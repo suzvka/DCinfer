@@ -1,0 +1,84 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="测试用">
+      <UniqueIdentifier>{6fdbe1a0-e73e-49ef-bead-c3a8651cf205}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="API">
+      <UniqueIdentifier>{d0e7e20a-ca89-4ebc-9ad0-8533320157bc}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="API\实现">
+      <UniqueIdentifier>{ffd50eb0-e9e8-41dd-99ab-23874f34d9a6}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="工具">
+      <UniqueIdentifier>{9eed89be-a759-490c-83c9-5d7f96ac7949}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="工具\实现">
+      <UniqueIdentifier>{5d0622c1-d03d-4f1f-ab4d-9cbdacaeaa63}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="推理器">
+      <UniqueIdentifier>{86b3fb4c-17ce-4afe-8b67-2c12138f7327}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="推理器\实现">
+      <UniqueIdentifier>{b065535b-0c4f-468e-96b5-65ca4524e15a}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Value.cpp">
+      <Filter>工具\实现</Filter>
+    </ClCompile>
+    <ClCompile Include="test1.cpp">
+      <Filter>测试用</Filter>
+    </ClCompile>
+    <ClCompile Include="test.cpp">
+      <Filter>测试用</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Infer.cpp">
+      <Filter>推理器\实现</Filter>
+    </ClCompile>
+    <ClCompile Include="src\info.cpp">
+      <Filter>API\实现</Filter>
+    </ClCompile>
+    <ClCompile Include="src\tensor.cpp">
+      <Filter>API\实现</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Int64.cpp">
+      <Filter>API\实现</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Int32.cpp">
+      <Filter>API\实现</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Float.cpp">
+      <Filter>API\实现</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Bool.cpp">
+      <Filter>API\实现</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="API\info.h">
+      <Filter>API</Filter>
+    </ClInclude>
+    <ClInclude Include="API\tool.h">
+      <Filter>API</Filter>
+    </ClInclude>
+    <ClInclude Include="include\tree.h">
+      <Filter>工具</Filter>
+    </ClInclude>
+    <ClInclude Include="API\vector.h">
+      <Filter>工具</Filter>
+    </ClInclude>
+    <ClInclude Include="API\tensor.h">
+      <Filter>API</Filter>
+    </ClInclude>
+    <ClInclude Include="API\Type.h">
+      <Filter>API</Filter>
+    </ClInclude>
+    <ClInclude Include="API\Infer.h">
+      <Filter>推理器</Filter>
+    </ClInclude>
+    <ClInclude Include="API\Value.h">
+      <Filter>工具</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
