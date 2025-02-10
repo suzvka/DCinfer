@@ -74,16 +74,16 @@ namespace DC {
 
     // 从 Ort::Value 方向解析数据
     void Value::parseEnum(const Ort::Value& inOrtValue){
-        auto typeInfo = inOrtValue
-            .GetTypeInfo()
-            .GetTensorTypeAndShapeInfo();
+        //auto typeInfo = inOrtValue
+        //    .GetTypeInfo()
+        //    .GetTensorTypeAndShapeInfo();
         const char* OrtData = inOrtValue.GetTensorData<char>();
-        size_t elementCount = typeInfo.GetElementCount();
+        size_t elementCount = inOrtValue.GetTypeInfo().GetTensorTypeAndShapeInfo().GetElementCount();
         // 将数据提取出来
-        auto elemenSize = typeSize.at(typeInfo.GetElementType());
+        auto elemenSize = typeSize.at(inOrtValue.GetTypeInfo().GetTensorTypeAndShapeInfo().GetElementType());
         _data = std::vector<char>(OrtData, OrtData + elementCount * elemenSize);
-        _shape = typeInfo.GetShape();
-        _type = findEnum.at(typeInfo.GetElementType());
+        _shape = inOrtValue.GetTypeInfo().GetTensorTypeAndShapeInfo().GetShape();
+        _type = findEnum.at(inOrtValue.GetTypeInfo().GetTensorTypeAndShapeInfo().GetElementType());
     }
 
     // 计算总数据大小

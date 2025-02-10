@@ -53,6 +53,7 @@ namespace DC {
 			T value
 		) {
 			defaultList[name] = Tensor(name, getName.at(typeid(T).name()), shape);
+			defaultList[name].start<T>()[0] = value;
 			defaultList[name].load();
 			return *this;
 		}
@@ -94,6 +95,7 @@ namespace DC {
 
 		std::shared_ptr<Ort::Env> env;               // ONNX Runtime 环境
 		std::unique_ptr<Ort::Session> session;				// ONNX Runtime 会话
+		std::unique_ptr<Ort::SessionOptions>_options;		// ONNX Runtime 配置
 
 		std::map<std::string, tensorInfo> inputTensorInfo;	// 快捷浏览张量列表
 		std::unordered_map<std::string, Tensor> tensorList;	// 工作用张量列表

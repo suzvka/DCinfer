@@ -197,21 +197,56 @@ namespace DC {
 				}
 
 				if (_type == "float") {
-					std::vector<float> temp(
-						reinterpret_cast<float*>(const_cast<char*>(&data[0])),
-						reinterpret_cast<float*>(const_cast<char*>(&data[0])) + sizeof(data[0]) * data.size());
+					// 计算需要补零的字节数
+					size_t remainder = data.size() % sizeof(float);
+					size_t paddingSize = (remainder == 0) ? 0 : sizeof(float) - remainder;
+
+					// 创建一个临时缓冲区，复制原始数据并补零
+					std::vector<char> paddedData = data; // 复制原始数据
+					paddedData.insert(paddedData.end(), paddingSize, 0); // 在尾部补零
+
+					// 转换为 float 并处理
+					std::vector<float> temp;
+					temp.reserve(paddedData.size() / sizeof(float));
+					for (size_t i = 0; i < paddedData.size(); i += sizeof(float)) {
+						float value;
+						std::memcpy(&value, &paddedData[i], sizeof(float));
+						temp.push_back(value);
+					}
+
+					// 设置到 tensorPro
 					tensorPro<float>::set(myshape, temp);
 				}
 				else if (_type == "int32") {
-					std::vector<int32_t> temp(
-						reinterpret_cast<int32_t*>(const_cast<char*>(&data[0])),
-						reinterpret_cast<int32_t*>(const_cast<char*>(&data[0])) + sizeof(data[0]) * data.size());
+					// 计算需要补零的字节数
+					size_t remainder = data.size() % sizeof(float);
+					size_t paddingSize = (remainder == 0) ? 0 : sizeof(float) - remainder;
+					// 创建一个临时缓冲区，复制原始数据并补零
+					std::vector<char> paddedData = data; // 复制原始数据
+					paddedData.insert(paddedData.end(), paddingSize, 0); // 在尾部补零
+					std::vector<int32_t> temp;
+					temp.reserve(paddedData.size() / sizeof(int32_t));
+					for (size_t i = 0; i < paddedData.size(); i += sizeof(int32_t)) {
+						float value;
+						std::memcpy(&value, &paddedData[i], sizeof(float));
+						temp.push_back(value);
+					}
 					tensorPro<int32_t>::set(myshape, temp);
 				}
 				else if (_type == "int64") {
-					std::vector<int64_t> temp(
-						reinterpret_cast<int64_t*>(const_cast<char*>(&data[0])),
-						reinterpret_cast<int64_t*>(const_cast<char*>(&data[0])) + sizeof(data[0]) * data.size());
+					// 计算需要补零的字节数
+					size_t remainder = data.size() % sizeof(float);
+					size_t paddingSize = (remainder == 0) ? 0 : sizeof(float) - remainder;
+					// 创建一个临时缓冲区，复制原始数据并补零
+					std::vector<char> paddedData = data; // 复制原始数据
+					paddedData.insert(paddedData.end(), paddingSize, 0); // 在尾部补零
+					std::vector<int64_t> temp;
+					temp.reserve(paddedData.size() / sizeof(int64_t));
+					for (size_t i = 0; i < paddedData.size(); i += sizeof(int64_t)) {
+						float value;
+						std::memcpy(&value, &paddedData[i], sizeof(float));
+						temp.push_back(value);
+					}
 					tensorPro<int64_t>::set(myshape, temp);
 				}
 				else if (_type == "bool") {

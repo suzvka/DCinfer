@@ -6,8 +6,12 @@
 namespace DC {
     Infer::Infer(const std::vector<char>& onnxData, Ort::Env* env){
         try {
-            Ort::SessionOptions session_options;
-            Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0)); // 使用 CUDA 提供者
+            this->_options = std::make_unique<Ort::SessionOptions>();
+            //this->_options->EnableMemPattern();
+            //this->_options->EnableCpuMemArena();
+            this->_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+            Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(*_options, 0)); // 使用 CUDA 提供者
 
             if (env == nullptr) {
                 this->env = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "ONNXModel");
@@ -16,7 +20,7 @@ namespace DC {
                 this->env.reset(env);
             }
             
-            session = std::make_unique<Ort::Session>(*env, onnxData.data(), onnxData.size(), session_options);
+            session = std::make_unique<Ort::Session>(*env, onnxData.data(), onnxData.size(), *_options);
             parseInputTensorInfo(); // 初始化输入张量信息
             ready = true;
         }
@@ -142,7 +146,7 @@ namespace DC {
 
     std::unordered_map<std::string, Tensor> Infer::Run(
         const std::vector<Tensor>& inputs
-    ){
+    ) {
         if (!ready) {
             throw std::runtime_error("Worker is not ready for inference.");
         }
@@ -150,46 +154,67 @@ namespace DC {
         // 准备输入张量
         alignas(8) auto preparedInputs = prepareInputs(inputs);
 
-        // 获取输入和输出的名称数组
+        // 获取输入和输出名称
         alignas(8) std::vector<const char*> inputNames;
         for (const auto& [name, _] : tensorList) {
-            if (!inputTensorInfo[name].IOtype) {
-                continue;
+            if (inputTensorInfo[name].IOtype) {
+                inputNames.push_back(name.c_str());
             }
-            inputNames.push_back(name.c_str());
         }
 
         size_t numOutputs = session->GetOutputCount();
         alignas(8) std::vector<const char*> outputNames(numOutputs);
         for (size_t i = 0; i < numOutputs; ++i) {
             auto outputName = session->GetOutputNameAllocated(i, Ort::AllocatorWithDefaultOptions());
-            outputNames[i] = _strdup(outputName.get()); // 由于获取的是引用，因此需要显式复制，避免生命周期导致的悬空
+            outputNames[i] = _strdup(outputName.get());
         }
 
-        // 调用 Run 方法进行推理
+        // 执行推理
         auto outputValues = session->Run(
-            Ort::RunOptions{ nullptr },         // 默认运行选项
-            inputNames.data(),                  // 输入张量名称数组
-            preparedInputs.data(),              // 输入张量数组
-            inputNames.size(),                  // 输入张量数量
-            outputNames.data(),                 // 输出张量名称数组
-            numOutputs                          // 输出张量数量
+            Ort::RunOptions{ nullptr },
+            inputNames.data(),
+            preparedInputs.data(),
+            inputNames.size(),
+            outputNames.data(),
+            numOutputs
         );
 
-        // 定义用于存储推理结果的字典
+        // 构建结果字典并过滤无效输出
         std::unordered_map<std::string, Tensor> resultMap;
-
-        // 遍历输出张量
         for (size_t i = 0; i < numOutputs; ++i) {
-            // 获取输出张量的数据指针和大小
-            auto& outputTensor = outputValues[i];
-            // 将数据存储到结果字典中，键为输出张量名称
-            resultMap[outputNames[i]] = Tensor(outputNames[i], outputTensor);
+            const char* name = outputNames[i];
+            auto& ortValue = outputValues[i];
+
+            // 检查是否为有效张量
+            if (!ortValue.IsTensor()) {
+                continue; // 非张量类型，跳过
+            }
+
+            try {
+                auto tensorInfo = ortValue.GetTensorTypeAndShapeInfo();
+                size_t elementCount = tensorInfo.GetElementCount();
+                float* dataPtr = ortValue.GetTensorMutableData<float>();
+
+                // 验证元素数量和数据指针
+                if (elementCount == 0 || dataPtr == nullptr || tensorInfo.GetShape().empty()) {
+                    continue; // 空张量或无效数据，跳过
+                }
+
+                // 转换为自定义 Tensor
+                resultMap[name] = Tensor(name, ortValue);
+            }
+            catch (const Ort::Exception& e) {
+                // 处理可能的异常（例如无效张量结构）
+                std::cerr << "Error processing output '" << name << "': " << e.what() << std::endl;
+                continue;
+            }
         }
+
+        // 清理动态分配的 outputNames
         for (const char* name : outputNames) {
-            delete (const_cast<char*>(name));  // 释放 _strdup 分配的内存
+            delete[] name; // 使用 _strdup 分配需用 delete[] 释放
         }
-        // 返回推理结果字典
+
         return resultMap;
     }
 }
