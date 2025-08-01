@@ -27,6 +27,8 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="InferOrt.cpp" />
+    <ClCompile Include="InfoReadTest.cpp" />
     <ClCompile Include="src\Bool.cpp" />
     <ClCompile Include="src\Float.cpp" />
     <ClCompile Include="src\info.cpp" />
@@ -48,12 +50,23 @@
   <ItemGroup>
     <ClInclude Include="API\Infer.h" />
     <ClInclude Include="API\info.h" />
-    <ClInclude Include="API\tensor.h" />
-    <ClInclude Include="API\tool.h" />
+    <ClInclude Include="API\Tensor.h" />
+    <ClInclude Include="API\tool.h">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </ClInclude>
     <ClInclude Include="API\Type.h" />
-    <ClInclude Include="API\Value.h" />
-    <ClInclude Include="API\vector.h" />
-    <ClInclude Include="include\tree.h" />
+    <ClInclude Include="API\TensorMods.h" />
+    <ClInclude Include="API\Value.h">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </ClInclude>
+    <ClCompile Include="Expected.h" />
+    <ClInclude Include="include\tree.h">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </ClInclude>
+    <ClCompile Include="TensorOrt.cpp">
+      <FileType>CppHeader</FileType>
+    </ClCompile>
+    <ClInclude Include="TensorSlot.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>

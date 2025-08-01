@@ -12,6 +12,7 @@ namespace DC {
             this->_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
             Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(*_options, 0)); // 使用 CUDA 提供者
+            this->_options->AddConfigEntry("trt_fp16_enable", "1");
 
             if (env == nullptr) {
                 this->env = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "ONNXModel");

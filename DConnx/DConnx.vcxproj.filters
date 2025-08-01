@@ -54,6 +54,18 @@
     <ClCompile Include="src\Bool.cpp">
       <Filter>API\实现</Filter>
     </ClCompile>
+    <ClCompile Include="TensorOrt.cpp">
+      <Filter>API</Filter>
+    </ClCompile>
+    <ClCompile Include="InfoReadTest.cpp">
+      <Filter>测试用</Filter>
+    </ClCompile>
+    <ClCompile Include="InferOrt.cpp">
+      <Filter>API</Filter>
+    </ClCompile>
+    <ClCompile Include="Expected.h">
+      <Filter>工具</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="API\info.h">
@@ -65,10 +77,10 @@
     <ClInclude Include="include\tree.h">
       <Filter>工具</Filter>
     </ClInclude>
-    <ClInclude Include="API\vector.h">
+    <ClInclude Include="API\TensorMods.h">
       <Filter>工具</Filter>
     </ClInclude>
-    <ClInclude Include="API\tensor.h">
+    <ClInclude Include="API\Tensor.h">
       <Filter>API</Filter>
     </ClInclude>
     <ClInclude Include="API\Type.h">
@@ -79,6 +91,9 @@
     </ClInclude>
     <ClInclude Include="API\Value.h">
       <Filter>工具</Filter>
+    </ClInclude>
+    <ClInclude Include="TensorSlot.h">
+      <Filter>API</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

@@ -93,7 +93,7 @@ namespace DC {
 		bool ready = false;									// 推理器就绪标志
 		std::string errorMessage;							// 错误信息
 
-		std::shared_ptr<Ort::Env> env;               // ONNX Runtime 环境
+		std::shared_ptr<Ort::Env> env;						// ONNX Runtime 环境
 		std::unique_ptr<Ort::Session> session;				// ONNX Runtime 会话
 		std::unique_ptr<Ort::SessionOptions>_options;		// ONNX Runtime 配置
 
