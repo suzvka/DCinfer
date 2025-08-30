@@ -1,6 +1,7 @@
 #include "tensor.h"
-#include "Value.h"
+#include "tensorort.h"
 
 namespace DC {
-
+	TypeManager<TensorMeta::TensorType> TensorMeta::_typeMap;
+	TypeManager<ONNXTensorElementDataType> TensorOrt::_typeMap;
 }

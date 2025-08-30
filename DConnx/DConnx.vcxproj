@@ -27,15 +27,10 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="InferOrt.cpp" />
     <ClCompile Include="InfoReadTest.cpp" />
-    <ClCompile Include="src\Bool.cpp" />
-    <ClCompile Include="src\Float.cpp" />
-    <ClCompile Include="src\info.cpp" />
-    <ClCompile Include="src\Int32.cpp" />
-    <ClCompile Include="src\Int64.cpp" />
+    <ClCompile Include="src\InferOrt.cpp" />
+    <ClCompile Include="src\Info.cpp" />
     <ClCompile Include="src\tensor.cpp" />
-    <ClCompile Include="src\Value.cpp" />
     <ClCompile Include="src\Infer.cpp" />
     <ClCompile Include="test.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
@@ -45,28 +40,27 @@
     <ClCompile Include="test1.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='test|x64'">true</ExcludedFromBuild>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="API\Infer.h" />
+    <ClInclude Include="API\InferOrt.h" />
     <ClInclude Include="API\info.h" />
     <ClInclude Include="API\Tensor.h" />
+    <ClInclude Include="API\TensorOrt.h" />
     <ClInclude Include="API\tool.h">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
+    </ClInclude>
+    <ClInclude Include="API\Type.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </ClInclude>
-    <ClInclude Include="API\Type.h" />
     <ClInclude Include="API\TensorMods.h" />
-    <ClInclude Include="API\Value.h">
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
-    </ClInclude>
-    <ClCompile Include="Expected.h" />
+    <ClInclude Include="include\Expected.h" />
+    <ClInclude Include="include\TensorSlot.h" />
     <ClInclude Include="include\tree.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
     </ClInclude>
-    <ClCompile Include="TensorOrt.cpp">
-      <FileType>CppHeader</FileType>
-    </ClCompile>
-    <ClInclude Include="TensorSlot.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -204,7 +198,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
@@ -240,7 +234,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>

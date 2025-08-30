@@ -22,11 +22,11 @@
     <Filter Include="推理器\实现">
       <UniqueIdentifier>{b065535b-0c4f-468e-96b5-65ca4524e15a}</UniqueIdentifier>
     </Filter>
+    <Filter Include="API\ORT">
+      <UniqueIdentifier>{5d6455f1-d2c0-4f3f-9cd9-fd63ca1480cb}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\Value.cpp">
-      <Filter>工具\实现</Filter>
-    </ClCompile>
     <ClCompile Include="test1.cpp">
       <Filter>测试用</Filter>
     </ClCompile>
@@ -36,35 +36,17 @@
     <ClCompile Include="src\Infer.cpp">
       <Filter>推理器\实现</Filter>
     </ClCompile>
-    <ClCompile Include="src\info.cpp">
-      <Filter>API\实现</Filter>
-    </ClCompile>
     <ClCompile Include="src\tensor.cpp">
       <Filter>API\实现</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Int64.cpp">
-      <Filter>API\实现</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Int32.cpp">
-      <Filter>API\实现</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Float.cpp">
-      <Filter>API\实现</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Bool.cpp">
-      <Filter>API\实现</Filter>
-    </ClCompile>
-    <ClCompile Include="TensorOrt.cpp">
-      <Filter>API</Filter>
     </ClCompile>
     <ClCompile Include="InfoReadTest.cpp">
       <Filter>测试用</Filter>
     </ClCompile>
-    <ClCompile Include="InferOrt.cpp">
-      <Filter>API</Filter>
+    <ClCompile Include="src\InferOrt.cpp">
+      <Filter>API\ORT</Filter>
     </ClCompile>
-    <ClCompile Include="Expected.h">
-      <Filter>工具</Filter>
+    <ClCompile Include="src\Info.cpp">
+      <Filter>工具\实现</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -89,11 +71,17 @@
     <ClInclude Include="API\Infer.h">
       <Filter>推理器</Filter>
     </ClInclude>
-    <ClInclude Include="API\Value.h">
+    <ClInclude Include="include\TensorSlot.h">
+      <Filter>API</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Expected.h">
       <Filter>工具</Filter>
     </ClInclude>
-    <ClInclude Include="TensorSlot.h">
-      <Filter>API</Filter>
+    <ClInclude Include="API\InferOrt.h">
+      <Filter>API\ORT</Filter>
+    </ClInclude>
+    <ClInclude Include="API\TensorOrt.h">
+      <Filter>API\ORT</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

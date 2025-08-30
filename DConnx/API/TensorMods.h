@@ -5,31 +5,57 @@
 #include <unordered_set>
 #include <string>
 #include <memory>
+#include <Type.h>
 
 namespace DC {
 	// 张量元数据
-	class TensorMeta {
-	public:
-		std::string name;           // 张量名称
-		std::string type;           // 张量类型
-		size_t typeSize;			// 类型字节数
-		std::vector<int64_t> shape; // 张量形状
+	struct TensorMeta {
+		static enum class TensorType {
+			Float,
+			Int,
+			Uint,
+			Bool,
+			Char,
+			Data,
+			Void
+		};
 
-		// 检查输入形状是否符合规则
-		bool check(const std::vector<int64_t>& shape) const {
-			if (this->shape.empty()) {
-				if (shape.empty()) return false;
-				else return true;
+		static TypeManager<TensorMeta::TensorType> _typeMap;
+
+		std::string name = "";
+		std::string typeName = "";
+		size_t typeSize = 0;
+		std::vector<int64_t> shape = {};
+		TensorType type = TensorType::Void;
+
+		// 检查形状是否符合规则
+		bool check(const std::vector<int64_t>& currentShape) const {
+			if (shape.empty()) {
+				return true;
 			}
-
-			int64_t i = 0;
-			for (auto dim : this->shape) {
-				if (this->shape[i] != -1 && dim != shape[i]) {
+			if (shape.size() != currentShape.size()) {
+				return false;
+			}
+			for (size_t i = 0; i < shape.size(); ++i) {
+				if (shape[i] != -1 && shape[i] != currentShape[i]) {
 					return false;
 				}
-				i++;
 			}
 			return true;
+		}
+
+		static void setTypeMap() {
+			_typeMap.registerType<float>	(TensorType::Float	,"Float");
+			_typeMap.registerType<int64_t>	(TensorType::Int	,"Int"	);
+			_typeMap.registerType<uint64_t>	(TensorType::Uint	,"UInt"	);
+			_typeMap.registerType<bool>		(TensorType::Bool	,"Bool"	);
+			_typeMap.registerType<char>		(TensorType::Char	,"Char"	);
+			_typeMap.registerType<std::byte>(TensorType::Data	,"Data"	);
+			_typeMap.registerType<uint8_t>	(TensorType::Void	,"Void"	);
+		}
+
+		TensorMeta() {
+			setTypeMap();
 		}
 	};
 
@@ -83,6 +109,68 @@ namespace DC {
 		using DataMap = std::map<std::vector<int64_t>, DataBlock>;
 
 		TensorData() :_data({}) {}
+		TensorData(
+			const std::vector<int64_t>& shape,
+			std::vector<char>&& data
+		) {
+			if (shape.empty() || data.empty()) {
+				return;
+			}
+
+			size_t blockSize = *shape.cend();
+			_typeSize = data.size() / blockSize;
+
+			// 如果形状只有一个维度，则整个数据视为一个数据块
+			if (shape.size() == 1) {
+				_dataSize = data.size();
+				_data[{0}] = std::move(data);
+				_dataDimSets.resize(1);
+				_dataDimSets[0].insert(0);
+				_size = _dataSize;
+				return;
+			}
+
+			// 最后一个维度是数据块的大小（元素数量）
+			size_t blockElementCount = shape.back();
+			_dataSize = blockElementCount * _typeSize;
+
+			// 路径维度
+			std::vector<int64_t> pathShape(shape.begin(), shape.end() - 1);
+			size_t pathDimCount = pathShape.size();
+			_dataDimSets.resize(pathDimCount);
+
+			std::vector<int64_t> currentPath(pathDimCount, 0);
+			size_t dataOffset = 0;
+
+			while (true) {
+				// 登记当前路径
+				for (size_t i = 0; i < pathDimCount; ++i) {
+					_dataDimSets[i].insert(currentPath[i]);
+				}
+
+				// 提取并存储数据块
+				DataBlock block(data.begin() + dataOffset, data.begin() + dataOffset + _dataSize);
+				_data[currentPath] = std::move(block);
+				_size += _dataSize;
+				dataOffset += _dataSize;
+
+				// 更新到下一个路径（模拟进位）
+				int currentDim = pathDimCount - 1;
+				while (currentDim >= 0) {
+					currentPath[currentDim]++;
+					if (currentPath[currentDim] < pathShape[currentDim]) {
+						break; // 不需要进位，已找到下一个路径
+					}
+					currentPath[currentDim] = 0; // 当前维度重置为0，并向更高维度进位
+					currentDim--;
+				}
+
+				// 如果所有维度都已遍历完（最高位也发生了进位），则退出循环
+				if (currentDim < 0) {
+					break;
+				}
+			}
+		}
 
 		size_t size() const {
 			return _size;
@@ -212,11 +300,31 @@ namespace DC {
 			return charData;
 		}
 
+		template<>
+		DataBlock toCharVector<bool>(const std::vector<bool>& data) {
+			DataBlock charData;
+			charData.reserve(data.size());
+			for (bool b : data) {
+				charData.push_back(static_cast<char>(b));
+			}
+			return charData;
+		}
+
 		// 从数据块中恢复指定类型的数据
 		template<typename T>
 		std::vector<T> fromCharVector(const DataBlock& block) const {
 			std::vector<T> data(block.size() / sizeof(T));
 			std::memcpy(data.data(), block.data(), block.size());
+			return data;
+		}
+
+		template<>
+		std::vector<bool> fromCharVector<bool>(const DataBlock& block) const {
+			std::vector<bool> data;
+			data.reserve(block.size());
+			for (char c : block) {
+				data.push_back(c != 0);
+			}
 			return data;
 		}
 

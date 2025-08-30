@@ -39,7 +39,7 @@ namespace DC {
         );
     }
 
-    const std::vector<char> Value::getData() const{
+    const std::vector<char> Value::getTensor() const{
         return _data;
     }
 

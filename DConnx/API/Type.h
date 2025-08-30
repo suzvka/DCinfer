@@ -1,113 +1,91 @@
 #pragma once
 #include <vector>
+#include <unordered_map>
+#include <string>
+#include <typeinfo>
+#include <typeindex>
+#include <memory>
+#include <stdexcept>
 
 namespace DC {
-	class Int64;
-	class Int32;
-	class Float;
-	class Bool;
+	class TypeInfo;
+	template<typename T> class Type;
+
+	template<typename TEnum>
+	class TypeManager {
+	public:
+		// 注册一个新类型及其到后端枚举类型的映射
+		template<typename T>
+		void registerType(TEnum enumValue, const std::string& name) {
+			const std::type_index typeIndex(typeid(T));
+			auto typeName = std::make_unique<Type<T>>(name);
+			auto* typePtr = typeName.get();
+
+			_typeFromIndex[typeIndex] = std::move(typeName);
+			_typeFromName[name] = typePtr;
+			_toEnumMap[typePtr] = enumValue;
+			_fromEnumMap[enumValue] = typePtr;
+		}
+
+		// 按 C++ 类型获取内部类型
+		template<typename T>
+		const TypeInfo& get() const {
+			return get(std::type_index(typeid(T)));
+		}
+
+		// 按 std::type_index 获取内部类型
+		const TypeInfo& get(const std::type_index& typeIndex) const {
+			auto it = _typeFromIndex.find(typeIndex);
+			if (it == _typeFromIndex.end()) {
+				throw std::runtime_error("Unregistered type: " + std::string(typeIndex.name()));
+			}
+			return *it->second;
+		}
+
+		// 从后端枚举类型转换为内部类型
+		const TypeInfo& fromEnum(TEnum enumValue) const {
+			auto it = _fromEnumMap.find(enumValue);
+			if (it == _fromEnumMap.end()) {
+				throw std::runtime_error("Unsupported enum type for conversion");
+			}
+			return *it->second;
+		}
+
+		// 从内部类型转换为后端枚举类型
+		TEnum toEnum(const TypeInfo* typeName) const {
+			auto it = _toEnumMap.find(typeName);
+			if (it == _toEnumMap.end()) {
+				throw std::runtime_error("Unsupported internal type for enum conversion");
+			}
+			return it->second;
+		}
+
+	private:
+		std::unordered_map<std::type_index, std::unique_ptr<TypeInfo>> _typeFromIndex;
+		std::unordered_map<std::string, TypeInfo*> _typeFromName;
+		std::unordered_map<TEnum, TypeInfo*> _fromEnumMap;
+		std::unordered_map<const TypeInfo*, TEnum> _toEnumMap;
+	};
+
+	// 类型基类
+	class TypeInfo {
+	public:
+		virtual ~TypeInfo() = default;
+		virtual const std::string& getTypeName() const = 0;
+		virtual size_t getTypeSize() const = 0;
+		bool isEqual(const TypeInfo& other) const {
+			return typeid(*this) == typeid(other);
+		}
+	};
+
+	// 泛型类型实现，简化新类型定义
 	template<typename T>
-	class TypeBase {
+	class Type : public TypeInfo {
 	public:
-		// 获取实际的类型信息
-		const type_info& info()const {
-			return typeid(T);
-		}
-
-		// 获取张量中单个元素的尺寸
-		const size_t elementSize()const {
-			return sizeof(T);
-		}
-
-		// 获取张量实际尺寸
-		//virtual const size_t size()const = 0;
-
-		//virtual const bool isScalar()const = 0;
-
-		//template<typename K>
-		//const std::vector<K> toType()const {
-		//	std::vector<T> tempValue;
-		//	for () {
-
-		//	}
-		//}
-	};
-
-	class Int64 :public TypeBase<int64_t> {
-	public:
-		Int64() {};
-		Int64(int64_t input);
-		Int64(uint64_t input);
-		Int64(const std::vector<int64_t>& input);
-		Int64(const std::vector<uint64_t>& input);
-
-		operator Int32() const;
-		operator Float() const;
-		operator Bool() const;
-
-		const bool isScalar()const;
-		const std::vector<int64_t> data()const;
-
+		Type(std::string name) : _name(std::move(name)) {}
+		const std::string& getTypeName() const override { return _name; }
+		size_t getTypeSize() const override { return sizeof(T); }
 	private:
-		bool _isScalar = true;
-		std::vector<int64_t> _data;
-	};
-
-	class Int32 :public TypeBase<int32_t> {
-	public:
-		Int32() {}
-		Int32(int32_t input);
-		Int32(uint32_t input);
-		Int32(const std::vector<uint32_t>& input);
-		Int32(const std::vector<int32_t>& input);
-
-		operator Int64() const;
-		operator Float() const;
-		operator Bool() const;
-
-		const bool isScalar()const;
-		const std::vector<int32_t> data()const;
-
-	private:
-		bool _isScalar = true;
-		std::vector<int32_t> _data;
-	};
-
-	class Float :public TypeBase<float> {
-	public:
-		Float() {}
-		Float(float input);
-		Float(const std::vector<float>& input);
-
-		operator Int64() const;
-		operator Int32() const;
-		operator Bool() const;
-
-		const bool isScalar()const;
-		const std::vector<float> data()const;
-
-	private:
-		bool _isScalar = true;
-		std::vector<float> _data;
-	};
-
-	class Bool :public TypeBase<uint8_t> {
-	public:
-		Bool() {}
-		Bool(uint8_t input);
-		Bool(bool input);
-		Bool(const std::vector<uint8_t>& input);
-		Bool(const std::vector<bool>& input);
-
-		operator Int64() const;
-		operator Int32() const;
-		operator Float() const;
-		
-		const bool isScalar()const;
-		const std::vector<uint8_t> data()const;
-
-	private:
-		bool _isScalar = true;
-		std::vector<uint8_t> _data;
+		std::string _name;
 	};
 }

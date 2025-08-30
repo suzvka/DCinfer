@@ -2,8 +2,10 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include "Infer.h"
+#include "InferOrt.h"
 #include "tensor.h"
+#include "Info.h"
+#include <filesystem>
 
 #include <windows.h>
 
@@ -30,7 +32,7 @@ int main() {
     try {
         // 打印 CUDA 设备信息
         std::cout << "========== CUDA Device Information ==========" << std::endl;
-        std::vector<DC::GPUInfo> gpus = DC::getInfo_GPU();
+        auto gpus = DC::getInfo_GPU();
         for (size_t i = 0; i < gpus.size(); ++i) {
             const DC::GPUInfo& gpu = gpus[i];
             std::cout << "Device " << i << ": " << gpu.name << std::endl;
@@ -56,68 +58,11 @@ int main() {
         std::cout << "=============================================" << std::endl;
 
         // 加载 ONNX 模型
-        const std::string model_path = "C:/Users/东风谷早苗/Desktop/DiffSinger_Yoko/yoko.onnx"; // 替换为你的 ONNX 模型路径
-        std::vector<char> onnxModelData = LoadONNXModel(model_path);
+        const std::string model_path = "C:/Users/东风谷早苗/Desktop/acoustic.onnx"; // 替换为你的 ONNX 模型路径
 
-        // 使用 worker 对象
-        DC::Infer inferenceWorker(onnxModelData);
-        if (!inferenceWorker.isReady()) {
-            std::cerr << "Failed to initialize inference worker: "
-                << inferenceWorker.getErrorMessage() << std::endl;
-            return -1;
-        }
-
-        // 获取并打印 ONNX 模型的输入张量信息
-        const auto& onnxInputs = inferenceWorker.getInfo();
-        std::cout << "\n========== ONNX Model Input Tensors ==========" << std::endl;
-        for (const auto& [tensorName, tensorInfo] : onnxInputs) {
-            if (!tensorInfo.IOtype) {
-                continue;
-            }
-            std::cout << "Tensor Name: " << tensorName << std::endl;
-            std::cout << "  Type: " << tensorInfo.type << std::endl;
-            std::cout << "  Shape: [";
-            for (size_t i = 0; i < tensorInfo.shape.size(); ++i) {
-                std::cout << tensorInfo.shape[i];
-                if (i < tensorInfo.shape.size() - 1) std::cout << ", ";
-            }
-            std::cout << "]" << std::endl;
-            std::cout << "---------------------------------------------" << std::endl;
-        }
-        std::cout << "=============================================" << std::endl;
-        std::cout << "\n========== ONNX Model Output Tensors ==========" << std::endl;
-        for (const auto& [tensorName, tensorInfo] : onnxInputs) {
-            if (tensorInfo.IOtype) {
-                continue;
-            }
-            std::cout << "Tensor Name: " << tensorName << std::endl;
-            std::cout << "  Type: " << tensorInfo.type << std::endl;
-            std::cout << "  Shape: [";
-            for (size_t i = 0; i < tensorInfo.shape.size(); ++i) {
-                std::cout << tensorInfo.shape[i];
-                if (i < tensorInfo.shape.size() - 1) std::cout << ", ";
-            }
-            std::cout << "]" << std::endl;
-            std::cout << "---------------------------------------------" << std::endl;
-        }
-        std::cout << "=============================================" << std::endl;
-        // 示例用法
-        if (!gpus.empty()) {
-            std::cout << "\n示例: 首个GPU的Warp Size: " << gpus[0].warpSize << std::endl;
-        }
-
-        if (!onnxInputs.empty()) {
-            const std::string sampleTensor = "tension"; // 替换为实际的张量名
-            auto it = onnxInputs.find(sampleTensor);
-            if (it != onnxInputs.end()) {
-                std::cout << "示例: 张量 \"" << sampleTensor << "\" 的类型: " << it->second.type << std::endl;
-            }
-            else {
-                std::cout << "示例: 张量 \"" << sampleTensor << "\" 不存在。" << std::endl;
-            }
-        }
+		DC::InferOrt worker(model_path, 1);
         
-        test1();
+        // test1();
         Sleep(10000);
     }
     catch (const Ort::Exception& e) {

@@ -3,6 +3,7 @@
 #include <vector>
 #include <map>
 
+
 namespace DC {
 	// GPU 信息
 	struct GPUInfo {
@@ -24,10 +25,12 @@ namespace DC {
 	struct tensorInfo {
 		bool IOtype;                    // 1 输入 0 输出
 		std::string name;               // 张量名称
-		std::string type;               // 张量类型
+		std::string typeName;           // 张量类型
 		std::vector<int64_t> shape;     // 张量形状
 	};
 
 	std::vector<GPUInfo> getInfo_GPU();
 	std::map<std::string, tensorInfo> getInfo_ONNX(const std::vector<char>& onnxModelData);
+
+	
 }
