@@ -2,7 +2,7 @@
 #include "Tensor.h"
 #include "tool.h"
 
-class Infer;
+class InferBase;
 
 namespace DC {
 	class TensorSlot {
@@ -53,8 +53,21 @@ namespace DC {
 			return slot;
 		}
 
+		TensorSlot& setDefaultTensor(const Tensor& data) {
+			if (!(*this == data)) {
+				throw std::runtime_error("默认数据规则检查未通过");
+			}
+
+			Tensor tensor;
+			tensor = data;
+			_defaultData = std::make_unique<Tensor>(std::move(tensor));
+			
+			return *this;
+		}
+
 		std::string name() const { return _rule.name; }
-		std::string type() const { return _rule.typeName; }
+		std::string typeName() const { return _rule.typeName; }
+		TensorMeta::TensorType type() const { return _rule.type; }
 		size_t typeSize() const { return _rule.typeSize; }
 		std::vector<int64_t> shape() const { return _rule.shape; }
 
@@ -93,7 +106,7 @@ namespace DC {
 		}
 
 		const bool hasData() const {
-			return _data != nullptr;
+			return _data != nullptr && _defaultData != nullptr;
 		}
 
 		void clear() const {
@@ -102,12 +115,18 @@ namespace DC {
 
 		Tensor& getTensor() {
 			if (!hasData()) throw std::runtime_error("无数据");
+			if (!_data) {
+				Tensor tensor;
+				tensor = *_defaultData;
+				_data = std::make_unique<Tensor>(std::move(tensor));
+			}
 			return *_data;
 		}
 
 	private:
-		Infer* _infer = nullptr; // 归属的推理器
+		InferBase* _infer = nullptr; // 归属的推理器
 		TensorMeta _rule;
+		std::unique_ptr<Tensor> _defaultData; // 默认数据
 		mutable std::unique_ptr<Tensor> _data;
 	};
 }

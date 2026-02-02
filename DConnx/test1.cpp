@@ -37,7 +37,7 @@ void test1() {
 	// 加载 ONNX 模型
 	const std::string model_path = "C:/Users/东风谷早苗/Desktop/DiffSinger_Yoko/yoko.onnx";
 	std::vector<char> onnxModelData = LoadONNXModel1(model_path);
-	DC::Infer worker1(onnxModelData);
+	DC::InferBase worker1(onnxModelData);
 
 
 	worker1.config()

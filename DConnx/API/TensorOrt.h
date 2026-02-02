@@ -29,23 +29,63 @@ namespace DC{
 			value.GetTensorTypeAndShapeInfo().GetElementType(),
 			value.GetTensorTypeAndShapeInfo().GetShape()
 		) {
+			// 直接接收为稠密数据，避免重复进行数据块登记
+			auto info = value.GetTensorTypeAndShapeInfo();
+			auto shp = info.GetShape();
+			const auto elemType = info.GetElementType();
+			size_t elemSize = 0;
+			switch (elemType) {
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: elemSize = sizeof(float); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: elemSize = sizeof(double); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: elemSize = sizeof(int8_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: elemSize = sizeof(int16_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: elemSize = sizeof(int32_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: elemSize = sizeof(int64_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: elemSize = sizeof(uint8_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: elemSize = sizeof(uint16_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32: elemSize = sizeof(uint32_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64: elemSize = sizeof(uint64_t); break;
+				case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL: elemSize = sizeof(uint8_t); break;
+				default: elemSize = 0; break;
+			}
+
+			size_t elemCount = 1;
+			for (auto d : shp) {
+				elemCount *= static_cast<size_t>(d > 0 ? d : 0);
+			}
+
+			std::vector<char> bytes;
+			if (elemSize > 0 && elemCount > 0) {
+				bytes.resize(elemCount * elemSize);
+				std::memcpy(bytes.data(), value.GetTensorRawData(), bytes.size());
+				setDense(std::move(bytes), shp);
+			}
+
 			_ortValue = std::make_unique<Ort::Value>(std::move(value));
 		}
 
 		template<typename T>
 		bool load() {
 			try {
-				auto data = getData<T>();
+				const auto& bytes = getBytes();
+				if (bytes.empty()) {
+					_ortValue.reset();
+					return false;
+				}
+
+				auto* ptr = reinterpret_cast<T*>(const_cast<char*>(bytes.data()));
+				const size_t count = bytes.size() / sizeof(T);
 
 				_ortValue = std::make_unique<Ort::Value>(
 					Ort::Value::CreateTensor<T>(
 						Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault),
-						data.data(),
-						data.size(),
+						ptr,
+						count,
 						shape().data(),
 						shape().size()
 					)
 				);
+				return true;
 			}
 			catch (...) {
 				return false;
@@ -115,20 +155,19 @@ namespace DC{
 	private:
 		std::unique_ptr<Ort::Value> _ortValue = nullptr;
 		ONNXTensorElementDataType _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-		static TypeManager<ONNXTensorElementDataType> _typeMap;
 
 		void setTypeMap() {
-			_typeMap.registerType<float>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT	, "Float"	);
-			_typeMap.registerType<uint8_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8	, "UInt8"	);
-			_typeMap.registerType<int8_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8		, "Int8"	);
-			_typeMap.registerType<uint16_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16	, "UInt16"	);
-			_typeMap.registerType<int16_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16	, "Int16"	);
-			_typeMap.registerType<int32_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32	, "Int32"	);
-			_typeMap.registerType<int64_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64	, "Int64"	);
-			_typeMap.registerType<bool>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL		, "Bool"	);
-			_typeMap.registerType<double>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE	, "Double"	);
-			_typeMap.registerType<uint32_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32	, "UInt32"	);
-			_typeMap.registerType<uint64_t>	(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64	, "UInt64"	);
+			registerType<float>			(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+			registerType<uint8_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+			registerType<int8_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+			registerType<uint16_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16);
+			registerType<int16_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16);
+			registerType<int32_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+			registerType<int64_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+			registerType<bool>			(ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL);
+			registerType<double>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE);
+			registerType<uint32_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32);
+			registerType<uint64_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64);
 		}
 	};
 }

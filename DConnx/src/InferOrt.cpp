@@ -7,8 +7,6 @@
 #include <stdexcept>
 
 namespace DC {
-	TypeManager<ONNXTensorElementDataType> InferOrt::_typeMap;
-
 	InferOrt::InferOrt(const std::filesystem::path& modelPath, size_t maxParallelCount) {
 		setTypeMap();
 		_maxParallelCount = maxParallelCount;
@@ -32,14 +30,15 @@ namespace DC {
 
 	InferOrt::InferOrt(const std::vector<std::byte>& modelData, size_t maxParallelCount) {
 		setTypeMap();
+		addEngine("ONNXRuntime", [](std::vector<std::byte> data, size_t maxParallelCount) { return new InferOrt(data, maxParallelCount); });
 		_maxParallelCount = maxParallelCount;
 		parseONNX(modelData);
 	}
 
-	Infer::Results InferOrt::Run(const std::vector<Tensor>& inputs){
+	Infer::Task InferOrt::Run(Infer::Task& inputs){
 		if (!ready) {
 			errorMessage = "InferOrt instance is not ready. Check errorMessage for details.";
-			return false;
+			return {};
 		}
 
 		std::unique_lock<std::mutex> lock(_mutex);
@@ -47,28 +46,28 @@ namespace DC {
 		++_activeSessions;
 		lock.unlock();
 
-		auto results = runInfer(const_cast<std::vector<Tensor>&>(inputs));
+		auto results = runInfer(const_cast<Infer::Task&>(inputs));
 		lock.lock();
 		--_activeSessions;
 		_condition.notify_one();
-		return results;
+		return results.get();
 	}
 
 	void InferOrt::setTypeMap() {
-		_typeMap.registerType<float>    (ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT    , "Float"   );
-		_typeMap.registerType<uint8_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8    , "UInt8"   );
-		_typeMap.registerType<int8_t>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8     , "Int8"    );
-		_typeMap.registerType<uint16_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16   , "UInt16"  );
-		_typeMap.registerType<int16_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16    , "Int16"   );
-		_typeMap.registerType<int32_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32    , "Int32"   );
-		_typeMap.registerType<int64_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64    , "Int64"   );
-		_typeMap.registerType<bool>     (ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL     , "Bool"    );
-		_typeMap.registerType<double>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE   , "Double"  );
-		_typeMap.registerType<uint32_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32   , "UInt32"  );
-		_typeMap.registerType<uint64_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64   , "UInt64"  );
+		registerType<float>    (ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+		registerType<uint8_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+		registerType<int8_t>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+		registerType<uint16_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16);
+		registerType<int16_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16);
+		registerType<int32_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+		registerType<int64_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+		registerType<bool>     (ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL);
+		registerType<double>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE);
+		registerType<uint32_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32);
+		registerType<uint64_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64);
 	}
 
-	Infer::Promise InferOrt::parseONNX(const std::vector<std::byte>& onnxData) {
+	bool InferOrt::parseONNX(const std::vector<std::byte>& onnxData) {
 		try {
 			_env = Ort::Env(ORT_LOGGING_LEVEL_WARNING, "DC-Infer");
 			_options = Ort::SessionOptions();
@@ -109,67 +108,67 @@ namespace DC {
 		catch (const Ort::Exception& e) {
 			errorMessage = "ONNX Runtime error: " + std::string(e.what());
 			ready = false;
-			return ErrorCode::ERROR_TENSOR;
+			return ready;
 		}
 		catch (const std::exception& e) {
 			errorMessage = "Standard exception: " + std::string(e.what());
 			ready = false;
-			return ErrorCode::ERROR_TENSOR;
+			return ready;
 		}
 		catch (...) {
 			errorMessage = "Unknown error occurred while parsing ONNX model.";
 			ready = false;
-			return ErrorCode::ERROR_TENSOR;
+			return ready;
 		}
 
 	}
 	
 	TensorSlot InferOrt::createTensorSlot(std::string name, const Ort::ConstTensorTypeAndShapeInfo& tensorInfo) {
-		auto& typeName = _typeMap.fromEnum(tensorInfo.GetElementType()).getTypeName();
+		const auto& type = getType<ONNXTensorElementDataType>(tensorInfo.GetElementType());
 		if (
-			typeName == "Float" ||
-			typeName == "Double"
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE
 			) {
 			return TensorSlot(
 				name,
 				TensorMeta::TensorType::Float,
-				typeName,
+				"Float",
 				tensorInfo.GetShape()
 			);
 		}
 		else if (
-			typeName == "Int64" ||
-			typeName == "Int32" ||
-			typeName == "Int16" ||
-			typeName == "Int8"
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16 ||
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8
 			) {
 			return TensorSlot(
 				name,
 				TensorMeta::TensorType::Int,
-				typeName,
+				"Int",
 				tensorInfo.GetShape()
 			);
 		}
 		else if (
-			typeName == "UInt64" ||
-			typeName == "UInt32" ||
-			typeName == "UInt16" ||
-			typeName == "UInt8"
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64 ||
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32 ||
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16 ||
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8
 			) {
 			return TensorSlot(
 				name,
 				TensorMeta::TensorType::Uint,
-				typeName,
+				"Uint",
 				tensorInfo.GetShape()
 			);
 		}
 		else if (
-			typeName == "Bool"
+			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL
 			) {
 			return TensorSlot(
 				name,
 				TensorMeta::TensorType::Bool,
-				typeName,
+				"Bool",
 				tensorInfo.GetShape()
 			);
 		}
@@ -178,7 +177,7 @@ namespace DC {
 		}
 	}
 
-	Infer::Results InferOrt::runInfer(std::vector<Tensor>& inputs){
+	InferBase::Results InferOrt::runInfer(Infer::Task& inputs){
 		if (!prepareInputs(inputs)) return false;
 
 		_inputTensors.reserve(inputList.size());
@@ -191,19 +190,12 @@ namespace DC {
 			}
 			else {
 				auto ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-				if (slot.type() == "Float")			{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;	}
-				else if (slot.type() == "Int64")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;	}
-				else if (slot.type() == "Uint64")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;	}
-				else if (slot.type() == "Bool")		{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;		}
-				else if (slot.type() == "Int32")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;	}
-				else if (slot.type() == "Uint32")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;	}
-				else if (slot.type() == "Int16")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;	}
-				else if (slot.type() == "Uint16")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;	}
-				else if (slot.type() == "Int8")		{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;		}
-				else if (slot.type() == "Uint8")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;	}
-				else if (slot.type() == "Double")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;	}
+				if (slot.typeName() == "Float")			{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;	}
+				else if (slot.typeName() == "Int64")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;	}
+				else if (slot.typeName() == "Uint64")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;	}
+				else if (slot.typeName() == "Bool")		{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;		}
 				else {
-					errorMessage = "Unsupported tensor type for input: " + slot.type();
+					errorMessage = "Unsupported tensor type for input: " + slot.typeName();
 					return false;
 				}
 
@@ -254,13 +246,13 @@ namespace DC {
 		}
 
 		// 解析输出
-		std::unordered_map<std::string, Tensor> results(_outputTensors.size());
+		std::unordered_map<std::string, Tensor> results; // 不指定大小，让它为空初始化
 
 		for (size_t i = 0; i < _outputTensors.size(); ++i) {
-			results[outputNames[i]] = TensorOrt(
+			results.emplace(outputNames[i], TensorOrt(
 				outputList[outputNames[i]].name(),
 				std::move(_outputTensors[i])
-			);
+			));
 		}
 		
 		_outputTensors.clear();

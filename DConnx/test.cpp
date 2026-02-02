@@ -57,8 +57,17 @@ int main() {
         }
         std::cout << "=============================================" << std::endl;
 
+        DC::Tensor a = DC::Tensor::Create<float>("test", { 2,3 }, { 'a','a' ,'a' ,'a' ,'a' ,'a' });
+
         // 加载 ONNX 模型
         const std::string model_path = "C:/Users/东风谷早苗/Desktop/acoustic.onnx"; // 替换为你的 ONNX 模型路径
+		std::wstring w_model_path = std::filesystem::path(model_path).wstring();
+
+		Ort::Env test_env(ORT_LOGGING_LEVEL_WARNING, "test");
+		Ort::SessionOptions test_options;
+		test_options.SetIntraOpNumThreads(1);
+		test_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+		Ort::Session test_session(test_env, w_model_path.c_str(), test_options);
 
 		DC::InferOrt worker(model_path, 1);
         

@@ -7,21 +7,58 @@ namespace DC {
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 // DC::Tensor
 // 张量对象
-// 栈占用：232 字节
+// 栈占用：240 字节
 // 
 // 用于创建输入或输出张量
 // 在启动时设置张量规则，之后可以对实际数据进行检查，以匹配规则
 // 在运行时而非编译时进行类型检查，请做好异常处理
 // 自行指定类型时会按位进行转换，可能出现精度丢失，请小心使用
 // 
-// 	2025.8.29
+// 	2026.2.3
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 	
-	class Tensor : public TensorDim{
+	class Tensor {
 		using TensorType = TensorMeta::TensorType;
 	public:
+		class View {
+		public:
+			View(Tensor& tensor, std::vector<int64_t> path = {})
+				: _tensor(&tensor), _path(std::move(path)) {
+			}
+
+			View operator[](uint64_t index) const {
+				auto nextPath = _path;
+				nextPath.push_back(static_cast<int64_t>(index));
+				return View(*_tensor, std::move(nextPath));
+			}
+
+			template<typename T>
+			View& operator=(const std::vector<T>& data) {
+				_tensor->writeAt(_path, data);
+				return *this;
+			}
+
+			Tensor& setShape() {
+				_tensor->setRuleShape(_path);
+				return *_tensor;
+			}
+
+			template<typename T>
+			std::vector<T> read() const {
+				return _tensor->readAt<T>(_path);
+			}
+
+			const std::vector<int64_t>& path() const {
+				return _path;
+			}
+
+		private:
+			Tensor* _tensor = nullptr;
+			std::vector<int64_t> _path;
+		};
+
+		virtual ~Tensor() = default;
 		Tensor() = default;
-		virtual  ~Tensor() = default;
 
 		Tensor(
 			const std::string& name,				// - 张量名称
@@ -31,8 +68,7 @@ namespace DC {
 		) {
 			_rule.name = name;
 			_rule.type = type;
-			_rule.typeName = TensorMeta::_typeMap.fromEnum(type).getTypeName();
-			_rule.typeSize = TensorMeta::_typeMap.fromEnum(type).getTypeSize();
+			_rule.typeSize = getSize<TensorType>(type);
 			_rule.shape = shape;
 			_data = TensorData(shape, std::move(data));
 		}
@@ -43,11 +79,9 @@ namespace DC {
 			const std::vector<int64_t>& shape = {},
 			std::vector<char>&& data = {}
 		) {
-			Type<T> typeInfo = Type<T>(typeid(T).name());
-
 			Tensor tensor(
 				name, 
-				TensorMeta::_typeMap.toEnum(&typeInfo), 
+				getType<TensorType>(T()),
 				shape,
 				std::move(data)
 			);
@@ -57,7 +91,16 @@ namespace DC {
 
 		// 设置规则形状
 		Tensor& setShape() {
-			_rule.shape = getPath();
+			_rule.shape = _data.getCurrentShape();
+			return *this;
+		}
+
+		View operator[](uint64_t index) {
+			return View(*this, { static_cast<int64_t>(index) });
+		}
+
+		View at() {
+			return View(*this, {});
 		}
 
 		// 重载赋值
@@ -86,12 +129,17 @@ namespace DC {
 			return *this;
 		}
 
+		// 在 Tensor 类的 public 部分添加拷贝构造函数
+		Tensor(const Tensor& other) {
+			_rule = other._rule;
+			_data = other._data;
+		}
 
 		// 重载赋值
 		// 给当前设定的维度写入数据
 		template<typename T>
 		Tensor& operator=(const std::vector<T>& data) {
-			_data.write(getPath(), data);
+			_data.write({}, data);
 			return *this;
 		}
 
@@ -100,11 +148,10 @@ namespace DC {
 			if (_rule.name.empty()) {
 				_rule = other._rule;
 			}
-			if (other._rule.typeName != _rule.typeName) {
+			if (other._rule.type != _rule.type) {
 				throw std::runtime_error(
 					"输入的 " + other._rule.name + 
-					" 类型不匹配，期望 " + _rule.typeName +
-					"，实际得到 " + other._rule.typeName
+					" 类型不匹配"
 				);
 			}
 			_data = other._data;
@@ -121,7 +168,6 @@ namespace DC {
 
 		// 张量静态属性
 		const std::string name() const { return _rule.name; }
-		const std::string typeName() const { return _rule.typeName; }
 		const std::vector<int64_t> shape() const {return _rule.shape;}
 		const TensorType type() const { return _rule.type; }
 
@@ -145,11 +191,39 @@ namespace DC {
 			return _rule.check(_data.getCurrentShape());
 		}
 
+		// 获取一维化后的原始字节数据（连续内存）。
+		// 适合推理后端直接引用，避免每帧构造临时 vector<T>。
+		const std::vector<char>& getBytes() const {
+			return _data.getBytes();
+		}
+
+		// 直接设置为稠密（连续）数据。
+		// bytes 为按 type 的字节序列（与 shape 对应）。
+		Tensor& setDense(std::vector<char>&& bytes, const std::vector<int64_t>& shape) {
+			_rule.shape = shape;
+			_data.setDenseBytes(shape, _rule.typeSize, std::move(bytes));
+			return *this;
+		}
+
 	private:
+		friend class View;
+
 		TensorMeta _rule;
 		TensorData _data;
 
-		template<typename T> Type<T> getType();
+		void setRuleShape(const std::vector<int64_t>& path) {
+			_rule.shape = path;
+		}
+
+		template<typename T>
+		void writeAt(const std::vector<int64_t>& path, const std::vector<T>& data) {
+			_data.write(path, data);
+		}
+
+		template<typename T>
+		std::vector<T> readAt(const std::vector<int64_t>& path) const {
+			return _data.read<T>(path);
+		}
 
 		void move_from(Tensor&& other) noexcept {
 			if (_rule.name.empty()) {
@@ -158,22 +232,4 @@ namespace DC {
 			_data = std::move(other._data);
 		}
 	};
-
-	template<typename T> Type<T> Tensor::getType(){
-		if constexpr (std::is_same_v<T, float> || std::is_same_v<T, double>) {
-			return Type<float>(TensorMeta::_typeMap.fromEnum(TensorType::Float));
-		}
-		else if constexpr (std::is_integral_v<T> && std::is_signed_v<T>) {
-			return Type<int64_t>(TensorMeta::_typeMap.fromEnum(TensorType::Int));
-		}
-		else if constexpr (std::is_integral_v<T> && std::is_unsigned_v<T>) {
-			return Type<uint64_t>(TensorMeta::_typeMap.fromEnum(TensorType::Uint));
-		}
-		else if constexpr (std::is_same_v<T, bool>) {
-			return Type<bool>(TensorMeta::_typeMap.fromEnum(TensorType::Bool));
-		}
-		else {
-			throw std::runtime_error("不支持的张量类型");
-		}
-	}
 }

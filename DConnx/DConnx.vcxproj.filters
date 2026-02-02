@@ -33,7 +33,7 @@
     <ClCompile Include="test.cpp">
       <Filter>测试用</Filter>
     </ClCompile>
-    <ClCompile Include="src\Infer.cpp">
+    <ClCompile Include="src\InferBase.cpp">
       <Filter>推理器\实现</Filter>
     </ClCompile>
     <ClCompile Include="src\tensor.cpp">
@@ -48,6 +48,10 @@
     <ClCompile Include="src\Info.cpp">
       <Filter>工具\实现</Filter>
     </ClCompile>
+    <ClCompile Include="src\Infer.cpp">
+      <Filter>推理器</Filter>
+    </ClCompile>
+    <ClCompile Include="src\TensorMods.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="API\info.h">
@@ -56,19 +60,13 @@
     <ClInclude Include="API\tool.h">
       <Filter>API</Filter>
     </ClInclude>
-    <ClInclude Include="include\tree.h">
-      <Filter>工具</Filter>
-    </ClInclude>
     <ClInclude Include="API\TensorMods.h">
       <Filter>工具</Filter>
     </ClInclude>
     <ClInclude Include="API\Tensor.h">
       <Filter>API</Filter>
     </ClInclude>
-    <ClInclude Include="API\Type.h">
-      <Filter>API</Filter>
-    </ClInclude>
-    <ClInclude Include="API\Infer.h">
+    <ClInclude Include="API\InferBase.h">
       <Filter>推理器</Filter>
     </ClInclude>
     <ClInclude Include="include\TensorSlot.h">
@@ -82,6 +80,9 @@
     </ClInclude>
     <ClInclude Include="API\TensorOrt.h">
       <Filter>API\ORT</Filter>
+    </ClInclude>
+    <ClInclude Include="API\Infer.h">
+      <Filter>API</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

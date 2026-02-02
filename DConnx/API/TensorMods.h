@@ -5,7 +5,9 @@
 #include <unordered_set>
 #include <string>
 #include <memory>
-#include <Type.h>
+#include <DCtype.h>
+#include <cstring>
+#include <algorithm>
 
 namespace DC {
 	// 张量元数据
@@ -19,8 +21,9 @@ namespace DC {
 			Data,
 			Void
 		};
-
-		static TypeManager<TensorMeta::TensorType> _typeMap;
+		
+	public:
+		TensorMeta() { setTypeMap(); };
 
 		std::string name = "";
 		std::string typeName = "";
@@ -44,60 +47,32 @@ namespace DC {
 			return true;
 		}
 
-		static void setTypeMap() {
-			_typeMap.registerType<float>	(TensorType::Float	,"Float");
-			_typeMap.registerType<int64_t>	(TensorType::Int	,"Int"	);
-			_typeMap.registerType<uint64_t>	(TensorType::Uint	,"UInt"	);
-			_typeMap.registerType<bool>		(TensorType::Bool	,"Bool"	);
-			_typeMap.registerType<char>		(TensorType::Char	,"Char"	);
-			_typeMap.registerType<std::byte>(TensorType::Data	,"Data"	);
-			_typeMap.registerType<uint8_t>	(TensorType::Void	,"Void"	);
-		}
-
-		TensorMeta() {
-			setTypeMap();
-		}
-	};
-
-	// 用于嵌套引用
-	// 根据编辑器中的嵌套层数，自动生成合适的索引形状
-	// 顶层张量继承这个类，然后组合 TensorData
-	// 之后这里的信息可用于 TensorData 索引张量数据
-	class TensorDim {
-	public:
-		// 作为顶层构造时
-		TensorDim() {}
-
-		// 嵌套构造
-		TensorDim(TensorDim& parent, uint64_t index)
-			: _parent(&parent), _index(index) {
-		}
-
-		// 重载引用运算符
-		// 但是返回堆上的新 TensorDim
-		TensorDim& operator[](uint64_t index) {
-			_child = std::make_unique<TensorDim>(*this, index);
-			return *_child;
-		}
-
-		// 获取形状
-		// 逐级上报自己的索引，过程中传递一个路径向量
-		std::vector<int64_t> getPath(std::vector<int64_t> path = {}) const {
-			path.push_back(_index);
-			if (_parent) {
-				return _parent->getPath(path);
-			}
-			else {
-				std::reverse(path.begin(), path.end());
-				return path;
-			}
-		}
-
 	private:
-		int _index = 0;						// 当前维度索引
-		TensorDim* _parent = nullptr;		// 父级维度指针
-		std::unique_ptr<TensorDim> _child;	// 子级维度指针
+		static void setTypeMap() {
+			registerType<float>		(TensorType::Float);
+			registerType<double>	(TensorType::Float);
 
+			registerType<int64_t>	(TensorType::Int);
+			registerType<int32_t>	(TensorType::Int);
+			registerType<int16_t>	(TensorType::Int);
+			registerType<int8_t>	(TensorType::Int);
+			registerType<int>		(TensorType::Int);
+
+			registerType<uint64_t>	(TensorType::Uint);
+			registerType<uint32_t>	(TensorType::Uint);
+			registerType<uint16_t>	(TensorType::Uint);
+			registerType<uint8_t>	(TensorType::Uint);
+			registerType<unsigned int>(TensorType::Uint);
+
+			registerType<bool>		(TensorType::Bool);
+
+			registerType<char>		(TensorType::Char);
+			registerType<unsigned char>(TensorType::Char);
+
+			registerType<std::vector<std::byte>>(TensorType::Data);
+			registerType<std::vector<char>>		(TensorType::Data);
+			registerType<std::vector<float>>	(TensorType::Data);
+		}
 	};
 
 	// 实际储存张量数据的类
@@ -184,6 +159,7 @@ namespace DC {
 		// 这会重新解释张量形状
 		void setTypeSize(size_t typeSize) {
 			_typeSize = typeSize;
+			invalidateCache();
 		}
 
 		// 写入数据
@@ -203,6 +179,7 @@ namespace DC {
 				_dataSize = _data[path].size();
 			}
 
+			invalidateCache();
 			return true;
 		}
 
@@ -217,6 +194,7 @@ namespace DC {
 			if (it != _data.end()) {
 				_size -= it->second.size();
 				_data.erase(it);
+				invalidateCache();
 			}
 			return true;
 		}
@@ -243,6 +221,7 @@ namespace DC {
 			_dataDimSets.clear();
 			_size = 0;
 			_dataSize = 0;
+			invalidateCache();
 		}
 
 		// 获取当前动态形状
@@ -267,21 +246,38 @@ namespace DC {
 		// 较小的数据块将对齐到最大数据块大小
 		template<typename T>
 		std::vector<T> getData() const {
-			std::vector<int64_t> denseShape = getDenseShape();
-			size_t totalSize = 1;
-			for (int64_t dim_size : denseShape) {
-				totalSize *= dim_size;
-			}
-			totalSize *= _typeSize;
+			buildFlattenedCache();
+			return fromCharVector<T>(_flattenedCache);
+		}
 
-			std::vector<char> flattenedData(totalSize, 0);
-			for (const auto& [path, block] : _data) {
-				size_t offset = calculateOffset(path, denseShape);
-				if (offset + block.size() <= flattenedData.size()) {
-					std::memcpy(flattenedData.data() + offset, block.data(), block.size());
+		const std::vector<char>& getBytes() const {
+			buildFlattenedCache();
+			return _flattenedCache;
+		}
+
+		// 直接设置为稠密（连续）数据。
+		// 适用于外部已是稠密张量的场景（例如推理输出接收），避免数据块登记/拼装开销。
+		// shape 为张量形状（元素维度），typeSize 为单元素字节数。
+		void setDenseBytes(const std::vector<int64_t>& shape, size_t typeSize, std::vector<char>&& bytes) {
+			clear();
+			_typeSize = typeSize;
+			_flattenedCache = std::move(bytes);
+			_flattenedCacheValid = true;
+			_flattenedCacheShape = shape;
+			_flattenedCacheTypeSize = _typeSize;
+
+			// 同步基本统计信息，避免 size()/getCurrentShape() 异常。
+			_dataSize = 0;
+			if (!shape.empty() && _typeSize > 0) {
+				_dataSize = shape.back() * _typeSize;
+			}
+			_size = _flattenedCache.size();
+			_dataDimSets.resize(shape.size() > 0 ? shape.size() - 1 : 0);
+			for (size_t i = 0; i + 1 < shape.size(); ++i) {
+				for (int64_t idx = 0; idx < shape[i]; ++idx) {
+					_dataDimSets[i].insert(static_cast<uint64_t>(idx));
 				}
 			}
-			return fromCharVector<T>(flattenedData);
 		}
 
 	private:
@@ -290,6 +286,11 @@ namespace DC {
 		size_t _size = 0;
 		size_t _typeSize = 0; // 类型字节数
 		size_t _dataSize = 0; // 单个数据块的大小
+
+		mutable std::vector<char> _flattenedCache;
+		mutable bool _flattenedCacheValid = false;
+		mutable std::vector<int64_t> _flattenedCacheShape;
+		mutable size_t _flattenedCacheTypeSize = 0;
 
 		// 强制类型转换
 		// 将输入的数据块转换为 char 类型
@@ -375,6 +376,37 @@ namespace DC {
 				shape.push_back(_dataSize / _typeSize);
 			}
 			return shape;
+		}
+
+		void invalidateCache() const {
+			_flattenedCacheValid = false;
+			_flattenedCacheShape.clear();
+			_flattenedCacheTypeSize = 0;
+		}
+
+		void buildFlattenedCache() const {
+			const auto denseShape = getDenseShape();
+			if (_flattenedCacheValid && denseShape == _flattenedCacheShape && _flattenedCacheTypeSize == _typeSize) {
+				return;
+			}
+
+			size_t totalSize = 1;
+			for (int64_t dim_size : denseShape) {
+				totalSize *= static_cast<size_t>(dim_size);
+			}
+			totalSize *= _typeSize;
+
+			_flattenedCache.assign(totalSize, 0);
+			for (const auto& [path, block] : _data) {
+				size_t offset = calculateOffset(path, denseShape);
+				if (offset + block.size() <= _flattenedCache.size()) {
+					std::memcpy(_flattenedCache.data() + offset, block.data(), block.size());
+				}
+			}
+
+			_flattenedCacheValid = true;
+			_flattenedCacheShape = denseShape;
+			_flattenedCacheTypeSize = _typeSize;
 		}
 	};
 }
