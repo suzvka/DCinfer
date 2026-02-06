@@ -1,132 +1,83 @@
 #pragma once
 #include "Tensor.h"
 #include "tool.h"
+#include <type_traits>
 
 class InferBase;
 
 namespace DC {
 	class TensorSlot {
+		using TensorType = TensorMeta::TensorType;
+		using State = TensorMeta::DataState;
+		using MismatchPolicy = TensorMeta::MismatchPolicy;
+
 	public:
 		TensorSlot() = default;
 
+		// ä½¿ç”¨ DType æ„é€ å¼ é‡æ§½
+		// - å¼ é‡åç§°
+		// - å¼ é‡ç±»å‹
+		// - å¼ é‡ç±»å‹å¤§å°(å­—èŠ‚)
+		// - å¼ é‡å½¢çŠ¶(é»˜è®¤ç©º)
 		TensorSlot(
-			const std::string& name,				// - ÕÅÁ¿Ãû³Æ
-			const TensorMeta::TensorType& type,		// - ÕÅÁ¿ÀàĞÍ
-			const std::string& typeName,			// - ÕÅÁ¿ÀàĞÍÃû
-			const std::vector<int64_t>& shape = {}	// - ÕÅÁ¿ĞÎ×´
-		) {
-			setName(name);
-			setShaps(shape);
-			switch (type) {
-				case TensorMeta::TensorType::Float: {
-					setType<float>(typeName);
-					break;
-				}
-				case TensorMeta::TensorType::Int: {
-					setType<int64_t>(typeName);
-					break;
-				}
-				case TensorMeta::TensorType::Uint: {
-					setType<uint64_t>(typeName);
-					break;
-				}
-				case TensorMeta::TensorType::Bool: {
-					setType<bool>(typeName);
-					break;
-				}
-				default: {
-					throw std::runtime_error("Unsupported tensor type");
-					break;
-				}
-			}
-		}
-
-		template<typename T>
-		static TensorSlot Create(
 			const std::string& name,
-			const std::vector<int64_t>& shape
-		) {
-			TensorSlot slot;
-			slot.setName(name);
-			slot.setType<T>();
-			slot.setShaps(shape);
-			return slot;
-		}
+			TensorMeta::TensorType type,
+			size_t size,
+			const std::vector<int64_t>& shape = {}
+		);
 
-		TensorSlot& setDefaultTensor(const Tensor& data) {
-			if (!(*this == data)) {
-				throw std::runtime_error("Ä¬ÈÏÊı¾İ¹æÔò¼ì²éÎ´Í¨¹ı");
-			}
-
-			Tensor tensor;
-			tensor = data;
-			_defaultData = std::make_unique<Tensor>(std::move(tensor));
-			
-			return *this;
-		}
+		TensorSlot& setDefaultTensor(const Tensor& data);
 
 		std::string name() const { return _rule.name; }
-		std::string typeName() const { return _rule.typeName; }
-		TensorMeta::TensorType type() const { return _rule.type; }
+
+		TensorType type() const { return _rule.type; }
+
 		size_t typeSize() const { return _rule.typeSize; }
-		std::vector<int64_t> shape() const { return _rule.shape; }
 
-		TensorSlot& setName(const std::string& name) {
-			_rule.name = name;
-			return *this;
-		}
+		TensorSlot& setName(const std::string& name);
 
-		TensorSlot& setShaps(const std::vector<int64_t>& shape) {
-			_rule.shape = shape;
-			return *this;
-		}
+		TensorSlot& setShapes(const std::vector<int64_t>& shape);
 
-		template<typename T> TensorSlot& setType() {
-			_rule.typeName = typeid(T).name();
-			_rule.typeSize = sizeof(T);
-			return *this;
-		}
-
-		template<typename T> TensorSlot& setType(
-			const std::string& typeName
-		) {
-			_rule.typeName = typeName;
-			_rule.typeSize = sizeof(T);
-			return *this;
-		}
 
 		bool operator==(const Tensor& data) const {
 			return _rule.check(data.getShape());
 		}
 
 		const TensorSlot& input(Tensor& data) const {
-			if (*this != data) throw std::runtime_error("¹æÔò¼ì²éÎ´Í¨¹ı");
+			if (*this != data) throw std::runtime_error("è§„åˆ™æ£€æŸ¥æœªé€šè¿‡");
 			_data = std::make_unique<Tensor>(std::move(data));
 			return *this;
 		}
 
 		const bool hasData() const {
-			return _data != nullptr && _defaultData != nullptr;
+			return _data != nullptr || _defaultData != nullptr;
 		}
 
 		void clear() const {
 			_data.reset();
 		}
 
-		Tensor& getTensor() {
-			if (!hasData()) throw std::runtime_error("ÎŞÊı¾İ");
-			if (!_data) {
-				Tensor tensor;
-				tensor = *_defaultData;
-				_data = std::make_unique<Tensor>(std::move(tensor));
-			}
-			return *_data;
-		}
+		Tensor& getTensor();
 
 	private:
-		InferBase* _infer = nullptr; // ¹éÊôµÄÍÆÀíÆ÷
+		InferBase* _infer = nullptr; // å½’å±çš„æ¨ç†å™¨
 		TensorMeta _rule;
-		std::unique_ptr<Tensor> _defaultData; // Ä¬ÈÏÊı¾İ
+		TensorType _type = TensorType::Void;
+		size_t _typeSize = 0; // æ¨¡å‹çœŸå®å…ƒç´ å¤§å°ï¼ˆæŒ‰å­—èŠ‚è§£é‡Šï¼‰
+		std::unique_ptr<Tensor> _defaultData; // é»˜è®¤æ•°æ®
 		mutable std::unique_ptr<Tensor> _data;
 	};
+
+	template<typename T>
+	TensorSlot CreateSlot(
+		const std::string& name,
+		const std::vector<int64_t>& shape = {}
+	) {
+		return TensorSlot(
+			name,
+			Type::getType<TensorMeta::TensorType>(T()),
+			Type::getSize<TensorMeta::TensorType>(T()),
+			shape
+		);
+	}
 }

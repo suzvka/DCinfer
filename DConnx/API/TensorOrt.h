@@ -8,10 +8,10 @@ namespace DC{
 	public:
 		using OrtType = ONNXTensorElementDataType;
 		TensorOrt(
-			const std::string& name,				// - ’≈¡ø√˚≥∆
-			const OrtType& type,					// - ’≈¡ø¿‡–Õ
-			const std::vector<int64_t>& shape = {},	// - ’≈¡ø–Œ◊¥
-			std::vector<char>&& data = {}			// - ’≈¡ø ˝æ›
+			const std::string& name,				// - Âº†ÈáèÂêçÁß∞
+			const OrtType& type,					// - Âº†ÈáèÁ±ªÂûã
+			const std::vector<int64_t>& shape = {},	// - Âº†ÈáèÂΩ¢Áä∂
+			std::vector<char>&& data = {}			// - Âº†ÈáèÊï∞ÊçÆ
 		) : Tensor(name, TensorType::Void, shape, std::move(data)) {}
 
 		TensorOrt(
@@ -29,7 +29,7 @@ namespace DC{
 			value.GetTensorTypeAndShapeInfo().GetElementType(),
 			value.GetTensorTypeAndShapeInfo().GetShape()
 		) {
-			// ÷±Ω”Ω” ’Œ™≥Ì√‹ ˝æ›£¨±‹√‚÷ÿ∏¥Ω¯–– ˝æ›øÈµ«º«
+			// Áõ¥Êé•Êé•Êî∂‰∏∫Á®†ÂØÜÊï∞ÊçÆÔºåÈÅøÂÖçÈáçÂ§çËøõË°åÊï∞ÊçÆÂùóÁôªËÆ∞
 			auto info = value.GetTensorTypeAndShapeInfo();
 			auto shp = info.GetShape();
 			const auto elemType = info.GetElementType();
@@ -157,17 +157,17 @@ namespace DC{
 		ONNXTensorElementDataType _type = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
 
 		void setTypeMap() {
-			registerType<float>			(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-			registerType<uint8_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-			registerType<int8_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
-			registerType<uint16_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16);
-			registerType<int16_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16);
-			registerType<int32_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-			registerType<int64_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-			registerType<bool>			(ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL);
-			registerType<double>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE);
-			registerType<uint32_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32);
-			registerType<uint64_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64);
+			DC::Type::registerType<float>			(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+			DC::Type::registerType<uint8_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+			DC::Type::registerType<int8_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+			DC::Type::registerType<uint16_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16);
+			DC::Type::registerType<int16_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16);
+			DC::Type::registerType<int32_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+			DC::Type::registerType<int64_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+			DC::Type::registerType<bool>			(ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL);
+			DC::Type::registerType<double>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE);
+			DC::Type::registerType<uint32_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32);
+			DC::Type::registerType<uint64_t>		(ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64);
 		}
 	};
 }

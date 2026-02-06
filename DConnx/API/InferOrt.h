@@ -14,10 +14,10 @@ namespace DC {
 		using NameList = std::vector<const char*>;
 		using ErrorCode = Infer::ErrorCode;
 
-		// ´ÓÎÄ¼şÂ·¾¶¹¹Ôì
+		// ä»æ–‡ä»¶è·¯å¾„æ„é€ 
 		InferOrt(const std::filesystem::path& modelPath, size_t maxParallelCount);
 
-		// ´ÓÄÚ´æÊı¾İ¹¹Ôì
+		// ä»å†…å­˜æ•°æ®æ„é€ 
 		InferOrt(const std::vector<std::byte>& modelData, size_t maxParallelCount);
 		
 		Infer::Task Run(
@@ -31,14 +31,14 @@ namespace DC {
 			return *configInfo;
 		}
 	private:
-		Ort::Env _env;						// ONNX Runtime »·¾³
-		std::unique_ptr<Ort::Session> _session;				// ONNX Runtime »á»°
-		Ort::SessionOptions _options;		// ONNX Runtime ÅäÖÃ
+		Ort::Env _env;						// ONNX Runtime ç¯å¢ƒ
+		std::unique_ptr<Ort::Session> _session;				// ONNX Runtime ä¼šè¯
+		Ort::SessionOptions _options;		// ONNX Runtime é…ç½®
 
 		std::vector<std::string> inputNames;
 		std::vector<std::string> outputNames;
 
-		// Ort ÕÅÁ¿Êı¾İÏòÁ¿
+		// Ort å¼ é‡æ•°æ®å‘é‡
 		InputValues _inputTensors;
 		OutputValues _outputTensors;
 
@@ -47,6 +47,6 @@ namespace DC {
 		bool parseONNX(const std::vector<std::byte>& onnxData);
 		TensorSlot createTensorSlot(std::string name, const Ort::ConstTensorTypeAndShapeInfo& tensorInfo);
 
-		Results runInfer(Infer::Task& inputs); // µ¥´ÎÍÆÀí
+		Results runInfer(Infer::Task& inputs); // å•æ¬¡æ¨ç†
 	};
 }

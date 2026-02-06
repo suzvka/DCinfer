@@ -36,7 +36,7 @@
     <ClCompile Include="src\InferBase.cpp">
       <Filter>推理器\实现</Filter>
     </ClCompile>
-    <ClCompile Include="src\tensor.cpp">
+    <ClCompile Include="src\TensorSlot.cpp">
       <Filter>API\实现</Filter>
     </ClCompile>
     <ClCompile Include="InfoReadTest.cpp">
@@ -51,7 +51,9 @@
     <ClCompile Include="src\Infer.cpp">
       <Filter>推理器</Filter>
     </ClCompile>
-    <ClCompile Include="src\TensorMods.cpp" />
+    <ClCompile Include="src\TensorMods.cpp">
+      <Filter>工具\实现</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="API\info.h">

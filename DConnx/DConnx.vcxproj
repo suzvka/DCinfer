@@ -31,7 +31,7 @@
     <ClCompile Include="src\Infer.cpp" />
     <ClCompile Include="src\InferOrt.cpp" />
     <ClCompile Include="src\Info.cpp" />
-    <ClCompile Include="src\tensor.cpp" />
+    <ClCompile Include="src\TensorSlot.cpp" />
     <ClCompile Include="src\InferBase.cpp" />
     <ClCompile Include="src\TensorMods.cpp" />
     <ClCompile Include="test.cpp">
@@ -198,6 +198,7 @@
       <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -215,6 +216,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -236,6 +238,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>

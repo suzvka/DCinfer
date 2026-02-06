@@ -54,17 +54,17 @@ namespace DC {
 	}
 
 	void InferOrt::setTypeMap() {
-		registerType<float>    (ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-		registerType<uint8_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-		registerType<int8_t>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
-		registerType<uint16_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16);
-		registerType<int16_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16);
-		registerType<int32_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
-		registerType<int64_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-		registerType<bool>     (ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL);
-		registerType<double>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE);
-		registerType<uint32_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32);
-		registerType<uint64_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64);
+		DC::Type::registerType<float>    (ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+		DC::Type::registerType<uint8_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+		DC::Type::registerType<int8_t>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8);
+		DC::Type::registerType<uint16_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16);
+		DC::Type::registerType<int16_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16);
+		DC::Type::registerType<int32_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32);
+		DC::Type::registerType<int64_t>  (ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+		DC::Type::registerType<bool>     (ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL);
+		DC::Type::registerType<double>   (ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE);
+		DC::Type::registerType<uint32_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32);
+		DC::Type::registerType<uint64_t> (ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64);
 	}
 
 	bool InferOrt::parseONNX(const std::vector<std::byte>& onnxData) {
@@ -124,56 +124,35 @@ namespace DC {
 	}
 	
 	TensorSlot InferOrt::createTensorSlot(std::string name, const Ort::ConstTensorTypeAndShapeInfo& tensorInfo) {
-		const auto& type = getType<ONNXTensorElementDataType>(tensorInfo.GetElementType());
-		if (
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT ||
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE
-			) {
-			return TensorSlot(
-				name,
-				TensorMeta::TensorType::Float,
-				"Float",
-				tensorInfo.GetShape()
-			);
-		}
-		else if (
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64 ||
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32 ||
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16 ||
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8
-			) {
-			return TensorSlot(
-				name,
-				TensorMeta::TensorType::Int,
-				"Int",
-				tensorInfo.GetShape()
-			);
-		}
-		else if (
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64 ||
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32 ||
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16 ||
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8
-			) {
-			return TensorSlot(
-				name,
-				TensorMeta::TensorType::Uint,
-				"Uint",
-				tensorInfo.GetShape()
-			);
-		}
-		else if (
-			type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL
-			) {
-			return TensorSlot(
-				name,
-				TensorMeta::TensorType::Bool,
-				"Bool",
-				tensorInfo.GetShape()
-			);
-		}
-		else {
-			throw std::runtime_error("Unsupported tensor type: " + std::to_string(tensorInfo.GetElementType()));
+		const auto ortElemType = tensorInfo.GetElementType();
+
+		const auto& type = Type::getType<ONNXTensorElementDataType>(ortElemType);
+
+		switch (ortElemType) {
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: 
+			return CreateSlot<float>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+			return CreateSlot<double>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+			return CreateSlot<int8_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+			return CreateSlot<int16_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+			return CreateSlot<int32_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+			return CreateSlot<int64_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+			return CreateSlot<uint8_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+			return CreateSlot<uint16_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+			return CreateSlot<uint32_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+			return CreateSlot<uint64_t>(name, tensorInfo.GetShape());
+		case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+			return CreateSlot<bool>(name, tensorInfo.GetShape());
+		default:
+			throw std::runtime_error("Unsupported tensor type: " + std::to_string(ortElemType));
 		}
 	}
 
@@ -190,14 +169,6 @@ namespace DC {
 			}
 			else {
 				auto ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED;
-				if (slot.typeName() == "Float")			{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;	}
-				else if (slot.typeName() == "Int64")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;	}
-				else if (slot.typeName() == "Uint64")	{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;	}
-				else if (slot.typeName() == "Bool")		{ ortType = ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;		}
-				else {
-					errorMessage = "Unsupported tensor type for input: " + slot.typeName();
-					return false;
-				}
 
 				*tensor = TensorOrt(
 					std::move(slot.getTensor()),
@@ -208,7 +179,7 @@ namespace DC {
 			}
 		}
 
-		// Ω¯––Õ∆¿Ì
+		// ËøõË°åÊé®ÁêÜ
 		NameList inputNamesCStr, outputNamesCStr;
 
 		inputNamesCStr.reserve(inputNames.size());
@@ -245,8 +216,8 @@ namespace DC {
 			return false;
 		}
 
-		// Ω‚Œˆ ‰≥ˆ
-		std::unordered_map<std::string, Tensor> results; // ≤ª÷∏∂®¥Û–°£¨»√À¸Œ™ø’≥ı ºªØ
+		// Ëß£ÊûêËæìÂá∫
+		std::unordered_map<std::string, Tensor> results; // ‰∏çÊåáÂÆöÂ§ßÂ∞èÔºåËÆ©ÂÆÉ‰∏∫Á©∫ÂàùÂßãÂåñ
 
 		for (size_t i = 0; i < _outputTensors.size(); ++i) {
 			results.emplace(outputNames[i], TensorOrt(
@@ -259,4 +230,3 @@ namespace DC {
 		return results;
 	}
 }
-	
