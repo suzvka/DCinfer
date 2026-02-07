@@ -1,0 +1,11 @@
+{
+  "env": {
+    "DC_ORT_ROOT": "external/onnxruntime",
+    "DC_ORT_BUILD": "external/onnxruntime-build/build-x64-Release"
+  },
+  "notes": [
+    "DC_ORT_ROOT points to onnxruntime source checkout (submodule).",
+    "DC_ORT_BUILD points to the CMake build directory that contains the built artifacts.",
+    "Update DC_ORT_BUILD after running scripts/build_onnxruntime.ps1."
+  ]
+}

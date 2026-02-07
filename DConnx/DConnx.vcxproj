@@ -59,6 +59,9 @@
     <ClInclude Include="include\Expected.h" />
     <ClInclude Include="include\TensorSlot.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="README_debug_ort_session_crash.md" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
@@ -130,20 +133,20 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
-    <LibraryPath>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
+    <ExternalIncludePath>$(SolutionDir)external\onnxruntime\include\onnxruntime\core\session;$(SolutionDir)external\\onnxruntime\\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
+    <LibraryPath>$(SolutionDir)external\\onnxruntime-build\\build-$(Platform)-$(Configuration)\\$(Configuration);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
     <IncludePath>$(ProjectDir)include;$(ProjectDir)API;$(IncludePath)</IncludePath>
     <OutDir>..\x64\Debug</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='test|x64'">
-    <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
-    <LibraryPath>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
+    <ExternalIncludePath>$(SolutionDir)external\onnxruntime\include\onnxruntime\core\session;$(SolutionDir)external\\onnxruntime\\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
+    <LibraryPath>$(SolutionDir)external\\onnxruntime-build\\build-$(Platform)-$(Configuration)\\$(Configuration);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
     <IncludePath>$(ProjectDir)include;$(ProjectDir)API;$(IncludePath)</IncludePath>
     <OutDir>..\x64\test</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
-    <LibraryPath>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
+    <ExternalIncludePath>$(SolutionDir)external\onnxruntime\include\onnxruntime\core\session;$(SolutionDir)external\\onnxruntime\\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
+    <LibraryPath>$(SolutionDir)external\\onnxruntime-build\\build-$(Platform)-$(Configuration)\\$(Configuration);C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
     <IncludePath>$(ProjectDir)include;$(ProjectDir)API;$(IncludePath)</IncludePath>
     <OutDir>..\x64\Release</OutDir>
   </PropertyGroup>
@@ -199,6 +202,7 @@
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(SolutionDir)external\onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -206,6 +210,9 @@
       <AdditionalLibraryDirectories>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>onnxruntime.lib;onnxruntime_providers_cuda.lib;onnxruntime_providers_shared.lib;onnxruntime_providers_tensorrt.lib;cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PreBuildEvent>
+      <Command>powershell -ExecutionPolicy Bypass -File "$(SolutionDir)scripts\\build_onnxruntime.ps1" -Config Debug -Arch $(Platform) -OutDir "external/onnxruntime-build"</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='test|x64'">
     <ClCompile>
@@ -217,6 +224,7 @@
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(SolutionDir)external\onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -224,6 +232,9 @@
       <AdditionalLibraryDirectories>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>onnxruntime.lib;onnxruntime_providers_cuda.lib;onnxruntime_providers_shared.lib;onnxruntime_providers_tensorrt.lib;cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PreBuildEvent>
+      <Command>powershell -ExecutionPolicy Bypass -File "$(SolutionDir)scripts\\build_onnxruntime.ps1" -Config Debug -Arch $(Platform) -OutDir "external/onnxruntime-build"</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -239,6 +250,7 @@
       <Optimization>MaxSpeed</Optimization>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(SolutionDir)external\onnxruntime\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -248,6 +260,9 @@
       <AdditionalLibraryDirectories>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>onnxruntime.lib;onnxruntime_providers_cuda.lib;onnxruntime_providers_shared.lib;onnxruntime_providers_tensorrt.lib;cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PreBuildEvent>
+      <Command>powershell -ExecutionPolicy Bypass -File "$(SolutionDir)scripts\\build_onnxruntime.ps1" -Config Debug -Arch $(Platform) -OutDir "external/onnxruntime-build"</Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
