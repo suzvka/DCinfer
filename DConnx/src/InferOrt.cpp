@@ -14,8 +14,7 @@ namespace DC {
 		std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
 		if (!file.is_open()) {
 			ready = false;
-			auto p = modelPath.u8string();
-			errorMessage = "Failed to open ONNX model file: " + std::string(reinterpret_cast<const char*>(p.data()), p.size());
+			errorMessage = "Failed to open ONNX model file: " + modelPath.string();
 			return;
 		}
 		auto fileSize = file.tellg();
@@ -23,8 +22,7 @@ namespace DC {
 		std::vector<std::byte> buffer(fileSize);
 		if (!file.read(reinterpret_cast<char*>(buffer.data()), fileSize)) {
 			ready = false;
-			auto p = modelPath.u8string();
-			errorMessage = "Failed to read ONNX model file: " + std::string(reinterpret_cast<const char*>(p.data()), p.size());
+			errorMessage = "Failed to read ONNX model file: " + modelPath.string();
 			return;
 		}
 		parseONNX(buffer);
@@ -71,15 +69,14 @@ namespace DC {
 
 	bool InferOrt::parseONNX(const std::vector<std::byte>& onnxData) {
 		try {
+			_env = Ort::Env(ORT_LOGGING_LEVEL_WARNING, "DC-Infer");
 			_options = Ort::SessionOptions();
 			_options.SetIntraOpNumThreads(1);
 			_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
-			auto data = onnxData.data();
-
 			_session = std::make_unique<Ort::Session>(
 				_env,
-				data,
+				onnxData.data(),
 				onnxData.size(),
 				_options
 			);

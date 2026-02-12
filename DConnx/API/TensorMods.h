@@ -112,13 +112,8 @@ namespace DC {
 				return;
 			}
 
-			size_t totalElements = 1;
-			for (const auto& dim : shape) {
-				totalElements *= static_cast<size_t>(dim);
-			}
-			if (totalElements == 0) return;
-
-			_typeSize = data.size() / totalElements;
+			size_t blockSize = *shape.cend();
+			_typeSize = data.size() / blockSize;
 
 			// 如果形状只有一个维度，则整个数据视为一个数据块
 			if (shape.size() == 1) {
@@ -155,18 +150,18 @@ namespace DC {
 				dataOffset += _dataSize;
 
 				// 更新到下一个路径（模拟进位）
-				bool advanced = false;
-				for (size_t currentDim = pathDimCount; currentDim-- > 0;) {
+				size_t currentDim = pathDimCount - 1;
+				while (currentDim >= 0) {
 					currentPath[currentDim]++;
 					if (currentPath[currentDim] < pathShape[currentDim]) {
-						advanced = true;
 						break; // 不需要进位，已找到下一个路径
 					}
 					currentPath[currentDim] = 0; // 当前维度重置为0，并向更高维度进位
+					currentDim--;
 				}
 
 				// 如果所有维度都已遍历完（最高位也发生了进位），则退出循环
-				if (!advanced) {
+				if (currentDim < 0) {
 					break;
 				}
 			}
@@ -385,7 +380,7 @@ namespace DC {
 				multiplier = denseShape.back(); // 块大小
 			}
 
-			for (size_t i = path.size(); i-- > 0;) {
+			for (size_t i = path.size() - 1; i >= 0; --i) {
 				offset += path[i] * multiplier;
 				multiplier *= denseShape[i];
 			}

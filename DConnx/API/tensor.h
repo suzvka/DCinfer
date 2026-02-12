@@ -86,7 +86,7 @@ namespace DC {
 		) {
 			Tensor tensor(
 				name,
-				Type::getType<TensorType>(T()),
+				getType<TensorType>(T()),
 				shape,
 				std::move(data)
 			);

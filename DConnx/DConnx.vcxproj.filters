@@ -87,7 +87,4 @@
       <Filter>API</Filter>
     </ClInclude>
   </ItemGroup>
-  <ItemGroup>
-    <None Include="README_debug_ort_session_crash.md" />
-  </ItemGroup>
 </Project>
