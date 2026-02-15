@@ -59,6 +59,9 @@
     <ClInclude Include="include\Expected.h" />
     <ClInclude Include="include\TensorSlot.h" />
   </ItemGroup>
+  <ItemGroup>
+    <Text Include="CMakeLists.txt" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
@@ -131,19 +134,19 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
-    <LibraryPath>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
+    <LibraryPath>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
     <IncludePath>$(ProjectDir)include;$(ProjectDir)API;$(IncludePath)</IncludePath>
     <OutDir>..\x64\Debug</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='test|x64'">
     <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
-    <LibraryPath>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
+    <LibraryPath>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
     <IncludePath>$(ProjectDir)include;$(ProjectDir)API;$(IncludePath)</IncludePath>
     <OutDir>..\x64\test</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
-    <LibraryPath>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
+    <LibraryPath>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
     <IncludePath>$(ProjectDir)include;$(ProjectDir)API;$(IncludePath)</IncludePath>
     <OutDir>..\x64\Release</OutDir>
   </PropertyGroup>
@@ -222,7 +225,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)onnxRuntime/lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>onnxruntime.lib;onnxruntime_providers_cuda.lib;onnxruntime_providers_shared.lib;onnxruntime_providers_tensorrt.lib;cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">

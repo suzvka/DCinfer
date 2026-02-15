@@ -2,6 +2,7 @@
 #include "Tensor.h"
 #include "tool.h"
 #include <type_traits>
+#include <stdexcept>
 
 class InferBase;
 
@@ -26,7 +27,7 @@ namespace DC {
 			const std::vector<int64_t>& shape = {}
 		);
 
-		TensorSlot& setDefaultTensor(const Tensor& data);
+		TensorSlot& setDefaultTensor(Tensor& data);
 
 		std::string name() const { return _rule.name; }
 
@@ -40,7 +41,16 @@ namespace DC {
 
 
 		bool operator==(const Tensor& data) const {
-			return _rule.check(data.getShape());
+			if (!_rule.check(data.getShape())) {
+				return false;
+			}
+			if (_rule.type != TensorType::Void && _rule.type != data.type()) {
+				return false;
+			}
+			if (_rule.typeSize != 0 && _rule.typeSize != data.typeSize()) {
+				return false;
+			}
+			return true;
 		}
 
 		const TensorSlot& input(Tensor& data) const {
@@ -62,8 +72,6 @@ namespace DC {
 	private:
 		InferBase* _infer = nullptr; // 归属的推理器
 		TensorMeta _rule;
-		TensorType _type = TensorType::Void;
-		size_t _typeSize = 0; // 模型真实元素大小（按字节解释）
 		std::unique_ptr<Tensor> _defaultData; // 默认数据
 		mutable std::unique_ptr<Tensor> _data;
 	};

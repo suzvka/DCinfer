@@ -87,4 +87,7 @@
       <Filter>API</Filter>
     </ClInclude>
   </ItemGroup>
+  <ItemGroup>
+    <Text Include="CMakeLists.txt" />
+  </ItemGroup>
 </Project>

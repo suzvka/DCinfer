@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
-#include <onnxruntime_cxx_api.h>
+#include <cstdint>
+#include <type_traits>
 
 namespace DC {
 	//推导输入张量形状==================================================================

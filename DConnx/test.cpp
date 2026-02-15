@@ -6,11 +6,12 @@
 #include "tensor.h"
 #include "Info.h"
 #include <filesystem>
+#include <cstring>
 
 #include <windows.h>
 
 extern void test1();
-// ¶ÁÈ¡ ONNX ÎÄ¼şµ½ std::vector<char>
+// è¯»å– ONNX æ–‡ä»¶åˆ° std::vector<char>
 std::vector<char> LoadONNXModel(const std::string& model_path) {
     std::ifstream file(model_path, std::ios::binary | std::ios::ate);
     if (!file) {
@@ -30,7 +31,7 @@ std::vector<char> LoadONNXModel(const std::string& model_path) {
 
 int main() {
     try {
-        // ´òÓ¡ CUDA Éè±¸ĞÅÏ¢
+        // æ‰“å° CUDA è®¾å¤‡ä¿¡æ¯
         std::cout << "========== CUDA Device Information ==========" << std::endl;
         auto gpus = DC::getInfo_GPU();
         for (size_t i = 0; i < gpus.size(); ++i) {
@@ -57,26 +58,42 @@ int main() {
         }
         std::cout << "=============================================" << std::endl;
 
-        DC::Tensor a = DC::Tensor::Create<float>("test", { 2,3 }, { 'a','a' ,'a' ,'a' ,'a' ,'a' });
+		std::vector<float> testData = { 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f };
+		std::vector<char> testBytes(testData.size() * sizeof(float));
+		std::memcpy(testBytes.data(), testData.data(), testBytes.size());
 
-        // ¼ÓÔØ ONNX Ä£ĞÍ
-        const std::string model_path = "C:/Users/¶«·ç¹ÈÔçÃç/Desktop/acoustic.onnx"; // Ìæ»»ÎªÄãµÄ ONNX Ä£ĞÍÂ·¾¶
-		std::wstring w_model_path = std::filesystem::path(model_path).wstring();
+        DC::Tensor a = DC::Tensor::Create<float>({ 2,3 }, std::move(testBytes));
+		std::cout << "Tensor test typeSize = " << DC::Type::getSize(DC::TensorMeta::TensorType::Float) << std::endl;
 
-		Ort::Env test_env(ORT_LOGGING_LEVEL_WARNING, "test");
-		Ort::SessionOptions test_options;
-		test_options.SetIntraOpNumThreads(1);
-		test_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-		Ort::Session test_session(test_env, w_model_path.c_str(), test_options);
+		// Dense passthrough -> explicit editable start -> sparse write should not lose original dense content.
+		{
+			std::vector<char> denseBytes(sizeof(float) * 6);
+			std::memcpy(denseBytes.data(), testData.data(), denseBytes.size());
 
-		DC::InferOrt worker(model_path, 1);
-        
-        // test1();
+			DC::Tensor t = DC::Tensor::Create<float>();
+			t.setDense(std::move(denseBytes), { 2, 3 });
+			const auto before = t.getData<float>();
+			if (before != testData) {
+				throw std::runtime_error("Dense passthrough getData<float>() mismatch");
+			}
+
+			t[0] = std::vector<float>{10.0f, 20.0f, 30.0f};
+			// Multi-level chained indexing should work without excessive allocations and preserve semantics.
+			t[1][2] = 99.0f;
+			const float scalar = t[1][2];
+			auto scalarVec = t.getData<float>();
+			if (scalar != 99.0f) {
+				throw std::runtime_error("Chained scalar write/read mismatch");
+			}
+
+			const auto after = t.getData<float>();
+			std::vector<float> expected = { 10.0f, 20.0f, 30.0f, 4.0f, 5.0f, 99.0f };
+			if (after != expected) {
+				throw std::runtime_error("Editable materialization or write mismatch");
+			}
+		}
+
         Sleep(10000);
-    }
-    catch (const Ort::Exception& e) {
-        std::cerr << "ONNX Runtime Error: " << e.what() << std::endl;
-        return -1;
     }
     catch (const std::exception& e) {
         std::cerr << "Standard Error: " << e.what() << std::endl;

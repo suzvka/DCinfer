@@ -8,7 +8,9 @@
 #include <DCtype.h>
 #include <cstring>
 #include <algorithm>
+	#include <numeric>
 #include <stdexcept>
+#include <mutex>
 
 namespace DC {
 	// 张量元数据
@@ -39,7 +41,12 @@ namespace DC {
 		};
 		
 	public:
-		TensorMeta() { setTypeMap(); };
+		TensorMeta() { ensureTypeMap(); };
+
+		static void ensureTypeMap() {
+			static std::once_flag flag;
+			std::call_once(flag, []() { setTypeMap(); });
+		}
 
 		std::string name = "";
 		size_t typeSize = 0;
@@ -95,6 +102,8 @@ namespace DC {
 		}
 	};
 
+	
+
 	// 实际储存张量数据的类
 	// 数据块一维平摊储存
 	class TensorData {
@@ -106,13 +115,48 @@ namespace DC {
 		TensorData() :_data({}) {}
 		TensorData(
 			const std::vector<int64_t>& shape,
+			size_t typeSize,
+			std::vector<char>&& denseBytes
+		) {
+			if (shape.empty() || denseBytes.empty()) {
+				return;
+			}
+			if (typeSize == 0) {
+				throw std::invalid_argument("TensorData: typeSize must be > 0");
+			}
+			for (auto d : shape) {
+				if (d <= 0) {
+					throw std::invalid_argument("TensorData: shape elements must be > 0");
+				}
+			}
+
+			size_t elementCount = 1;
+			for (auto d : shape) {
+				elementCount *= static_cast<size_t>(d);
+			}
+			const size_t expectedBytes = elementCount * typeSize;
+			if (denseBytes.size() != expectedBytes) {
+				throw std::invalid_argument("TensorData: denseBytes.size() does not match shape product");
+			}
+
+			setDenseBytes(shape, typeSize, std::move(denseBytes));
+		}
+		TensorData(
+			const std::vector<int64_t>& shape,
 			std::vector<char>&& data
 		) {
 			if (shape.empty() || data.empty()) {
 				return;
 			}
 
-			size_t blockSize = *shape.cend();
+			const int64_t lastDim = shape.back();
+			if (lastDim <= 0) {
+				throw std::invalid_argument("TensorData: shape.back() must be > 0");
+			}
+			const size_t blockSize = static_cast<size_t>(lastDim);
+			if (data.size() % blockSize != 0) {
+				throw std::invalid_argument("TensorData: data.size() must be divisible by shape.back() (block element count)");
+			}
 			_typeSize = data.size() / blockSize;
 
 			// 如果形状只有一个维度，则整个数据视为一个数据块
@@ -126,7 +170,7 @@ namespace DC {
 			}
 
 			// 最后一个维度是数据块的大小（元素数量）
-			size_t blockElementCount = shape.back();
+			const size_t blockElementCount = blockSize;
 			_dataSize = blockElementCount * _typeSize;
 
 			// 路径维度
@@ -136,6 +180,12 @@ namespace DC {
 
 			std::vector<int64_t> currentPath(pathDimCount, 0);
 			size_t dataOffset = 0;
+
+			const size_t expectedTotalSize = _dataSize * static_cast<size_t>(std::accumulate(pathShape.begin(), pathShape.end(), int64_t{1},
+				[](int64_t a, int64_t b) { return a * b; }));
+			if (expectedTotalSize != data.size()) {
+				throw std::invalid_argument("TensorData: data.size() does not match shape product");
+			}
 
 			while (true) {
 				// 登记当前路径
@@ -150,14 +200,14 @@ namespace DC {
 				dataOffset += _dataSize;
 
 				// 更新到下一个路径（模拟进位）
-				size_t currentDim = pathDimCount - 1;
+				int64_t currentDim = static_cast<int64_t>(pathDimCount) - 1;
 				while (currentDim >= 0) {
 					currentPath[currentDim]++;
 					if (currentPath[currentDim] < pathShape[currentDim]) {
 						break; // 不需要进位，已找到下一个路径
 					}
 					currentPath[currentDim] = 0; // 当前维度重置为0，并向更高维度进位
-					currentDim--;
+					--currentDim;
 				}
 
 				// 如果所有维度都已遍历完（最高位也发生了进位），则退出循环
@@ -179,16 +229,20 @@ namespace DC {
 		// 这会重新解释张量形状
 		void setTypeSize(size_t typeSize) {
 			_typeSize = typeSize;
-			invalidateCache();
 		}
 
 		// 写入数据
 		// 如果写入索引会改变维度数量，则清空旧数据，当作全新张量写入
 		template<typename T>
 		bool write(std::vector<int64_t> path, const std::vector<T>& data) {
-			if( path.size() != _dataDimSets.size()) clear();
+			ensureEditable();
+			if (path.size() != _dataDimSets.size()) {
+				clear();
+				_dataDimSets.resize(path.size());
+			}
 
 			for (int index = 0; index < path.size();++index) {
+
 				if (path[index] < 0) return false;
 				_dataDimSets[index].insert(path[index]);
 			}
@@ -199,12 +253,53 @@ namespace DC {
 				_dataSize = _data[path].size();
 			}
 
-			invalidateCache();
 			return true;
+		}
+
+		// 按规则 typeSize 写入 bytes（不改变张量规则；仅影响解释方式）
+		bool writeBytes(std::vector<int64_t> path, size_t ruleTypeSize, const std::vector<char>& bytes) {
+			ensureEditable();
+			if (ruleTypeSize == 0) {
+				throw std::invalid_argument("TensorData::writeBytes: ruleTypeSize must be > 0");
+			}
+			if (path.size() != _dataDimSets.size()) {
+				clear();
+				_dataDimSets.resize(path.size());
+			}
+
+			for (int index = 0; index < static_cast<int>(path.size()); ++index) {
+
+				const auto p = path[static_cast<size_t>(index)];
+				if (p < 0) return false;
+				_dataDimSets[static_cast<size_t>(index)].insert(static_cast<uint64_t>(p));
+			}
+
+			_typeSize = ruleTypeSize;
+			_data[path] = bytes;
+			_size += _data[path].size();
+			if (_dataSize < _data[path].size()) {
+				_dataSize = _data[path].size();
+			}
+			return true;
+		}
+
+		// vector<T> 作为 bytes 来源，按位拷贝并按 ruleTypeSize 解释。
+		template<typename T>
+		bool writeBitcast(std::vector<int64_t> path, size_t ruleTypeSize, const std::vector<T>& data) {
+			if (ruleTypeSize == 0) {
+				throw std::invalid_argument("TensorData::writeBitcast: ruleTypeSize must be > 0");
+			}
+			const size_t totalBytes = data.size() * sizeof(T);
+			if (totalBytes % ruleTypeSize != 0) {
+				throw std::invalid_argument("TensorData::writeBitcast: byte size is not divisible by ruleTypeSize");
+			}
+			auto bytes = toCharVector(data);
+			return writeBytes(std::move(path), ruleTypeSize, bytes);
 		}
 
 		// 删除数据
 		bool remove(std::vector<int64_t> path) {
+			ensureEditable();
 			for (int index = 0; index < path.size(); ++index) {
 				if (path[index] < 0) return false;
 				_dataDimSets[index].erase(path[index]);
@@ -214,7 +309,6 @@ namespace DC {
 			if (it != _data.end()) {
 				_size -= it->second.size();
 				_data.erase(it);
-				invalidateCache();
 			}
 			return true;
 		}
@@ -222,6 +316,10 @@ namespace DC {
 		// 读取数据
 		template<typename T>
 		std::vector<T> read(std::vector<int64_t> path) const {
+			// 稠密直通模式下仍允许读取 bytes/getData；path 读取属于编辑视图的一部分，需要显式切换。
+			if (_cacheValid) {
+				return {};
+			}
 			for (int index = 0; index < path.size(); ++index) {
 				if (path[index] < 0) return {};
 			}
@@ -229,8 +327,9 @@ namespace DC {
 			auto it = _data.find(path);
 			if (it != _data.end()) {
 				const DataBlock& block = it->second;
-				return fromCharVector(block);
+				return fromCharVector<T>(block);
 			}
+
 
 			return {};
 		}
@@ -241,15 +340,14 @@ namespace DC {
 			_dataDimSets.clear();
 			_size = 0;
 			_dataSize = 0;
-			invalidateCache();
 		}
 
 		// 获取当前动态形状
 		// 即稠密形状（最大索引 + 1）+ 数据块大小（元素数量）
 		// 注意：在 setDenseBytes() 的“稠密直通模式”下，不会构建稀疏块映射，形状直接来自 _flattenedCacheShape。
 		std::vector<int64_t> getCurrentShape() const {
-			if (_flattenedCacheValid && !_flattenedCacheShape.empty() && _flattenedCacheTypeSize == _typeSize) {
-				return _flattenedCacheShape;
+			if (_cacheValid) {
+				return _shapeCache;
 			}
 
 			std::vector<int64_t> shape(_dataDimSets.size(), 0);
@@ -272,12 +370,12 @@ namespace DC {
 		template<typename T>
 		std::vector<T> getData() const {
 			buildFlattenedCache();
-			return fromCharVector<T>(_flattenedCache);
+			return fromCharVector<T>(_dataCache);
 		}
 
 		const std::vector<char>& getBytes() const {
 			buildFlattenedCache();
-			return _flattenedCache;
+			return _dataCache;
 		}
 
 		// 直接设置为稠密（连续）数据。
@@ -286,10 +384,9 @@ namespace DC {
 		void setDenseBytes(const std::vector<int64_t>& shape, size_t typeSize, std::vector<char>&& bytes) {
 			clear();
 			_typeSize = typeSize;
-			_flattenedCache = std::move(bytes);
-			_flattenedCacheValid = true;
-			_flattenedCacheShape = shape;
-			_flattenedCacheTypeSize = _typeSize;
+			_dataCache = std::move(bytes);
+			_shapeCache = shape;
+			_cacheValid = true;
 
 			// 注意：此处为“稠密直通模式”（二选一）。
 			// TODO: 未来可在确实需要稀疏编辑视图/按 path 查询时，再从 _flattenedCache + shape 延迟物化 _data（块映射），
@@ -300,13 +397,22 @@ namespace DC {
 			if (!shape.empty() && _typeSize > 0) {
 				_dataSize = shape.back() * _typeSize;
 			}
-			_size = _flattenedCache.size();
+			_size = _dataCache.size();
 			_dataDimSets.resize(shape.size() > 0 ? shape.size() - 1 : 0);
 			for (size_t i = 0; i + 1 < shape.size(); ++i) {
 				for (int64_t idx = 0; idx < shape[i]; ++idx) {
 					_dataDimSets[i].insert(static_cast<uint64_t>(idx));
 				}
 			}
+		}
+
+		// 显式进入可编辑模式：若当前为稠密直通模式，则会将稠密 bytes 物化为稀疏块映射。
+		void ensureEditable() {
+			if (!_cacheValid) {
+				return;
+			}
+			materializeFromDense();
+			_cacheValid = false;
 		}
 
 	private:
@@ -316,10 +422,9 @@ namespace DC {
 		size_t _typeSize = 0; // 类型字节数
 		size_t _dataSize = 0; // 单个数据块的大小
 
-		mutable std::vector<char> _flattenedCache;
-		mutable bool _flattenedCacheValid = false;
-		mutable std::vector<int64_t> _flattenedCacheShape;
-		mutable size_t _flattenedCacheTypeSize = 0;
+		mutable std::vector<char> _dataCache;
+		mutable std::vector<int64_t> _shapeCache;
+		mutable bool _cacheValid = false;
 
 		// 强制类型转换
 		// 将输入的数据块转换为 char 类型
@@ -380,9 +485,9 @@ namespace DC {
 				multiplier = denseShape.back(); // 块大小
 			}
 
-			for (size_t i = path.size() - 1; i >= 0; --i) {
-				offset += path[i] * multiplier;
-				multiplier *= denseShape[i];
+			for (size_t k = path.size(); k-- > 0;) {
+				offset += static_cast<size_t>(path[k]) * multiplier;
+				multiplier *= static_cast<size_t>(denseShape[k]);
 			}
 
 			// 最终偏移量要乘以类型字节数
@@ -407,28 +512,15 @@ namespace DC {
 			return shape;
 		}
 
-		void invalidateCache() const {
-			_flattenedCacheValid = false;
-			_flattenedCacheShape.clear();
-			_flattenedCacheTypeSize = 0;
-		}
-
 		void buildFlattenedCache() const {
 			// setDenseBytes() 已提供稠密直通缓存；该模式下不应触发基于 _data 的重建。
-			if (_flattenedCacheValid && !_flattenedCacheShape.empty() && _flattenedCacheTypeSize == _typeSize && _data.empty()) {
+			if (_data.empty()) {
 				return;
 			}
 
 			const auto denseShape = getDenseShape();
-			if (_flattenedCacheValid && denseShape == _flattenedCacheShape && _flattenedCacheTypeSize == _typeSize) {
-				return;
-			}
 
 			if (denseShape.empty() || _typeSize == 0) {
-				_flattenedCache.clear();
-				_flattenedCacheValid = true;
-				_flattenedCacheShape = denseShape;
-				_flattenedCacheTypeSize = _typeSize;
 				return;
 			}
 
@@ -442,17 +534,66 @@ namespace DC {
 			}
 			const size_t totalBytes = totalElements * _typeSize;
 
-			_flattenedCache.assign(totalBytes, 0);
+			_dataCache.assign(totalBytes, 0);
 			for (const auto& [path, block] : _data) {
 				const size_t offset = calculateOffset(path, denseShape);
-				if (offset + block.size() <= _flattenedCache.size()) {
-					std::memcpy(_flattenedCache.data() + offset, block.data(), block.size());
+				if (offset + block.size() <= _dataCache.size()) {
+					std::memcpy(_dataCache.data() + offset, block.data(), block.size());
+				}
+			}
+		}
+
+		void materializeFromDense() {
+			if (!_cacheValid) {
+				return;
+			}
+
+			// 单块大小：最后一维元素数 * typeSize
+			_dataSize = static_cast<size_t>(_shapeCache.back()) * _typeSize;
+			if (_dataSize == 0) {
+				return;
+			}
+
+			const size_t pathDims = (_shapeCache.size() >= 2) ? (_shapeCache.size() - 1) : 0;
+			_dataDimSets.resize(pathDims);
+			for (size_t i = 0; i < pathDims; ++i) {
+				for (int64_t idx = 0; idx < _shapeCache[i]; ++idx) {
+					_dataDimSets[i].insert(static_cast<uint64_t>(idx));
 				}
 			}
 
-			_flattenedCacheValid = true;
-			_flattenedCacheShape = denseShape;
-			_flattenedCacheTypeSize = _typeSize;
+			if (pathDims == 0) {
+				// 退化为一维：以根路径 {} 存一整块
+				_data[{}] = _dataCache;
+				_size = _dataCache.size();
+				return;
+			}
+
+			std::vector<int64_t> path(pathDims, 0);
+			size_t offsetBytes = 0;
+			while (true) {
+				if (offsetBytes + _dataSize > _dataCache.size()) {
+					break;
+				}
+				DataBlock block(_dataCache.begin() + offsetBytes, _dataCache.begin() + offsetBytes + _dataSize);
+				_data[path] = std::move(block);
+				_size += _dataSize;
+				offsetBytes += _dataSize;
+
+				int64_t dim = static_cast<int64_t>(pathDims) - 1;
+				while (dim >= 0) {
+					path[static_cast<size_t>(dim)]++;
+					// Use shape bounds, not data bytes.
+					if (path[static_cast<size_t>(dim)] < _shapeCache[static_cast<size_t>(dim)]) {
+						break;
+					}
+					path[static_cast<size_t>(dim)] = 0;
+					--dim;
+				}
+				if (dim < 0) {
+					break;
+				}
+			}
 		}
 	};
 }

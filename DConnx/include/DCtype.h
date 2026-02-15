@@ -87,13 +87,18 @@ namespace DC::Type {
 	class TypeRegistry final : public ITypeRegistry {
 	private:
 		using TypeEnumMap = std::unordered_map<TypeId, Enum>;
-		using TypeSizeMap = std::unordered_map<TypeId, std::size_t>;
+		struct EnumHash {
+			std::size_t operator()(Enum e) const noexcept {
+				return std::hash<std::underlying_type_t<Enum>>{}(static_cast<std::underlying_type_t<Enum>>(e));
+			}
+		};
+		using EnumSizeMap = std::unordered_map<Enum, std::size_t, EnumHash>;
 
 		mutable std::mutex mutex_;
 		TypeEnumMap mappings_;
 		mutable std::atomic<bool> frozen_{ false };
 		std::optional<Enum> fallback_;
-		TypeSizeMap sizes_;
+		EnumSizeMap sizes_;
 
 		void ensureFrozen() const {
 			if (!frozen_.load(std::memory_order_acquire)) {
@@ -146,9 +151,26 @@ namespace DC::Type {
 				return false;
 			}
 			mappings_[getTypeId<T>()] = value;
-			sizes_[getTypeId<T>()] = sizeof(T);
+			auto& slot = sizes_[value];
+			if (slot < sizeof(T)) {
+				slot = sizeof(T);
+			}
 
 			return true;
+		}
+
+		[[nodiscard]] std::size_t getSize(Enum value) const {
+			ensureFrozen();
+			std::scoped_lock lock(mutex_);
+			auto it = sizes_.find(value);
+			return it != sizes_.end() ? it->second : 0;
+		}
+
+		[[nodiscard]] std::size_t getSizeOr(Enum value, std::size_t fallback) const {
+			ensureFrozen();
+			std::scoped_lock lock(mutex_);
+			auto it = sizes_.find(value);
+			return it != sizes_.end() ? it->second : fallback;
 		}
 
 		/// @brief 查询类型 T 对应的枚举值。
@@ -199,9 +221,7 @@ namespace DC::Type {
 		/// @return 如果找到，则返回对应的大小；否则返回 0。
 		template<class T>
 		[[nodiscard]] std::size_t getSize() const {
-			std::scoped_lock lock(mutex_);
-			auto it = sizes_.find(getTypeId<T>());
-			return it != sizes_.end() ? it->second : 0;
+			return sizeof(T);
 		}
 
 		/// @brief 查询类型 T 对应的注册大小，如果未找到则返回备用值。
@@ -210,9 +230,8 @@ namespace DC::Type {
 		/// @return 如果找到，则返回对应的大小；否则返回 fallback。
 		template<class T>
 		[[nodiscard]] std::size_t getSizeOr(std::size_t fallback) const {
-			std::scoped_lock lock(mutex_);
-			auto it = sizes_.find(getTypeId<T>());
-			return it != sizes_.end() ? it->second : fallback;
+			(void)fallback;
+			return sizeof(T);
 		}
 
 		/// @brief 获取此注册表管理的枚举类型的名称。
@@ -374,6 +393,12 @@ namespace DC::Type {
 		return TypeEnvironment::instance().getRegistry<Enum>().template getSize<T>();
 	}
 
+	/// @brief 查询枚举值对应的注册大小（同一枚举值下注册多个 C++ 类型时取 sizeof(T) 最大值）。
+	template<class Enum>
+	[[nodiscard]] std::size_t getSize(Enum value) {
+		return TypeEnvironment::instance().getRegistry<Enum>().getSize(value);
+	}
+
 	/// @brief 查询与类型 T 关联的注册大小。
 	/// @tparam Enum 目标枚举类型。
 	/// @tparam T 要查询的类型。
@@ -391,6 +416,12 @@ namespace DC::Type {
 	template<class Enum, class T>
 	[[nodiscard]] std::size_t getSizeOr(const T&, std::size_t fallback) {
 		return TypeEnvironment::instance().getRegistry<Enum>().template getSizeOr<T>(fallback);
+	}
+
+	/// @brief 查询枚举值对应的注册大小，如果未找到则返回备用值。
+	template<class Enum>
+	[[nodiscard]] std::size_t getSizeOr(Enum value, std::size_t fallback) {
+		return TypeEnvironment::instance().getRegistry<Enum>().getSizeOr(value, fallback);
 	}
 
 } // namespace DC

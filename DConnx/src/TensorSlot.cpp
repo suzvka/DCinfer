@@ -11,19 +11,16 @@ namespace DC {
 	) {
 		setName(name);
 		setShapes(shape);
-
-		_type = type;
-		_typeSize = typeSize;
+		_rule.type = type;
+		_rule.typeSize = typeSize;
 	}
 
-	TensorSlot& TensorSlot::setDefaultTensor(const Tensor& data) {
+	TensorSlot& TensorSlot::setDefaultTensor(Tensor& data) {
 		if (!(*this == data)) {
 			throw std::runtime_error("默认数据规则检查未通过");
 		}
 
-		Tensor tensor;
-		tensor = data;
-		_defaultData = std::make_unique<Tensor>(std::move(tensor));
+		_defaultData = std::make_unique<Tensor>(std::move(data));
 
 		return *this;
 	}
@@ -39,7 +36,9 @@ namespace DC {
 	}
 
 	Tensor& TensorSlot::getTensor() {
-		if (!hasData()) throw ;
+		if (!hasData()) {
+			throw std::runtime_error("TensorSlot has no data.");
+		}
 		if (!_data) {
 			Tensor tensor;
 			tensor = *_defaultData;

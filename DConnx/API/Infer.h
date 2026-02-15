@@ -1,7 +1,13 @@
 #pragma once
 #include <filesystem>
 
+#include <cstddef>
 #include <functional>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "Tensor.h"
 
