@@ -22,38 +22,47 @@
     <Filter Include="推理器\实现">
       <UniqueIdentifier>{b065535b-0c4f-468e-96b5-65ca4524e15a}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Tensor">
+      <UniqueIdentifier>{26820bde-0dc8-4e2d-b4d2-faf1a92eed02}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Tensor\Slot">
+      <UniqueIdentifier>{751c5f43-13af-4bcc-bd90-fec478bbd93b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Tensor\src">
+      <UniqueIdentifier>{cc902a5d-52cc-4082-b268-e59124c3f943}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Tensor\mods">
+      <UniqueIdentifier>{b75f2960-086c-4d40-b20e-90f1680fae5e}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="test1.cpp">
       <Filter>测试用</Filter>
     </ClCompile>
-    <ClCompile Include="test.cpp">
-      <Filter>测试用</Filter>
-    </ClCompile>
     <ClCompile Include="src\InferBase.cpp">
       <Filter>推理器\实现</Filter>
-    </ClCompile>
-    <ClCompile Include="src\TensorSlot.cpp">
-      <Filter>API\实现</Filter>
     </ClCompile>
     <ClCompile Include="src\Infer.cpp">
       <Filter>推理器</Filter>
     </ClCompile>
-    <ClCompile Include="src\TensorMods.cpp">
-      <Filter>工具\实现</Filter>
+    <ClCompile Include="test.cpp">
+      <Filter>Tensor</Filter>
+    </ClCompile>
+    <ClCompile Include="src\TensorSlot.cpp">
+      <Filter>Tensor\Slot</Filter>
     </ClCompile>
     <ClCompile Include="src\Tensor.cpp">
-      <Filter>API\实现</Filter>
+      <Filter>Tensor\src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\TensorData.cpp">
+      <Filter>Tensor\src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\TensorMeta.cpp">
+      <Filter>Tensor\src</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="API\tool.h">
-      <Filter>API</Filter>
-    </ClInclude>
-    <ClInclude Include="API\TensorMods.h">
-      <Filter>工具</Filter>
-    </ClInclude>
-    <ClInclude Include="API\Tensor.h">
       <Filter>API</Filter>
     </ClInclude>
     <ClInclude Include="API\InferBase.h">
@@ -67,6 +76,18 @@
     </ClInclude>
     <ClInclude Include="API\Infer.h">
       <Filter>API</Filter>
+    </ClInclude>
+    <ClInclude Include="API\TensorMods.h">
+      <Filter>Tensor</Filter>
+    </ClInclude>
+    <ClInclude Include="API\Tensor.h">
+      <Filter>Tensor</Filter>
+    </ClInclude>
+    <ClInclude Include="include\TensorData.h">
+      <Filter>Tensor\mods</Filter>
+    </ClInclude>
+    <ClInclude Include="include\TensorMeta.h">
+      <Filter>Tensor\mods</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

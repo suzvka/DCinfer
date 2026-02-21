@@ -160,7 +160,7 @@ namespace DC {
 		void move_from(Tensor&& other) noexcept;
 	};
 
-	template<bool IsConst>
+template<bool IsConst>
 class Tensor::ViewImpl {
 public:
     using TensorType = std::conditional_t<IsConst, const Tensor, Tensor>;

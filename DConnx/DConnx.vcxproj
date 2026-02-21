@@ -29,9 +29,10 @@
   <ItemGroup>
     <ClCompile Include="src\Infer.cpp" />
     <ClCompile Include="src\Tensor.cpp" />
+    <ClCompile Include="src\TensorData.cpp" />
+    <ClCompile Include="src\TensorMeta.cpp" />
     <ClCompile Include="src\TensorSlot.cpp" />
     <ClCompile Include="src\InferBase.cpp" />
-    <ClCompile Include="src\TensorMods.cpp" />
     <ClCompile Include="test.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='test|x64'">false</ExcludedFromBuild>
@@ -52,6 +53,8 @@
     </ClInclude>
     <ClInclude Include="API\TensorMods.h" />
     <ClInclude Include="include\Expected.h" />
+    <ClInclude Include="include\TensorData.h" />
+    <ClInclude Include="include\TensorMeta.h" />
     <ClInclude Include="include\TensorSlot.h" />
   </ItemGroup>
   <ItemGroup>

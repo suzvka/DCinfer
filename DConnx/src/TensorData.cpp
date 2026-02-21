@@ -1,66 +1,7 @@
-#include <stdexcept>
-#include <numeric>
-#include "TensorMods.h"
+#include "TensorData.h"
 
-namespace DC {
-
-    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    // TensorMeta implementation
-    //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
-    TensorMeta::TensorMeta() {
-        ensureTypeMap();
-    }
-
-    void TensorMeta::ensureTypeMap() {
-        static std::once_flag flag;
-        std::call_once(flag, []() { setTypeMap(); });
-    }
-
-    bool TensorMeta::check(const std::vector<int64_t>& currentShape) const {
-        // Unset rule: skip check
-        if (shape.empty()) {
-            return true;
-        }
-        // Dimension count must match
-        if (shape.size() != currentShape.size()) {
-            return false;
-        }
-        for (size_t i = 0; i < shape.size(); ++i) {
-            // -1 means dynamic dimension: skip comparison
-            if (shape[i] != -1 && shape[i] != currentShape[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    void TensorMeta::setTypeMap() {
-        Type::registerType<float>		(TensorType::Float);
-        Type::registerType<double>		(TensorType::Float);
-
-        Type::registerType<int64_t>		(TensorType::Int);
-        Type::registerType<int32_t>		(TensorType::Int);
-        Type::registerType<int16_t>		(TensorType::Int);
-        Type::registerType<int8_t>		(TensorType::Int);
-        Type::registerType<int>			(TensorType::Int);
-
-        Type::registerType<uint64_t>	(TensorType::Uint);
-        Type::registerType<uint32_t>	(TensorType::Uint);
-        Type::registerType<uint16_t>	(TensorType::Uint);
-        Type::registerType<uint8_t>		(TensorType::Uint);
-        Type::registerType<unsigned int>(TensorType::Uint);
-
-        Type::registerType<bool>		(TensorType::Bool);
-
-        Type::registerType<char>		(TensorType::Char);
-        Type::registerType<unsigned char>(TensorType::Char);
-
-        Type::registerType<std::vector<std::byte>>(TensorType::Data);
-        Type::registerType<std::vector<char>>	(TensorType::Data);
-        Type::registerType<std::vector<float>>	(TensorType::Data);
-    }
-
+namespace DC
+{
     //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     // TensorData implementation
     //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -118,9 +59,9 @@ namespace DC {
         if (shape.size() == 1) {
             _isScalar = false;
             _dataSize = data.size();
-			// 1D convention: the only block path is {} (rank-1 == 0)
-			_data[{}] = std::move(data);
-			_dataDimSets.clear();
+            // 1D convention: the only block path is {} (rank-1 == 0)
+            _data[{}] = std::move(data);
+            _dataDimSets.clear();
             _size = _dataSize;
             return;
         }
@@ -137,7 +78,7 @@ namespace DC {
         std::vector<int64_t> currentPath(pathDimCount, 0);
         size_t dataOffset = 0;
 
-        const size_t expectedTotalSize = _dataSize * static_cast<size_t>(std::accumulate(pathShape.begin(), pathShape.end(), int64_t{1},
+        const size_t expectedTotalSize = _dataSize * static_cast<size_t>(std::accumulate(pathShape.begin(), pathShape.end(), int64_t{ 1 },
             [](int64_t a, int64_t b) { return a * b; }));
         if (expectedTotalSize != data.size()) {
             throw std::invalid_argument("TensorData: data.size() does not match shape product");
@@ -224,17 +165,17 @@ namespace DC {
             _dataDimSets[static_cast<size_t>(index)].insert(static_cast<uint64_t>(p));
         }
 
-		{
-			const auto it = _data.find(path);
-			if (it != _data.end()) {
-				_size -= it->second.size();
-			}
-			_data[path] = bytes;
-			_size += _data[path].size();
-			if (_dataSize < _data[path].size()) {
-				_dataSize = _data[path].size();
-			}
-		}
+        {
+            const auto it = _data.find(path);
+            if (it != _data.end()) {
+                _size -= it->second.size();
+            }
+            _data[path] = bytes;
+            _size += _data[path].size();
+            if (_dataSize < _data[path].size()) {
+                _dataSize = _data[path].size();
+            }
+        }
         return true;
     }
 
@@ -252,9 +193,9 @@ namespace DC {
             return _shapeCache;
         }
 
-		if (_isScalar) {
-			return {};
-		}
+        if (_isScalar) {
+            return {};
+        }
 
         std::vector<int64_t> shape(_dataDimSets.size(), 0);
         for (size_t i = 0; i < _dataDimSets.size(); ++i) {
@@ -279,7 +220,7 @@ namespace DC {
 
         // Note: this is "Dense Pass-Through Mode".
         // TODO: Future optimization: materialize _data (block map) lazily from _flattenedCache + shape only when sparse edit/path query is really needed.
-        
+
         // Sync basic stats
         _dataSize = 0;
         if (!shape.empty() && _typeSize > 0) {
@@ -298,13 +239,13 @@ namespace DC {
         ensureSparseEditable();
     }
 
-	bool TensorData::isScalar() const {
-		return _isScalar;
-	}
+    bool TensorData::isScalar() const {
+        return _isScalar;
+    }
 
-	void TensorData::setScalar(bool scalar) {
-		_isScalar = scalar;
-	}
+    void TensorData::setScalar(bool scalar) {
+        _isScalar = scalar;
+    }
 
     bool TensorData::writeScalarDenseBytes(const std::vector<int64_t>& path, size_t ruleTypeSize, const void* scalarBytes, size_t scalarByteCount) {
         CacheScope scope(*this, CacheScope::Mode::DenseEdit, CacheScope::DensePolicy::RequireCache);
@@ -314,12 +255,12 @@ namespace DC {
         if (ruleTypeSize == 0) {
             throw std::invalid_argument("TensorData::writeScalarDenseBytes: ruleTypeSize must be > 0");
         }
-		if (_typeSize == 0) {
-			throw std::runtime_error("TensorData::writeScalarDenseBytes: typeSize must be determined at construction");
-		}
-		if (ruleTypeSize != _typeSize) {
-			throw std::invalid_argument("TensorData::writeScalarDenseBytes: ruleTypeSize mismatch");
-		}
+        if (_typeSize == 0) {
+            throw std::runtime_error("TensorData::writeScalarDenseBytes: typeSize must be determined at construction");
+        }
+        if (ruleTypeSize != _typeSize) {
+            throw std::invalid_argument("TensorData::writeScalarDenseBytes: ruleTypeSize mismatch");
+        }
         if (_shapeCache.empty()) {
             return false;
         }
@@ -466,9 +407,9 @@ namespace DC {
     }
 
     std::vector<int64_t> TensorData::getDenseShape() const {
-		if (_isScalar) {
-			return {};
-		}
+        if (_isScalar) {
+            return {};
+        }
         std::vector<int64_t> shape(_dataDimSets.size());
         for (size_t i = 0; i < _dataDimSets.size(); ++i) {
             if (_dataDimSets[i].empty()) {
@@ -507,10 +448,10 @@ namespace DC {
         _dataCache.assign(totalBytes, 0);
         for (const auto& [path, block] : _data) {
             const size_t offset = calculateBlockOffsetBytes(path, denseShape);
-			const size_t copyBytes = std::min(block.size(), _dataSize);
-			if (offset + copyBytes <= _dataCache.size()) {
-				std::memcpy(_dataCache.data() + offset, block.data(), copyBytes);
-			}
+            const size_t copyBytes = std::min(block.size(), _dataSize);
+            if (offset + copyBytes <= _dataCache.size()) {
+                std::memcpy(_dataCache.data() + offset, block.data(), copyBytes);
+            }
         }
         syncDenseCacheMeta(denseShape);
     }
@@ -574,5 +515,4 @@ namespace DC {
             }
         }
     }
-
 }
