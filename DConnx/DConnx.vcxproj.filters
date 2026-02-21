@@ -80,7 +80,7 @@
     <ClInclude Include="API\TensorMods.h">
       <Filter>Tensor</Filter>
     </ClInclude>
-    <ClInclude Include="API\Tensor.h">
+    <ClInclude Include="API\Tensor.hpp">
       <Filter>Tensor</Filter>
     </ClInclude>
     <ClInclude Include="include\TensorData.h">

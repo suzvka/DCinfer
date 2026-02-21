@@ -1,5 +1,5 @@
 #include <algorithm>
-#include "Tensor.h"
+#include "Tensor.hpp"
 
 namespace DC {
 

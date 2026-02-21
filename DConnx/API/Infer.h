@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "Tensor.h"
+#include "Tensor.hpp"
 
 namespace DC {
 	class InferBase;

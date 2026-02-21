@@ -1,5 +1,5 @@
 #pragma once
-#include "Tensor.h"
+#include "Tensor.hpp"
 #include "tool.h"
 #include <type_traits>
 #include <stdexcept>

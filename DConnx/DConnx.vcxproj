@@ -47,7 +47,7 @@
   <ItemGroup>
     <ClInclude Include="API\Infer.h" />
     <ClInclude Include="API\InferBase.h" />
-    <ClInclude Include="API\Tensor.h" />
+    <ClInclude Include="API\Tensor.hpp" />
     <ClInclude Include="API\tool.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
     </ClInclude>

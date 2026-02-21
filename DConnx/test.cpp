@@ -2,7 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include "tensor.h"
+#include "Tensor.hpp"
 #include <filesystem>
 #include <cstring>
 
@@ -50,21 +50,32 @@ int main() {
 			}
 
             {
-                auto r = t[0].trySet<std::vector<float>>(std::vector<float>{10.0f, 20.0f, 30.0f});
-                if (!r) throw std::runtime_error("Chained scalar write failed");
+                try {
+                    t[0].set(std::vector<float>{10.0f, 20.0f, 30.0f});
+                }
+                catch (const std::exception&) {
+                    throw std::runtime_error("Chained scalar write failed");
+                }
             }
             // Multi-level chained indexing should work without excessive allocations and preserve semantics.
             {
-                auto r = t[1][2].trySet<float>(99.0f);
-                if (!r) throw std::runtime_error("Chained scalar write failed");
+                try {
+                    t[1][2].set<float>(99.0f);
+                }
+                catch (const std::exception&) {
+                    throw std::runtime_error("Chained scalar write failed");
+                }
             }
             {
-                auto scalarRes = t[1][2].tryItem<float>();
-                if (!scalarRes) throw std::runtime_error("Chained scalar read failed");
-                const float scalar = scalarRes.get();
-                auto scalarVecSpan = t.data<float>();
-                if (scalar != 99.0f) {
-                    throw std::runtime_error("Chained scalar write/read mismatch");
+                try {
+                    const float scalar = t[1][2].item<float>();
+                    auto scalarVecSpan = t.data<float>();
+                    if (scalar != 99.0f) {
+                        throw std::runtime_error("Chained scalar write/read mismatch");
+                    }
+                }
+                catch (const std::exception&) {
+                    throw std::runtime_error("Chained scalar read failed");
                 }
             }
 
@@ -88,8 +99,14 @@ int main() {
 				throw std::runtime_error("fill() broadcast mismatch");
 			}
             {
-                auto res = t.tryItem<float>();
-                if (res) throw std::runtime_error("item() should not succeed on multi-element tensor");
+                try {
+                    auto v = t.item<float>();
+                    (void)v;
+                    throw std::runtime_error("item() should not succeed on multi-element tensor");
+                }
+                catch (const std::exception&) {
+                    /* expected */
+                }
             }
 		}
 
@@ -114,8 +131,12 @@ int main() {
 			DC::Tensor t = DC::Tensor::Create<float>();
 			t.setDense(std::move(denseBytes), { 2, 3 });
             {
-                auto r = t[0].trySet<float>(9.0f);
-                if (!r) throw std::runtime_error("Sub-tensor scalar broadcast write failed");
+                try {
+                    t[0].set<float>(9.0f);
+                }
+                catch (const std::exception&) {
+                    throw std::runtime_error("Sub-tensor scalar broadcast write failed");
+                }
             }
             const auto afterSpan = t.data<float>();
             std::vector<float> after(afterSpan.begin(), afterSpan.end());
@@ -124,8 +145,14 @@ int main() {
                 throw std::runtime_error("Sub-tensor scalar broadcast mismatch");
             }
             {
-                auto res = t[0].tryItem<float>();
-                if (res) throw std::runtime_error("item() should not succeed on non-singleton sub-tensor view");
+                try {
+                    auto v = t[0].item<float>();
+                    (void)v;
+                    throw std::runtime_error("item() should not succeed on non-singleton sub-tensor view");
+                }
+                catch (const std::exception&) {
+                    /* expected */
+                }
             }
 		}
 
@@ -135,8 +162,12 @@ int main() {
 			t.setDense(std::vector<char>(sizeof(float) * 3, 0), { 3 });
 			// write a single element, then read whole tensor back
             {
-                auto r = t[1].trySet<float>(2.0f);
-                if (!r) throw std::runtime_error("1D write failed");
+                try {
+                    t[1].set<float>(2.0f);
+                }
+                catch (const std::exception&) {
+                    throw std::runtime_error("1D write failed");
+                }
             }
 			const auto span = t.data<float>();
 			std::vector<float> v(span.begin(), span.end());
@@ -151,8 +182,14 @@ int main() {
 			DC::Tensor t = DC::Tensor::Create<float>();
 			t.setDense(std::vector<char>(sizeof(float) * 6, 0), { 2, 3 });
             {
-                auto rr = t[0][0][0].tryRank();
-                if (rr) throw std::runtime_error("rank() should not succeed on path overflow");
+                try {
+                    auto r = t[0][0][0].rank();
+                    (void)r;
+                    throw std::runtime_error("rank() should not succeed on path overflow");
+                }
+                catch (const std::exception&) {
+                    /* expected */
+                }
             }
 		}
 

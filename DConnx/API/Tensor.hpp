@@ -66,12 +66,7 @@ namespace DC {
 		template<typename T>
 		T item() const;
 
-		// Non-throwing scalar access
-		template<typename T>
-		Expected<T, TensorError> tryItem() const;
-
-		template<typename T>
-		Expected<T, TensorError> tryItem();
+        // Non-throwing scalar access (internal only - moved to private)
 
 		// 重载赋值
 		Tensor& operator=(const Tensor& other);
@@ -125,6 +120,10 @@ namespace DC {
 		Expected<bool, TensorError> checkShapeValid(const std::vector<int64_t>& shape) const;
 
 		Expected<bool, TensorError> checkSingleElementView(const std::vector<int64_t>& path, const std::vector<int64_t>& shape) const;
+
+		// Non-throwing vector write variant for View::trySet to use
+		template<typename T>
+		Expected<bool, TensorError> tryWriteAt(const std::vector<int64_t>& path, const std::vector<T>& data);
 
 		template<typename T>
 		void writeAt(const std::vector<int64_t>& path, const std::vector<T>& data);
@@ -181,19 +180,13 @@ public:
     // 赋值（仅非 const 版本）
     // Non-throwing try-set APIs (replace operator= for explicit error handling)
     template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
-    Expected<bool, Tensor::TensorError> trySet(const std::vector<T>& data) {
-        try {
-            _tensor->writeAt(path(), data);
-            return Expected<bool, Tensor::TensorError>(true);
-        }
-        catch (const std::exception&) {
-            return Expected<bool, Tensor::TensorError>(Tensor::TensorError::Other);
-        }
+    void set(const std::vector<T>& data) {
+        _tensor->writeAt(path(), data);
     }
 
     template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
-    Expected<bool, Tensor::TensorError> trySet(const T& data) {
-        return _tensor->tryWriteScalarAt<T>(path(), data);
+    void set(const T& data) {
+        _tensor->writeScalarAt(path(), data);
     }
 
     // 读取数据
@@ -203,12 +196,7 @@ public:
         return std::vector<T>(span.begin(), span.end());
     }
 
-	// Non-throwing readSpan variant that returns Expected
-	template<typename T>
-	Expected<std::vector<T>, Tensor::TensorError> tryRead() const {
-		auto span = readSpan<T>();
-		return Expected<std::vector<T>, Tensor::TensorError>(std::vector<T>(span.begin(), span.end()));
-	}
+    // read() returns a vector by value (throws on error)
 
 	template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
 	std::vector<T> read() {
@@ -258,25 +246,7 @@ public:
 		return _tensor->template readScalarAt<T>(path());
 	}
 
-    // Non-throwing item
-    template<typename T>
-    Expected<T, Tensor::TensorError> tryItem() const {
-        return _tensor->template tryReadScalarAt<T>(path());
-    }
-
-    template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
-    Expected<T, Tensor::TensorError> tryItem() {
-        return _tensor->template tryReadScalarAt<T>(path());
-    }
-
-    // Non-throwing rank
-    Expected<size_t, Tensor::TensorError> tryRank() const {
-        auto full_shape = _tensor->shape();
-        if (_path.size() > full_shape.size()) {
-            return Expected<size_t, Tensor::TensorError>(Tensor::TensorError::InvalidPath);
-        }
-        return Expected<size_t, Tensor::TensorError>(full_shape.size() - _path.size());
-    }
+    // item() throws on error
 
     // 获取路径（返回 const 引用，避免拷贝）
     const std::vector<int64_t>& path() const { return _path; }
@@ -311,15 +281,7 @@ private:
     return readScalarAt<T>({});
 	}
 
-	template<typename T>
-inline Expected<T, Tensor::TensorError> Tensor::tryItem() const {
-    return tryReadScalarAt<T>({});
-}
-
-	template<typename T>
-inline Expected<T, Tensor::TensorError> Tensor::tryItem() {
-    return tryReadScalarAt<T>({});
-}
+// Note: non-throwing tryItem variants removed from public API; use item() which throws on error.
 
 	template<typename T>
 	inline Tensor& Tensor::operator=(const std::vector<T>& data) {
@@ -415,6 +377,32 @@ inline Expected<T, Tensor::TensorError> Tensor::tryItem() {
 	inline std::vector<T> Tensor::readAt(const std::vector<int64_t>& path) const {
 		auto span = readSpanAt<T>(path);
 		return std::vector<T>(span.begin(), span.end());
+	}
+
+	template<typename T>
+	inline Expected<bool, Tensor::TensorError> Tensor::tryWriteAt(const std::vector<int64_t>& path, const std::vector<T>& data) {
+		// Ensure editable buffer
+		try {
+			_data.ensureEditable();
+		}
+		catch (const std::exception&) {
+			return Expected<bool, Tensor::TensorError>(TensorError::Other);
+		}
+
+		// Delegate to writeBitcast which may throw on path/type mismatches; catch and map errors
+		try {
+			_data.writeBitcast(path, _meta.typeSize, data);
+			return Expected<bool, Tensor::TensorError>(true);
+		}
+		catch (const std::out_of_range&) {
+			return Expected<bool, Tensor::TensorError>(TensorError::InvalidPath);
+		}
+		catch (const std::bad_cast&) {
+			return Expected<bool, Tensor::TensorError>(TensorError::TypeMismatch);
+		}
+		catch (const std::exception&) {
+			return Expected<bool, Tensor::TensorError>(TensorError::Other);
+		}
 	}
 
 	template<typename T>
