@@ -1,15 +1,19 @@
 #pragma once
 #include <algorithm>
+#include <cstring>
 #include <memory>
+#include <span>
 #include <stdexcept>
+#include <vector>
 
+#include "Expected.h"
 #include "TensorMods.h"
 
 namespace DC {
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 // DC::Tensor
 // 张量对象
-// 栈占用：264 字节
+// 栈占用：248 字节
 // 
 // 用于创建输入或输出张量的数据载体。
 //
@@ -24,324 +28,520 @@ namespace DC {
 		using TensorType = TensorMeta::TensorType;
 
 	public:
-		class View {
-		public:
-			View(Tensor& tensor)
-				: _tensor(&tensor) {
-			}
-
-			View(Tensor& tensor, std::vector<int64_t> path)
-				: _tensor(&tensor) {
-				for (auto idx : path) {
-					appendNode(idx);
-				}
-			}
-
-			View operator[](uint64_t index) const {
-				View next(*_tensor);
-				next._chain = cloneChain();
-				next._tail = next._chain.get() ? next.findTail(next._chain.get()) : nullptr;
-				next.appendNode(static_cast<int64_t>(index));
-				return next;
-			}
-
-			template<typename T>
-			View& operator=(const std::vector<T>& data) {
-				_tensor->writeAt(materializePath(), data);
-				return *this;
-			}
-
-			// Add scalar assignment support
-			template<typename T>
-			View& operator=(const T& data) {
-				_tensor->writeScalarAt(materializePath(), data);
-				return *this;
-			}
-
-			template<typename T>
-			std::vector<T> read() const {
-				return _tensor->readAt<T>(materializePath());
-			}
-
-			// Add scalar read support (implicit conversion)
-			template<typename T>
-			T item() const {
-				return _tensor->readScalarAt<T>(materializePath());
-			}
-
-			// Implicit conversion operators for common types
-			operator float() const { return item<float>(); }
-			operator double() const { return item<double>(); }
-			operator int() const { return item<int>(); }
-			operator int64_t() const { return item<int64_t>(); }
-			operator bool() const { return item<bool>(); }
-			operator char() const { return item<char>(); }
-			operator unsigned char() const { return item<unsigned char>(); }
-
-			const std::vector<int64_t>& path() const {
-				_cachedPath = materializePath();
-				return _cachedPath;
-			}
-
-		private:
-			struct Node {
-				const Node* parent = nullptr;
-				int64_t index = 0;
-				std::unique_ptr<Node> child;
-			};
-
-			Tensor* _tensor = nullptr;
-			std::unique_ptr<Node> _chain;
-			Node* _tail = nullptr;
-			mutable std::vector<int64_t> _cachedPath;
-
-			void appendNode(int64_t index) {
-				auto n = std::make_unique<Node>();
-				n->parent = _tail;
-				n->index = index;
-				Node* raw = n.get();
-				if (!_chain) {
-					_chain = std::move(n);
-				}
-				else {
-					_tail->child = std::move(n);
-				}
-				_tail = raw;
-			}
-
-			Node* findTail(Node* root) const {
-				Node* cur = root;
-				while (cur && cur->child) {
-					cur = cur->child.get();
-				}
-				return cur;
-			}
-
-			std::unique_ptr<Node> cloneChain() const {
-				if (!_chain) {
-					return nullptr;
-				}
-				auto newRoot = std::make_unique<Node>();
-				newRoot->parent = nullptr;
-				newRoot->index = _chain->index;
-				Node* prev = newRoot.get();
-				for (const Node* src = _chain->child.get(); src; src = src->child.get()) {
-					auto next = std::make_unique<Node>();
-					next->parent = prev;
-					next->index = src->index;
-					prev->child = std::move(next);
-					prev = prev->child.get();
-				}
-				return newRoot;
-			}
-
-			std::vector<int64_t> materializePath() const {
-				std::vector<int64_t> path;
-				const Node* cur = _tail;
-				while (cur) {
-					path.push_back(cur->index);
-					cur = cur->parent;
-				}
-				std::reverse(path.begin(), path.end());
-				return path;
-			}
-		};
-
 		virtual ~Tensor() = default;
-		Tensor() = default;
+		template<bool IsConst> class ViewImpl;
+		enum class TensorError {
+			TypeMismatch,
+			ShapeMismatch,
+			InvalidPath,
+			InvalidShape,
+			NotAScalar,
+			Other
+		};
+		using View = ViewImpl<false>;
+		using ConstView = ViewImpl<true>;
+
+		Tensor();
 
 		Tensor(
 			const TensorType& type,					// - 张量类型
 			size_t typeSize = 0,					// - 类型字节数（TypeSize）
 			const std::vector<int64_t>& shape = {},	// - 数据形状（CurrentShape）
 			std::vector<char>&& data = {}			// - 张量数据
-		) {
-			TensorMeta::ensureTypeMap();
-			_meta.type = type;
-			_meta.typeSize = (typeSize > 0) ? typeSize : DC::Type::getSize(type);
-			_data = TensorData(shape, _meta.typeSize, std::move(data));
-		}
+		);
 
 		template<typename T>
 		static Tensor Create(
 			const std::vector<int64_t>& shape = {},
 			std::vector<char>&& data = {}
-		) {
-			TensorMeta::ensureTypeMap();
-			Tensor tensor(
-				DC::Type::getType<TensorType, T>(),
-				sizeof(T),
-				shape,
-				std::move(data)
-			);
+		);
 
-			return tensor;
-		}
+		View operator[](int64_t index);
+		ConstView operator[](int64_t index) const;
 
-		View operator[](uint64_t index) {
-			return View(*this, { static_cast<int64_t>(index) });
-		}
-
-		View operator[](int index) {
-			return View(*this, { static_cast<int64_t>(index) });
-		}
-
-		View at() {
-			return View(*this);
-		}
+		View view();
+		ConstView view() const;
 
 		// Scalar item access for whole tensor (0-dim or 1-dim size 1)
 		template<typename T>
-		T item() const {
-			auto v = _data.read<T>({});
-			if (v.empty()) {
-				throw std::runtime_error("Tensor: empty read result for scalar conversion.");
-			}
-			return v[0];
-		}
+		T item() const;
+
+		// Non-throwing scalar access
+		template<typename T>
+		Expected<T, TensorError> tryItem() const;
+
+		template<typename T>
+		Expected<T, TensorError> tryItem();
 
 		// 重载赋值
-		Tensor& operator=(const Tensor& other) {
-			_meta = other._meta;
-			_data = other._data;
-			return *this;
-		}
+		Tensor& operator=(const Tensor& other);
 		// 移动构造
-		Tensor(Tensor&& other) noexcept {
-			move_from(std::move(other));
-		}
+		Tensor(Tensor&& other) noexcept;
 
 		// 移动赋值运算符
-		Tensor& operator=(Tensor&& other) noexcept {
-			if (this != &other) {
-				move_from(std::move(other));
-			}
-			return *this;
-		}
+		Tensor& operator=(Tensor&& other) noexcept;
 
 		// 在 Tensor 类的 public 部分添加拷贝构造函数
-		Tensor(const Tensor& other) {
-			_meta = other._meta;
-			_data = other._data;
-		}
+		Tensor(const Tensor& other);
 
 		// 重载赋值
 		// 给当前设定的维度写入数据
 		template<typename T>
-		Tensor& operator=(const std::vector<T>& data) {
-			writeAt({}, data);
-			return *this;
-		}
+		Tensor& operator=(const std::vector<T>& data);
+
+		// 标量赋值：无索引直接赋值时，视为设置 0D 标量张量
+		template<typename T>
+		Tensor& operator=(const T& value);
 
 		template<typename T>
-		Tensor& operator=(const T& data) {
-			writeAt({}, std::vector<T>{data});
-			return *this;
-		}
+		Tensor& fill(const T& value);
 
-		const TensorType type() const { return _meta.type; }
-		size_t typeSize() const { return _meta.typeSize; }
+		TensorType type() const;
+		size_t typeSize() const;
 
-		// 获取一维化后的数据
-		const std::vector<char> getData() const {
-			return _data.getData<char>();
-		}
+		std::span<const char> bytes() const;
 
 		template<typename T>
-		const std::vector<T> getData() const {
-			return _data.getData<T>();
-		}
+		std::span<const T> data() const;
+
+		template<typename T>
+		std::span<T> data();
 
 		// 获取当前的动态形状（CurrentShape）
-		std::vector<int64_t> getShape() const {
-			return _data.getCurrentShape();
-		}
-		const std::vector<int64_t> shape() const { return _data.getCurrentShape(); }
-
-		// 获取一维化后的原始字节数据（连续内存）。
-		// 适合推理后端直接引用，避免每帧构造临时 vector<T>。
-		const std::vector<char>& getBytes() const {
-			return _data.getBytes();
-		}
+		std::vector<int64_t> shape() const;
 
 		// 直接设置为稠密（连续）数据。
 		// bytes 为按 type 的字节序列（与 shape 对应）。
-		Tensor& setDense(std::vector<char>&& bytes, const std::vector<int64_t>& shape) {
-			_data.setDenseBytes(shape, _meta.typeSize, std::move(bytes));
-			return *this;
-		}
+		Tensor& setDense(std::vector<char>&& bytes, const std::vector<int64_t>& shape);
 
 	private:
-		friend class View;
-
 		TensorMeta _meta;
 		TensorData _data;
 
-		template<typename T>
-		void writeAt(const std::vector<int64_t>& path, const std::vector<T>& data) {
-			_data.ensureEditable();
-			_data.writeBitcast(path, _meta.typeSize, data);
-		}
+		Expected<bool, TensorError> checkTypeMatch(size_t size) const;
+
+		Expected<bool, TensorError> checkPathValid(const std::vector<int64_t>& path, const std::vector<int64_t>& shape) const;
+
+		Expected<bool, TensorError> checkShapeValid(const std::vector<int64_t>& shape) const;
+
+		Expected<bool, TensorError> checkSingleElementView(const std::vector<int64_t>& path, const std::vector<int64_t>& shape) const;
 
 		template<typename T>
-		void writeScalarAt(const std::vector<int64_t>& path, const T& data) {
-			_data.ensureEditable();
-			const auto shape = _data.getCurrentShape();
-			if (!shape.empty() && path.size() == shape.size()) {
-				const int64_t elementIndex = path.back();
-				const int64_t blockSize = shape.back();
-				if (elementIndex < 0 || elementIndex >= blockSize) {
-					throw std::runtime_error("Tensor: scalar index out of range.");
-				}
-				std::vector<int64_t> blockPath(path.begin(), path.end() - 1);
-				auto block = _data.read<T>(blockPath);
-				if (block.empty()) {
-					block.assign(static_cast<size_t>(blockSize), T{});
-				}
-				else if (static_cast<int64_t>(block.size()) < blockSize) {
-					block.resize(static_cast<size_t>(blockSize), T{});
-				}
-				block[static_cast<size_t>(elementIndex)] = data;
-				_data.writeBitcast(std::move(blockPath), _meta.typeSize, block);
-				return;
-			}
-			_data.writeBitcast(path, _meta.typeSize, std::vector<T>{data});
-		}
+		void writeAt(const std::vector<int64_t>& path, const std::vector<T>& data);
 
 		template<typename T>
-		std::vector<T> readAt(const std::vector<int64_t>& path) const {
-			return _data.read<T>(path);
-		}
+		void writeScalarAt(const std::vector<int64_t>& path, const T& data);
+
+		// Expected-based variants (non-void success uses bool as success indicator)
+		template<typename T>
+		Expected<T, TensorError> tryReadScalarAt(const std::vector<int64_t>& path) const;
 
 		template<typename T>
-		T readScalarAt(const std::vector<int64_t>& path) const {
-			const auto shape = _data.getCurrentShape();
-			if (!shape.empty() && path.size() == shape.size()) {
-				const int64_t elementIndex = path.back();
-				const int64_t blockSize = shape.back();
-				if (elementIndex < 0 || elementIndex >= blockSize) {
-					throw std::runtime_error("Tensor: scalar index out of range.");
-				}
-				std::vector<int64_t> blockPath(path.begin(), path.end() - 1);
-				auto block = _data.read<T>(blockPath);
-				if (block.empty()) {
-					throw std::runtime_error("Tensor: empty read result for scalar conversion.");
-				}
-				if (static_cast<int64_t>(block.size()) <= elementIndex) {
-					throw std::runtime_error("Tensor: scalar index out of range.");
-				}
-				return block[static_cast<size_t>(elementIndex)];
-			}
-			auto v = _data.read<T>(path);
-			if (v.empty()) {
-				throw std::runtime_error("Tensor: empty read result for scalar conversion.");
-			}
-			return v[0];
-		}
+		Expected<T, TensorError> tryReadScalarAt(const std::vector<int64_t>& path);
 
-		void move_from(Tensor&& other) noexcept {
-			_meta = std::move(other._meta);
-			_data = std::move(other._data);
-		}
+		template<typename T>
+		Expected<bool, TensorError> tryWriteScalarAt(const std::vector<int64_t>& path, const T& data);
+
+		template<typename T>
+		std::vector<T> readAt(const std::vector<int64_t>& path) const;
+
+		template<typename T>
+		std::span<const T> readSpanAt(const std::vector<int64_t>& path) const;
+
+		template<typename T>
+		std::span<const T> readSpanAt(const std::vector<int64_t>& path);
+
+		template<typename T>
+		T readScalarAt(const std::vector<int64_t>& path) const;
+
+		template<typename T>
+		T readScalarAt(const std::vector<int64_t>& path);
+
+		void move_from(Tensor&& other) noexcept;
 	};
+
+	template<bool IsConst>
+class Tensor::ViewImpl {
+public:
+    using TensorType = std::conditional_t<IsConst, const Tensor, Tensor>;
+
+    // 构造函数：直接存储路径向量（移动或拷贝）
+    ViewImpl(TensorType& tensor) : _tensor(&tensor) {}  // 空路径
+    ViewImpl(TensorType& tensor, std::vector<int64_t> path) 
+        : _tensor(&tensor), _path(std::move(path)) {}
+
+    // 索引操作：复制当前路径并追加索引，返回新视图
+    ViewImpl operator[](int64_t index) const {
+        ViewImpl next(*_tensor);
+        next._path = _path;          // 拷贝当前路径（小向量，成本可控）
+        next._path.push_back(index);  // 追加新索引
+        return next;
+    }
+
+    // 赋值（仅非 const 版本）
+    // Non-throwing try-set APIs (replace operator= for explicit error handling)
+    template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
+    Expected<bool, Tensor::TensorError> trySet(const std::vector<T>& data) {
+        try {
+            _tensor->writeAt(path(), data);
+            return Expected<bool, Tensor::TensorError>(true);
+        }
+        catch (const std::exception&) {
+            return Expected<bool, Tensor::TensorError>(Tensor::TensorError::Other);
+        }
+    }
+
+    template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
+    Expected<bool, Tensor::TensorError> trySet(const T& data) {
+        return _tensor->tryWriteScalarAt<T>(path(), data);
+    }
+
+    // 读取数据
+    template<typename T>
+    std::vector<T> read() const {
+        auto span = readSpan<T>();
+        return std::vector<T>(span.begin(), span.end());
+    }
+
+	// Non-throwing readSpan variant that returns Expected
+	template<typename T>
+	Expected<std::vector<T>, Tensor::TensorError> tryRead() const {
+		auto span = readSpan<T>();
+		return Expected<std::vector<T>, Tensor::TensorError>(std::vector<T>(span.begin(), span.end()));
+	}
+
+	template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
+	std::vector<T> read() {
+		auto span = readSpan<T>();
+		return std::vector<T>(span.begin(), span.end());
+	}
+
+	template<typename T>
+	std::span<const T> readSpan() const {
+		return _tensor->template readSpanAt<T>(path());
+	}
+
+	template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
+	std::span<const T> readSpan() {
+		return _tensor->template readSpanAt<T>(path());
+	}
+
+	// 获取视图对应的形状（从路径长度开始的剩余维度）
+	std::vector<int64_t> shape() const {
+		auto full_shape = _tensor->shape();          // 获取原始形状
+		if (_path.size() > full_shape.size()) {
+			throw std::runtime_error("View path exceeds tensor rank.");
+		}
+		// 返回从路径长度开始的剩余维度
+		return std::vector<int64_t>(
+			full_shape.begin() + _path.size(),
+			full_shape.end()
+		);
+	}
+
+	// 获取视图对应的秩（从路径长度开始的剩余维度数量）
+	size_t rank() const {
+		auto full_shape = _tensor->shape();
+		if (_path.size() > full_shape.size()) {
+			throw std::runtime_error("View path exceeds tensor rank.");
+		}
+		return full_shape.size() - _path.size();
+	}
+
+    template<typename T>
+	T item() const {
+		return _tensor->template readScalarAt<T>(path());
+	}
+
+	template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
+	T item() {
+		return _tensor->template readScalarAt<T>(path());
+	}
+
+    // Non-throwing item
+    template<typename T>
+    Expected<T, Tensor::TensorError> tryItem() const {
+        return _tensor->template tryReadScalarAt<T>(path());
+    }
+
+    template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
+    Expected<T, Tensor::TensorError> tryItem() {
+        return _tensor->template tryReadScalarAt<T>(path());
+    }
+
+    // Non-throwing rank
+    Expected<size_t, Tensor::TensorError> tryRank() const {
+        auto full_shape = _tensor->shape();
+        if (_path.size() > full_shape.size()) {
+            return Expected<size_t, Tensor::TensorError>(Tensor::TensorError::InvalidPath);
+        }
+        return Expected<size_t, Tensor::TensorError>(full_shape.size() - _path.size());
+    }
+
+    // 获取路径（返回 const 引用，避免拷贝）
+    const std::vector<int64_t>& path() const { return _path; }
+
+private:
+    TensorType* _tensor = nullptr;
+    std::vector<int64_t> _path;   // 连续存储路径
+};
+
+	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+	// Template Implementations: Tensor
+	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+	template<typename T>
+	inline Tensor Tensor::Create(
+		const std::vector<int64_t>& shape,
+		std::vector<char>&& data
+	) {
+		TensorMeta::ensureTypeMap();
+		Tensor tensor(
+			DC::Type::getType<TensorType, T>(),
+			sizeof(T),
+			shape,
+			std::move(data)
+		);
+
+		return tensor;
+	}
+
+	template<typename T>
+	inline T Tensor::item() const {
+    return readScalarAt<T>({});
+	}
+
+	template<typename T>
+inline Expected<T, Tensor::TensorError> Tensor::tryItem() const {
+    return tryReadScalarAt<T>({});
+}
+
+	template<typename T>
+inline Expected<T, Tensor::TensorError> Tensor::tryItem() {
+    return tryReadScalarAt<T>({});
+}
+
+	template<typename T>
+	inline Tensor& Tensor::operator=(const std::vector<T>& data) {
+		writeAt({}, data);
+		return *this;
+	}
+
+	template<typename T>
+	inline Tensor& Tensor::operator=(const T& value) {
+		auto res = checkTypeMatch(sizeof(T));
+		if (!res) {
+			switch (res.getError()) {
+			case TensorError::TypeMismatch: throw std::runtime_error("type mismatch");
+			default: throw std::runtime_error("unknown tensor write error");
+			}
+		}
+
+		std::vector<char> bytes(_meta.typeSize, 0);
+		std::memcpy(bytes.data(), &value, _meta.typeSize);
+		_data.setDenseBytes({}, _meta.typeSize, std::move(bytes));
+		_data.setScalar(true);
+		return *this;
+	}
+
+	template<typename T>
+	Tensor& Tensor::fill(const T& data) {
+		auto resType = checkTypeMatch(sizeof(T));
+		if (!resType) {
+			switch (resType.getError()) {
+			case TensorError::TypeMismatch: throw std::runtime_error("type mismatch");
+			default: throw std::runtime_error("unknown tensor write error");
+			}
+		}
+
+		auto shape = _data.getCurrentShape();
+		const bool isScalar0d = shape.empty();
+		if (isScalar0d) {
+			std::vector<char> bytes(_meta.typeSize, 0);
+			std::memcpy(bytes.data(), &data, _meta.typeSize);
+			_data.setDenseBytes({}, _meta.typeSize, std::move(bytes));
+			return *this;
+		}
+
+		auto resShape = checkShapeValid(shape);
+		if (!resShape) throw std::runtime_error("Tensor::fill: current shape does not match meta shape rules");
+		size_t elementCount = 1;
+		for (const auto d : shape) {
+			elementCount *= static_cast<size_t>(d);
+		}
+
+		std::vector<char> bytes(elementCount * _meta.typeSize);
+		std::vector<char> scalarBytes(_meta.typeSize, 0);
+		std::memcpy(scalarBytes.data(), &data, std::min(sizeof(T), _meta.typeSize));
+		for (size_t off = 0; off < bytes.size(); off += _meta.typeSize) {
+			std::memcpy(bytes.data() + off, scalarBytes.data(), _meta.typeSize);
+		}
+
+		_data.setDenseBytes(shape, _meta.typeSize, std::move(bytes));
+		return *this;
+	}
+
+	template<typename T>
+	inline std::span<const T> Tensor::data() const {
+		return _data.dataSpanAs<T>();
+	}
+
+	template<typename T>
+	inline std::span<T> Tensor::data() {
+		_data.ensureEditable();
+		return _data.dataSpanAsMut<T>();
+	}
+
+	template<typename T>
+	inline void Tensor::writeAt(const std::vector<int64_t>& path, const std::vector<T>& data) {
+		_data.ensureEditable();
+		_data.writeBitcast(path, _meta.typeSize, data);
+	}
+
+	template<typename T>
+	void Tensor::writeScalarAt(const std::vector<int64_t>& path, const T& data) {
+		auto res = tryWriteScalarAt<T>(path, data);
+		if (!res) {
+			switch (res.getError()) {
+			case TensorError::TypeMismatch: throw std::runtime_error("type mismatch");
+			case TensorError::InvalidPath: throw std::out_of_range("path out of range");
+			default: throw std::runtime_error("unknown tensor write error");
+			}
+		}
+		// success -> nothing to do
+	}
+
+	template<typename T>
+	inline std::vector<T> Tensor::readAt(const std::vector<int64_t>& path) const {
+		auto span = readSpanAt<T>(path);
+		return std::vector<T>(span.begin(), span.end());
+	}
+
+	template<typename T>
+	inline std::span<const T> Tensor::readSpanAt(const std::vector<int64_t>& path) const {
+		return _data.readSpan<T>(path);
+	}
+
+	template<typename T>
+	inline std::span<const T> Tensor::readSpanAt(const std::vector<int64_t>& path) {
+		return _data.readSpan<T>(path);
+	}
+
+	// Expected-based implementations
+
+	template<typename T>
+	inline Expected<T, Tensor::TensorError> Tensor::tryReadScalarAt(const std::vector<int64_t>& path) const {
+		auto shape = _data.getCurrentShape();
+		auto resType = checkTypeMatch(sizeof(T));
+		if (!resType) return Expected<T, Tensor::TensorError>(TensorError::TypeMismatch);
+		auto resPath = checkPathValid(path, shape);
+		if (!resPath) return Expected<T, Tensor::TensorError>(TensorError::InvalidPath);
+
+		// 路径长度等于形状：直接读取单个元素
+		if (path.size() == shape.size())
+			return Expected<T, Tensor::TensorError>(_data.readElement<T>(path));
+
+		// 路径长度小于形状：要求子视图恰好包含一个元素
+		auto resSingle = checkSingleElementView(path, shape);
+		if (!resSingle) return Expected<T, Tensor::TensorError>(TensorError::NotAScalar);
+
+		// 构造完整路径（剩余维度索引全为 0）
+		std::vector<int64_t> fullPath = path;
+		fullPath.insert(fullPath.end(), shape.size() - path.size(), 0);
+		return Expected<T, Tensor::TensorError>(_data.readElement<T>(fullPath));
+	}
+
+	template<typename T>
+	inline Expected<T, Tensor::TensorError> Tensor::tryReadScalarAt(const std::vector<int64_t>& path) {
+		auto shape = _data.getCurrentShape();
+		auto resType = checkTypeMatch(sizeof(T));
+		if (!resType) return Expected<T, Tensor::TensorError>(TensorError::TypeMismatch);
+		auto resPath = checkPathValid(path, shape);
+		if (!resPath) return Expected<T, Tensor::TensorError>(TensorError::InvalidPath);
+
+		if (path.size() == shape.size()) {
+			return Expected<T, Tensor::TensorError>(_data.readElement<T>(path));
+		}
+
+		auto resSingle = checkSingleElementView(path, shape);
+		if (!resSingle) return Expected<T, Tensor::TensorError>(TensorError::NotAScalar);
+
+		std::vector<int64_t> fullPath = path;
+		fullPath.insert(fullPath.end(), shape.size() - path.size(), 0);
+		return Expected<T, Tensor::TensorError>(_data.readElement<T>(fullPath));
+	}
+
+	template<typename T>
+	inline Expected<bool, Tensor::TensorError> Tensor::tryWriteScalarAt(const std::vector<int64_t>& path, const T& data) {
+		auto shape = _data.getCurrentShape();
+		auto resType = checkTypeMatch(sizeof(T));
+		if (!resType) return Expected<bool, Tensor::TensorError>(TensorError::TypeMismatch);
+		auto resPath = checkPathValid(path, shape);
+		if (!resPath) return Expected<bool, Tensor::TensorError>(TensorError::InvalidPath);
+
+		// 标量张量特例
+		if (shape.empty()) {
+			_data.writeElement({}, data);
+			return Expected<bool, Tensor::TensorError>(true);
+		}
+
+		// 路径长度等于形状：单元素写入
+		if (path.size() == shape.size()) {
+			_data.writeElement(path, data);
+			return Expected<bool, Tensor::TensorError>(true);
+		}
+
+		// 路径长度小于形状：计算剩余元素个数
+		size_t remaining = 1;
+		for (size_t i = path.size(); i < shape.size(); ++i)
+			remaining *= static_cast<size_t>(shape[i]);
+
+		if (remaining == 1) {
+			// 子视图只有一个元素：构造完整路径后写入
+			std::vector<int64_t> fullPath = path;
+			fullPath.insert(fullPath.end(), shape.size() - path.size(), 0);
+			_data.writeElement(fullPath, data);
+			return Expected<bool, Tensor::TensorError>(true);
+		}
+		else {
+			// 广播：构造包含 remaining 个 data 的向量
+			std::vector<T> block(remaining, data);
+			_data.writeBitcast(path, _meta.typeSize, block);
+			return Expected<bool, Tensor::TensorError>(true);
+		}
+	}
+
+	template<typename T>
+	T Tensor::readScalarAt(const std::vector<int64_t>& path) const {
+		auto shape = _data.getCurrentShape();
+		if (!checkTypeMatch(sizeof(T))) throw std::runtime_error("type mismatch");
+		if (!checkPathValid(path, shape)) throw std::out_of_range("path out of range");
+
+		// 路径长度等于形状：直接读取单个元素
+		if (path.size() == shape.size())
+			return _data.readElement<T>(path);
+
+		// 路径长度小于形状：要求子视图恰好包含一个元素
+		if (!checkSingleElementView(path, shape)) throw std::runtime_error("scalar read requires a single-element view");
+
+		// 构造完整路径（剩余维度索引全为 0）
+		std::vector<int64_t> fullPath = path;
+		fullPath.insert(fullPath.end(), shape.size() - path.size(), 0);
+		return _data.readElement<T>(fullPath);
+	}
+
+	template<typename T>
+	T Tensor::readScalarAt(const std::vector<int64_t>& path) {
+		auto res = tryReadScalarAt<T>(path);
+		if (!res) {
+			switch (res.getError()) {
+			case TensorError::TypeMismatch: throw std::runtime_error("type mismatch");
+			case TensorError::InvalidPath: throw std::out_of_range("path out of range");
+			case TensorError::NotAScalar: throw std::runtime_error("scalar read requires a single-element view");
+			default: throw std::runtime_error("unknown tensor read error");
+			}
+		}
+		return res.get();
+	}
+
 }

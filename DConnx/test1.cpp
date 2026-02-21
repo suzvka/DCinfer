@@ -1,11 +1,9 @@
-#include <vector.h>
+
 #include <windows.h>
 #include <tensor.h>
-#include <onnxruntime_cxx_api.h>
 #include <fstream>
 #include <iostream>
 #include <Infer.h>
-#include <Type.h>
 
 // 读取 ONNX 文件到 std::vector<char>
 std::vector<char> LoadONNXModel1(const std::string& model_path) {

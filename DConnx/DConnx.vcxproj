@@ -27,10 +27,8 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="InfoReadTest.cpp" />
     <ClCompile Include="src\Infer.cpp" />
-    <ClCompile Include="src\InferOrt.cpp" />
-    <ClCompile Include="src\Info.cpp" />
+    <ClCompile Include="src\Tensor.cpp" />
     <ClCompile Include="src\TensorSlot.cpp" />
     <ClCompile Include="src\InferBase.cpp" />
     <ClCompile Include="src\TensorMods.cpp" />
@@ -48,10 +46,7 @@
   <ItemGroup>
     <ClInclude Include="API\Infer.h" />
     <ClInclude Include="API\InferBase.h" />
-    <ClInclude Include="API\InferOrt.h" />
-    <ClInclude Include="API\info.h" />
     <ClInclude Include="API\Tensor.h" />
-    <ClInclude Include="API\TensorOrt.h" />
     <ClInclude Include="API\tool.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
     </ClInclude>

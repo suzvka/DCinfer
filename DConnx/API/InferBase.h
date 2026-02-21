@@ -7,7 +7,6 @@
 #include <mutex>
 
 #include "TensorSlot.h"
-#include "info.h"
 #include "expected.h"
 
 namespace DC {
@@ -77,7 +76,7 @@ namespace DC {
 		std::string errorMessage;							// 错误信息
 		InferConfig* configInfo;							// 配置对象
 
-		std::map<std::string, tensorInfo> inputTensorInfo;	// 快捷浏览张量列表
+		//std::map<std::string, tensorInfo> inputTensorInfo;	// 快捷浏览张量列表
 		TensorList inputList;								// 输入张量列表
 		TensorList outputList;								// 输出张量列表
 

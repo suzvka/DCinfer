@@ -41,7 +41,7 @@ namespace DC {
 
 
 		bool operator==(const Tensor& data) const {
-			if (!_rule.check(data.getShape())) {
+			if (!_rule.check(data.shape())) {
 				return false;
 			}
 			if (_rule.type != TensorType::Void && _rule.type != data.type()) {

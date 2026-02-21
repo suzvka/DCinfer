@@ -22,9 +22,6 @@
     <Filter Include="推理器\实现">
       <UniqueIdentifier>{b065535b-0c4f-468e-96b5-65ca4524e15a}</UniqueIdentifier>
     </Filter>
-    <Filter Include="API\ORT">
-      <UniqueIdentifier>{5d6455f1-d2c0-4f3f-9cd9-fd63ca1480cb}</UniqueIdentifier>
-    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="test1.cpp">
@@ -39,26 +36,17 @@
     <ClCompile Include="src\TensorSlot.cpp">
       <Filter>API\实现</Filter>
     </ClCompile>
-    <ClCompile Include="InfoReadTest.cpp">
-      <Filter>测试用</Filter>
-    </ClCompile>
-    <ClCompile Include="src\InferOrt.cpp">
-      <Filter>API\ORT</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Info.cpp">
-      <Filter>工具\实现</Filter>
-    </ClCompile>
     <ClCompile Include="src\Infer.cpp">
       <Filter>推理器</Filter>
     </ClCompile>
     <ClCompile Include="src\TensorMods.cpp">
       <Filter>工具\实现</Filter>
     </ClCompile>
+    <ClCompile Include="src\Tensor.cpp">
+      <Filter>API\实现</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="API\info.h">
-      <Filter>API</Filter>
-    </ClInclude>
     <ClInclude Include="API\tool.h">
       <Filter>API</Filter>
     </ClInclude>
@@ -76,12 +64,6 @@
     </ClInclude>
     <ClInclude Include="include\Expected.h">
       <Filter>工具</Filter>
-    </ClInclude>
-    <ClInclude Include="API\InferOrt.h">
-      <Filter>API\ORT</Filter>
-    </ClInclude>
-    <ClInclude Include="API\TensorOrt.h">
-      <Filter>API\ORT</Filter>
     </ClInclude>
     <ClInclude Include="API\Infer.h">
       <Filter>API</Filter>
