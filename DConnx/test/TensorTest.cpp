@@ -4,10 +4,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
-#include "API/Tensor.hpp"
-
-// Focus: exercise Tensor API (Create, data<T>, view reads/writes, scalar assign/item,
-// fill, copy/move, negative indexing, const reads, and error cases).
+#include "Tensor.hpp"
 
 static void runTensorTests() {
     using namespace DC;

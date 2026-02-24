@@ -2,6 +2,7 @@
 
 ## General Guidelines
 - In VS environment, when using Python in terminal, provide complete scripts in a single command; line-by-line input may hang with no output and time out.
+ - By default the user authorizes Copilot to search and read any files within the repository workspace when investigating or modifying code.
 
 ## C++ Engineering Guidelines
 - Target users are traditional C++ engineers, but consider incorporating NumPy-style chained View-based tensor editing for enhanced usability.
