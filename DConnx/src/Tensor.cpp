@@ -120,13 +120,6 @@ namespace DC {
         return Expected<bool, Tensor::ErrorType>(true);
     }
 
-    Expected<bool, Tensor::ErrorType> Tensor::checkShapeValid(const Shape& shape) const {
-        for (const auto d : shape) {
-            if (d <= 0) return Expected<bool, Tensor::ErrorType>(Tensor::ErrorType::InvalidShape);
-        }
-        return Expected<bool, Tensor::ErrorType>(true);
-    }
-
     Expected<bool, Tensor::ErrorType> Tensor::checkSingleElementView(const Shape& path, const Shape& shape) const {
         size_t remaining = 1;
         for (size_t i = path.size(); i < shape.size(); ++i)

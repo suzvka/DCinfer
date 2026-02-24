@@ -105,8 +105,6 @@ namespace DC {
 
 		Expected<bool, ErrorType> checkPathValid(const Shape& path, const TensorData::Shape& shape) const;
 
-		Expected<bool, ErrorType> checkShapeValid(const Shape& shape) const;
-
 		Expected<bool, ErrorType> checkSingleElementView(const Shape& path, const Shape& shape) const;
 
         // 向指定路径写数据块 (会在错误时抛出 via abort)
@@ -164,13 +162,8 @@ public:
     // 读取数据 (single implementation usable on const and non-const views)
     template<typename T>
     std::vector<T> read() const {
-        auto span = readSpan<T>();
+        auto span = _tensor->template read<T>(path());
         return std::vector<T>(span.begin(), span.end());
-    }
-
-    template<typename T>
-    std::span<const T> readSpan() const {
-        return _tensor->template readSpanAt<T>(path());
     }
 
 	// 获取视图对应的形状（从路径长度开始的剩余维度）
@@ -195,10 +188,8 @@ public:
 
     template<typename T>
     T item() const {
-        return _tensor->template readScalarAt<T>(path());
+        return _tensor->template readScalar<T>(path());
     }
-
-    // item() throws on error
 
     // 获取路径（返回 const 引用，避免拷贝）
     const Shape& path() const { return _path; }
@@ -240,8 +231,9 @@ private:
 			abort(ErrorType::TypeMismatch, "type mismatch in scalar assignment");
 		}
 
-		// Prefer dense-write fast-path to safely create 0-D scalar if no cache exists.
-		DataBlock bytes(_meta.typeSize, std::byte());
+        // Prefer dense-write fast-path to safely create 0-D scalar if no cache exists.
+        DataBlock bytes(_meta.typeSize);
+        std::fill(bytes.begin(), bytes.end(), std::byte(0));
 		std::memcpy(bytes.data(), &value, std::min(sizeof(T), _meta.typeSize));
 		if (_data.hasCache()) {
 			// write into existing dense cache
@@ -267,25 +259,26 @@ private:
 		auto shape = _data.getCurrentShape();
 		const bool isScalar0d = shape.empty();
 		if (isScalar0d) {
-			DataBlock bytes(_meta.typeSize, 0);
-			std::memcpy(bytes.data(), &data, _meta.typeSize);
+            DataBlock bytes(_meta.typeSize);
+            std::fill(bytes.begin(), bytes.end(), std::byte(0));
+            std::memcpy(bytes.data(), &data, _meta.typeSize);
 			_data.loadData({}, _meta.typeSize, std::move(bytes));
 			return *this;
 		}
 
-		auto resShape = checkShapeValid(shape);
-		if (!resShape) abort(ErrorType::ShapeMismatch, "invalid shape in fill assignment");
 		size_t elementCount = 1;
 		for (const auto d : shape) {
 			elementCount *= static_cast<size_t>(d);
 		}
 
-		DataBlock bytes(elementCount * _meta.typeSize);
-		DataBlock scalarBytes(_meta.typeSize, 0);
-		std::memcpy(scalarBytes.data(), &data, std::min(sizeof(T), _meta.typeSize));
-		for (size_t off = 0; off < bytes.size(); off += _meta.typeSize) {
-			std::memcpy(bytes.data() + off, scalarBytes.data(), _meta.typeSize);
-		}
+        DataBlock bytes(elementCount * _meta.typeSize);
+        std::fill(bytes.begin(), bytes.end(), std::byte(0));
+        DataBlock scalarBytes(_meta.typeSize);
+        std::fill(scalarBytes.begin(), scalarBytes.end(), std::byte(0));
+        std::memcpy(scalarBytes.data(), &data, std::min(sizeof(T), _meta.typeSize));
+        for (size_t off = 0; off < bytes.size(); off += _meta.typeSize) {
+            std::memcpy(bytes.data() + off, scalarBytes.data(), _meta.typeSize);
+        }
 
 		_data.loadData(shape, _meta.typeSize, std::move(bytes));
 		return *this;
@@ -326,30 +319,36 @@ private:
 
 	template<typename T>
 	inline std::span<const T> Tensor::read(const Shape& path) const {
-		return _data.read<T>(indexShape(path));
+		return _data.read<T>(indexShape(path, true));
 	}
 
 	// Expected-based implementations
 
     template<typename T>
     inline T Tensor::readScalar(const Shape& path) const {
-        auto shape = _data.getCurrentShape();
+        // dataShape is TensorData::Shape (vector<size_t>)
+        auto dataShape = _data.getCurrentShape();
         auto resType = checkTypeMatch(sizeof(T));
         if (!resType) abort(ErrorType::TypeMismatch, "type mismatch in scalar read");
-        auto resPath = checkPathValid(path, shape);
+        auto resPath = checkPathValid(path, dataShape);
         if (!resPath) abort(ErrorType::InvalidPath, "invalid path in scalar read");
 
-        // 路径长度等于形状：直接读取单个元素
-        if (path.size() == shape.size())
-            return _data.readElement<T>(path);
+        // If path length equals rank, read the single element
+        if (path.size() == dataShape.size()) {
+            auto full = indexShape(path, true); // convert/validate
+            return _data.readElement<T>(full);
+        }
 
-        // 路径长度小于形状：要求子视图恰好包含一个元素
-        auto resSingle = checkSingleElementView(path, shape);
+        // Path shorter than rank: ensure remaining dimensions multiply to 1
+        // convert dataShape to Tensor::Shape for checkSingleElementView
+        Shape asTensorShape(dataShape.begin(), dataShape.end());
+        auto resSingle = checkSingleElementView(path, asTensorShape);
         if (!resSingle) abort(ErrorType::NotAScalar, "not a scalar view");
 
-        // 构造完整路径（剩余维度索引全为 0）
+        // build full path with trailing zeros
         Shape fullPath = path;
-        fullPath.insert(fullPath.end(), shape.size() - path.size(), 0);
-        return _data.readElement<T>(fullPath);
+        fullPath.insert(fullPath.end(), dataShape.size() - path.size(), 0);
+        auto full = indexShape(fullPath, true);
+        return _data.readElement<T>(full);
     }
 }

@@ -63,6 +63,9 @@
     <ClCompile Include="src\TensorMeta.cpp">
       <Filter>Tensor\src</Filter>
     </ClCompile>
+    <ClCompile Include="TensorDataTest.cpp">
+      <Filter>Tensor</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="API\tool.h">
