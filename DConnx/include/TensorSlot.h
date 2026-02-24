@@ -9,8 +9,6 @@ class InferBase;
 namespace DC {
 	class TensorSlot {
 		using TensorType = TensorMeta::TensorType;
-		using State = TensorMeta::DataState;
-		using MismatchPolicy = TensorMeta::MismatchPolicy;
 
 	public:
 		TensorSlot() = default;

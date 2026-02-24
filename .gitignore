@@ -365,3 +365,4 @@ MigrationBackup/
 FodyWeavers.xsd
 /build
 /engines/ort
+/DConnx/build

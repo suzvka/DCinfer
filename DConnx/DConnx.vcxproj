@@ -33,7 +33,7 @@
     <ClCompile Include="src\TensorMeta.cpp" />
     <ClCompile Include="src\TensorSlot.cpp" />
     <ClCompile Include="src\InferBase.cpp" />
-    <ClCompile Include="test.cpp">
+    <ClCompile Include="TensorTest.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='test|x64'">false</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
@@ -52,8 +52,10 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="API\TensorMods.h" />
+    <ClInclude Include="include\Exception.h" />
     <ClInclude Include="include\Expected.h" />
     <ClInclude Include="include\TensorData.h" />
+    <ClInclude Include="include\TensorException.h" />
     <ClInclude Include="include\TensorMeta.h" />
     <ClInclude Include="include\TensorSlot.h" />
   </ItemGroup>
@@ -140,7 +142,8 @@
     <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>
     <LibraryPath>C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\lib\x64;$(LibraryPath)</LibraryPath>
     <IncludePath>$(ProjectDir)include;$(ProjectDir)API;$(IncludePath)</IncludePath>
-    <OutDir>..\x64\test</OutDir>
+    <OutDir>..\x64\test\</OutDir>
+    <TargetName>TensorTest</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ExternalIncludePath>$(ProjectDir)onnxRuntime/include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.3\include;$(ExternalIncludePath)</ExternalIncludePath>

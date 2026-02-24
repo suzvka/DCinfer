@@ -15,21 +15,6 @@ namespace DC {
 			Void
 		};
 
-		enum class DataState {
-			Overflow,
-			TypeError,
-			Empty,
-			Ready
-		};
-
-		enum class MismatchPolicy {
-			Auto,
-			Truncate,
-			Bitcast,
-			Convert,
-			Throw
-		};
-
 	public:
 		TensorMeta();
 

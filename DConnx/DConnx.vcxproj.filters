@@ -34,6 +34,9 @@
     <Filter Include="Tensor\mods">
       <UniqueIdentifier>{b75f2960-086c-4d40-b20e-90f1680fae5e}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Tools">
+      <UniqueIdentifier>{a6af392c-2429-4cbf-b156-95589fd78cd4}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="test1.cpp">
@@ -45,7 +48,7 @@
     <ClCompile Include="src\Infer.cpp">
       <Filter>推理器</Filter>
     </ClCompile>
-    <ClCompile Include="test.cpp">
+    <ClCompile Include="TensorTest.cpp">
       <Filter>Tensor</Filter>
     </ClCompile>
     <ClCompile Include="src\TensorSlot.cpp">
@@ -71,9 +74,6 @@
     <ClInclude Include="include\TensorSlot.h">
       <Filter>API</Filter>
     </ClInclude>
-    <ClInclude Include="include\Expected.h">
-      <Filter>工具</Filter>
-    </ClInclude>
     <ClInclude Include="API\Infer.h">
       <Filter>API</Filter>
     </ClInclude>
@@ -88,6 +88,15 @@
     </ClInclude>
     <ClInclude Include="include\TensorMeta.h">
       <Filter>Tensor\mods</Filter>
+    </ClInclude>
+    <ClInclude Include="include\TensorException.h">
+      <Filter>Tensor\mods</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Expected.h">
+      <Filter>Tools</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Exception.h">
+      <Filter>Tools</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

@@ -2,3 +2,4 @@
 
 #include "TensorData.h"
 #include "TensorMeta.h"
+#include "TensorException.h"
