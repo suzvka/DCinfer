@@ -15,12 +15,12 @@ namespace DC {
 		_rule.typeSize = typeSize;
 	}
 
-	TensorSlot& TensorSlot::setDefaultTensor(Tensor& data) {
+	TensorSlot& TensorSlot::setDefaultTensor(const Tensor& data) {
 		if (!(*this == data)) {
 			throw std::runtime_error("默认数据规则检查未通过");
 		}
 
-		_defaultData = std::make_unique<Tensor>(std::move(data));
+		_defaultData = std::make_unique<Tensor>(data);
 
 		return *this;
 	}

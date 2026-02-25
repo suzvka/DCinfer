@@ -61,7 +61,7 @@ namespace DC {
 			// 添加输入列表
 			for (auto& [name, tensor] : inputs) {
 				if (inputList.find(name) != inputList.end()) {
-					inputList[name].input(tensor);
+					inputList[name].input(std::move(tensor));
 				}
 			}
 

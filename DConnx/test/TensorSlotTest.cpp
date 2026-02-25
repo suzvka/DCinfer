@@ -13,7 +13,7 @@ static void runTensorSlotTests() {
 	// 2) Create a matching Tensor and verify slot acceptance
 	Tensor t(TensorMeta::TensorType::Float, sizeof(float), {2, 3}, {});
 	try {
-		slot.input(t); // should has throw
+		slot << t; // should has throw
 		throw std::runtime_error("TensorSlot accepted matching tensor");
 	}
 	catch (const TensorException&) {
@@ -21,7 +21,7 @@ static void runTensorSlotTests() {
 	}
 	t.fill(42.0f);
 	try {
-		slot.input(t); // should not throw
+		slot << t; // should not throw
 	}
 	catch (const TensorException&) {
 		throw std::runtime_error("TensorSlot rejected matching tensor");
@@ -30,7 +30,7 @@ static void runTensorSlotTests() {
 	// 3) Create a non-matching Tensor (wrong shape) and verify rejection
 	try {
 		Tensor tWrongShape(TensorMeta::TensorType::Float, sizeof(float), {3, 2}, {});
-		slot.input(tWrongShape);
+		slot << tWrongShape;
 		throw std::runtime_error("TensorSlot accepted wrong shape");
 	} catch (const TensorException&) {
 		// expected
@@ -39,7 +39,7 @@ static void runTensorSlotTests() {
 	// 4) Create a non-matching Tensor (wrong type) and verify rejection
 	try {
 		Tensor tWrongType(TensorMeta::TensorType::Int, sizeof(int), {2, 3}, {});
-		slot.input(tWrongType);
+		slot << std::move(tWrongType);
 		throw std::runtime_error("TensorSlot accepted wrong type");
 	} catch (const TensorException&) {
 		// expected
@@ -82,7 +82,7 @@ static void runTensorSlotTests() {
 		// expected
 	}
 
-	// 8) clear() should remove input data and getTensor() should return default again
+	// 8) clearData() should remove input data and getTensor() should return default again
 	{
 		TensorSlot mix("mix", TensorMeta::TensorType::Int, sizeof(int), {2,3});
 		Tensor def(TensorMeta::TensorType::Int, sizeof(int), {2,3}, {});
@@ -91,15 +91,33 @@ static void runTensorSlotTests() {
 		Tensor t2(TensorMeta::TensorType::Int, sizeof(int), {2,3}, {});
 		t2.fill(9);
 		try {
-			mix.input(t2);
+			mix.input(std::move(t2));
 		}
 		catch (const TensorException&) {
 			throw std::runtime_error("mix.input rejected valid tensor");
 		}
-		mix.clear();
+		mix.clearData();
 		auto& r = mix.getTensor();
 		if (r.data<int>()[0] != 7) {
 			throw std::runtime_error("clear did not restore default tensor");
+		}
+	}
+
+	// 9) Test move semantics of input
+	{
+		TensorSlot moveSlot("move", TensorMeta::TensorType::Int, sizeof(int), { 2,3 });
+		Tensor t3(TensorMeta::TensorType::Int, sizeof(int), { 2,3 }, {});
+		t3.fill(5);
+		try {
+			moveSlot << std::move(t3);
+		}
+		catch (const TensorException&) {
+			throw std::runtime_error("moveSlot.input rejected valid tensor");
+		}
+		auto t4 = Tensor::Create<int>();
+		moveSlot >> t4;
+		if (t4.data<int>()[0] != 5) {
+			throw std::runtime_error("moveSlot did not store moved tensor correctly");
 		}
 	}
 }

@@ -27,7 +27,7 @@ namespace DC {
 			const std::vector<int64_t>& shape = {}
 		);
 
-		TensorSlot& setDefaultTensor(Tensor& data);
+		TensorSlot& setDefaultTensor(const Tensor& data);
 
 		std::string name() const { return _rule.name; }
 
@@ -53,7 +53,15 @@ namespace DC {
 			return true;
 		}
 
-		const TensorSlot& input(Tensor& data) const {
+		const TensorSlot& operator<<(const Tensor& data) const {
+			return input(Tensor(data));
+		}
+
+		const TensorSlot& operator<<(Tensor&& data) const {
+			return input(std::move(data));
+		}
+
+		const TensorSlot& input(Tensor&& data) const {
 			if (*this != data) abort(ErrorType::TypeMismatch, "input tensor does not match slot requirements");
 			_data = std::make_unique<Tensor>(std::move(data));
 			return *this;
@@ -63,8 +71,24 @@ namespace DC {
 			return _data != nullptr || _defaultData != nullptr;
 		}
 
-		void clear() const {
+		void clear() {
 			_data.reset();
+			_defaultData.reset();
+		}
+
+		void clearData() const {
+			_data.reset();
+		}
+
+		void operator>>(Tensor& data) const {
+			if (!hasData()) abort(ErrorType::InvalidPath, "no tensor data available");
+			if (_data) {
+				data = std::move(*_data);
+				_data.reset();
+			}
+			else {
+				data = Tensor(*_defaultData);
+			}
 		}
 
 		Tensor& getTensor();
