@@ -60,7 +60,7 @@ namespace DC {
 
         Type::registerType<std::vector<std::byte>>(TensorType::Data);
         Type::registerType<std::vector<char>>(TensorType::Data);
-        Type::registerType<std::vector<float>>(TensorType::Data);
+        Type::registerType<std::vector<unsigned char>>(TensorType::Data);
     }
 
 

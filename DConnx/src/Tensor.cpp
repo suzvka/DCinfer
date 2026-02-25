@@ -30,6 +30,12 @@ namespace DC {
         _data = TensorData(indexShape(shape, false), _meta.typeSize, std::move(data));
     }
 
+    Tensor& Tensor::setName(const std::string& name) {
+        _meta.name = name;
+        return *this;
+	}
+
+
     Tensor::View Tensor::operator[](int64_t index) {
         return View(*this, { index });
     }

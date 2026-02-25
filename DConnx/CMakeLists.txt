@@ -8,6 +8,7 @@ target_include_directories(DConnx
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/Tensor
         ${CMAKE_CURRENT_SOURCE_DIR}/include/Tools
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/Infer
 )
 
 file(GLOB_RECURSE DCONNX_SRC_FILES CONFIGURE_DEPENDS

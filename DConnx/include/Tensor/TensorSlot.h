@@ -65,7 +65,17 @@ namespace DC {
 			_data.reset();
 		}
 
-		Tensor& getTensor();
+		Tensor& getTensor() {
+			if (_data) {
+				return *_data;
+			}
+			else if (_defaultData) {
+				return *_defaultData;
+			}
+			else {
+				throw std::runtime_error("没有数据可用");
+			}
+		}
 
 	private:
 		InferBase* _infer = nullptr; // 归属的推理器

@@ -49,6 +49,8 @@ namespace DC {
 			DataBlock&& data = {}
 		);
 
+		Tensor& setName(const std::string& name);
+
 		View operator[](int64_t index);
 		ConstView operator[](int64_t index) const;
 
