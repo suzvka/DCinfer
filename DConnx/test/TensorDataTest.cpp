@@ -68,6 +68,18 @@ static void runTensorDataDetailedTests() {
         if (std::abs(gotf - 2.5f) > 1e-6f) throw std::runtime_error("TensorData writeCache readback mismatch");
     }
 
+    // 5) getData Test
+    {
+        TensorData td5;
+        std::vector<std::byte> dense(4 * sizeof(float), std::byte(1));
+		std::vector<std::byte> sample = dense;
+        td5.loadData(std::vector<size_t>{4}, sizeof(float), std::move(dense));
+        auto dataSpan = td5.getData();
+
+		if (dataSpan != sample) throw std::runtime_error("TensorData getVector mismatch");
+		if (td5.hasCache()) throw std::runtime_error("TensorData getVector did not clear cache");
+    }
+
     std::cout << "TensorData detailed tests passed" << std::endl;
 }
 

@@ -97,6 +97,14 @@ namespace DC {
 			const std::string& message = ""
 		) const ;
 
+		template<typename T>
+		std::vector<T> getData();
+
+		bool isScalar() const { return _data.isScalar(); }
+		bool empty() const { return _data.empty(); }
+		bool valid() const { return _data.valid(); }
+		bool hasCache() const { return _data.hasCache(); }
+
 	private:
 		TensorMeta _meta;
 		TensorData _data;
@@ -146,6 +154,12 @@ public:
         next._path.push_back(index);  // 追加新索引
         return next;
     }
+
+	template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
+	ViewImpl& operator=(const std::vector<T>& data) {
+		set(data);
+		return *this;
+	}
 
     // 赋值（仅非 const 版本）
     // Non-throwing try-set APIs (replace operator= for explicit error handling)
@@ -204,7 +218,7 @@ private:
 	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 	template<typename T>
-	inline Tensor Tensor::Create(
+	Tensor Tensor::Create(
 		const Shape& shape,
 		DataBlock&& data
 	) {
@@ -220,12 +234,12 @@ private:
 	}
 
 	template<typename T>
-	inline T Tensor::item() const {
+	T Tensor::item() const {
 		return _data.readElement<T>({});  // 0-D scalar access via empty path
 	}
 
 	template<typename T>
-	inline Tensor& Tensor::operator=(const T& value) {
+	Tensor& Tensor::operator=(const T& value) {
 		auto res = checkTypeMatch(sizeof(T));
 		if (!res) {
 			abort(ErrorType::TypeMismatch, "type mismatch in scalar assignment");
@@ -318,14 +332,14 @@ private:
     }
 
 	template<typename T>
-	inline std::span<const T> Tensor::read(const Shape& path) const {
+	std::span<const T> Tensor::read(const Shape& path) const {
 		return _data.read<T>(indexShape(path, true));
 	}
 
 	// Expected-based implementations
 
     template<typename T>
-    inline T Tensor::readScalar(const Shape& path) const {
+    T Tensor::readScalar(const Shape& path) const {
         // dataShape is TensorData::Shape (vector<size_t>)
         auto dataShape = _data.getCurrentShape();
         auto resType = checkTypeMatch(sizeof(T));
@@ -351,4 +365,12 @@ private:
         auto full = indexShape(fullPath, true);
         return _data.readElement<T>(full);
     }
+
+	template<typename T>
+	std::vector<T> Tensor::getData() {
+		auto data = _data.getData();
+		std::vector<T> result(data.size() / typeSize());
+		std::memcpy(result.data(), data.data(), data.size());
+		return result;
+	}
 }

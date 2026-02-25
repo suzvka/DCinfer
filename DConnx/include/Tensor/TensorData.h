@@ -12,6 +12,8 @@
 
 namespace DC
 {
+	// Todo：无拷贝移动写入
+
     // TensorData: 存储张量的底层数据容器
     // - 支持两种内部表示：稀疏块视图（_dataMain / _dataDimSets，称为 "view"）
     //   与连续稠密缓存（_dataCache，称为 "cache"）。
@@ -71,12 +73,7 @@ namespace DC
         template<typename T>
         bool write(const Shape& path, const std::vector<T>& data);
 
-        // rvalue vector overload: 目前仍以 span 形式读取并拷贝/解释数据。
-        template<typename T>
-        bool write(const Shape& path, std::vector<T>&& data);
-
 		bool write(const Shape& path, const std::vector<bool>& data);
-		bool write(const Shape& path, std::vector<bool>&& data);
 
         // 写入单个元素（按坐标全路径）。
         // 参数：
@@ -107,13 +104,11 @@ namespace DC
         //  - block path（rank == shape.size() - 1）：写入整块（元素数 == shape.back()）
         // data 的字节大小必须精确匹配目标区域的字节数（element_count * _typeSize），否则抛出。
         template<typename T>
-        bool writeCache(const Shape& path, std::span<const T> data);
+        bool writeCache(const Shape& path, const std::span<const T>& data);
 
         // vector overload for writeCache
         template<typename T>
         bool writeCache(const Shape& path, const std::vector<T>& data);
-
-		bool writeCache(const Shape& path, const std::vector<bool>& data);
 
 		template<typename T>
 		bool writeCacheElement(const Shape& fullPath, const T& value);
@@ -143,6 +138,9 @@ namespace DC
 
 		// 显式进入可编辑模式：若当前为稠密直通模式，则会将稠密 bytes 物化为稀疏块映射。
 		void editMode();
+
+		// 取出数据
+		DataBlock getData();
 
 	private:
         // 更新 _shapeCache / _dataSize / _size 等缓存元信息以匹配给定的稠密形状。
@@ -297,13 +295,6 @@ namespace DC
 	bool TensorData::write(const Shape& path, const std::vector<T>& data) {
 		return write(path, std::span<const T>(data.data(), data.size()));
 	}
-	template<typename T>
-	bool TensorData::write(const Shape& path, std::vector<T>&& data) {
-		return write(path, std::span<const T>(data.data(), data.size()));
-	}
-	inline bool TensorData::write(const Shape& path, std::vector<bool>&& data) {
-		return write(path, data);
-	}
 
 	template<typename T>
 	bool TensorData::write(const Shape& fullPath, const T& value) {
@@ -426,12 +417,13 @@ namespace DC
 	}
 
 	template<typename T>
-	bool TensorData::writeCache(const Shape& path, std::span<const T> data) {
+	bool TensorData::writeCache(const Shape& path, const std::span<const T>& data) {
 		static_assert(std::is_trivially_copyable_v<T>,
 			"TensorData::writeCache requires trivially copyable element type");
 		return writeCacheByDeposit(path, data, sizeof(T), "TensorData::writeCache");
 	}
 
+	template<>
 	inline bool TensorData::writeCache(const Shape& path, const std::vector<bool>& data) {
 		return writeCacheByDeposit(path, data, sizeof(bool), "TensorData::writeCache");
 	}
@@ -442,18 +434,18 @@ namespace DC
 	}
 
 	template<typename T>
-	inline bool TensorData::writeCacheElement(const Shape& fullPath, const T& value) {
+	bool TensorData::writeCacheElement(const Shape& fullPath, const T& value) {
 		return writeCache(fullPath, std::span<const T>(&value, 1));
 	}
 
 	template<typename T>
-	inline T TensorData::readCacheElement(const Shape& fullPath) const {
+	T TensorData::readCacheElement(const Shape& fullPath) const {
 		auto span = readCache<T>(fullPath);
 		return span.empty() ? T{} : span[0];
 	}
 
 	template<typename T>
-	inline std::span<const T> TensorData::readCache(const Shape& path) const {
+	std::span<const T> TensorData::readCache(const Shape& path) const {
 		return hasCache() ? read<T>(path) : std::span<const T>();
 	}
 
@@ -487,7 +479,7 @@ namespace DC
 	}
 
 	template<class Range>
-	inline bool TensorData::writeCacheByDeposit(const Shape& path, Range&& r, size_t typeSize, const char* apiName) {
+	bool TensorData::writeCacheByDeposit(const Shape& path, Range&& r, size_t typeSize, const char* apiName) {
 		return writeCacheRaw(path, deposit(std::forward<Range>(r)), typeSize, apiName);
 	}
 

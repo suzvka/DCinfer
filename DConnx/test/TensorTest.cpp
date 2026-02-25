@@ -21,7 +21,7 @@ static void runTensorTests() {
     if (got != src) throw std::runtime_error("create/read mismatch");
 
     // 2) Dense fast-path editing via view: replace row 0 and an element
-    t[0].set(std::vector<float>{10.0f, 20.0f, 30.0f});
+	t[0] = std::vector<float>{ 10, 20, 30 }; // whole row replace
     t[1][2].set<float>(99.0f);
     auto after = t.data<float>();
     std::vector<float> expected = { 10,20,30,4,5,99 };
@@ -84,6 +84,20 @@ static void runTensorTests() {
         if (e.getErrorType() == TensorException::ErrorType::NotAScalar) gotNotScalar = true;
     }
     if (!gotNotScalar) throw std::runtime_error("expected NotAScalar on view.item()");
+
+    // 12) fast read
+    try {
+		std::vector<double> sample = { 1.1, 2.2, 3.3, 4.4 };
+		Tensor t2 = Tensor::Create<double>();
+        t2[0] = sample;
+		auto spanD = t2.data<double>();
+		auto readSample = t2.getData<double>();
+		if (readSample != sample) throw std::runtime_error("fast read mismatch");
+        if (t2.hasCache()) throw std::runtime_error("fast read should not have cache");
+    }
+    catch (const TensorException& e) {
+        throw std::runtime_error("fast read failed");
+	}
 
     std::cout << "Tensor tests passed" << std::endl;
 }

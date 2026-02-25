@@ -181,4 +181,14 @@ namespace DC {
 		return result;
     }
 
+    TensorData::DataBlock TensorData::getData() {
+        if (!hasCache()) {
+            ensureCache();
+        }
+
+        DataBlock dataBlock = std::move(_dataCache);
+        clearCache();
+        return std::move(dataBlock);
+    }
+
 } // namespace DC

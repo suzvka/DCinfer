@@ -123,9 +123,14 @@ namespace DC
 			setViewFlag();
  			return;
  		}
+		// If no view exists but we are entering edit mode (e.g. first write to an
+		// initially-empty tensor), create an empty view state rather than
+		// failing. This preserves any catalog information that may have been
+		// prepared earlier and allows subsequent write() to populate blocks.
 		if (!hasView()) {
- 			throw std::runtime_error("TensorData: sparse state is invalid without dense cache.");
- 		}
+			setViewFlag();
+			return;
+		}
 	}
 
 	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -147,10 +152,20 @@ namespace DC
 	}
 
 	void DC::TensorData::ensureView() {
-		if (hasCache() && !hasView()) {
-			buildView();
-			setViewFlag();
-		}
+    if (hasCache() && !hasView()) {
+        buildView();
+    }
+
+    // If there is no view materialized and no cache to build it from,
+    // do not clear existing catalog/state. Calling clearView() here
+    // would discard catalog information that may have been prepared
+    // by updateCatalog() for upcoming writes. Only set the view flag
+    // when a view actually exists.
+    if (!hasView()) {
+        return;
+    }
+
+    setViewFlag();
 	}
 
 	size_t TensorData::blockOffset(const Shape& blockPath, const Shape& denseShape) const {

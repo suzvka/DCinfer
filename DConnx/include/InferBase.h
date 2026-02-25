@@ -7,7 +7,7 @@
 #include <mutex>
 
 #include "TensorSlot.h"
-#include "expected.h"
+#include "Expected.h"
 
 namespace DC {
 	// 可配置张量规则的推理器对象
