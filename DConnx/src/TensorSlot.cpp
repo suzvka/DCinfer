@@ -37,13 +37,13 @@ namespace DC {
 
 	Tensor& TensorSlot::getTensor() {
 		if (!hasData()) {
-			throw std::runtime_error("TensorSlot has no data.");
+			abort(ErrorType::Other, "TensorSlot has no data.");
 		}
+
 		if (!_data) {
-			Tensor tensor;
-			tensor = *_defaultData;
-			_data = std::make_unique<Tensor>(std::move(tensor));
+			return *_defaultData;
 		}
+
 		return *_data;
 	}
 }

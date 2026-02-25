@@ -1,14 +1,16 @@
 #pragma once
-#include "Tensor.hpp"
-#include "tool.h"
 #include <type_traits>
 #include <stdexcept>
+
+#include "Tensor.hpp"
+#include "Exception.h"
 
 class InferBase;
 
 namespace DC {
 	class TensorSlot {
 		using TensorType = TensorMeta::TensorType;
+		using ErrorType = TensorException::ErrorType;
 
 	public:
 		TensorSlot() = default;
@@ -52,7 +54,7 @@ namespace DC {
 		}
 
 		const TensorSlot& input(Tensor& data) const {
-			if (*this != data) throw std::runtime_error("规则检查未通过");
+			if (*this != data) abort(ErrorType::TypeMismatch, "input tensor does not match slot requirements");
 			_data = std::make_unique<Tensor>(std::move(data));
 			return *this;
 		}
@@ -65,23 +67,25 @@ namespace DC {
 			_data.reset();
 		}
 
-		Tensor& getTensor() {
-			if (_data) {
-				return *_data;
-			}
-			else if (_defaultData) {
-				return *_defaultData;
-			}
-			else {
-				throw std::runtime_error("没有数据可用");
-			}
-		}
+		Tensor& getTensor();
 
 	private:
 		InferBase* _infer = nullptr; // 归属的推理器
 		TensorMeta _rule;
 		std::unique_ptr<Tensor> _defaultData; // 默认数据
 		mutable std::unique_ptr<Tensor> _data;
+
+		// 异常中止
+		void abort(
+			ErrorType errorType = ErrorType::Other,
+			const std::string& message = ""
+		) const {
+			std::string source = "TensorSlot";
+			if (!_rule.name.empty()) {
+				source += " (" + _rule.name + ")";
+			}
+			throw TensorException(errorType, source, message);
+		}
 	};
 
 	template<typename T>

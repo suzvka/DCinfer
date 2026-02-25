@@ -27,6 +27,7 @@ namespace DC {
         else {
             _meta.typeSize = (typeSize > 0) ? typeSize : DC::Type::getSize(type);
         }
+        _meta.shape = shape;
         _data = TensorData(indexShape(shape, false), _meta.typeSize, std::move(data));
     }
 

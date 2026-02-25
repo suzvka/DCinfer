@@ -272,7 +272,15 @@ private:
 			abort(ErrorType::TypeMismatch, "type mismatch in fill assignment");
 		}
 
-		auto shape = _data.getCurrentShape();
+		Shape shape;
+		if (_data.hasView()) {
+			auto currentShape = _data.getCurrentShape();
+			shape = Shape(currentShape.begin(), currentShape.end());
+		}
+		else {
+			shape = _meta.shape;
+		}
+
 		const bool isScalar0d = shape.empty();
 		if (isScalar0d) {
             DataBlock bytes(_meta.typeSize);
@@ -296,7 +304,7 @@ private:
             std::memcpy(bytes.data() + off, scalarBytes.data(), _meta.typeSize);
         }
 
-		_data.loadData(shape, _meta.typeSize, std::move(bytes));
+		_data.loadData(indexShape(shape, false), _meta.typeSize, std::move(bytes));
 		return *this;
 	}
 

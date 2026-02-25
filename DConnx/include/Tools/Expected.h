@@ -20,11 +20,10 @@ class Expected {
 
 public:
     // Constructors
-    Expected() : data(), hasValue(false) {
-        if constexpr (std::is_default_constructible_v<T>) {
-            data.template emplace<T>();
-            hasValue = true;
-        }
+    // Default constructor exists only when T is default-constructible to avoid
+    // instantiating a default std::variant when T is not default-constructible.
+    Expected() requires std::is_default_constructible_v<T>
+        : data(std::in_place_type<T>), hasValue(true) {
     }
 
     Expected(const T& value) : data(value), hasValue(true) {

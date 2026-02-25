@@ -14,8 +14,10 @@ namespace DC
 		const Shape& shape,
 		size_t typeSize,
 		DataBlock&& denseBytes
-	) : _dataSize(0), _dataMain({}), _dataCatalog({}), _dataCache({}), _shapeCache({}), _validFlags(0)
+	) : _dataSize(0), _dataMain({}), _dataCatalog({}), _dataCache({}), _shapeCache({}), _validFlags(0), _isScalar(false), _typeSize(0)
 	{
+		_isScalar = shape.empty();
+
 		if (denseBytes.empty()) {
 			setTypeSize(typeSize);
 			return;
