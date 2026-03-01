@@ -19,7 +19,7 @@ namespace DC {
         std::call_once(flag, []() { setTypeMap(); });
     }
 
-    bool TensorMeta::check(const std::vector<int64_t>& currentShape) const {
+    bool TensorMeta::checkShape(const std::vector<int64_t>& currentShape) const {
         // Unset rule: skip check
         if (shape.empty()) {
             return true;

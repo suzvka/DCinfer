@@ -47,11 +47,18 @@ namespace DC {
 	bool TensorSlot::isOutput() const { return _config.position == Config::Position::Output; }
 
 	TensorSlot& TensorSlot::operator<<(const Tensor& data) {
-		return input(Tensor(data));
+		return write(Tensor(data));
 	}
 
 	TensorSlot& TensorSlot::operator<<(Tensor&& data) {
-		return input(std::move(data));
+		return write(std::move(data));
+	}
+
+	TensorSlot& TensorSlot::write(Tensor&& data) {
+		if (_config.position != Config::Position::Input) {
+			abort(ErrorType::InvalidPath, "Cannot write to output slot");
+		}
+		return loadData(std::move(data));
 	}
 
 	bool TensorSlot::hasData() const { return _data != nullptr || _defaultData != nullptr; }
@@ -125,12 +132,21 @@ namespace DC {
 		return tensor;
 	}
 
-	TensorSlot& TensorSlot::operator>>(Tensor& data) {
-		if (!hasData()) abort(ErrorType::InvalidPath, "no tensor data available");
+	TensorSlot& TensorSlot::read(Tensor& data) {
+		if (_config.position != Config::Position::Output) {
+			abort(ErrorType::InvalidPath, "Cannot read from input slot");
+		}
+
+		if (!hasData()) { 
+			abort(ErrorType::InvalidPath, "no tensor data available"); 
+		
+		}
+
 		if (_data) {
 			data = std::move(*_data);
 			_data.reset();
 		}
+
 		else {
 			data = Tensor(*_defaultData);
 		}
@@ -138,27 +154,48 @@ namespace DC {
 		return *this;
 	}
 
-	bool TensorSlot::check() const {
+	TensorSlot& TensorSlot::operator>>(Tensor& data) {
+		return read(data);
+	}
+
+	TensorSlot::DataStatus TensorSlot::check() const {
 		return check(view());
 	}
 
-	bool TensorSlot::check(const Tensor& data) const {
-		if (!data.valid()) return false;
+	TensorSlot::DataStatus TensorSlot::check(const Tensor& data) const {
+		DataStatus result;
+
+		if (!data.valid()) result.invalid = true;
 
 		if (_config.requiredcheckType()) {
-			if (data.type() != _rule.type && !_config.allowTypeConversion()) {
-				return false;
+			result.needConvert = type() != data.type();
+		}
+
+		bool shapeReady = _rule.checkShape(data.shape());
+		if (_config.allowShapeAlignment()) {
+			shapeReady ? (true) : (result.needAlign = true);
+		}
+		else {
+			result.invalid = !shapeReady;
+		}
+
+		return result;
+	}
+
+	TensorSlot& TensorSlot::loadData(Tensor&& data) {
+		auto checkResult = check(data);
+		if (!checkResult.ready()) {
+			if (checkResult.invalid) {
+				abort(ErrorType::InvalidShape, "Input tensor is invalid");
+			}
+			if (checkResult.needConvert) {
+				; // Todo: 类型转换，当前依赖 Tensor 按位强转
+			}
+			if (checkResult.needAlign) {
+				abort(ErrorType::ShapeMismatch, "Input tensor shape mismatch and alignment is not allowed");
 			}
 		}
 
-		if (data.shape() != _rule.shape && !_config.allowShapeAlignment()) {
-			return false;
-		}
-		return true;
-	}
-
-	TensorSlot& TensorSlot::input(Tensor&& data) {
-		if (!check(data)) abort(ErrorType::TypeMismatch, "input tensor does not match slot requirements");
 		_data = std::make_unique<Tensor>(std::move(data));
 		return *this;
 	}
@@ -194,5 +231,9 @@ namespace DC {
 	TensorSlot::Config& TensorSlot::Config::setCheckLevel(CheckLevel level) {
 		checkLevel = level;
 		return *this;
+	}
+
+	bool TensorSlot::DataStatus::ready() const {
+		return !invalid && !needAlign && !needConvert;
 	}
 }

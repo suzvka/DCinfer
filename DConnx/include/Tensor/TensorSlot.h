@@ -50,6 +50,15 @@ namespace DC {
 			Position position = Position::Auto;
 			CheckLevel checkLevel = CheckLevel::Strict;
 		};
+
+		struct DataStatus {
+			bool needAlign = false; // 需要形状对齐
+			bool needConvert = false; // 需要类型转换
+			bool invalid = false; // 数据无效
+
+			bool ready() const;
+		};
+
 		TensorSlot(const TensorSlot&) = delete;
 		TensorSlot& operator=(const TensorSlot&) = delete;
 		TensorSlot(TensorSlot&&) noexcept = default;
@@ -64,7 +73,6 @@ namespace DC {
 		);
 
 		TensorSlot& setDefaultTensor(const Tensor& data);
-
 
 		const std::string& name() const;
 
@@ -82,10 +90,12 @@ namespace DC {
 		template<typename T>
 		bool isType() const;
 
-		TensorSlot& operator<<(const Tensor& data);
-
+		TensorSlot& write(Tensor&& data);
 		TensorSlot& operator<<(Tensor&& data);
-
+		TensorSlot& operator<<(const Tensor& data);
+		
+		TensorSlot& read(Tensor& data);
+		TensorSlot& operator>>(Tensor& data);
 		
 		bool hasData() const;
 
@@ -99,24 +109,21 @@ namespace DC {
 
 		const Tensor& view() const;
 
-		TensorSlot& operator>>(Tensor& data);
-
-		bool check() const;
-		bool check(const Tensor& data) const;
-
-		Tensor takeTensor();
+		DataStatus check() const;
+		DataStatus check(const Tensor& data) const;
 
 		const Config& config() const;
 
 		static Config CreateConfig();
 
+		TensorSlot& loadData(Tensor&& data);
 	private:
 		TensorMeta _rule;
 		std::unique_ptr<Tensor> _defaultData; // 默认数据
 		std::unique_ptr<Tensor> _data;
 		TensorSlot::Config _config;
 
-		TensorSlot& input(Tensor&& data);
+		Tensor takeTensor();
 
 		// 异常中止
 		void abort(
@@ -124,6 +131,7 @@ namespace DC {
 			const std::string& message = ""
 		) const;
 
+		// Todo：移到上层
 		Tensor align(
 			const Shape& target,
 			std::byte fillData = {}
@@ -148,6 +156,6 @@ namespace DC {
 	// Template method definitions for TensorSlot
 	template<typename T>
 	bool TensorSlot::isType() const {
-		return type() == Type::getType<TensorMeta::TensorType>(T());
+		return type() == Type::getType<TensorMeta::TensorType, T>();
 	}
 }

@@ -28,7 +28,7 @@ namespace DC {
 		TensorType type = TensorType::Void;
 
 		// 检查形状是否符合规则
-		bool check(const std::vector<int64_t>& currentShape) const;
+		bool checkShape(const std::vector<int64_t>& currentShape) const;
 
 	private:
 		static void setTypeMap();
