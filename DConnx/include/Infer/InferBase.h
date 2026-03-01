@@ -60,13 +60,13 @@ namespace DC {
 		bool prepareInputs(Task& inputs) {
 			// 添加输入列表
 			for (auto& [name, tensor] : inputs) {
-				if (inputList.find(name) != inputList.end()) {
-					inputList[name].input(std::move(tensor));
+				if (inputList->find(name) != inputList->end()) {
+					(*inputList).at(name) << std::move(tensor);
 				}
 			}
 
 			// 检查输入完整性
-			for (auto& [name, slot] : inputList) {
+			for (auto& [name, slot] : *inputList) {
 				if (!slot.hasData()) return false;
 			}
 			return true;
@@ -77,8 +77,8 @@ namespace DC {
 		InferConfig* configInfo;							// 配置对象
 
 		//std::map<std::string, tensorInfo> inputTensorInfo;	// 快捷浏览张量列表
-		TensorList inputList;								// 输入张量列表
-		TensorList outputList;								// 输出张量列表
+		std::unique_ptr<TensorList> inputList;								// 输入张量列表
+		std::unique_ptr<TensorList> outputList;								// 输出张量列表
 
 		// 并发控制成员
 		std::mutex _mutex;

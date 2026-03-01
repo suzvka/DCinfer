@@ -22,12 +22,12 @@ namespace DC {
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 	
 	class Tensor {
+	public:
 		using TensorType = TensorMeta::TensorType;
 		using ErrorType = TensorException::ErrorType;
 		using DataBlock = TensorData::DataBlock;
 		using Shape = std::vector<int64_t>; // 支持负数
 
-	public:
 		virtual ~Tensor() = default;
 		template<bool IsConst> class ViewImpl;
 		
@@ -93,11 +93,10 @@ namespace DC {
 		// 直接设置为稠密（连续）数据。
 		Tensor& loadData(DataBlock&& data, const Shape& shape);
 
-		// 异常中止
-		void abort(
-			ErrorType errorType = ErrorType::Other,
-			const std::string& message = ""
-		) const ;
+		template<typename T>
+		Tensor& expand(const Shape& targetShape, const T& fillData = T());
+
+		Tensor& crop(const Shape& targetShape);
 
 		template<typename T>
 		std::vector<T> getData();
@@ -137,6 +136,12 @@ namespace DC {
 		void moveFrom(Tensor&& other) noexcept;
 
 		std::vector<size_t> indexShape(const Shape& shape, bool isRead) const;
+
+		// 异常中止
+		void abort(
+			ErrorType errorType = ErrorType::Other,
+			const std::string& message = ""
+		) const;
 	};
 
 template<bool IsConst>
@@ -383,4 +388,16 @@ private:
 		std::memcpy(result.data(), data.data(), data.size());
 		return result;
 	}
+
+	template<typename T>
+	Tensor& Tensor::expand(const Tensor::Shape& targetShape, const T& fillData) {
+		_data.expand(indexShape(targetShape, false), fillData);
+		return *this;
+	}
+
+	inline Tensor& Tensor::crop(const Shape& targetShape) {
+		_data.crop(indexShape(targetShape, false));
+		return *this;
+	}
+	
 }

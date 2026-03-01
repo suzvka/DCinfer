@@ -3,10 +3,10 @@
 
 namespace DC {
 	const InferBase::TensorList& InferBase::getInput() const {
-		return inputList;
+		return *inputList;
 	}
 
 	const InferBase::TensorList& InferBase::getOutput() const {
-		return outputList;
+		return *outputList;
 	}
 }

@@ -10,6 +10,7 @@ namespace DC {
 			InvalidPath,
 			InvalidShape,
 			NotAScalar,
+			NotData,
 			Other
 		};
 
@@ -38,6 +39,7 @@ namespace DC {
 			case ErrorType::InvalidPath:   errorStr = "Invalid Path";   break;
 			case ErrorType::InvalidShape:  errorStr = "Invalid Shape";  break;
 			case ErrorType::NotAScalar:    errorStr = "Not a Scalar";   break;
+			case ErrorType::NotData:       errorStr = "Not Data";       break;
 			case ErrorType::Other:         errorStr = "Other";          break;
 			}
 

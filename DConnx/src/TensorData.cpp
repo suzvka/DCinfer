@@ -414,4 +414,43 @@ namespace DC
 		clearView();
 		return true;
 	}
+
+	TensorData::DataBlock TensorData::getData() {
+		if (!hasCache()) {
+			ensureCache();
+		}
+
+		DataBlock dataBlock = std::move(_dataCache);
+		clearCache();
+		return std::move(dataBlock);
+	}
+
+	TensorData& TensorData::crop(const Shape& targetShape) {
+		if (!hasCache()) {
+			ensureCache();
+		}
+		if (!hasCache()) {
+			throw std::runtime_error("TensorData::crop: no data to crop");
+		}
+		const auto& currentShape = _shapeCache;
+		if (targetShape.size() != currentShape.size()) {
+			throw std::invalid_argument("TensorData::crop: target shape rank mismatch");
+		}
+		for (size_t i = 0; i < targetShape.size(); ++i) {
+			if (targetShape[i] > currentShape[i]) {
+				throw std::invalid_argument("TensorData::crop: target shape must be smaller than or equal to current shape in each dimension");
+			}
+		}
+		size_t newElementCount = 1;
+		for (auto d : targetShape) {
+			newElementCount *= static_cast<size_t>(d);
+		}
+		size_t newByteSize = newElementCount * typeSize();
+		if (newByteSize > _dataCache.size()) {
+			throw std::runtime_error("TensorData::crop: calculated byte size exceeds current cache size");
+		}
+		_dataCache.resize(newByteSize);
+		syncDenseCacheMeta(targetShape);
+		return *this;
+	}
 }

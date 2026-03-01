@@ -51,7 +51,7 @@ static void runTensorSlotTests() {
 		Tensor defaultT(TensorMeta::TensorType::Int, sizeof(int), { 2, 3 }, {});
 		defaultT.fill(123);
 		defaultSlot.setDefaultTensor(defaultT);
-		auto& retrieved = defaultSlot.getTensor();
+		auto retrieved = defaultSlot.takeTensor();
 		if (
 			retrieved.type() != TensorMeta::TensorType::Int ||
 			retrieved.shape() != std::vector<int64_t>{2, 3} ||
@@ -64,7 +64,7 @@ static void runTensorSlotTests() {
 	// 6) getTensor on an empty slot should throw
 	try {
 		TensorSlot empty("empty", TensorMeta::TensorType::Float, sizeof(float), {1});
-		empty.getTensor();
+		empty.takeTensor();
 		throw std::runtime_error("getTensor did not throw on empty slot");
 	}
 	catch (const TensorException&) {
@@ -91,13 +91,13 @@ static void runTensorSlotTests() {
 		Tensor t2(TensorMeta::TensorType::Int, sizeof(int), {2,3}, {});
 		t2.fill(9);
 		try {
-			mix.input(std::move(t2));
+			mix << (std::move(t2));
 		}
 		catch (const TensorException&) {
 			throw std::runtime_error("mix.input rejected valid tensor");
 		}
 		mix.clearData();
-		auto& r = mix.getTensor();
+		auto r = mix.takeTensor();
 		if (r.data<int>()[0] != 7) {
 			throw std::runtime_error("clear did not restore default tensor");
 		}
@@ -120,6 +120,8 @@ static void runTensorSlotTests() {
 			throw std::runtime_error("moveSlot did not store moved tensor correctly");
 		}
 	}
+
+	
 }
 
 

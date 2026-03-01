@@ -142,6 +142,11 @@ namespace DC
 		// 取出数据
 		DataBlock getData();
 
+		template<typename T>
+		TensorData& expand(const Shape& targetShape, const T& fillData);
+
+		TensorData& crop(const Shape& targetShape);
+
 	private:
         // 更新 _shapeCache / _dataSize / _size 等缓存元信息以匹配给定的稠密形状。
         // 参数 denseShape: 当前稠密表示的形状（最后一维为块内元素数）。
@@ -491,5 +496,48 @@ namespace DC
 			data.push_back(c != std::byte());
 		}
 		return data;
+	}
+
+	template<typename T>
+	TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
+		static_assert(std::is_trivially_copyable_v<T>, "expand requires trivially copyable T");
+		if (!checkType(sizeof(T), "TensorData::expand")) setTypeSize(sizeof(T));
+		ensureView();
+
+		auto current = getCurrentShape();
+		if (current == targetShape) return *this;
+		if (targetShape.empty()) { /* handle scalar case */ }
+		// 增加这一行，防止非法收缩
+		for (size_t i = 0; i < current.size(); ++i) {
+			if (targetShape[i] < current[i]) {
+				throw std::invalid_argument("TensorData::expand: target shape must be greater than or equal to current shape in each dimension");
+			}
+		}
+
+		size_t rank = targetShape.size();
+		size_t blockRank = (rank >= 1) ? rank - 1 : 0;
+		size_t blockLen = targetShape.back();
+
+		// iterate over all block paths (multi-index loop)
+		Shape blockPath(blockRank, 0);
+		bool done = (blockRank == 0); // zero-dim block space handled separately
+		while (!done) {
+			if (_dataMain.find(blockPath) == _dataMain.end()) {
+				updateCatalog(blockPath, "TensorData::expand");
+				std::vector<T> vals(blockLen, fillData);
+				auto bytes = deposit(std::span<const T>(vals.data(), vals.size()));
+				commitData(blockPath, std::move(bytes));
+			}
+			// increment blockPath lexicographically with carry
+			for (size_t i = 0; i < blockRank; ++i) {
+				if (++blockPath[i] < targetShape[i]) break;
+				blockPath[i] = 0;
+				if (i + 1 == blockRank) done = true;
+			}
+		}
+
+		setViewFlag();
+		clearCache(); // commitData may already clear cache, ensure consistency
+		return *this;
 	}
 }

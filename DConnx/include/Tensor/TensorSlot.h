@@ -1,9 +1,11 @@
 #pragma once
 #include <type_traits>
 #include <stdexcept>
+#include <optional>
 
 #include "Tensor.hpp"
 #include "Exception.h"
+
 
 class InferBase;
 
@@ -11,117 +13,141 @@ namespace DC {
 	class TensorSlot {
 		using TensorType = TensorMeta::TensorType;
 		using ErrorType = TensorException::ErrorType;
+		using Shape = Tensor::Shape;
+		using DataBlock = Tensor::DataBlock;
 
 	public:
-		TensorSlot() = default;
+		class Config {
+		public:
+			enum class Type {
+				Value,
+				Data,
+				Auto
+			};
 
-		// 使用 DType 构造张量槽
-		// - 张量名称
-		// - 张量类型
-		// - 张量类型大小(字节)
-		// - 张量形状(默认空)
+			enum class Position {
+				Input,
+				Output,
+				Auto
+			};
+
+			enum class CheckLevel {
+				Strict,
+				Lenient
+			};
+
+			bool allowShapeAlignment() const;
+
+			bool allowTypeConversion() const;
+
+			bool requiredcheckType() const;
+
+			Config& setType(Type t);
+			Config& setPosition(Position p);
+			Config& setCheckLevel(CheckLevel level);
+
+			Type type = Type::Auto;
+			Position position = Position::Auto;
+			CheckLevel checkLevel = CheckLevel::Strict;
+		};
+		TensorSlot(const TensorSlot&) = delete;
+		TensorSlot& operator=(const TensorSlot&) = delete;
+		TensorSlot(TensorSlot&&) noexcept = default;
+		TensorSlot& operator=(TensorSlot&&) noexcept = default;
+
 		TensorSlot(
 			const std::string& name,
 			TensorMeta::TensorType type,
 			size_t size,
-			const std::vector<int64_t>& shape = {}
+			const Shape& shape,
+			const Config& config = Config()
 		);
 
 		TensorSlot& setDefaultTensor(const Tensor& data);
 
-		std::string name() const { return _rule.name; }
 
-		TensorType type() const { return _rule.type; }
+		const std::string& name() const;
 
-		size_t typeSize() const { return _rule.typeSize; }
+		TensorType type() const;
 
-		TensorSlot& setName(const std::string& name);
+		size_t typeSize() const;
 
-		TensorSlot& setShapes(const std::vector<int64_t>& shape);
+		Shape shape() const;
 
+		Shape dataShape() const;
 
-		bool operator==(const Tensor& data) const {
-			if (!_rule.check(data.shape())) {
-				return false;
-			}
-			if (_rule.type != TensorType::Void && _rule.type != data.type()) {
-				return false;
-			}
-			if (_rule.typeSize != 0 && _rule.typeSize != data.typeSize()) {
-				return false;
-			}
-			return true;
-		}
+		bool isInput() const;
+		bool isOutput() const;
 
-		const TensorSlot& operator<<(const Tensor& data) const {
-			return input(Tensor(data));
-		}
+		template<typename T>
+		bool isType() const;
 
-		const TensorSlot& operator<<(Tensor&& data) const {
-			return input(std::move(data));
-		}
+		TensorSlot& operator<<(const Tensor& data);
 
-		const TensorSlot& input(Tensor&& data) const {
-			if (*this != data) abort(ErrorType::TypeMismatch, "input tensor does not match slot requirements");
-			_data = std::make_unique<Tensor>(std::move(data));
-			return *this;
-		}
+		TensorSlot& operator<<(Tensor&& data);
 
-		const bool hasData() const {
-			return _data != nullptr || _defaultData != nullptr;
-		}
+		
+		bool hasData() const;
 
-		void clear() {
-			_data.reset();
-			_defaultData.reset();
-		}
+		bool hasDefaultData() const;
 
-		void clearData() const {
-			_data.reset();
-		}
+		bool hasDynamicData() const;
 
-		void operator>>(Tensor& data) const {
-			if (!hasData()) abort(ErrorType::InvalidPath, "no tensor data available");
-			if (_data) {
-				data = std::move(*_data);
-				_data.reset();
-			}
-			else {
-				data = Tensor(*_defaultData);
-			}
-		}
+		void clear();
 
-		Tensor& getTensor();
+		void clearData();
+
+		const Tensor& view() const;
+
+		TensorSlot& operator>>(Tensor& data);
+
+		bool check() const;
+		bool check(const Tensor& data) const;
+
+		Tensor takeTensor();
+
+		const Config& config() const;
+
+		static Config CreateConfig();
 
 	private:
-		InferBase* _infer = nullptr; // 归属的推理器
 		TensorMeta _rule;
 		std::unique_ptr<Tensor> _defaultData; // 默认数据
-		mutable std::unique_ptr<Tensor> _data;
+		std::unique_ptr<Tensor> _data;
+		TensorSlot::Config _config;
+
+		TensorSlot& input(Tensor&& data);
 
 		// 异常中止
 		void abort(
 			ErrorType errorType = ErrorType::Other,
 			const std::string& message = ""
-		) const {
-			std::string source = "TensorSlot";
-			if (!_rule.name.empty()) {
-				source += " (" + _rule.name + ")";
-			}
-			throw TensorException(errorType, source, message);
-		}
+		) const;
+
+		Tensor align(
+			const Shape& target,
+			std::byte fillData = {}
+		);
 	};
 
 	template<typename T>
 	TensorSlot CreateSlot(
 		const std::string& name,
-		const std::vector<int64_t>& shape = {}
+		const std::vector<int64_t>& shape,
+		const TensorSlot::Config& config
 	) {
 		return TensorSlot(
 			name,
 			Type::getType<TensorMeta::TensorType>(T()),
 			Type::getSize<TensorMeta::TensorType>(T()),
-			shape
+			shape,
+			config
 		);
+	}
+
+	// Template method definitions for TensorSlot
+	template<typename T>
+	bool TensorSlot::isType() const {
+		return type() == Type::getType<TensorMeta::TensorType>(T());
 	}
 }
