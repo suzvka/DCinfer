@@ -2,21 +2,19 @@
 #include <type_traits>
 #include <stdexcept>
 #include <optional>
+#include <functional>
 
 #include "Tensor.hpp"
 #include "Exception.h"
-
-
-class InferBase;
 
 namespace DC {
 	class TensorSlot {
 		using TensorType = TensorMeta::TensorType;
 		using ErrorType = TensorException::ErrorType;
-		using Shape = Tensor::Shape;
 		using DataBlock = Tensor::DataBlock;
 
 	public:
+		using Shape = Tensor::Shape;
 		class Config {
 		public:
 			enum class Type {
@@ -35,8 +33,6 @@ namespace DC {
 				Strict,
 				Lenient
 			};
-
-			bool allowShapeAlignment() const;
 
 			bool allowTypeConversion() const;
 
@@ -96,6 +92,11 @@ namespace DC {
 		
 		TensorSlot& read(Tensor& data);
 		TensorSlot& operator>>(Tensor& data);
+
+		template<typename InferTensor>
+		InferTensor convert(const std::function<InferTensor(const Tensor&)>& toExternal) {
+			return toExternal(view());
+		}
 		
 		bool hasData() const;
 
@@ -136,6 +137,66 @@ namespace DC {
 			const Shape& target,
 			std::byte fillData = {}
 		);
+	};
+
+	template<typename InferTensor>
+	class CurrencyTensorSlot : public TensorSlot {
+	public:
+		CurrencyTensorSlot(
+			const std::string& name, 
+			TensorMeta::TensorType type, 
+			size_t size, const Shape& shape, 
+			const std::function<Tensor(const InferTensor&)>& toInternal,
+			const std::function<InferTensor(const Tensor&)>& toExternal,
+			const Config& config = Config()
+		): TensorSlot(name, type, size, shape, config) {
+			_toInternal = toInternal;
+			_toExternal = toExternal;
+			if (!toInternal || !toExternal) {
+				throw std::invalid_argument("Conversion functions cannot be null");
+			}
+		}
+
+		CurrencyTensorSlot& operator<<(const InferTensor& data) {
+			_externalRef = &data;
+			_externalOwned.reset();
+			return *this;
+		}
+
+		CurrencyTensorSlot& operator<<(InferTensor&& data) {
+			_externalOwned = std::make_unique<InferTensor>(std::move(data));
+			_externalRef = _externalOwned.get();
+			return *this;
+		}
+
+		using TensorSlot::operator<<;
+
+		CurrencyTensorSlot& read(InferTensor& data) {
+			if (_externalRef) {
+				return *_externalRef;
+			}
+
+			if (!hasData()) {
+				throw std::runtime_error("Slot is empty");
+			}
+
+			_externalOwned = std::make_unique<InferTensor>(_toExternal(view()));
+			_externalRef = _externalOwned.get();
+
+			data = std::move(*_externalRef);
+			
+			return *this;
+		}
+
+		CurrencyTensorSlot & operator>>(InferTensor& data) {
+			return read(data);
+		}
+
+	private:
+		std::function<Tensor(const InferTensor&)> _toInternal; // 外部张量转内部张量
+		std::function<InferTensor(const Tensor&)> _toExternal; // 内部张量转外部张量
+		std::unique_ptr<InferTensor> _externalOwned;
+		const InferTensor* _externalRef = nullptr;
 	};
 
 	template<typename T>

@@ -113,13 +113,6 @@ namespace DC
 		template<typename T>
 		bool writeCacheElement(const Shape& fullPath, const T& value);
 
-        // 从稠密缓存读取数据；等价于当 hasCache() 时调用 read<T>(path)，否则返回空 span。
-        template<typename T>
-        std::span<const T> readCache(const Shape& path) const;
-
-		template<typename T>
-		T readCacheElement(const Shape& fullPath) const;
-
 		size_t typeSize() const { return _typeSize; }
 		void clear();
 		bool valid() const { return hasCache() || hasView(); }
@@ -181,9 +174,7 @@ namespace DC
 
 		DataBlock deposit(const std::vector<bool>& data);
 
-		// 从数据块中恢复指定类型的数据
-		template<typename T>
-		std::vector<T> explain(const DataBlock& block) const;
+
 
 		// Offset helpers (bytes)
 		// - blockPath: rank-1 indices, pointing to a full last-dimension block
@@ -443,16 +434,6 @@ namespace DC
 		return writeCache(fullPath, std::span<const T>(&value, 1));
 	}
 
-	template<typename T>
-	T TensorData::readCacheElement(const Shape& fullPath) const {
-		auto span = readCache<T>(fullPath);
-		return span.empty() ? T{} : span[0];
-	}
-
-	template<typename T>
-	std::span<const T> TensorData::readCache(const Shape& path) const {
-		return hasCache() ? read<T>(path) : std::span<const T>();
-	}
 
 	template<typename T>
 	TensorData::DataBlock TensorData::deposit(std::span<const T> data) {
@@ -473,30 +454,12 @@ namespace DC
 		return charData;
 	}
 
-	template<typename T>
-	std::vector<T> TensorData::explain(const DataBlock& block) const {
-		static_assert(std::is_trivially_copyable_v<T>, "TensorData::explain requires trivially copyable type");
-		std::vector<T> data(block.size() / sizeof(T));
-		if (!block.empty()) {
-			std::memcpy(data.data(), block.data(), block.size());
-		}
-		return data;
-	}
 
 	template<class Range>
 	bool TensorData::writeCacheByDeposit(const Shape& path, Range&& r, size_t typeSize, const char* apiName) {
 		return writeCacheRaw(path, deposit(std::forward<Range>(r)), typeSize, apiName);
 	}
 
-	template<>
-	inline std::vector<bool> TensorData::explain<bool>(const DataBlock& block) const {
-		std::vector<bool> data;
-		data.reserve(block.size());
-		for (std::byte c : block) {
-			data.push_back(c != std::byte());
-		}
-		return data;
-	}
 
 	template<typename T>
 	TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {

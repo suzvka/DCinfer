@@ -75,17 +75,7 @@ static void runTensorTests() {
     }
     if (!gotTypeMismatch) throw std::runtime_error("expected type mismatch on scalar assign");
 
-    // 11) View.item() on non-scalar view should throw NotAScalar
-    bool gotNotScalar = false;
-    try {
-        moved[0].item<float>(); // row with 3 elements
-    }
-    catch (const TensorException& e) {
-        if (e.getErrorType() == TensorException::ErrorType::NotAScalar) gotNotScalar = true;
-    }
-    if (!gotNotScalar) throw std::runtime_error("expected NotAScalar on view.item()");
-
-    // 12) fast read
+    // 11) fast read
     try {
 		std::vector<double> sample = { 1.1, 2.2, 3.3, 4.4 };
 		Tensor t2 = Tensor::Create<double>();

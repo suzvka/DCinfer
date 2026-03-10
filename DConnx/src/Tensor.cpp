@@ -37,20 +37,9 @@ namespace DC {
 	}
 
 
-    Tensor::View Tensor::operator[](int64_t index) {
-        return View(*this, { index });
-    }
-
-    Tensor::ConstView Tensor::operator[](int64_t index) const {
-        return ConstView(*this, { index });
-    }
-
-    Tensor::View Tensor::view() {
-        return View(*this);
-    }
-
-    Tensor::ConstView Tensor::view() const {
-        return ConstView(*this);
+    Tensor::View Tensor::operator[](int64_t index) const {
+		Shape path = { index }; // Handle empty shape case
+        return View(std::move(path), *this);
     }
 
     Tensor::Tensor(const Tensor& other) {

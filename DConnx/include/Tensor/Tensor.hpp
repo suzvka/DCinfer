@@ -29,10 +29,7 @@ namespace DC {
 		using Shape = std::vector<int64_t>; // 支持负数
 
 		virtual ~Tensor() = default;
-		template<bool IsConst> class ViewImpl;
-		
-		using View = ViewImpl<false>;
-		using ConstView = ViewImpl<true>;
+		class View;
 
 		Tensor();
 
@@ -51,11 +48,9 @@ namespace DC {
 
 		Tensor& setName(const std::string& name);
 
-		View operator[](int64_t index);
-		ConstView operator[](int64_t index) const;
+		View operator[](int64_t index) const;
 
 		View view();
-		ConstView view() const;
 
 		template<typename T>
 		T item() const;
@@ -122,7 +117,7 @@ namespace DC {
 
         // 向指定路径写标量（路径可指向一个元素或一个单元素子视图，支持广播）(会在错误时抛出)
         template<typename T>
-        void writeScalar(const Shape& path, const T& data);
+        void write(const Shape& path, const T& data);
 
 		// 从指定路径读取数据块并按 typeSize 解释为 T 元素的只读 span。路径语义同上。
 		template<typename T>
@@ -135,7 +130,7 @@ namespace DC {
 		// 拷贝数据和元信息
 		void moveFrom(Tensor&& other) noexcept;
 
-		std::vector<size_t> indexShape(const Shape& shape, bool isRead) const;
+		TensorData::Shape indexShape(const Shape& shape, bool isRead) const;
 
 		// 异常中止
 		void abort(
@@ -144,80 +139,49 @@ namespace DC {
 		) const;
 	};
 
-template<bool IsConst>
-class Tensor::ViewImpl {
+class Tensor::View {
 public:
-    using TensorType = std::conditional_t<IsConst, const Tensor, Tensor>;
+    View(Shape&& shape, Tensor& top):_shape(std::move(shape)), _top(top){}
 
-    // 构造函数：直接存储路径向量（移动或拷贝）
-    ViewImpl(TensorType& tensor) : _tensor(&tensor) {}  // 空路径
-    ViewImpl(TensorType& tensor, Shape path) 
-        : _tensor(&tensor), _path(std::move(path)) {}
+	View(Shape&& shape, const Tensor& top) :_shape(std::move(shape)), _top(const_cast<Tensor&>(top)) {}
 
-    // 索引操作：复制当前路径并追加索引，返回新视图
-    ViewImpl operator[](int64_t index) const {
-        ViewImpl next(*_tensor);
-        next._path = _path;          // 拷贝当前路径（小向量，成本可控）
-        next._path.push_back(index);  // 追加新索引
-        return next;
+    // 索引操作：返回一个新的链节点
+    View operator[](int64_t index) const {
+		_shape.push_back(index);
+        return View(std::move(_shape), _top);
     }
 
-	template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
-	ViewImpl& operator=(const std::vector<T>& data) {
-		set(data);
-		return *this;
+	// 赋值操作：代理调用顶层写入方法
+	template<typename T>
+	Tensor& operator=(const T& value) {
+		set(value);
+		return _top;
 	}
 
-    // 赋值（仅非 const 版本）
-    // Non-throwing try-set APIs (replace operator= for explicit error handling)
-    template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
-    void set(const std::vector<T>& data) {
-        _tensor->write(path(), data);
-    }
-
-    template<typename T, bool C = IsConst, typename = std::enable_if_t<!C>>
-    void set(const T& data) {
-        _tensor->writeScalar(path(), data);
-    }
-
-    // 读取数据 (single implementation usable on const and non-const views)
-    template<typename T>
-    std::vector<T> read() const {
-        auto span = _tensor->template read<T>(path());
-        return std::vector<T>(span.begin(), span.end());
-    }
-
-	// 获取视图对应的形状（从路径长度开始的剩余维度）
-	Shape shape() const {
-		auto full_shape = _tensor->shape();          // 获取原始形状
-		if (_path.size() > full_shape.size()) {
-			_tensor->abort(ErrorType::InvalidPath, "View path exceeds tensor rank.");
-		}
-		// 返回从路径长度开始的剩余维度
-		return Shape(
-			full_shape.begin() + _path.size(),
-			full_shape.end()
-		);
+	template<typename T>
+	Tensor& set(const T& value) {
+		_top.write(_shape, value);
+		return _top;
 	}
 
-	// 获取视图对应的秩（从路径长度开始的剩余维度数量）
-	size_t rank() const {
-		// shape() already returns the remaining dimensions after the path;
-		// its size is the rank of this view.
-		return shape().size();
+	template<typename T>
+	Tensor& item(const T& value = T()) {
+		_top.write(_shape, value);
+		return _top;
 	}
 
-    template<typename T>
-    T item() const {
-        return _tensor->template readScalar<T>(path());
-    }
+	template<typename T>
+	T readScalar() const {
+		return _top.readScalar<T>(_shape);
+	}
 
-    // 获取路径（返回 const 引用，避免拷贝）
-    const Shape& path() const { return _path; }
+	template<typename T>
+	std::span<const T> read() const {
+		return _top.read<T>(_shape);
+	}
 
-private:
-    TensorType* _tensor = nullptr;
-    Shape _path;   // 连续存储路径
+	mutable Shape _shape;
+	Tensor& _top;
 };
 
 	//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -333,7 +297,7 @@ private:
     }
 
     template<typename T>
-    void Tensor::writeScalar(const Shape& path, const T& data) {
+    void Tensor::write(const Shape& path, const T& data) {
         try {
             _data.editMode();
             _data.write(indexShape(path, false), data);

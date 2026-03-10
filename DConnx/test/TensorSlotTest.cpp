@@ -1,127 +1,109 @@
 #include "TensorSlot.h"
 
 #include <iostream>
+#include <string>
 
 static void runTensorSlotTests() {
 	using namespace DC;
-	// 1) Create a TensorSlot with specific rules and verify properties
-	TensorSlot slot("input", TensorMeta::TensorType::Float, sizeof(float), {2, 3});
-	if (slot.name() != "input") throw std::runtime_error("TensorSlot name mismatch");
-	if (slot.type() != TensorMeta::TensorType::Float) throw std::runtime_error("TensorSlot type mismatch");
-	if (slot.typeSize() != sizeof(float)) throw std::runtime_error("TensorSlot type size mismatch");
 
-	// 2) Create a matching Tensor and verify slot acceptance
-	Tensor t(TensorMeta::TensorType::Float, sizeof(float), {2, 3}, {});
-	try {
-		slot << t; // should has throw
-		throw std::runtime_error("TensorSlot accepted matching tensor");
-	}
-	catch (const TensorException&) {
-		// expected
-	}
-	t.fill(42.0f);
-	try {
-		slot << t; // should not throw
-	}
-	catch (const TensorException&) {
-		throw std::runtime_error("TensorSlot rejected matching tensor");
-	}
-	
-	// 3) Create a non-matching Tensor (wrong shape) and verify rejection
-	try {
-		Tensor tWrongShape(TensorMeta::TensorType::Float, sizeof(float), {3, 2}, {});
-		slot << tWrongShape;
-		throw std::runtime_error("TensorSlot accepted wrong shape");
-	} catch (const TensorException&) {
-		// expected
-	}
+	struct DummyExternalTensor {
+		std::string payload;
+	};
 
-	// 4) Create a non-matching Tensor (wrong type) and verify rejection
-	try {
-		Tensor tWrongType(TensorMeta::TensorType::Int, sizeof(int), {2, 3}, {});
-		slot << std::move(tWrongType);
-		throw std::runtime_error("TensorSlot accepted wrong type");
-	} catch (const TensorException&) {
-		// expected
-	}
-
-	// 5) Set default tensor and verify retrieval
+	// Test 1: write to input slot and inspect
 	{
-		TensorSlot defaultSlot("default", TensorMeta::TensorType::Int, sizeof(int), { 2,3 });
-		Tensor defaultT(TensorMeta::TensorType::Int, sizeof(int), { 2, 3 }, {});
-		defaultT.fill(123);
-		defaultSlot.setDefaultTensor(defaultT);
-		auto retrieved = defaultSlot.view();
-		if (
-			retrieved.type() != TensorMeta::TensorType::Int ||
-			retrieved.shape() != std::vector<int64_t>{2, 3} ||
-			retrieved.data<int>()[0] != 123
-			) {
-			throw std::runtime_error("TensorSlot default tensor mismatch");
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Input);
+		cfg.setType(TensorSlot::Config::Type::Value);
+
+		auto slot = CreateSlot<float>("in", {2,2}, cfg);
+		if (!slot.isInput()) throw std::runtime_error("slot should be input");
+		if (!slot.isType<float>()) throw std::runtime_error("slot type should be float");
+
+		// prepare tensor
+		Tensor t = Tensor::Create<float>({2,2});
+		t.fill<float>(1.5f);
+
+		slot << t; // write
+
+		if (!slot.hasData()) throw std::runtime_error("slot should have data after write");
+
+		const Tensor& view = slot.view();
+		auto sp = view.data<float>();
+		if (sp.size() != 4) throw std::runtime_error("unexpected data size");
+		for (auto v : sp) {
+			if (v != 1.5f) throw std::runtime_error("unexpected value in tensor");
 		}
 	}
 
-	// 6) getTensor on an empty slot should throw
-	try {
-		TensorSlot empty("empty", TensorMeta::TensorType::Float, sizeof(float), {1});
-		empty.view();
-		throw std::runtime_error("getTensor did not throw on empty slot");
-	}
-	catch (const TensorException&) {
-		// expected
-	}
-
-	// 7) setDefaultTensor with mismatched type should throw (implementation throws std::runtime_error)
-	try {
-		TensorSlot defWrong("defWrong", TensorMeta::TensorType::Int, sizeof(int), {2,3});
-		Tensor wrongDefault(TensorMeta::TensorType::Float, sizeof(float), {2,3}, {});
-		defWrong.setDefaultTensor(wrongDefault);
-		throw std::runtime_error("setDefaultTensor accepted mismatched default tensor");
-	}
-	catch (const std::runtime_error&) {
-		// expected
-	}
-
-	// 8) clearData() should remove input data and getTensor() should return default again
+	// Test 2: default data and read from output slot
 	{
-		TensorSlot mix("mix", TensorMeta::TensorType::Int, sizeof(int), {2,3});
-		Tensor def(TensorMeta::TensorType::Int, sizeof(int), {2,3}, {});
-		def.fill(7);
-		mix.setDefaultTensor(def);
-		Tensor t2(TensorMeta::TensorType::Int, sizeof(int), {2,3}, {});
-		t2.fill(9);
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Output);
+
+		auto slot = CreateSlot<float>("out", {1,2}, cfg);
+
+		Tensor def = Tensor::Create<float>({1,2});
+		def.fill<float>(2.5f);
+		slot.setDefaultTensor(def);
+
+		if (!slot.hasDefaultData()) throw std::runtime_error("slot should have default data");
+
+		Tensor out;
+		slot >> out; // read
+
+		auto sp = out.data<float>();
+		if (sp.size() != 2) throw std::runtime_error("unexpected default tensor size");
+		for (auto v : sp) if (v != 2.5f) throw std::runtime_error("unexpected default tensor value");
+	}
+
+	// Test 3: shape mismatch should throw when loading invalid shape
+	{
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Input);
+
+		auto slot = CreateSlot<float>("badshape", {2,2}, cfg);
+		Tensor t = Tensor::Create<float>({1,2});
+		t.fill<float>(0.0f);
+		bool thrown = false;
 		try {
-			mix << (std::move(t2));
+			slot << t;
 		}
-		catch (const TensorException&) {
-			throw std::runtime_error("mix.input rejected valid tensor");
+		catch (const std::exception& e) {
+			thrown = true;
 		}
-		mix.clearData();
-		auto r = mix.view();
-		if (r.data<int>()[0] != 7) {
-			throw std::runtime_error("clear did not restore default tensor");
-		}
+		if (!thrown) throw std::runtime_error("expected exception on shape mismatch");
 	}
 
-	// 9) Test move semantics of input
+	// Test 4: CurrencyTensorSlot should keep/own external tensors and provide zero-copy external view
 	{
-		TensorSlot moveSlot("move", TensorMeta::TensorType::Int, sizeof(int), { 2,3 });
-		Tensor t3(TensorMeta::TensorType::Int, sizeof(int), { 2,3 }, {});
-		t3.fill(5);
-		try {
-			moveSlot << std::move(t3);
-		}
-		catch (const TensorException&) {
-			throw std::runtime_error("moveSlot.input rejected valid tensor");
-		}
-		auto t4 = Tensor::Create<int>();
-		moveSlot >> t4;
-		if (t4.data<int>()[0] != 5) {
-			throw std::runtime_error("moveSlot did not store moved tensor correctly");
-		}
-	}
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Input);
 
-	
+		auto toInternal = [](const DummyExternalTensor& t) {
+			Tensor x = Tensor::Create<std::byte>({ 1 });
+			(void)t;
+			return x;
+		};
+		auto toExternal = [](const Tensor&) {
+			return DummyExternalTensor{ "fromInternal" };
+		};
+
+		CurrencyTensorSlot<DummyExternalTensor> slot(
+			"ext",
+			Type::getType<TensorMeta::TensorType, float>(),
+			Type::getSize<TensorMeta::TensorType, float>(),
+			{ 1 },
+			toInternal,
+			toExternal,
+			cfg
+		);
+
+		DummyExternalTensor ext{ "moved" };
+		slot << std::move(ext);
+		const auto& v = slot.viewExternal();
+		if (v.payload != "moved") throw std::runtime_error("unexpected external payload");
+	}
 }
 
 

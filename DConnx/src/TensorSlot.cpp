@@ -165,19 +165,16 @@ namespace DC {
 	TensorSlot::DataStatus TensorSlot::check(const Tensor& data) const {
 		DataStatus result;
 
-		if (!data.valid()) result.invalid = true;
+		if (!data.valid()) { 
+			result.invalid = true;
+			return result;
+		}
 
 		if (_config.requiredcheckType()) {
 			result.needConvert = type() != data.type();
 		}
 
-		bool shapeReady = _rule.checkShape(data.shape());
-		if (_config.allowShapeAlignment()) {
-			shapeReady ? (true) : (result.needAlign = true);
-		}
-		else {
-			result.invalid = !shapeReady;
-		}
+		result.needAlign = !_rule.checkShape(data.shape());
 
 		return result;
 	}
@@ -189,7 +186,7 @@ namespace DC {
 				abort(ErrorType::InvalidShape, "Input tensor is invalid");
 			}
 			if (checkResult.needConvert) {
-				; // Todo: 类型转换，当前依赖 Tensor 按位强转
+				abort(ErrorType::TypeMismatch, "Input tensor type mismatch and conversion is not allowed");
 			}
 			if (checkResult.needAlign) {
 				abort(ErrorType::ShapeMismatch, "Input tensor shape mismatch and alignment is not allowed");
@@ -198,11 +195,6 @@ namespace DC {
 
 		_data = std::make_unique<Tensor>(std::move(data));
 		return *this;
-	}
-
-
-	bool TensorSlot::Config::allowShapeAlignment() const {
-		return checkLevel == CheckLevel::Lenient;
 	}
 
 	bool TensorSlot::Config::allowTypeConversion() const {

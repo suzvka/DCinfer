@@ -1,12 +1,3 @@
-#include "InferBase.h"
-#include "tool.h"
+#include "Infer.h"
 
-namespace DC {
-	const InferBase::TensorList& InferBase::getInput() const {
-		return *inputList;
-	}
-
-	const InferBase::TensorList& InferBase::getOutput() const {
-		return *outputList;
-	}
-}
+// All current `InferBase` methods are header-only.
