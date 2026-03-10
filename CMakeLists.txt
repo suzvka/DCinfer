@@ -16,12 +16,12 @@ if (MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /utf-8")
 endif ()
 
-add_subdirectory(DConnx)
+add_subdirectory(DCinfer)
 
 # Optionally enable tests in subdirectories
-option(BUILD_TESTS "Build DConnx tests" ON)
+option(BUILD_TESTS "Build DCinfer tests" ON)
 if (BUILD_TESTS)
-    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DConnx/test/CMakeLists.txt)
-        add_subdirectory(DConnx/test)
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCinfer/test/CMakeLists.txt)
+        add_subdirectory(DCinfer/test)
     endif()
 endif()

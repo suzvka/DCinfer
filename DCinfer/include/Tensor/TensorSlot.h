@@ -173,7 +173,8 @@ namespace DC {
 
 		CurrencyTensorSlot& read(InferTensor& data) {
 			if (_externalRef) {
-				return *_externalRef;
+				data = *_externalRef;
+				return *this;
 			}
 
 			if (!hasData()) {

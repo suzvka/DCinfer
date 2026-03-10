@@ -79,10 +79,11 @@ static void runTensorSlotTests() {
 	{
 		TensorSlot::Config cfg = TensorSlot::CreateConfig();
 		cfg.setPosition(TensorSlot::Config::Position::Input);
-
 		auto toInternal = [](const DummyExternalTensor& t) {
-			Tensor x = Tensor::Create<std::byte>({ 1 });
+			// placeholder conversion: produce a float tensor from external
 			(void)t;
+			Tensor x = Tensor::Create<float>({ 1 });
+			x.fill<float>(0.0f);
 			return x;
 		};
 		auto toExternal = [](const Tensor&) {
@@ -99,10 +100,35 @@ static void runTensorSlotTests() {
 			cfg
 		);
 
+		// write external by rvalue: slot should take ownership
 		DummyExternalTensor ext{ "moved" };
 		slot << std::move(ext);
-		const auto& v = slot.viewExternal();
-		if (v.payload != "moved") throw std::runtime_error("unexpected external payload");
+
+		// read back external view (zero-copy ownership should preserve payload)
+		DummyExternalTensor got;
+		slot >> got;
+		if (got.payload != "moved") throw std::runtime_error("CurrencyTensorSlot failed to preserve moved external payload");
+
+		// Now test conversion path: write an internal tensor and read as external
+		CurrencyTensorSlot<DummyExternalTensor> slot2(
+			"ext2",
+			Type::getType<TensorMeta::TensorType, float>(),
+			Type::getSize<TensorMeta::TensorType, float>(),
+			{ 1 },
+			toInternal,
+			toExternal,
+			cfg
+		);
+
+		// prepare internal tensor matching slot2 type and shape
+		Tensor internal = Tensor::Create<float>({ 1 });
+		internal.fill<float>(3.14f);
+		slot2 << std::move(internal); // write internal data
+
+		DummyExternalTensor outExt;
+		slot2 >> outExt; // convert internal -> external
+		if (outExt.payload != "fromInternal") throw std::runtime_error("CurrencyTensorSlot conversion to external failed");
+
 	}
 }
 
