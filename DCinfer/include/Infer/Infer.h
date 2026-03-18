@@ -39,7 +39,7 @@ namespace DC {
 	class InferBase{
 	public:
 
-		using TensorList = std::unordered_map<std::string, TensorSlot>;
+		using TensorList = std::unordered_map<std::string, TensorSlotBase>;
 		using Shape = Tensor::Shape;
 
 		using Task = std::unordered_map<std::string, Tensor>;
@@ -102,7 +102,7 @@ namespace DC {
 	template<typename ExternalTensor, typename InferEngine>
 	class Infer : public InferBase {
 	public:
-		using SlotList = std::unordered_map<std::string, CurrencyTensorSlot<ExternalTensor>>;
+		using SlotList = std::unordered_map<std::string, TensorSlot<ExternalTensor>>;
 		using TensorList = std::vector<ExternalTensor>;
 		using TensorType = Tensor::TensorType;
 		using Shape = Tensor::Shape;

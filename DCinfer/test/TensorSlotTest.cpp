@@ -12,9 +12,9 @@ static void runTensorSlotTests() {
 
 	// Test 1: write to input slot and inspect
 	{
-		TensorSlot::Config cfg = TensorSlot::CreateConfig();
-		cfg.setPosition(TensorSlot::Config::Position::Input);
-		cfg.setType(TensorSlot::Config::Type::Value);
+		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
+		cfg.setPosition(TensorSlotBase::Config::Position::Input);
+		cfg.setType(TensorSlotBase::Config::Type::Value);
 
 		auto slot = CreateSlot<float>("in", {2,2}, cfg);
 		if (!slot.isInput()) throw std::runtime_error("slot should be input");
@@ -38,8 +38,8 @@ static void runTensorSlotTests() {
 
 	// Test 2: default data and read from output slot
 	{
-		TensorSlot::Config cfg = TensorSlot::CreateConfig();
-		cfg.setPosition(TensorSlot::Config::Position::Output);
+		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
+		cfg.setPosition(TensorSlotBase::Config::Position::Output);
 
 		auto slot = CreateSlot<float>("out", {1,2}, cfg);
 
@@ -59,8 +59,8 @@ static void runTensorSlotTests() {
 
 	// Test 3: shape mismatch should throw when loading invalid shape
 	{
-		TensorSlot::Config cfg = TensorSlot::CreateConfig();
-		cfg.setPosition(TensorSlot::Config::Position::Input);
+		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
+		cfg.setPosition(TensorSlotBase::Config::Position::Input);
 
 		auto slot = CreateSlot<float>("badshape", {2,2}, cfg);
 		Tensor t = Tensor::Create<float>({1,2});
@@ -75,10 +75,10 @@ static void runTensorSlotTests() {
 		if (!thrown) throw std::runtime_error("expected exception on shape mismatch");
 	}
 
-	// Test 4: CurrencyTensorSlot should keep/own external tensors and provide zero-copy external view
+	// Test 4: TensorSlot should keep/own external tensors and provide zero-copy external view
 	{
-		TensorSlot::Config cfg = TensorSlot::CreateConfig();
-		cfg.setPosition(TensorSlot::Config::Position::Input);
+		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
+		cfg.setPosition(TensorSlotBase::Config::Position::Input);
 		auto toInternal = [](const DummyExternalTensor& t) {
 			// placeholder conversion: produce a float tensor from external
 			(void)t;
@@ -90,7 +90,7 @@ static void runTensorSlotTests() {
 			return DummyExternalTensor{ "fromInternal" };
 		};
 
-		CurrencyTensorSlot<DummyExternalTensor> slot(
+		TensorSlot<DummyExternalTensor> slot(
 			"ext",
 			Type::getType<TensorMeta::TensorType, float>(),
 			Type::getSize<TensorMeta::TensorType, float>(),
@@ -107,10 +107,10 @@ static void runTensorSlotTests() {
 		// read back external view (zero-copy ownership should preserve payload)
 		DummyExternalTensor got;
 		slot >> got;
-		if (got.payload != "moved") throw std::runtime_error("CurrencyTensorSlot failed to preserve moved external payload");
+		if (got.payload != "moved") throw std::runtime_error("TensorSlot failed to preserve moved external payload");
 
 		// Now test conversion path: write an internal tensor and read as external
-		CurrencyTensorSlot<DummyExternalTensor> slot2(
+		TensorSlot<DummyExternalTensor> slot2(
 			"ext2",
 			Type::getType<TensorMeta::TensorType, float>(),
 			Type::getSize<TensorMeta::TensorType, float>(),
@@ -127,7 +127,7 @@ static void runTensorSlotTests() {
 
 		DummyExternalTensor outExt;
 		slot2 >> outExt; // convert internal -> external
-		if (outExt.payload != "fromInternal") throw std::runtime_error("CurrencyTensorSlot conversion to external failed");
+		if (outExt.payload != "fromInternal") throw std::runtime_error("TensorSlot conversion to external failed");
 
 	}
 }
@@ -138,7 +138,7 @@ int main() {
 	try {
 		runTensorSlotTests();
 
-		std::cout << "TensorSlot tests passed" << std::endl;
+		std::cout << "TensorSlotBase tests passed" << std::endl;
 		return 0;
 	}
 	catch(const std::exception& e) {

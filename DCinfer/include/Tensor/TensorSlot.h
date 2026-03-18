@@ -8,7 +8,7 @@
 #include "Exception.h"
 
 namespace DC {
-	class TensorSlot {
+	class TensorSlotBase {
 		using TensorType = TensorMeta::TensorType;
 		using ErrorType = TensorException::ErrorType;
 		using DataBlock = Tensor::DataBlock;
@@ -55,12 +55,12 @@ namespace DC {
 			bool ready() const;
 		};
 
-		TensorSlot(const TensorSlot&) = delete;
-		TensorSlot& operator=(const TensorSlot&) = delete;
-		TensorSlot(TensorSlot&&) noexcept = default;
-		TensorSlot& operator=(TensorSlot&&) noexcept = default;
+		TensorSlotBase(const TensorSlotBase&) = delete;
+		TensorSlotBase& operator=(const TensorSlotBase&) = delete;
+		TensorSlotBase(TensorSlotBase&&) noexcept = default;
+		TensorSlotBase& operator=(TensorSlotBase&&) noexcept = default;
 
-		TensorSlot(
+		TensorSlotBase(
 			const std::string& name,
 			TensorMeta::TensorType type,
 			size_t size,
@@ -68,7 +68,7 @@ namespace DC {
 			const Config& config = Config()
 		);
 
-		TensorSlot& setDefaultTensor(const Tensor& data);
+		TensorSlotBase& setDefaultTensor(const Tensor& data);
 
 		const std::string& name() const;
 
@@ -86,12 +86,12 @@ namespace DC {
 		template<typename T>
 		bool isType() const;
 
-		TensorSlot& write(Tensor&& data);
-		TensorSlot& operator<<(Tensor&& data);
-		TensorSlot& operator<<(const Tensor& data);
+		TensorSlotBase& write(Tensor&& data);
+		TensorSlotBase& operator<<(Tensor&& data);
+		TensorSlotBase& operator<<(const Tensor& data);
 		
-		TensorSlot& read(Tensor& data);
-		TensorSlot& operator>>(Tensor& data);
+		TensorSlotBase& read(Tensor& data);
+		TensorSlotBase& operator>>(Tensor& data);
 
 		template<typename InferTensor>
 		InferTensor convert(const std::function<InferTensor(const Tensor&)>& toExternal) {
@@ -117,12 +117,12 @@ namespace DC {
 
 		static Config CreateConfig();
 
-		TensorSlot& loadData(Tensor&& data);
+		TensorSlotBase& loadData(Tensor&& data);
 	private:
 		TensorMeta _rule;
 		std::unique_ptr<Tensor> _defaultData; // 默认数据
 		std::unique_ptr<Tensor> _data;
-		TensorSlot::Config _config;
+		TensorSlotBase::Config _config;
 
 		Tensor takeTensor();
 
@@ -140,16 +140,16 @@ namespace DC {
 	};
 
 	template<typename InferTensor>
-	class CurrencyTensorSlot : public TensorSlot {
+	class TensorSlot : public TensorSlotBase {
 	public:
-		CurrencyTensorSlot(
+		TensorSlot(
 			const std::string& name, 
 			TensorMeta::TensorType type, 
 			size_t size, const Shape& shape, 
 			const std::function<Tensor(const InferTensor&)>& toInternal,
 			const std::function<InferTensor(const Tensor&)>& toExternal,
 			const Config& config = Config()
-		): TensorSlot(name, type, size, shape, config) {
+		): TensorSlotBase(name, type, size, shape, config) {
 			_toInternal = toInternal;
 			_toExternal = toExternal;
 			if (!toInternal || !toExternal) {
@@ -157,21 +157,21 @@ namespace DC {
 			}
 		}
 
-		CurrencyTensorSlot& operator<<(const InferTensor& data) {
+		TensorSlot& operator<<(const InferTensor& data) {
 			_externalRef = &data;
 			_externalOwned.reset();
 			return *this;
 		}
 
-		CurrencyTensorSlot& operator<<(InferTensor&& data) {
+		TensorSlot& operator<<(InferTensor&& data) {
 			_externalOwned = std::make_unique<InferTensor>(std::move(data));
 			_externalRef = _externalOwned.get();
 			return *this;
 		}
 
-		using TensorSlot::operator<<;
+		using TensorSlotBase::operator<<;
 
-		CurrencyTensorSlot& read(InferTensor& data) {
+		TensorSlot& read(InferTensor& data) {
 			if (_externalRef) {
 				data = *_externalRef;
 				return *this;
@@ -189,7 +189,7 @@ namespace DC {
 			return *this;
 		}
 
-		CurrencyTensorSlot & operator>>(InferTensor& data) {
+		TensorSlot& operator>>(InferTensor& data) {
 			return read(data);
 		}
 
@@ -201,12 +201,12 @@ namespace DC {
 	};
 
 	template<typename T>
-	TensorSlot CreateSlot(
+	TensorSlotBase CreateSlot(
 		const std::string& name,
 		const std::vector<int64_t>& shape,
-		const TensorSlot::Config& config
+		const TensorSlotBase::Config& config
 	) {
-		return TensorSlot(
+		return TensorSlotBase(
 			name,
 			Type::getType<TensorMeta::TensorType>(T()),
 			Type::getSize<TensorMeta::TensorType>(T()),
@@ -215,9 +215,9 @@ namespace DC {
 		);
 	}
 
-	// Template method definitions for TensorSlot
+	// Template method definitions for TensorSlotBase
 	template<typename T>
-	bool TensorSlot::isType() const {
+	bool TensorSlotBase::isType() const {
 		return type() == Type::getType<TensorMeta::TensorType, T>();
 	}
 }

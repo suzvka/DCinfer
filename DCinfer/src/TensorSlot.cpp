@@ -3,7 +3,7 @@
 namespace DC {
 	using TensorType = TensorMeta::TensorType;
 
-	TensorSlot::TensorSlot(
+	TensorSlotBase::TensorSlotBase(
 		const std::string& name,
 		TensorMeta::TensorType type,
 		size_t typeSize,
@@ -17,21 +17,21 @@ namespace DC {
 		_config = config;
 	}
 
-	TensorSlot& TensorSlot::setDefaultTensor(const Tensor& data) {
+	TensorSlotBase& TensorSlotBase::setDefaultTensor(const Tensor& data) {
 		_defaultData = std::make_unique<Tensor>(data);
 
 		return *this;
 	}
 
-	const std::string& TensorSlot::name() const { return _rule.name; }
+	const std::string& TensorSlotBase::name() const { return _rule.name; }
 
-	TensorType TensorSlot::type() const { return _rule.type; }
+	TensorType TensorSlotBase::type() const { return _rule.type; }
 
-	size_t TensorSlot::typeSize() const { return _rule.typeSize; }
+	size_t TensorSlotBase::typeSize() const { return _rule.typeSize; }
 
-	TensorSlot::Shape TensorSlot::shape() const { return _rule.shape; }
+	TensorSlotBase::Shape TensorSlotBase::shape() const { return _rule.shape; }
 
-	TensorSlot::Shape TensorSlot::dataShape() const {
+	TensorSlotBase::Shape TensorSlotBase::dataShape() const {
 		if (_data) {
 			return _data->shape();
 		}
@@ -43,48 +43,48 @@ namespace DC {
 		}
 	}
 
-	bool TensorSlot::isInput() const { return _config.position == Config::Position::Input; }
-	bool TensorSlot::isOutput() const { return _config.position == Config::Position::Output; }
+	bool TensorSlotBase::isInput() const { return _config.position == Config::Position::Input; }
+	bool TensorSlotBase::isOutput() const { return _config.position == Config::Position::Output; }
 
-	TensorSlot& TensorSlot::operator<<(const Tensor& data) {
+	TensorSlotBase& TensorSlotBase::operator<<(const Tensor& data) {
 		return write(Tensor(data));
 	}
 
-	TensorSlot& TensorSlot::operator<<(Tensor&& data) {
+	TensorSlotBase& TensorSlotBase::operator<<(Tensor&& data) {
 		return write(std::move(data));
 	}
 
-	TensorSlot& TensorSlot::write(Tensor&& data) {
+	TensorSlotBase& TensorSlotBase::write(Tensor&& data) {
 		if (_config.position != Config::Position::Input) {
 			abort(ErrorType::InvalidPath, "Cannot write to output slot");
 		}
 		return loadData(std::move(data));
 	}
 
-	bool TensorSlot::hasData() const { return _data != nullptr || _defaultData != nullptr; }
+	bool TensorSlotBase::hasData() const { return _data != nullptr || _defaultData != nullptr; }
 
-	bool TensorSlot::hasDefaultData() const { return _defaultData != nullptr; }
+	bool TensorSlotBase::hasDefaultData() const { return _defaultData != nullptr; }
 
-	bool TensorSlot::hasDynamicData() const { return _data != nullptr; }
+	bool TensorSlotBase::hasDynamicData() const { return _data != nullptr; }
 
-	void TensorSlot::clear() { _data.reset(); _defaultData.reset(); }
+	void TensorSlotBase::clear() { _data.reset(); _defaultData.reset(); }
 
-	void TensorSlot::clearData() { _data.reset(); }
+	void TensorSlotBase::clearData() { _data.reset(); }
 
-	const Tensor& TensorSlot::view() const {
+	const Tensor& TensorSlotBase::view() const {
 		if (!_data && !_defaultData) {
 			abort(ErrorType::NotData, "Slot is empty");
 		}
 		return _data ? *_data : *_defaultData;
 	}
 
-	const TensorSlot::Config& TensorSlot::config() const { return _config; }
+	const TensorSlotBase::Config& TensorSlotBase::config() const { return _config; }
 
-	TensorSlot::Config TensorSlot::CreateConfig() { return Config(); }
+	TensorSlotBase::Config TensorSlotBase::CreateConfig() { return Config(); }
 
-	Tensor TensorSlot::takeTensor() {
+	Tensor TensorSlotBase::takeTensor() {
 		if (!hasData()) {
-			abort(ErrorType::NotData, "TensorSlot has no data.");
+			abort(ErrorType::NotData, "TensorSlotBase has no data.");
 		}
 
 		if (!_data) {
@@ -94,18 +94,18 @@ namespace DC {
 		return std::move(*_data);
 	}
 
-	void TensorSlot::abort(
+	void TensorSlotBase::abort(
 		ErrorType errorType,
 		const std::string& message
 	) const {
-		std::string source = "TensorSlot";
+		std::string source = "TensorSlotBase";
 		if (!_rule.name.empty()) {
 			source += " (" + _rule.name + ")";
 		}
 		throw TensorException(errorType, source, message);
 	}
 
-	Tensor TensorSlot::align(
+	Tensor TensorSlotBase::align(
 		const Shape& target,
 		std::byte fillData
 	) {
@@ -114,7 +114,7 @@ namespace DC {
 		auto currentShape = dataShape();
 
 		if (currentShape.size() != targetShape.size()) {
-			abort(ErrorType::ShapeMismatch, "TensorSlot shape mismatch");
+			abort(ErrorType::ShapeMismatch, "TensorSlotBase shape mismatch");
 		}
 
 		for (size_t i = 0; i < currentShape.size(); ++i) {
@@ -132,7 +132,7 @@ namespace DC {
 		return tensor;
 	}
 
-	TensorSlot& TensorSlot::read(Tensor& data) {
+	TensorSlotBase& TensorSlotBase::read(Tensor& data) {
 		if (_config.position != Config::Position::Output) {
 			abort(ErrorType::InvalidPath, "Cannot read from input slot");
 		}
@@ -154,15 +154,15 @@ namespace DC {
 		return *this;
 	}
 
-	TensorSlot& TensorSlot::operator>>(Tensor& data) {
+	TensorSlotBase& TensorSlotBase::operator>>(Tensor& data) {
 		return read(data);
 	}
 
-	TensorSlot::DataStatus TensorSlot::check() const {
+	TensorSlotBase::DataStatus TensorSlotBase::check() const {
 		return check(view());
 	}
 
-	TensorSlot::DataStatus TensorSlot::check(const Tensor& data) const {
+	TensorSlotBase::DataStatus TensorSlotBase::check(const Tensor& data) const {
 		DataStatus result;
 
 		if (!data.valid()) { 
@@ -179,7 +179,7 @@ namespace DC {
 		return result;
 	}
 
-	TensorSlot& TensorSlot::loadData(Tensor&& data) {
+	TensorSlotBase& TensorSlotBase::loadData(Tensor&& data) {
 		auto checkResult = check(data);
 		if (!checkResult.ready()) {
 			if (checkResult.invalid) {
@@ -197,11 +197,11 @@ namespace DC {
 		return *this;
 	}
 
-	bool TensorSlot::Config::allowTypeConversion() const {
+	bool TensorSlotBase::Config::allowTypeConversion() const {
 		return checkLevel == CheckLevel::Lenient;
 	}
 
-	bool TensorSlot::Config::requiredcheckType() const {
+	bool TensorSlotBase::Config::requiredcheckType() const {
 		if (type == Type::Value) {
 			return true;
 		}
@@ -210,22 +210,22 @@ namespace DC {
 		}
 	}
 
-	TensorSlot::Config& TensorSlot::Config::setType(Type t) {
+	TensorSlotBase::Config& TensorSlotBase::Config::setType(Type t) {
 		type = t;
 		return *this;
 	}
 
-	TensorSlot::Config& TensorSlot::Config::setPosition(Position p) {
+	TensorSlotBase::Config& TensorSlotBase::Config::setPosition(Position p) {
 		position = p;
 		return *this;
 	}
 
-	TensorSlot::Config& TensorSlot::Config::setCheckLevel(CheckLevel level) {
+	TensorSlotBase::Config& TensorSlotBase::Config::setCheckLevel(CheckLevel level) {
 		checkLevel = level;
 		return *this;
 	}
 
-	bool TensorSlot::DataStatus::ready() const {
+	bool TensorSlotBase::DataStatus::ready() const {
 		return !invalid && !needAlign && !needConvert;
 	}
 }
