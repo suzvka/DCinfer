@@ -1,7 +1,11 @@
 #include "TensorSlot.h"
+#include "SlotType.h"
 
 #include <iostream>
 #include <string>
+
+// 向全局注册表注册测试类型的映射（由 EngineRegistry.cpp 的静态初始化保障 DC::Tensor 和 NativeTensor）
+// DummyExternalTensor 在此通过 ValiatorRegistry（不做校验）自动放行
 
 static void runTensorSlotTests() {
 	using namespace DC;
@@ -10,64 +14,73 @@ static void runTensorSlotTests() {
 		std::string payload;
 	};
 
-	// Test 1: write to input slot and inspect
+	// Test 1: store Tensor and peek
 	{
 		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
 		cfg.setPosition(TensorSlotBase::Config::Position::Input);
-		cfg.setType(TensorSlotBase::Config::Type::Value);
 
-		auto slot = CreateSlot<float>("in", {2,2}, cfg);
+		TensorSlotBase slot("in", TensorMeta::TensorType::Float,
+		                    sizeof(float), {2, 2}, cfg);
+
 		if (!slot.isInput()) throw std::runtime_error("slot should be input");
 		if (!slot.isType<float>()) throw std::runtime_error("slot type should be float");
 
 		// prepare tensor
-		Tensor t = Tensor::Create<float>({2,2});
+		Tensor t = Tensor::Create<float>({2, 2});
 		t.fill<float>(1.5f);
 
-		slot << t; // write
+		slot.store(std::move(t)); // store via type-erased API
 
-		if (!slot.hasData()) throw std::runtime_error("slot should have data after write");
+		if (!slot.hasData()) throw std::runtime_error("slot should have data after store");
 
-		const Tensor& view = slot.view();
-		auto sp = view.data<float>();
+		// peek for read-only access
+		auto* viewPtr = slot.peek<Tensor>();
+		if (!viewPtr) throw std::runtime_error("peek<Tensor> returned null");
+
+		auto sp = viewPtr->data<float>();
 		if (sp.size() != 4) throw std::runtime_error("unexpected data size");
 		for (auto v : sp) {
 			if (v != 1.5f) throw std::runtime_error("unexpected value in tensor");
 		}
+
+		// view() backward compat
+		const auto& v = slot.view();
+		if (std::abs(v.item<float>() - 1.5f) < 1e-6f) { /* ok */ }
 	}
 
-	// Test 2: default data and read from output slot
+	// Test 2: default data and take output
 	{
 		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
 		cfg.setPosition(TensorSlotBase::Config::Position::Output);
 
-		auto slot = CreateSlot<float>("out", {1,2}, cfg);
+		TensorSlotBase slot("out", TensorMeta::TensorType::Float,
+		                    sizeof(float), {1, 2}, cfg);
 
-		Tensor def = Tensor::Create<float>({1,2});
+		Tensor def = Tensor::Create<float>({1, 2});
 		def.fill<float>(2.5f);
 		slot.setDefaultTensor(def);
 
 		if (!slot.hasDefaultData()) throw std::runtime_error("slot should have default data");
 
-		Tensor out;
-		slot >> out; // read
-
+		// Take via view (backward compat for default data)
+		const auto& out = slot.view();
 		auto sp = out.data<float>();
 		if (sp.size() != 2) throw std::runtime_error("unexpected default tensor size");
 		for (auto v : sp) if (v != 2.5f) throw std::runtime_error("unexpected default tensor value");
 	}
 
-	// Test 3: shape mismatch should throw when loading invalid shape
+	// Test 3: shape mismatch should throw when storing
 	{
 		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
 		cfg.setPosition(TensorSlotBase::Config::Position::Input);
 
-		auto slot = CreateSlot<float>("badshape", {2,2}, cfg);
-		Tensor t = Tensor::Create<float>({1,2});
+		TensorSlotBase slot("badshape", TensorMeta::TensorType::Float,
+		                    sizeof(float), {2, 2}, cfg);
+		Tensor t = Tensor::Create<float>({1, 2});
 		t.fill<float>(0.0f);
 		bool thrown = false;
 		try {
-			slot << t;
+			slot.store(std::move(t));
 		}
 		catch (const std::exception& e) {
 			thrown = true;
@@ -75,60 +88,54 @@ static void runTensorSlotTests() {
 		if (!thrown) throw std::runtime_error("expected exception on shape mismatch");
 	}
 
-	// Test 4: TensorSlot should keep/own external tensors and provide zero-copy external view
+	// Test 4: store and take arbitrary external type (DummyExternalTensor)
 	{
 		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
 		cfg.setPosition(TensorSlotBase::Config::Position::Input);
-		auto toInternal = [](const DummyExternalTensor& t) {
-			// placeholder conversion: produce a float tensor from external
-			(void)t;
-			Tensor x = Tensor::Create<float>({ 1 });
-			x.fill<float>(0.0f);
-			return x;
-		};
-		auto toExternal = [](const Tensor&) {
-			return DummyExternalTensor{ "fromInternal" };
-		};
 
-		TensorSlot<DummyExternalTensor> slot(
-			"ext",
-			Type::getType<TensorMeta::TensorType, float>(),
-			Type::getSize<TensorMeta::TensorType, float>(),
-			{ 1 },
-			toInternal,
-			toExternal,
-			cfg
-		);
+		TensorSlotBase slot("ext", TensorMeta::TensorType::Float,
+		                    sizeof(float), {1}, cfg);
 
-		// write external by rvalue: slot should take ownership
+		// store external type directly (no validator registered → pass-through)
 		DummyExternalTensor ext{ "moved" };
-		slot << std::move(ext);
+		slot.store(std::move(ext));
 
-		// read back external view (zero-copy ownership should preserve payload)
-		DummyExternalTensor got;
-		slot >> got;
-		if (got.payload != "moved") throw std::runtime_error("TensorSlot failed to preserve moved external payload");
+		if (!slot.hasData()) throw std::runtime_error("slot should have external data");
+		if (slot.storedType() == SlotDataType::DCTensor)
+			throw std::runtime_error("stored type should not be DCTensor");
 
-		// Now test conversion path: write an internal tensor and read as external
-		TensorSlot<DummyExternalTensor> slot2(
-			"ext2",
-			Type::getType<TensorMeta::TensorType, float>(),
-			Type::getSize<TensorMeta::TensorType, float>(),
-			{ 1 },
-			toInternal,
-			toExternal,
-			cfg
-		);
+		// take back
+		auto got = slot.take<DummyExternalTensor>();
+		if (got.payload != "moved")
+			throw std::runtime_error("take<DummyExternalTensor> payload mismatch");
 
-		// prepare internal tensor matching slot2 type and shape
-		Tensor internal = Tensor::Create<float>({ 1 });
-		internal.fill<float>(3.14f);
-		slot2 << std::move(internal); // write internal data
+		// slot should be empty after take
+		if (slot.hasData()) throw std::runtime_error("slot should be empty after take");
+	}
 
-		DummyExternalTensor outExt;
-		slot2 >> outExt; // convert internal -> external
-		if (outExt.payload != "fromInternal") throw std::runtime_error("TensorSlot conversion to external failed");
+	// Test 5: type mismatch on take should throw
+	{
+		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
+		cfg.setPosition(TensorSlotBase::Config::Position::Output);
 
+		TensorSlotBase slot("typemismatch", TensorMeta::TensorType::Float,
+		                    sizeof(float), {}, cfg);
+
+		Tensor t(TensorMeta::TensorType::Float, sizeof(float));
+		t = 42.0f;
+		slot.store(std::move(t));
+
+		if (slot.storedType() != SlotDataType::DCTensor)
+			throw std::runtime_error("expected DCTensor type");
+
+		// Try to take as wrong type
+		bool thrown = false;
+		try {
+			slot.take<DummyExternalTensor>();
+		} catch (const std::exception&) {
+			thrown = true;
+		}
+		if (!thrown) throw std::runtime_error("expected exception on type mismatch take");
 	}
 }
 

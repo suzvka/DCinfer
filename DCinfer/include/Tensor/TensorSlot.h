@@ -3,56 +3,35 @@
 #include <stdexcept>
 #include <optional>
 #include <functional>
+#include <memory>
 
 #include "Tensor.hpp"
 #include "Exception.h"
+#include "DCtype.h"
+#include "SlotType.h"
+#include "Tensor/NativeTensor.h"
+#include <iostream>
 
 namespace DC {
 	class TensorSlotBase {
 		using TensorType = TensorMeta::TensorType;
-		using ErrorType = TensorException::ErrorType;
-		using DataBlock = Tensor::DataBlock;
+		using ErrorType  = TensorException::ErrorType;
 
 	public:
 		using Shape = Tensor::Shape;
+
+		// ── 配置（精简后）──
 		class Config {
 		public:
-			enum class Type {
-				Value,
-				Data,
-				Auto
-			};
-
 			enum class Position {
 				Input,
 				Output,
 				Auto
 			};
 
-			enum class CheckLevel {
-				Strict,
-				Lenient
-			};
-
-			bool allowTypeConversion() const;
-
-			bool requiredcheckType() const;
-
-			Config& setType(Type t);
 			Config& setPosition(Position p);
-			Config& setCheckLevel(CheckLevel level);
 
-			Type type = Type::Auto;
 			Position position = Position::Auto;
-			CheckLevel checkLevel = CheckLevel::Strict;
-		};
-
-		struct DataStatus {
-			bool needAlign = false; // 需要形状对齐
-			bool needConvert = false; // 需要类型转换
-			bool invalid = false; // 数据无效
-
-			bool ready() const;
 		};
 
 		TensorSlotBase(const TensorSlotBase&) = delete;
@@ -68,156 +47,167 @@ namespace DC {
 			const Config& config = Config()
 		);
 
+		// ── 元数据（仅与 DC::Tensor 有关）──
 		TensorSlotBase& setDefaultTensor(const Tensor& data);
 
-		const std::string& name() const;
+		const std::string& name()      const;
+		TensorType          type()      const;
+		size_t              typeSize()  const;
+		Shape               shape()     const;
+		Shape               dataShape() const;
 
-		TensorType type() const;
-
-		size_t typeSize() const;
-
-		Shape shape() const;
-
-		Shape dataShape() const;
-
-		bool isInput() const;
+		bool isInput()  const;
 		bool isOutput() const;
+
+		bool hasDefaultData() const;
+		const Tensor& defaultTensor() const;
 
 		template<typename T>
 		bool isType() const;
 
-		TensorSlotBase& write(Tensor&& data);
-		TensorSlotBase& operator<<(Tensor&& data);
-		TensorSlotBase& operator<<(const Tensor& data);
-		
-		TensorSlotBase& read(Tensor& data);
-		TensorSlotBase& operator>>(Tensor& data);
+		// ── 运行时存储：类型擦除 ──
+		// store：通过 DC::Type 推导 SlotDataType，经 ValidatorRegistry 校验后存储
+		template<typename T>
+		TensorSlotBase& store(T&& data);
 
-		template<typename InferTensor>
-		InferTensor convert(const std::function<InferTensor(const Tensor&)>& toExternal) {
-			return toExternal(view());
-		}
-		
-		bool hasData() const;
+		// take：移动取出，运行时检查类型标签是否匹配
+		template<typename T>
+		T take();
 
-		bool hasDefaultData() const;
+		// peek：只读指针，类型不匹配返回 nullptr
+		template<typename T>
+		const T* peek() const;
 
-		bool hasDynamicData() const;
-
-		void clear();
-
-		void clearData();
-
+		// 便捷方法：以 const Tensor& 获取 DC::Tensor 数据
+		// 仅当 storedType() == SlotDataType::DCTensor 时有效
 		const Tensor& view() const;
 
-		DataStatus check() const;
-		DataStatus check(const Tensor& data) const;
+		bool              hasData()     const;
+		SlotDataType      storedType()  const;
+		const void*       rawPtr()      const;
+
+		void clear();
+		void clearData();
 
 		const Config& config() const;
-
 		static Config CreateConfig();
 
-		TensorSlotBase& loadData(Tensor&& data);
 	private:
-		TensorMeta _rule;
-		std::unique_ptr<Tensor> _defaultData; // 默认数据
-		std::unique_ptr<Tensor> _data;
-		TensorSlotBase::Config _config;
+		// ── 类型擦除存储 ──
+		struct TypedBlob {
+			void*                      ptr = nullptr;
+			std::function<void(void*)> deleter;
+			SlotDataType               type = SlotDataType::Unknown;
+		};
 
-		Tensor takeTensor();
+		TensorMeta              _rule;
+		std::unique_ptr<Tensor> _defaultData;  // 默认数据（永远是 DC::Tensor）
+		std::optional<TypedBlob> _blob;         // 运行时数据
+		Config                  _config;
 
-		// 异常中止
-		void abort(
+		[[noreturn]] void abort(
 			ErrorType errorType = ErrorType::Other,
 			const std::string& message = ""
 		) const;
-
-		// Todo：移到上层
-		Tensor align(
-			const Shape& target,
-			std::byte fillData = {}
-		);
 	};
 
-	template<typename InferTensor>
-	class TensorSlot : public TensorSlotBase {
-	public:
-		TensorSlot(
-			const std::string& name, 
-			TensorMeta::TensorType type, 
-			size_t size, const Shape& shape, 
-			const std::function<Tensor(const InferTensor&)>& toInternal,
-			const std::function<InferTensor(const Tensor&)>& toExternal,
-			const Config& config = Config()
-		): TensorSlotBase(name, type, size, shape, config) {
-			_toInternal = toInternal;
-			_toExternal = toExternal;
-			if (!toInternal || !toExternal) {
-				throw std::invalid_argument("Conversion functions cannot be null");
-			}
-		}
-
-		TensorSlot& operator<<(const InferTensor& data) {
-			_externalRef = &data;
-			_externalOwned.reset();
-			return *this;
-		}
-
-		TensorSlot& operator<<(InferTensor&& data) {
-			_externalOwned = std::make_unique<InferTensor>(std::move(data));
-			_externalRef = _externalOwned.get();
-			return *this;
-		}
-
-		using TensorSlotBase::operator<<;
-
-		TensorSlot& read(InferTensor& data) {
-			if (_externalRef) {
-				data = *_externalRef;
-				return *this;
-			}
-
-			if (!hasData()) {
-				throw std::runtime_error("Slot is empty");
-			}
-
-			_externalOwned = std::make_unique<InferTensor>(_toExternal(view()));
-			_externalRef = _externalOwned.get();
-
-			data = std::move(*_externalRef);
-			
-			return *this;
-		}
-
-		TensorSlot& operator>>(InferTensor& data) {
-			return read(data);
-		}
-
-	private:
-		std::function<Tensor(const InferTensor&)> _toInternal; // 外部张量转内部张量
-		std::function<InferTensor(const Tensor&)> _toExternal; // 内部张量转外部张量
-		std::unique_ptr<InferTensor> _externalOwned;
-		const InferTensor* _externalRef = nullptr;
-	};
-
-	template<typename T>
-	TensorSlotBase CreateSlot(
-		const std::string& name,
-		const std::vector<int64_t>& shape,
-		const TensorSlotBase::Config& config
-	) {
-		return TensorSlotBase(
-			name,
-			Type::getType<TensorMeta::TensorType>(T()),
-			Type::getSize<TensorMeta::TensorType>(T()),
-			shape,
-			config
-		);
-	}
-
-	// Template method definitions for TensorSlotBase
+	// Template method definitions
 	template<typename T>
 	bool TensorSlotBase::isType() const {
 		return type() == Type::getType<TensorMeta::TensorType, T>();
+	}
+
+	template<typename T>
+	TensorSlotBase& TensorSlotBase::store(T&& data) {
+		ValidatorRegistry::ensureDefaults();  // 保证默认注册已执行（std::call_once）
+		auto typeEnum = DC::Type::getType<SlotDataType, std::decay_t<T>>();
+
+		// NativeTensor 解析内部类型做校验路由
+		SlotDataType validateType = typeEnum;
+		if constexpr (std::is_same_v<std::decay_t<T>, NativeTensor>) {
+			validateType = data.innerType();
+		}
+
+        // 校验
+		auto status = ValidatorRegistry::instance().validate(
+			std::addressof(data), validateType, _rule);
+
+		// Diagnostic log
+		try {
+			std::cerr << "TensorSlot::store name='" << _rule.name << "' typeEnum="
+					  << static_cast<int>(typeEnum) << " validateType="
+					  << static_cast<int>(validateType)
+					  << " status.ready=" << status.ready()
+					  << " invalid=" << status.invalid
+					  << " needConvert=" << status.needConvert
+					  << " needAlign=" << status.needAlign
+					  << std::endl;
+		} catch(...) {}
+
+		if (!status.ready()) {
+			if (status.invalid) {
+				abort(ErrorType::InvalidShape, "Input data is invalid");
+			}
+			if (status.needConvert) {
+				abort(ErrorType::TypeMismatch, "Type mismatch and conversion not allowed");
+			}
+			if (status.needAlign) {
+				abort(ErrorType::ShapeMismatch, "Shape mismatch and alignment not allowed");
+			}
+		}
+
+		// 释放旧数据
+		if (_blob.has_value() && _blob->deleter && _blob->ptr) {
+			_blob->deleter(_blob->ptr);
+		}
+
+		// 类型擦除存储
+		TypedBlob blob;
+		blob.type = typeEnum;
+		blob.ptr  = new std::decay_t<T>(std::forward<T>(data));
+		blob.deleter = [](void* p) { delete static_cast<std::decay_t<T>*>(p); };
+		_blob = std::move(blob);
+
+		return *this;
+	}
+
+	template<typename T>
+	T TensorSlotBase::take() {
+		if (!_blob.has_value() || !_blob->ptr) {
+			abort(ErrorType::NotData, "Slot is empty");
+		}
+
+		auto expectedType = DC::Type::getType<SlotDataType, T>();
+		if (_blob->type != expectedType) {
+			abort(ErrorType::TypeMismatch,
+				"take<T>: type mismatch, stored=" +
+				std::to_string(static_cast<uint32_t>(_blob->type)) +
+				" expected=" +
+				std::to_string(static_cast<uint32_t>(expectedType)));
+		}
+
+		auto* typed = static_cast<T*>(_blob->ptr);
+		T result = std::move(*typed);
+
+		// 释放存储（但不调用 deleter，因为已移动）
+		typed->~T();
+		operator delete(typed);
+		_blob.reset();
+
+		return result;
+	}
+
+	template<typename T>
+	const T* TensorSlotBase::peek() const {
+		if (!_blob.has_value() || !_blob->ptr) {
+			return nullptr;
+		}
+
+		auto expectedType = DC::Type::getType<SlotDataType, T>();
+		if (_blob->type != expectedType) {
+			return nullptr;
+		}
+
+		return static_cast<const T*>(_blob->ptr);
 	}
 }

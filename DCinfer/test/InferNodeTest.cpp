@@ -1,0 +1,538 @@
+// InferNode 多任务乱序输入/输出 单元测试
+#include <atomic>
+#include <cstring>
+#include <iostream>
+#include <stdexcept>
+#include <thread>
+
+#include "InferNode.h"
+#include "EngineRegistry.h"
+
+using namespace DC;
+using TensorType = DC::Tensor::TensorType;
+using Tensor     = DC::Tensor;
+using Shape      = DC::Tensor::Shape;
+
+// ── Schema 辅助 ──
+static InferNode::Schema scalarAddSchema() {
+	InferNode::Schema s;
+	s.inputs  = {{"a", TensorType::Float, sizeof(float), {}},
+	              {"b", TensorType::Float, sizeof(float), {}}};
+	s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+	return s;
+}
+
+static InferNode::Schema shapedAddSchema(Shape shape) {
+	InferNode::Schema s;
+	s.inputs  = {{"a", TensorType::Float, sizeof(float), shape},
+	              {"b", TensorType::Float, sizeof(float), shape}};
+	s.outputs = {{"s", TensorType::Float, sizeof(float), shape}};
+	return s;
+}
+
+// ── Add 计算逻辑 ──
+static InferNode::Result addRunImpl(InferNode& self) {
+	const auto& a = self.input("a");
+	const auto& b = self.input("b");
+
+	auto aData = a.data<float>();
+	auto bData = b.data<float>();
+
+	std::vector<float> result(aData.size());
+	for (size_t i = 0; i < aData.size(); ++i)
+		result[i] = aData[i] + bData[i];
+
+	std::vector<std::byte> bytes(result.size() * sizeof(float));
+	std::memcpy(bytes.data(), result.data(), bytes.size());
+
+	Tensor s(TensorType::Float, sizeof(float), a.shape(), std::move(bytes));
+	self.output("s", std::move(s));
+
+	return self.success();
+}
+
+// ── 创建辅助张量（用于 setInput 的 NativeTensor 包装）──
+static NativeTensor makeScalarNative(float value) {
+	auto* p = new Tensor(TensorType::Float, sizeof(float));
+	*p = value;
+	return NativeTensor(p, [](Tensor* ptr) { delete ptr; });
+}
+
+static NativeTensor makeVectorNative(const std::vector<float>& values) {
+	std::vector<std::byte> bytes(values.size() * sizeof(float));
+	std::memcpy(bytes.data(), values.data(), bytes.size());
+	auto* p = new Tensor(TensorType::Float, sizeof(float),
+		{static_cast<int64_t>(values.size())},
+		Tensor::DataBlock(std::move(bytes)));
+	return NativeTensor(p, [](Tensor* ptr) { delete ptr; });
+}
+
+static NativeTensor makeIntNative(int value) {
+	auto* p = new Tensor(TensorType::Int, sizeof(int));
+	*p = value;
+	return NativeTensor(p, [](Tensor* ptr) { delete ptr; });
+}
+
+// ── 创建辅助张量（用于默认值等 Schema 定义）──
+static Tensor makeScalarFloat(float value) {
+	Tensor t(TensorType::Float, sizeof(float));
+	t = value;
+	return t;
+}
+
+static Tensor makeVectorFloat(const std::vector<float>& values) {
+	std::vector<std::byte> bytes(values.size() * sizeof(float));
+	std::memcpy(bytes.data(), values.data(), bytes.size());
+	return Tensor(TensorType::Float, sizeof(float),
+		{static_cast<int64_t>(values.size())},
+		Tensor::DataBlock(std::move(bytes)));
+}
+
+// ── 测试入口 ──
+static int failures = 0;
+
+#define CHECK(cond, msg) do { \
+	if (!(cond)) { \
+		std::cerr << "FAIL: " << msg << std::endl; \
+		++failures; \
+		return; \
+	} \
+} while(0)
+
+#define TEST(name) std::cout << "Test: " << name << " ... " << std::flush; \
+	[&]()
+#define END_TEST() (); \
+	std::cout << "PASSED" << std::endl
+
+// ════════════════════════════════════════════
+
+void runTests() {
+	auto& reg = EngineRegistry::instance();
+
+	// ── Test 1: 基本乱序 setInput ──
+	TEST("out-of-order setInput triggers auto-execute") {
+		auto node = reg.createNode("add1", scalarAddSchema(), addRunImpl);
+
+		std::atomic<bool> completed{false};
+		float resultValue = 0.0f;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			CHECK(result.ok(), "result should be Ok");
+			auto out = node->getOutput<Tensor>(taskId, "s");
+			resultValue = out.item<float>();
+			node->clearTask(taskId);
+			completed = true;
+		});
+
+		// a 先到，不应触发
+		node->setInput("task1", "a", makeScalarNative(3.0f));
+		CHECK(!completed, "should not complete after only 'a'");
+
+		// b 后到，应触发
+		node->setInput("task1", "b", makeScalarNative(4.0f));
+		CHECK(completed, "should complete after 'b'");
+		CHECK(std::abs(resultValue - 7.0f) < 1e-6f, "scalar add mismatch");
+	}
+	END_TEST();
+
+	// ── Test 2: 批量 setInputs ──
+	TEST("batch setInputs") {
+		auto node = reg.createNode("add2", scalarAddSchema(), addRunImpl);
+
+		std::atomic<bool> completed{false};
+		float resultValue = 0.0f;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			CHECK(result.ok(), "result should be Ok");
+			auto out = node->getOutput<Tensor>(taskId, "s");
+			resultValue = out.item<float>();
+			node->clearTask(taskId);
+			completed = true;
+		});
+
+		std::unordered_map<std::string, InferNode::TaskData> inputs;
+		inputs.emplace("a", makeScalarNative(10.0f));
+		inputs.emplace("b", makeScalarNative(20.0f));
+
+		CHECK(node->setInputs("task1", std::move(inputs)), "setInputs should succeed");
+		CHECK(completed, "should auto-execute after setInputs");
+		CHECK(std::abs(resultValue - 30.0f) < 1e-6f, "batch add mismatch");
+	}
+	END_TEST();
+
+	// ── Test 3: 多任务交织 ──
+	TEST("multi-task interleaving") {
+		auto node = reg.createNode("add3", scalarAddSchema(), addRunImpl);
+
+		std::vector<std::string> completedTasks;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			CHECK(result.ok(), "result should be Ok");
+			completedTasks.push_back(taskId);
+			node->clearTask(taskId);
+		});
+
+		node->setInput("task1", "a", makeScalarNative(1.0f));
+		node->setInput("task2", "b", makeScalarNative(6.0f));
+		node->setInput("task1", "b", makeScalarNative(2.0f));  // task1 就绪
+
+		CHECK(completedTasks.size() == 1, "task1 should complete");
+		CHECK(completedTasks[0] == "task1", "task1 should complete first");
+
+		node->setInput("task2", "a", makeScalarNative(5.0f));  // task2 就绪
+		CHECK(completedTasks.size() == 2, "task2 should also complete");
+	}
+	END_TEST();
+
+	// ── Test 4: 尚不就绪不触发 ──
+	TEST("not ready - no execution") {
+		auto node = reg.createNode("add4", scalarAddSchema(), addRunImpl);
+
+		std::atomic<bool> completed{false};
+		node->setCompletionCallback([&](const auto&, const auto&) {
+			completed = true;
+		});
+
+		node->setInput("task1", "a", makeScalarNative(1.0f));
+		CHECK(!completed, "should not execute with only one input");
+		CHECK(node->taskCount() == 1, "one pending task");
+	}
+	END_TEST();
+
+	// ── Test 5: 有默认值不阻塞 ──
+	TEST("default value unblocks") {
+		auto schema = []() {
+			InferNode::Schema s;
+			s.inputs  = {{"a", TensorType::Float, sizeof(float), {}},
+			              {"b", TensorType::Float, sizeof(float), {}, true,
+			               makeScalarFloat(100.0f)}};  // b 有默认值 100
+			s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+			return s;
+		}();
+		CHECK(schema.valid(), "schema with default should be valid");
+
+		auto node = reg.createNode("add5", schema, addRunImpl);
+
+		std::atomic<bool> completed{false};
+		float resultValue = 0.0f;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			completed = true;
+			if (result.ok()) {
+				auto out = node->getOutput<Tensor>(taskId, "s");
+				resultValue = out.item<float>();
+			}
+			node->clearTask(taskId);
+		});
+
+		// 只设置 a，b 有默认值 100 → 应立即触发
+		node->setInput("task1", "a", makeScalarNative(5.0f));
+		CHECK(completed, "should auto-execute with default value");
+		CHECK(std::abs(resultValue - 105.0f) < 1e-6f, "default value add mismatch");
+	}
+	END_TEST();
+
+	// ── Test 6: 默认值被显式覆盖 ──
+	TEST("default value overridden") {
+		auto schema = []() {
+			InferNode::Schema s;
+			s.inputs  = {{"a", TensorType::Float, sizeof(float), {}},
+			              {"b", TensorType::Float, sizeof(float), {}, true,
+			               makeScalarFloat(100.0f)}};
+			s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+			return s;
+		}();
+
+		auto node = reg.createNode("add6", schema, addRunImpl);
+
+		std::atomic<bool> completed{false};
+		float resultValue = 0.0f;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			completed = true;
+			if (result.ok()) {
+				auto out = node->getOutput<Tensor>(taskId, "s");
+				resultValue = out.item<float>();
+			}
+			node->clearTask(taskId);
+		});
+
+		// 批量同时设置 a 和 b，覆盖默认值
+		std::unordered_map<std::string, InferNode::TaskData> inputs;
+		inputs.emplace("a", makeScalarNative(5.0f));
+		inputs.emplace("b", makeScalarNative(200.0f));
+
+		CHECK(node->setInputs("task1", std::move(inputs)), "batch setInputs should succeed");
+		CHECK(completed, "should execute");
+		CHECK(std::abs(resultValue - 205.0f) < 1e-6f, "overridden default add mismatch");
+	}
+	END_TEST();
+
+	// ── Test 7: RunFn 抛异常 ──
+	TEST("RunFn exception handled") {
+		auto schema = []() {
+			InferNode::Schema s;
+			s.inputs  = {{"x", TensorType::Float, sizeof(float), {}}};
+			s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+			return s;
+		}();
+
+		auto node = reg.createNode("thrower", schema,
+			[](InferNode&) -> InferNode::Result {
+				throw std::runtime_error("boom!");
+			});
+
+		std::atomic<bool> completed{false};
+		InferNode::Status lastStatus = InferNode::Status::Ok;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			completed = true;
+			lastStatus = result.status;
+			node->clearTask(taskId);
+		});
+
+		node->setInput("task1", "x", makeScalarNative(1.0f));
+		CHECK(completed, "callback should be invoked even on failure");
+		CHECK(lastStatus == InferNode::Status::ExecutionFailed,
+			"status should be ExecutionFailed");
+	}
+	END_TEST();
+
+	// ── Test 8: RunFn 不产出 output ──
+	TEST("RunFn missing output") {
+		auto schema = []() {
+			InferNode::Schema s;
+			s.inputs  = {{"x", TensorType::Float, sizeof(float), {}}};
+			s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+			return s;
+		}();
+
+		auto node = reg.createNode("bad", schema,
+			[](InferNode& self) -> InferNode::Result {
+				// 故意不调用 output
+				return self.success();
+			});
+
+		std::atomic<bool> completed{false};
+		InferNode::Status lastStatus = InferNode::Status::Ok;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			completed = true;
+			lastStatus = result.status;
+			node->clearTask(taskId);
+		});
+
+		node->setInput("task1", "x", makeScalarNative(1.0f));
+		CHECK(completed, "callback should be invoked");
+		CHECK(lastStatus == InferNode::Status::InternalError,
+			"status should be InternalError for missing output");
+	}
+	END_TEST();
+
+	// ── Test 9: 无回调时轮询模式 ──
+	TEST("polling without callback") {
+		auto node = reg.createNode("add9", scalarAddSchema(), addRunImpl);
+
+		node->setInput("task1", "a", makeScalarNative(7.0f));
+		node->setInput("task1", "b", makeScalarNative(8.0f));
+
+		CHECK(node->hasOutput("task1", "s"), "hasOutput should be true");
+		auto out = node->getOutput<Tensor>("task1", "s");
+		CHECK(std::abs(out.item<float>() - 15.0f) < 1e-6f, "polling value mismatch");
+
+		CHECK(!node->hasOutput("task1", "s"), "after getOutput, hasOutput should be false");
+		node->clearTask("task1");
+		CHECK(node->taskCount() == 0, "task should be cleaned up");
+	}
+	END_TEST();
+
+	// ── Test 10: 端口名不存在 ──
+	TEST("invalid port name") {
+		auto node = reg.createNode("add10", scalarAddSchema(), addRunImpl);
+
+		CHECK(!node->setInput("task1", "no_such_port", makeScalarNative(1.0f)),
+			"setInput should return false for invalid port");
+		CHECK(node->taskCount() == 0, "no task should be created for invalid port");
+	}
+	END_TEST();
+
+	// ── Test 11: 类型不匹配 ──
+	TEST("type mismatch rejected") {
+		auto node = reg.createNode("add11", scalarAddSchema(), addRunImpl);
+
+		CHECK(!node->setInput("task1", "a", makeIntNative(42)),
+			"setInput should return false for type mismatch");
+	}
+	END_TEST();
+
+	// ── Test 12: 同一 taskId/port 重复 setInput ──
+	TEST("duplicate setInput overwrites") {
+		auto node = reg.createNode("add12", scalarAddSchema(), addRunImpl);
+
+		std::atomic<int> callCount{0};
+		float resultValue = 0.0f;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			++callCount;
+			if (result.ok()) {
+				auto out = node->getOutput<Tensor>(taskId, "s");
+				resultValue = out.item<float>();
+			}
+			node->clearTask(taskId);
+		});
+
+		node->setInput("task1", "a", makeScalarNative(1.0f));
+		node->setInput("task1", "a", makeScalarNative(10.0f));  // 覆盖
+		node->setInput("task1", "b", makeScalarNative(2.0f));
+
+		CHECK(callCount == 1, "should execute exactly once");
+		CHECK(std::abs(resultValue - 12.0f) < 1e-6f, "should use latest value");
+	}
+	END_TEST();
+
+	// ── Test 13: setInputs 中途失败回滚 ──
+	TEST("setInputs rollback on failure") {
+		auto node = reg.createNode("add13", scalarAddSchema(), addRunImpl);
+
+		std::atomic<bool> completed{false};
+		node->setCompletionCallback([&](const auto&, const auto&) {
+			completed = true;
+		});
+
+		// 先正常设置一个端口
+		node->setInput("task1", "a", makeScalarNative(1.0f));
+
+		// 批量设置中包含非法端口名
+		std::unordered_map<std::string, InferNode::TaskData> inputs;
+		inputs.emplace("b", makeScalarNative(2.0f));
+		inputs.emplace("no_such", makeScalarNative(3.0f));  // 非法端口
+
+		CHECK(!node->setInputs("task1", std::move(inputs)),
+			"setInputs should fail on invalid port");
+		CHECK(!completed, "should not execute after failed setInputs");
+
+		// 之前正常设置的端口数据应保留
+		node->setInput("task1", "b", makeScalarNative(5.0f));
+		CHECK(completed, "task should still be executable after rollback");
+	}
+	END_TEST();
+
+	// ── Test 14: 回调中 getOutput + clearTask ──
+	TEST("callback getOutput and clearTask") {
+		auto node = reg.createNode("add14", scalarAddSchema(), addRunImpl);
+
+		std::atomic<bool> gotOutput{false};
+		std::atomic<bool> cleared{false};
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			CHECK(result.ok(), "result should be Ok");
+			auto out = node->getOutput<Tensor>(taskId, "s");
+			gotOutput = (std::abs(out.item<float>() - 9.0f) < 1e-6f);
+			node->clearTask(taskId);
+			cleared = true;
+		});
+
+		node->setInput("task1", "a", makeScalarNative(4.0f));
+		node->setInput("task1", "b", makeScalarNative(5.0f));
+
+		CHECK(gotOutput, "callback should get correct output");
+		CHECK(cleared, "callback should clear task");
+	}
+	END_TEST();
+
+	// ── Test 15: 回调中 setInput 触发下游（模拟）──
+	TEST("callback re-entrant setInput") {
+		auto node = reg.createNode("add15", scalarAddSchema(), addRunImpl);
+
+		std::atomic<int> callCount{0};
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			++callCount;
+			CHECK(result.ok(), "result should be Ok");
+			node->clearTask(taskId);
+
+			// 在回调中触发新任务
+			if (callCount == 1) {
+				node->setInput("task2", "a", makeScalarNative(1.0f));
+				node->setInput("task2", "b", makeScalarNative(1.0f));
+			}
+		});
+
+		node->setInput("task1", "a", makeScalarNative(3.0f));
+		node->setInput("task1", "b", makeScalarNative(3.0f));
+
+		CHECK(callCount == 2, "should process both tasks (callback triggered new one)");
+	}
+	END_TEST();
+
+	// ── Test 16: 两线程并发 setInput ──
+	TEST("concurrent setInput from two threads") {
+		auto node = reg.createNode("add16", scalarAddSchema(), addRunImpl);
+
+		std::atomic<int> callCount{0};
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			++callCount;
+			CHECK(result.ok(), "result should be Ok");
+			node->clearTask(taskId);
+		});
+
+		std::thread t1([&]() {
+			node->setInput("task1", "a", makeScalarNative(1.0f));
+			node->setInput("task1", "b", makeScalarNative(2.0f));
+		});
+		std::thread t2([&]() {
+			node->setInput("task2", "a", makeScalarNative(10.0f));
+			node->setInput("task2", "b", makeScalarNative(20.0f));
+		});
+
+		t1.join();
+		t2.join();
+
+		CHECK(callCount == 2, "both tasks should complete");
+	}
+	END_TEST();
+
+	// ── Test 17: 向量加法 ──
+	TEST("vector addition with task API") {
+		std::vector<float> aVals = {1, 2, 3, 4};
+		std::vector<float> bVals = {5, 6, 7, 8};
+		std::vector<float> exp   = {6, 8, 10, 12};
+
+		auto node = reg.createNode("add17", shapedAddSchema({4}), addRunImpl);
+
+		std::atomic<bool> completed{false};
+		bool match = false;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			CHECK(result.ok(), "result should be Ok");
+			auto out = node->getOutput<Tensor>(taskId, "s");
+			auto outData = out.data<float>();
+			match = true;
+			for (size_t i = 0; i < exp.size(); ++i) {
+				if (std::abs(outData[i] - exp[i]) > 1e-6f) match = false;
+			}
+			node->clearTask(taskId);
+			completed = true;
+		});
+
+		node->setInput("task1", "a", makeVectorNative(aVals));
+		node->setInput("task1", "b", makeVectorNative(bVals));
+
+		CHECK(completed, "vector task should complete");
+		CHECK(match, "vector add values should match");
+	}
+	END_TEST();
+
+	std::cout << "\nAll InferNode tests passed!" << std::endl;
+}
+
+int main() {
+	try {
+		runTests();
+		return 0;
+	} catch (const std::exception& e) {
+		std::cerr << "Test failure: " << e.what() << std::endl;
+		return -1;
+	}
+}
