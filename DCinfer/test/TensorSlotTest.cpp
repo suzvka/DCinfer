@@ -16,10 +16,10 @@ static void runTensorSlotTests() {
 
 	// Test 1: store Tensor and peek
 	{
-		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
-		cfg.setPosition(TensorSlotBase::Config::Position::Input);
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Input);
 
-		TensorSlotBase slot("in", TensorMeta::TensorType::Float,
+		TensorSlot slot("in", TensorMeta::TensorType::Float,
 		                    sizeof(float), {2, 2}, cfg);
 
 		if (!slot.isInput()) throw std::runtime_error("slot should be input");
@@ -50,10 +50,10 @@ static void runTensorSlotTests() {
 
 	// Test 2: default data and take output
 	{
-		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
-		cfg.setPosition(TensorSlotBase::Config::Position::Output);
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Output);
 
-		TensorSlotBase slot("out", TensorMeta::TensorType::Float,
+		TensorSlot slot("out", TensorMeta::TensorType::Float,
 		                    sizeof(float), {1, 2}, cfg);
 
 		Tensor def = Tensor::Create<float>({1, 2});
@@ -71,10 +71,10 @@ static void runTensorSlotTests() {
 
 	// Test 3: shape mismatch should throw when storing
 	{
-		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
-		cfg.setPosition(TensorSlotBase::Config::Position::Input);
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Input);
 
-		TensorSlotBase slot("badshape", TensorMeta::TensorType::Float,
+		TensorSlot slot("badshape", TensorMeta::TensorType::Float,
 		                    sizeof(float), {2, 2}, cfg);
 		Tensor t = Tensor::Create<float>({1, 2});
 		t.fill<float>(0.0f);
@@ -90,10 +90,10 @@ static void runTensorSlotTests() {
 
 	// Test 4: store and take arbitrary external type (DummyExternalTensor)
 	{
-		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
-		cfg.setPosition(TensorSlotBase::Config::Position::Input);
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Input);
 
-		TensorSlotBase slot("ext", TensorMeta::TensorType::Float,
+		TensorSlot slot("ext", TensorMeta::TensorType::Float,
 		                    sizeof(float), {1}, cfg);
 
 		// store external type directly (no validator registered → pass-through)
@@ -115,10 +115,10 @@ static void runTensorSlotTests() {
 
 	// Test 5: type mismatch on take should throw
 	{
-		TensorSlotBase::Config cfg = TensorSlotBase::CreateConfig();
-		cfg.setPosition(TensorSlotBase::Config::Position::Output);
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Output);
 
-		TensorSlotBase slot("typemismatch", TensorMeta::TensorType::Float,
+		TensorSlot slot("typemismatch", TensorMeta::TensorType::Float,
 		                    sizeof(float), {}, cfg);
 
 		Tensor t(TensorMeta::TensorType::Float, sizeof(float));

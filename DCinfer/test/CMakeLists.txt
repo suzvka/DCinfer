@@ -19,5 +19,7 @@ foreach(test_src IN LISTS TEST_SOURCES)
     # Do not force-include a common test harness to avoid multiple main definitions.
     add_executable(${test_name} ${test_src})
     target_link_libraries(${test_name} PRIVATE DConnx::DConnx)
-    add_test(NAME ${test_name} COMMAND ${test_name})
+    # Use generator expression to pass the full path to the built executable to CTest.
+    # This avoids issues where the build tool tries to execute the test by target name.
+    add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
 endforeach()

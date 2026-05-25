@@ -16,29 +16,27 @@ static InferNode::Schema mockSchema() {
 }
 
 // ── Mock 计算逻辑（magic 值来自 engineConfig）──
-static InferNode::Result mockRunImpl(InferNode& self, int magic) {
-	const auto& inVal = self.input("in");
+static InferNode::Result mockRunImpl(InferNode::RunContext& ctx, int magic) {
+	const auto& inNT = ctx.input("in");
+	const auto* inVal = inNT.as<Tensor>();
 	Tensor out(Tensor::TensorType::Float, sizeof(float));
-	out = inVal.item<float>() + static_cast<float>(magic);
-	self.output("out", std::move(out));
-	return self.success();
+	out = inVal->item<float>() + static_cast<float>(magic);
+	auto* p = new Tensor(std::move(out));
+	ctx.output("out", Value(p, [](Tensor* ptr) { delete ptr; }));
+	return ctx.success();
 }
 
 // ── 模拟转换钩子 ──
-static NativeTensor mockToNative(const Tensor& dc) {
-	float* ptr = new float(dc.item<float>());
-	return NativeTensor(ptr, [](float* p) { delete p; });
+static Value mockToNative(const Tensor& dc) {
+	auto* p = new Tensor(dc);
+	return Value(p, [](Tensor* ptr) { delete ptr; });
 }
 
 static Tensor mockToDC(const void* native) {
-	auto val = *static_cast<const float*>(native);
-	Tensor t(Tensor::TensorType::Float, sizeof(float));
-	t = val;
-	return t;
-}
-
-static bool mockCanAccept(const std::string& tag) {
-	return tag == "MockFloat";
+	const auto* t = static_cast<const Tensor*>(native);
+	Tensor result(Tensor::TensorType::Float, sizeof(float));
+	result = t->item<float>();
+	return result;
 }
 
 static void runTests() {
@@ -48,7 +46,7 @@ static void runTests() {
 	{
 		EngineDescriptor desc;
 		desc.engineType = "Mock";
-		desc.converter  = { mockToNative, mockToDC, "MockFloat", mockCanAccept };
+		desc.converter  = { mockToNative, mockToDC };
 		desc.factory    = makeNodeFactory<int>("Mock", mockSchema(), mockRunImpl);
 
 		if (!reg.registerEngine(desc))
@@ -116,16 +114,17 @@ static void runTests() {
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 50.0f;
 		auto* inPtr = new Tensor(std::move(in));
-		NativeTensor nt(inPtr, [](Tensor* p) { delete p; });
+		Value nt(inPtr, [](Tensor* p) { delete p; });
 		node->setInput("task1", "in", std::move(nt));
 
 		if (!node->hasOutput("task1", "out"))
 			throw std::runtime_error("output not produced");
 
-		auto out = node->getOutput<Tensor>("task1", "out");
-		if (std::abs(out.item<float>() - 150.0f) > 1e-6f)
+		auto outNT = node->getOutput("task1", "out");
+		auto* out = outNT.as<Tensor>();
+		if (std::abs(out->item<float>() - 150.0f) > 1e-6f)
 			throw std::runtime_error("output value mismatch: expected 150, got " +
-				std::to_string(out.item<float>()));
+				std::to_string(out->item<float>()));
 	}
 	std::cout << "Test 7 passed: created node runs correctly" << std::endl;
 
@@ -137,7 +136,9 @@ static void runTests() {
 		// DC → Native
 		auto native = mockToNative(dc);
 		if (!native) throw std::runtime_error("toNative returned empty");
-		if (std::abs(*native.as<float>() - 3.14f) > 1e-6f)
+		auto* t = native.as<Tensor>();
+		if (!t) throw std::runtime_error("toNative did not wrap Tensor");
+		if (std::abs(t->item<float>() - 3.14f) > 1e-6f)
 			throw std::runtime_error("toNative value mismatch");
 
 		// Native → DC
@@ -147,23 +148,14 @@ static void runTests() {
 	}
 	std::cout << "Test 8 passed: TensorConverter round-trip" << std::endl;
 
-	// ── Test 9: canAccept 自我识别钩子 ──
-	{
-		if (!mockCanAccept("MockFloat"))
-			throw std::runtime_error("canAccept should accept MockFloat");
-		if (mockCanAccept("Ort::Value"))
-			throw std::runtime_error("canAccept should reject Ort::Value");
-	}
-	std::cout << "Test 9 passed: canAccept self-identification" << std::endl;
-
-	// ── Test 10: 空 engineType 注册被拒绝 ──
+	// ── Test 9: 空 engineType 注册被拒绝 ──
 	{
 		EngineDescriptor desc;
 		desc.engineType = "";
 		if (reg.registerEngine(desc))
 			throw std::runtime_error("empty engineType should be rejected");
 	}
-	std::cout << "Test 10 passed: empty engineType rejected" << std::endl;
+	std::cout << "Test 9 passed: empty engineType rejected" << std::endl;
 
 	std::cout << "\nAll EngineRegistry tests passed!" << std::endl;
 }

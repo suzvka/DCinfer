@@ -8,23 +8,25 @@
 namespace DC {
 
 // ── 构造：从 Schema 构建工作槽位 ──
-InferNode::InferNode(std::string type, std::string name, Schema schema, RunFn fn)
+InferNode::InferNode(std::string type, std::string name, Schema schema, RunFn fn,
+                     EngineInstance* engineInstance)
 	: _type(std::move(type))
 	, _name(std::move(name))
 	, _schema(std::move(schema))
 	, _fn(std::move(fn))
+	, _engineInstance(engineInstance)
 {
 	for (const auto& port : _schema.inputs) {
-		TensorSlotBase::Config cfg;
-		cfg.setPosition(TensorSlotBase::Config::Position::Input);
-		_inputSlots.emplace(port.name, TensorSlotBase(
+		TensorSlot::Config cfg;
+		cfg.setPosition(TensorSlot::Config::Position::Input);
+		_inputSlots.emplace(port.name, TensorSlot(
 			port.name, port.type, port.typeSize, port.shape, cfg));
 	}
 
 	for (const auto& port : _schema.outputs) {
-		TensorSlotBase::Config cfg;
-		cfg.setPosition(TensorSlotBase::Config::Position::Output);
-		_outputSlots.emplace(port.name, TensorSlotBase(
+		TensorSlot::Config cfg;
+		cfg.setPosition(TensorSlot::Config::Position::Output);
+		_outputSlots.emplace(port.name, TensorSlot(
 			port.name, port.type, port.typeSize, port.shape, cfg));
 	}
 }
@@ -33,19 +35,15 @@ InferNode::~InferNode() = default;
 
 // ── 回调注册 ──
 void InferNode::setCompletionCallback(CompletionFn fn) {
-	std::lock_guard lock(_mutex);
 	_onComplete = std::move(fn);
 }
 
 bool InferNode::hasCompletionCallback() const {
-	std::lock_guard lock(_mutex);
 	return static_cast<bool>(_onComplete);
 }
 
 // ── 单端口输入 ──
-bool InferNode::setInput(const TaskId& taskId, const std::string& portName, NativeTensor data) {
-	std::unique_lock lock(_mutex);
-
+bool InferNode::setInput(const TaskId& taskId, const std::string& portName, Value data) {
 	if (!_schema.findInput(portName)) {
 		return false;
 	}
@@ -54,7 +52,7 @@ bool InferNode::setInput(const TaskId& taskId, const std::string& portName, Nati
 	_taskInputs[taskId].at(portName) = std::move(data);
 
 	try {
-		_checkAndExecute(taskId, lock);
+		_checkAndExecute(taskId);
 	} catch (const TensorException&) {
 		return false;
 	}
@@ -62,10 +60,8 @@ bool InferNode::setInput(const TaskId& taskId, const std::string& portName, Nati
 }
 
 // ── 批量输入 ──
-bool InferNode::setInputs(const TaskId& taskId,
+bool InferNode::setInput(const TaskId& taskId,
                           std::unordered_map<std::string, TaskData> inputs) {
-	std::unique_lock lock(_mutex);
-
 	// 预校验：所有端口名必须存在
 	for (const auto& [name, data] : inputs) {
 		if (!_schema.findInput(name)) {
@@ -80,7 +76,7 @@ bool InferNode::setInputs(const TaskId& taskId,
 	}
 
 	try {
-		_checkAndExecute(taskId, lock);
+		_checkAndExecute(taskId);
 	} catch (const TensorException&) {
 		return false;
 	}
@@ -89,7 +85,6 @@ bool InferNode::setInputs(const TaskId& taskId,
 
 // ── 任务级输出 ──
 bool InferNode::hasOutput(const TaskId& taskId, const std::string& name) const {
-	std::lock_guard lock(_mutex);
 
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) return false;
@@ -98,10 +93,34 @@ bool InferNode::hasOutput(const TaskId& taskId, const std::string& name) const {
 	return slotIt->second.has_value();
 }
 
+Value InferNode::getOutput(const TaskId& taskId, const std::string& name) {
+	auto taskIt = _taskOutputs.find(taskId);
+	if (taskIt == _taskOutputs.end()) {
+		throw std::out_of_range("InferNode::getOutput: task '" + taskId + "' not found");
+	}
+	auto& optVal = taskIt->second.at(name);
+	if (!optVal.has_value()) {
+		throw std::out_of_range("InferNode::getOutput: output '" + name + "' is empty");
+	}
+	Value result = std::move(optVal.value());
+	optVal.reset();
+	return result;
+}
+
+const Value& InferNode::peekOutput(const TaskId& taskId, const std::string& name) const {
+	auto taskIt = _taskOutputs.find(taskId);
+	if (taskIt == _taskOutputs.end()) {
+		throw std::out_of_range("InferNode::peekOutput: task '" + taskId + "' not found");
+	}
+	auto& optVal = taskIt->second.at(name);
+	if (!optVal.has_value()) {
+		throw std::out_of_range("InferNode::peekOutput: output '" + name + "' is empty");
+	}
+	return optVal.value();
+}
+
 InferNode::TaskPortMap::mapped_type
 InferNode::collectOutputs(const TaskId& taskId) {
-	std::lock_guard lock(_mutex);
-
 	std::unordered_map<std::string, TaskData> result;
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) return result;
@@ -115,63 +134,184 @@ InferNode::collectOutputs(const TaskId& taskId) {
 	return result;
 }
 
+// ── 阻塞式一次执行 ──
+Value InferNode::execute(const std::string& outputName,
+                                std::unordered_map<std::string, Value> inputs) {
+	static size_t execCounter = 0;
+	auto taskId = "__exec_" + std::to_string(++execCounter);
+
+	// 暂存并清空外部回调，避免 execute 内部被外部回调干扰
+	auto savedCallback = std::move(_onComplete);
+	_onComplete = nullptr;
+
+	try {
+		if (!setInput(taskId, std::move(inputs))) {
+			_onComplete = std::move(savedCallback);
+			throw std::runtime_error("InferNode::execute: setInputs failed");
+		}
+	} catch (...) {
+		_onComplete = std::move(savedCallback);
+		throw;
+	}
+
+	_onComplete = std::move(savedCallback);
+
+	// 同步执行已在 setInputs → _checkAndExecute 内完成，直接读取输出
+	auto taskIt = _taskOutputs.find(taskId);
+	if (taskIt == _taskOutputs.end()) {
+		throw std::runtime_error("InferNode::execute: no output produced for task '" + taskId + "'");
+	}
+
+	auto outIt = taskIt->second.find(outputName);
+	if (outIt == taskIt->second.end() || !outIt->second.has_value()) {
+		_taskOutputs.erase(taskId);
+		throw std::runtime_error("InferNode::execute: output '" + outputName + "' not found");
+	}
+
+	Value result = std::move(outIt->second.value());
+	_taskOutputs.erase(taskId);
+	return result;
+}
+
 // ── 任务生命周期 ──
 void InferNode::clearTask(const TaskId& taskId) {
-	std::lock_guard lock(_mutex);
 	_taskInputs.erase(taskId);
 	_taskOutputs.erase(taskId);
 }
 
 size_t InferNode::taskCount() const {
-	std::lock_guard lock(_mutex);
 	return _taskInputs.size();
 }
 
+// ════════════════════════════════════════════
+// Tensor 便捷接口（自动完成 Tensor ↔ Value 包装）
+// ════════════════════════════════════════════
+
+bool InferNode::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
+	auto* p = new Tensor(std::move(data));
+	return setInput(taskId, portName, Value(p, [](Tensor* ptr) { delete ptr; }));
+}
+
+bool InferNode::setInput(const TaskId& taskId,
+                                std::unordered_map<std::string, Tensor> inputs) {
+	std::unordered_map<std::string, TaskData> wrapped;
+	wrapped.reserve(inputs.size());
+	for (auto& [name, t] : inputs) {
+		auto* p = new Tensor(std::move(t));
+		wrapped.emplace(name, Value(p, [](Tensor* ptr) { delete ptr; }));
+	}
+	return setInput(taskId, std::move(wrapped));
+}
+
+Tensor InferNode::getOutputTensor(const TaskId& taskId, const std::string& name) {
+	auto nt = getOutput(taskId, name);
+	auto* t = nt.as<Tensor>();
+	if (!t) {
+		throw std::out_of_range("InferNode::getOutputTensor: output '" + name
+			+ "' is not a DC::Tensor (innerType="
+			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
+	}
+	return std::move(*t);
+}
+
+std::unordered_map<std::string, Tensor>
+InferNode::collectOutputTensors(const TaskId& taskId) {
+	auto outputs = collectOutputs(taskId);
+	std::unordered_map<std::string, Tensor> result;
+	result.reserve(outputs.size());
+	for (auto& [name, nt] : outputs) {
+		auto* t = nt.as<Tensor>();
+		if (t) {
+			result.emplace(name, std::move(*t));
+		}
+	}
+	return result;
+}
+
+Tensor InferNode::executeTensor(const std::string& outputName,
+                                std::unordered_map<std::string, Tensor> inputs) {
+	std::unordered_map<std::string, Value> wrapped;
+	wrapped.reserve(inputs.size());
+	for (auto& [name, t] : inputs) {
+		auto* p = new Tensor(std::move(t));
+		wrapped.emplace(name, Value(p, [](Tensor* ptr) { delete ptr; }));
+	}
+
+	auto nt = execute(outputName, std::move(wrapped));
+	auto* t = nt.as<Tensor>();
+	if (!t) {
+		throw std::runtime_error("InferNode::executeTensor: output '" + outputName
+			+ "' is not a DC::Tensor (innerType="
+			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
+	}
+	return std::move(*t);
+}
+
 // ── RunFn 内部使用的计算 API ──
-const Tensor& InferNode::input(const std::string& name) const {
+const Value& InferNode::_inputImpl(const std::string& name) const {
 	auto it = _inputSlots.find(name);
 	if (it == _inputSlots.end()) {
-		throw std::out_of_range("InferNode::input: input '" + name + "' not found");
+		throw std::out_of_range("InferNode::_inputImpl: input '" + name + "' not found");
 	}
-	return it->second.view();
+	const auto* nt = it->second.peek<Value>();
+	if (!nt) {
+		throw std::runtime_error("InferNode::_inputImpl: input '" + name + "' is not a Value");
+	}
+	return *nt;
 }
 
-void InferNode::output(const std::string& name, const Tensor& tensor) {
+void InferNode::_outputImpl(const std::string& name, Value tensor) {
 	auto it = _outputSlots.find(name);
 	if (it == _outputSlots.end()) {
-		throw std::out_of_range("InferNode::output: output '" + name + "' not found");
-	}
-	it->second.store(tensor);
-}
-
-void InferNode::output(const std::string& name, Tensor&& tensor) {
-	auto it = _outputSlots.find(name);
-	if (it == _outputSlots.end()) {
-		throw std::out_of_range("InferNode::output: output '" + name + "' not found");
+		throw std::out_of_range("InferNode::_outputImpl: output '" + name + "' not found");
 	}
 	it->second.store(std::move(tensor));
 }
 
 // ── 转换钩子访问器 ──
-const TensorConverter* InferNode::converter() const {
-	auto* desc = engineDescriptor();
+const TensorConverter* InferNode::_converter() const {
+	auto* desc = _engineDescriptor();
 	if (!desc) return nullptr;
 	return &desc->converter;
 }
 
-const EngineDescriptor* InferNode::engineDescriptor() const {
+const EngineDescriptor* InferNode::_engineDescriptor() const {
+	if (_engineInstance) return _engineInstance->descriptor();
 	return EngineRegistry::instance().find(_type);
 }
 
+void InferNode::_synchronizeEngine() const {
+	if (!_engineInstance) return;
+	auto* desc = _engineInstance->descriptor();
+	if (desc && desc->synchronize) {
+		desc->synchronize(_engineInstance->get());
+	}
+}
+
+// ── RunContext out-of-line 实现（需要 EngineInstance 完整类型）──
+const EngineInstance* InferNode::RunContext::engineInstance() const {
+	return _node._engineInstance;
+}
+
+void* InferNode::RunContext::engine() const {
+	return _node._engineInstance ? _node._engineInstance->get() : nullptr;
+}
+
+const Value* InferNode::RunContext::outputRaw(const std::string& name) const {
+	auto it = _node._outputSlots.find(name);
+	if (it == _node._outputSlots.end()) return nullptr;
+	return it->second.peek<Value>();
+}
+
 // ── 结果辅助 ──
-InferNode::Result InferNode::success(std::string message) const {
+InferNode::Result InferNode::_makeSuccess(std::string message) const {
 	Result r;
 	r.status = Status::Ok;
 	r.message = std::move(message);
 	return r;
 }
 
-InferNode::Result InferNode::failure(Status status, std::string message) const {
+InferNode::Result InferNode::_makeFailure(Status status, std::string message) const {
 	Result r;
 	r.status = status;
 	r.message = std::move(message);
@@ -208,7 +348,7 @@ bool InferNode::_isTaskReady(const TaskId& taskId) const {
 	return true;
 }
 
-void InferNode::_checkAndExecute(const TaskId& taskId, std::unique_lock<std::mutex>& lock) {
+void InferNode::_checkAndExecute(const TaskId& taskId) {
 	if (!_isTaskReady(taskId)) return;
 
 	// ① 加载输入：_taskInputs[taskId] → _inputSlots (move)
@@ -217,14 +357,45 @@ void InferNode::_checkAndExecute(const TaskId& taskId, std::unique_lock<std::mut
 	// ② 清空上一轮工作输出
 	_clearWorkingOutputs();
 
-	// ③ 执行 RunFn
+	// ②½ preRun 钩子：推理前准备（I/O 绑定、warmup 等）
+	if (_engineInstance) {
+		auto* desc = _engineInstance->descriptor();
+		if (desc && desc->preRun) {
+			desc->preRun(_engineInstance->get());
+		}
+	}
+
+	// ③ 执行 RunFn（通过 RunContext 隔离接口）
 	Result result;
 	try {
-		result = _fn(*this);
+		RunContext ctx(*this);
+		result = _fn(ctx);
 	} catch (const std::exception& e) {
-		result = failure(Status::ExecutionFailed, e.what());
+		result = _makeFailure(Status::ExecutionFailed, e.what());
 	} catch (...) {
-		result = failure(Status::ExecutionFailed, "Unknown exception in RunFn");
+		result = _makeFailure(Status::ExecutionFailed, "Unknown exception in RunFn");
+	}
+
+	// ③¼ onError 钩子：执行失败时重置引擎状态
+	if (!result.ok() && _engineInstance) {
+		auto* desc = _engineInstance->descriptor();
+		if (desc && desc->onError) {
+			desc->onError(_engineInstance->get());
+		}
+	}
+
+	// ③½ 同步：确保异步引擎计算已完成
+	if (result.ok()) {
+		_synchronizeEngine();
+	}
+
+	// ③¾ postRun 钩子：同步后的后处理（D2H 传输、输出格式转换等）
+	if (result.ok() && _engineInstance) {
+		auto* desc = _engineInstance->descriptor();
+		if (desc && desc->postRun) {
+			RunContext ctx(*this);
+			desc->postRun(_engineInstance->get(), ctx);
+		}
 	}
 
 	// ④ 保存输出：_outputSlots → _taskOutputs[taskId]
@@ -235,7 +406,7 @@ void InferNode::_checkAndExecute(const TaskId& taskId, std::unique_lock<std::mut
 		for (const auto& port : _schema.outputs) {
 			auto outIt = _taskOutputs[taskId].find(port.name);
 			if (outIt == _taskOutputs[taskId].end() || !outIt->second.has_value()) {
-				result = failure(Status::InternalError,
+				result = _makeFailure(Status::InternalError,
 					"Output '" + port.name + "' was not produced by RunFn");
 				break;
 			}
@@ -256,10 +427,7 @@ void InferNode::_checkAndExecute(const TaskId& taskId, std::unique_lock<std::mut
 	// ⑥ 清理输入缓冲（输出缓冲保留，供调用方拉取）
 	_taskInputs.erase(taskId);
 
-	// ⑦ 释放锁
-	lock.unlock();
-
-	// ⑧ 在锁外调用回调（仅通知）
+	// ⑦ 调用回调（仅通知）
 	if (_onComplete) {
 		_onComplete(taskId, result);
 	}
@@ -267,28 +435,32 @@ void InferNode::_checkAndExecute(const TaskId& taskId, std::unique_lock<std::mut
 
 void InferNode::_loadTaskToWorkingSlots(const TaskId& taskId) {
 	auto& taskInputs = _taskInputs[taskId];
-	auto* nodeConverter = converter();
 
 	for (const auto& port : _schema.inputs) {
 		auto taskIt = taskInputs.find(port.name);
 		auto& workSlot = _inputSlots.at(port.name);
 
 		if (taskIt != taskInputs.end() && taskIt->second.has_value()) {
-			// 用户通过 NativeTensor 提供了数据
 			auto& nativeData = taskIt->second.value();
 
-			if (nodeConverter && nodeConverter->toDC) {
-				// 通过转换钩子：NativeTensor → Tensor → 工作槽位
-				Tensor t = nodeConverter->toDC(nativeData.get());
-				workSlot.store(std::move(t));
-			} else {
-				// 无转换器（引擎原生节点）：直接存入 NativeTensor
-				workSlot.store(std::move(nativeData));
+			// 对 DCTensor 类型的 Value 进行类型校验
+			if (nativeData.innerType() == SlotDataType::DCTensor && port.type != TensorType::Void) {
+				const auto* t = static_cast<const Tensor*>(nativeData.get());
+				if (!t || !t->valid()) {
+					throw TensorException(TensorException::ErrorType::Other,
+						"InferNode::_loadTaskToWorkingSlots: invalid Tensor in Value for port '" + port.name + "'");
+				}
+				if (t->type() != port.type) {
+					throw TensorException(TensorException::ErrorType::TypeMismatch,
+						"InferNode::_loadTaskToWorkingSlots: type mismatch for port '" + port.name + "'");
+				}
 			}
-			taskIt->second.reset();  // 已消费
+
+			workSlot.store(std::move(taskIt->second.value()));
+			taskIt->second.reset();
 		} else if (port.defaultValue.has_value()) {
-			// 回退到默认值（默认值始终以 Tensor 形式存入）
-			workSlot.store(Tensor(port.defaultValue.value()));
+			auto* p = new Tensor(port.defaultValue.value());
+			workSlot.store(Value(p, [](Tensor* ptr) { delete ptr; }));
 		}
 	}
 }
@@ -300,7 +472,6 @@ void InferNode::_clearWorkingOutputs() {
 }
 
 void InferNode::_collectAndSaveOutputs(const TaskId& taskId) {
-	// 确保输出 task bucket 存在
 	if (!_taskOutputs.contains(taskId)) {
 		TaskBuffer outputs;
 		for (const auto& port : _schema.outputs) {
@@ -309,35 +480,12 @@ void InferNode::_collectAndSaveOutputs(const TaskId& taskId) {
 		_taskOutputs.emplace(taskId, std::move(outputs));
 	}
 
-	auto* nodeConverter = converter();
 	auto& taskOutputs = _taskOutputs[taskId];
 	for (auto& [name, workSlot] : _outputSlots) {
 		if (!workSlot.hasData()) continue;
-
 		auto taskIt = taskOutputs.find(name);
 		if (taskIt == taskOutputs.end()) continue;
-
-		switch (workSlot.storedType()) {
-		case SlotDataType::DCTensor: {
-			auto t = workSlot.take<Tensor>();
-			if (nodeConverter && nodeConverter->toNative) {
-				// 通过转换钩子：Tensor → NativeTensor → 输出缓冲
-				taskIt->second = nodeConverter->toNative(t);
-			} else {
-				// 无转换器：直接包装为 NativeTensor（持有 Tensor 所有权）
-				auto* p = new Tensor(std::move(t));
-				taskIt->second = NativeTensor(p, [](Tensor* ptr) { delete ptr; });
-			}
-			break;
-		}
-		case SlotDataType::NativeTensor: {
-			auto nt = workSlot.take<NativeTensor>();
-			taskIt->second = std::move(nt);
-			break;
-		}
-		default:
-			break;
-		}
+		taskIt->second = workSlot.take<Value>();
 	}
 }
 

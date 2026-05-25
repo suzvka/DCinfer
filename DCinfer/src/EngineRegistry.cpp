@@ -1,30 +1,26 @@
 #include "EngineRegistry.h"
 #include "InferNode.h"
 
-#include <mutex>
 #include <stdexcept>
+#include <memory>
 
 namespace DC {
 
 // ── Builtin 引擎的 TensorConverter（DC::Tensor ↔ NativeTensor）──
-static NativeTensor builtinToNative(const Tensor& t) {
+static Value builtinToNative(const Tensor& t) {
 	auto* p = new Tensor(t);
-	return NativeTensor(p, [](Tensor* ptr) { delete ptr; });
+	return Value(p, [](Tensor* ptr) { delete ptr; });
 }
 
 static Tensor builtinToDC(const void* native) {
 	return Tensor(*static_cast<const Tensor*>(native));
 }
 
-static bool builtinCanAccept(const std::string& tag) {
-	return tag == "DC::Tensor";
-}
-
 // ── 确保 Builtin 引擎已注册（std::call_once）──
 static void ensureBuiltinEngine(EngineRegistry& reg) {
 	EngineDescriptor desc;
 	desc.engineType = "Builtin";
-	desc.converter  = { builtinToNative, builtinToDC, "DC::Tensor", builtinCanAccept };
+	desc.converter  = { builtinToNative, builtinToDC };
 	// Builtin 节点不通过工厂创建，由 createNode(name, schema, fn) 直接构造
 	desc.factory    = nullptr;
 	reg.registerEngine(desc);
@@ -42,8 +38,6 @@ bool EngineRegistry::registerEngine(const EngineDescriptor& desc) {
 		return false;
 	}
 
-	std::unique_lock lock(_mutex);
-
 	if (_engines.contains(desc.engineType)) {
 		return false; // 不允许重复注册
 	}
@@ -57,8 +51,6 @@ std::unique_ptr<InferNode> EngineRegistry::createNode(
 	const std::string& nodeName,
 	const void* engineConfig) const
 {
-	std::shared_lock lock(_mutex);
-
 	auto it = _engines.find(engineType);
 	if (it == _engines.end()) {
 		return nullptr;
@@ -74,15 +66,97 @@ std::unique_ptr<InferNode> EngineRegistry::createNode(
 std::unique_ptr<InferNode> EngineRegistry::createNode(
 	const std::string& nodeName,
 	InferNode::Schema schema,
-	std::function<InferNode::Result(InferNode&)> fn) const
+	InferNode::RunFn fn) const
 {
 	return std::make_unique<InferNode>("Builtin", nodeName,
 		std::move(schema), std::move(fn));
 }
 
-const EngineDescriptor* EngineRegistry::find(const std::string& engineType) const {
-	std::shared_lock lock(_mutex);
+std::unique_ptr<InferNode> EngineRegistry::createNode(
+	const std::string& engineType,
+	const std::string& nodeName,
+	const std::string& modelPath)
+{
+	auto it = _engines.find(engineType);
+	if (it == _engines.end())  return nullptr;
+	if (!it->second.factory)   return nullptr;
 
+	// 获取或创建引擎实例（生命周期由 Registry 管理）
+	auto* engineInstance = getOrCreateEngine(engineType, modelPath);
+	if (!engineInstance) return nullptr;
+
+	// 从模型推导 Schema（loadModel 与 createEngine 可独立实现）
+	InferNode::Schema schema;
+	if (it->second.loadModel && it->second.getInputPorts && it->second.getOutputPorts) {
+		auto handle = it->second.loadModel(modelPath);
+		if (handle) {
+			schema.inputs  = it->second.getInputPorts(handle);
+			schema.outputs = it->second.getOutputPorts(handle);
+		}
+	}
+
+	// 将 EngineInstance* 通过 engineConfig 传给工厂
+	// 使用 makeNodeFactoryWithEngine 注册的工厂会正确提取
+	return it->second.factory(nodeName, engineInstance);
+}
+
+// ── 引擎实例管理 ──
+
+std::string EngineRegistry::_makeEngineKey(
+	const std::string& engineType,
+	const std::string& modelPath)
+{
+	return engineType + ":" + modelPath;
+}
+
+EngineInstance* EngineRegistry::getOrCreateEngine(
+	const std::string& engineType,
+	const std::string& modelPath)
+{
+	auto key = _makeEngineKey(engineType, modelPath);
+	auto it = _engineInstances.find(key);
+	if (it != _engineInstances.end()) {
+		return &it->second;
+	}
+
+	auto engIt = _engines.find(engineType);
+	if (engIt == _engines.end())        return nullptr;
+	if (!engIt->second.createEngine)    return nullptr;
+
+	auto instance = engIt->second.createEngine(modelPath);
+	if (!instance) return nullptr;
+
+	auto [insertedIt, ok] = _engineInstances.emplace(
+		std::move(key), std::move(instance));
+	return &insertedIt->second;
+}
+
+void EngineRegistry::releaseEngine(
+	const std::string& engineType,
+	const std::string& modelPath)
+{
+	auto key = _makeEngineKey(engineType, modelPath);
+	auto it = _engineInstances.find(key);
+	if (it != _engineInstances.end()) {
+		auto* desc = it->second.descriptor();
+		if (desc && desc->releaseEngine) {
+			desc->releaseEngine(it->second.get());
+		}
+	}
+	_engineInstances.erase(key);
+}
+
+void EngineRegistry::releaseAllEngines() {
+	for (auto& [key, instance] : _engineInstances) {
+		auto* desc = instance.descriptor();
+		if (desc && desc->releaseEngine) {
+			desc->releaseEngine(instance.get());
+		}
+	}
+	_engineInstances.clear();
+}
+
+const EngineDescriptor* EngineRegistry::find(const std::string& engineType) const {
 	auto it = _engines.find(engineType);
 	if (it == _engines.end()) {
 		return nullptr;
@@ -92,13 +166,10 @@ const EngineDescriptor* EngineRegistry::find(const std::string& engineType) cons
 }
 
 bool EngineRegistry::hasEngine(const std::string& engineType) const {
-	std::shared_lock lock(_mutex);
 	return _engines.contains(engineType);
 }
 
 std::vector<std::string> EngineRegistry::engineTypes() const {
-	std::shared_lock lock(_mutex);
-
 	std::vector<std::string> types;
 	types.reserve(_engines.size());
 	for (const auto& [type, desc] : _engines) {

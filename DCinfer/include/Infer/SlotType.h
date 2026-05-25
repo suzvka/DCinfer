@@ -13,7 +13,7 @@ namespace DC {
 enum class SlotDataType : uint32_t {
 	Unknown      = 0,
 	DCTensor     = 1,
-	NativeTensor = 2,
+	Value = 2,
 	// 引擎原生类型预留从 100 开始
 	ONNX_OrtValue   = 100,
 	// TensorRT_ITensor = 200,

@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -15,7 +14,7 @@
 
 #include "TensorSlot.h"
 #include "SlotType.h"
-#include "Tensor/NativeTensor.h"
+#include "NativeTensor.h"
 
 namespace DC {
 
@@ -23,17 +22,10 @@ namespace DC {
 // 每种引擎类型注册一份，所有同引擎节点共享
 struct TensorConverter {
 	// DC::Tensor → heap 原生张量（调用者在 Run 期间持有此 handle）
-	std::function<NativeTensor(const Tensor&)> toNative;
+	std::function<Value(const Tensor&)> toNative;
 
 	// 原生张量（借阅指针，不接管所有权）→ DC::Tensor（内部拷贝数据）
 	std::function<Tensor(const void*)> toDC;
-
-	// ── 自我识别钩子（供同引擎直传优化）──
-	// 此引擎产出的原生张量类型标识（如 "Ort::Value", "nvinfer1::ITensor"）
-	std::string nativeTypeTag;
-
-	// 此引擎是否可直接消费指定类型的原生张量
-	std::function<bool(const std::string& nativeTypeTag)> canAccept;
 };
 
 // ── 节点工厂：按名称 + 引擎特定配置创建节点 ──
@@ -42,29 +34,21 @@ using NodeFactory = std::function<std::unique_ptr<class InferNode>(
 	const void* engineConfig
 )>;
 
-// ── 引擎描述符：注册一个引擎所需的全部信息 ──
-struct EngineDescriptor {
-	std::string     engineType;
-	TensorConverter converter;
-	NodeFactory     factory;
-};
+// ── 引擎描述符 / 引擎实例（前向声明，定义见 Graph/EngineRegistry.h）──
+struct EngineDescriptor;
+class  EngineInstance;
 
 class InferNode {
 public:
 	using TensorType = Tensor::TensorType;
 	using Shape      = Tensor::Shape;
-	using SlotMap    = std::unordered_map<std::string, TensorSlotBase>;
 
 	// ── 任务标识 ──
 	using TaskId     = std::string;
 
-	// ── 任务级数据：统一使用 NativeTensor 作为数据载体 ──
+	// ── 任务级数据：统一使用 Value 作为数据载体 ──
 	// 实际类型通过 TensorConverter 钩子在边界处透明转换
-	using TaskData      = NativeTensor;
-	using TaskPortMap   = std::unordered_map<TaskId, std::unordered_map<std::string, TaskData>>;
-	// 内部缓冲区（optional 表示"未设置"）
-	using TaskBuffer   = std::unordered_map<std::string, std::optional<TaskData>>;
-	using TaskBufferMap = std::unordered_map<TaskId, TaskBuffer>;
+	using TaskData    = Value;
 
 	// ── 端口定义 ──
 	struct Port {
@@ -74,6 +58,29 @@ public:
 		Shape       shape;
 		bool        required     = true;
 		std::optional<Tensor> defaultValue;  // 有默认值时，就绪检查视为已填充
+
+		// ── 工厂：必须输入端口 ──
+		template<typename T>
+		static Port in(std::string name, Shape shape = {}) {
+			TensorMeta::ensureTypeMap();
+			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), true};
+		}
+
+		// ── 工厂：可选输入端口（带默认值）──
+		template<typename T>
+		static Port optional(std::string name, T defaultValue, Shape shape = {}) {
+			TensorMeta::ensureTypeMap();
+			Tensor dv(DC::Type::getType<TensorType, T>(), sizeof(T));
+			dv = defaultValue;
+			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), false, std::move(dv)};
+		}
+
+		// ── 工厂：输出端口 ──
+		template<typename T>
+		static Port out(std::string name, Shape shape = {}) {
+			TensorMeta::ensureTypeMap();
+			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), true};
+		}
 	};
 
 	// ── Schema ──
@@ -141,14 +148,18 @@ public:
 		bool ok() const { return status == Status::Ok; }
 	};
 
-	// ── RunFn 类型（依赖 Result）──
-	using RunFn = std::function<Result(InferNode&)>;
+	// ── RunContext（前向声明，定义见类外）──
+	class RunContext;
+
+	// ── RunFn 类型（依赖 Result 和 RunContext）──
+	using RunFn = std::function<Result(RunContext&)>;
 
 	// ── 完成回调（纯通知，不传数据）──
 	using CompletionFn = std::function<void(const TaskId& taskId, const Result& result)>;
 
 	// ── 构造/析构 ──
-	InferNode(std::string type, std::string name, Schema schema, RunFn fn);
+	InferNode(std::string type, std::string name, Schema schema, RunFn fn,
+	          EngineInstance* engineInstance = nullptr);
 	~InferNode();
 
 	// 禁止拷贝/移动
@@ -169,53 +180,81 @@ public:
 	// ── 任务级输入 ──
 
 	/// @brief  单端口写入（NativeTensor），写入后立即检查就绪
-	/// 数据通过 TensorConverter 钩子在加载时转换为工作槽位所需类型
-	bool setInput(const TaskId& taskId, const std::string& portName, NativeTensor data);
+	bool setInput(const TaskId& taskId, const std::string& portName, Value data);
 
-	/// @brief  批量写入，全部成功后触发一次检查
-	bool setInputs(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs);
+	/// @brief  便捷接口：直接传入 DC::Tensor，内部自动包装为 Value
+	bool setInput(const TaskId& taskId, const std::string& portName, Tensor data);
+
+	/// @brief  批量写入（NativeTensor），全部成功后触发一次检查
+	bool setInput(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs);
+
+	/// @brief  便捷接口：批量传入 DC::Tensor，内部自动包装
+	bool setInput(const TaskId& taskId, std::unordered_map<std::string, Tensor> inputs);
 
 	// ── 任务级输出（始终从缓冲区拉取）──
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
-	template<typename T>
-	T getOutput(const TaskId& taskId, const std::string& name);
+	Value getOutput(const TaskId& taskId, const std::string& name);
 
-	template<typename T>
-	const T& peekOutput(const TaskId& taskId, const std::string& name) const;
+	/// @brief  便捷接口：消费式取出 DC::Tensor，自动完成 Value → Tensor 解包
+	/// @throws  std::out_of_range 若输出不存在或不是 Tensor 类型
+	Tensor getOutputTensor(const TaskId& taskId, const std::string& name);
+
+	const Value& peekOutput(const TaskId& taskId, const std::string& name) const;
 
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
+
+	/// @brief  便捷接口：批量消费 DC::Tensor 输出
+	std::unordered_map<std::string, Tensor> collectOutputTensors(const TaskId& taskId);
+
+	// ── 阻塞式一次执行 ──
+	/// @brief  一次性送入所有 Value 输入，同步执行，返回指定输出的 Value
+	/// @throws  std::runtime_error 若输入不合法或执行失败
+	Value execute(const std::string& outputName,
+	                     std::unordered_map<std::string, Value> inputs);
+
+	/// @brief  便捷接口：一次性送入 DC::Tensor，同步执行，返回指定输出的 Tensor
+	/// @throws  std::runtime_error 若输入不合法、执行失败或输出不是 Tensor 类型
+	Tensor executeTensor(const std::string& outputName,
+	                     std::unordered_map<std::string, Tensor> inputs);
 
 	// ── 任务生命周期 ──
 	void   clearTask(const TaskId& taskId);
 	size_t taskCount() const;
 
-	// ── RunFn 内部使用的计算 API ──
-	const Tensor& input(const std::string& name) const;
-	void          output(const std::string& name, const Tensor& tensor);
-	void          output(const std::string& name, Tensor&& tensor);
-
-	// ── 转换钩子访问器 ──
-	const TensorConverter* converter() const;
-	const EngineDescriptor* engineDescriptor() const;
-
-	Result success(std::string message = {}) const;
-	Result failure(Status status, std::string message) const;
-
-	// ── 直接访问工作槽位（高级场景）──
-	SlotMap&       inputSlots()       { return _inputSlots; }
-	SlotMap&       outputSlots()      { return _outputSlots; }
-	const SlotMap& inputSlots() const { return _inputSlots; }
-	const SlotMap& outputSlots() const{ return _outputSlots; }
+	// ── 直接访问工作槽位（只读，高级场景）──
+	const std::unordered_map<std::string, TensorSlot>& inputSlots()  const { return _inputSlots; }
+	const std::unordered_map<std::string, TensorSlot>& outputSlots() const { return _outputSlots; }
 
 private:
+	friend class RunContext;
+
+	// ── 内部类型 ──
+	using SlotMap       = std::unordered_map<std::string, TensorSlot>;
+	using TaskPortMap   = std::unordered_map<TaskId, std::unordered_map<std::string, TaskData>>;
+	using TaskBuffer    = std::unordered_map<std::string, std::optional<TaskData>>;
+	using TaskBufferMap = std::unordered_map<TaskId, TaskBuffer>;
+
 	// ── 内部方法 ──
 	void _ensureTaskExists(const TaskId& taskId);
 	bool _isTaskReady(const TaskId& taskId) const;
-	void _checkAndExecute(const TaskId& taskId, std::unique_lock<std::mutex>& lock);
+	void _checkAndExecute(const TaskId& taskId);
 	void _loadTaskToWorkingSlots(const TaskId& taskId);
 	void _clearWorkingOutputs();
 	void _collectAndSaveOutputs(const TaskId& taskId);
+
+	// ── RunContext 可调用的内部方法 ──
+	const Value&     _inputImpl(const std::string& name) const;
+	void                    _outputImpl(const std::string& name, Value tensor);
+	const TensorConverter*  _converter() const;
+	const EngineDescriptor* _engineDescriptor() const;
+	void                    _synchronizeEngine() const;
+	Result _makeSuccess(std::string message = {}) const;
+	Result _makeFailure(Status status, std::string message) const;
+
+	// ── 槽位可变访问（由 friend 类访问）──
+	SlotMap& _mutableInputSlots()  { return _inputSlots; }
+	SlotMap& _mutableOutputSlots() { return _outputSlots; }
 
 	// ── 成员 ──
 	std::string       _type;
@@ -227,59 +266,44 @@ private:
 	TaskBufferMap     _taskOutputs;    // 任务级输出缓冲 (port → optional<TaskData>)
 	RunFn             _fn;
 	CompletionFn      _onComplete;
-	mutable std::mutex _mutex;
+	EngineInstance*   _engineInstance = nullptr;  // 非拥有引用，Registry 管理生命周期
 };
 
-// ────────────────────────────────────────────
-// 模板实现（位于头文件）
-// ────────────────────────────────────────────
-
-template<typename T>
-T InferNode::getOutput(const TaskId& taskId, const std::string& name) {
-	static_assert(std::is_same_v<T, Tensor> || std::is_same_v<T, NativeTensor>,
-	              "getOutput only supports Tensor or NativeTensor");
-	std::lock_guard lock(_mutex);
-
-	auto taskIt = _taskOutputs.find(taskId);
-	if (taskIt == _taskOutputs.end()) {
-		throw std::out_of_range("InferNode::getOutput: task '" + taskId + "' not found");
+// ── RunContext 定义（需在 InferNode 类体之后）──
+class InferNode::RunContext {
+public:
+	const Value& input(const std::string& name) const {
+		return _node._inputImpl(name);
 	}
-	auto& optVal = taskIt->second.at(name);
-	if (!optVal.has_value()) {
-		throw std::out_of_range("InferNode::getOutput: output '" + name + "' is empty");
+	void output(const std::string& name, Value tensor) {
+		_node._outputImpl(name, std::move(tensor));
 	}
 
-	if constexpr (std::is_same_v<T, NativeTensor>) {
-		T result = std::move(optVal.value());
-		optVal.reset();  // 消费式取出
-		return result;
-	} else {
-		// T == Tensor：通过 converter 从 NativeTensor 转换
-		auto* nodeConverter = converter();
-		if (!nodeConverter || !nodeConverter->toDC) {
-			throw std::runtime_error("InferNode::getOutput: no TensorConverter registered for engine '" + _type + "'");
-		}
-		T result = nodeConverter->toDC(optVal.value().get());
-		optVal.reset();  // 消费式取出
-		return result;
-	}
-}
+	/// @brief  读取输出槽中的原始 Value（不消费），用于 postRun 钩子做 D2H 转换
+	/// @return 指向 Value 的指针，若槽位不存在或无数据则返回 nullptr
+	const Value* outputRaw(const std::string& name) const;
 
-template<typename T>
-const T& InferNode::peekOutput(const TaskId& taskId, const std::string& name) const {
-	static_assert(std::is_same_v<T, NativeTensor>,
-	              "peekOutput only supports NativeTensor; use getOutput<Tensor> for Tensor conversion");
-	std::lock_guard lock(_mutex);
-
-	auto taskIt = _taskOutputs.find(taskId);
-	if (taskIt == _taskOutputs.end()) {
-		throw std::out_of_range("InferNode::peekOutput: task '" + taskId + "' not found");
+	InferNode::Result success(std::string message = {}) const {
+		return _node._makeSuccess(std::move(message));
 	}
-	auto& optVal = taskIt->second.at(name);
-	if (!optVal.has_value()) {
-		throw std::out_of_range("InferNode::peekOutput: output '" + name + "' is empty");
+	InferNode::Result failure(InferNode::Status status, std::string message) const {
+		return _node._makeFailure(status, std::move(message));
 	}
-	return optVal.value();
-}
+	const TensorConverter* converter() const {
+		return _node._converter();
+	}
+	const EngineDescriptor* engineDescriptor() const {
+		return _node._engineDescriptor();
+	}
+	const EngineInstance* engineInstance() const;
+	void* engine() const;
+	const InferNode::Schema& schema() const { return _node.schema(); }
+	const std::string&       type()   const { return _node.type(); }
+	const std::string&       name()   const { return _node.name(); }
+private:
+	friend class InferNode;
+	explicit RunContext(InferNode& node) : _node(node) {}
+	InferNode& _node;
+};
 
 } // namespace DC

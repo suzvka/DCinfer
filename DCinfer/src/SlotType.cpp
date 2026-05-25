@@ -16,7 +16,7 @@ void ValidatorRegistry::ensureDefaults() {
 	std::call_once(flag, []() {
 		// 类型映射
 		DC::Type::registerType<DC::Tensor>(SlotDataType::DCTensor);
-		DC::Type::registerType<DC::NativeTensor>(SlotDataType::NativeTensor);
+		DC::Type::registerType<DC::Value>(SlotDataType::Value);
 
 		// DCTensor 校验器
 		ValidatorRegistry::instance().registerValidator(
@@ -37,9 +37,9 @@ void ValidatorRegistry::ensureDefaults() {
 				return s;
 			});
 
-		// NativeTensor 校验器：放行（由具体引擎校验）
+		// Value 校验器：放行（由具体引擎校验）
 		ValidatorRegistry::instance().registerValidator(
-			SlotDataType::NativeTensor,
+			SlotDataType::Value,
 			[](const void*, SlotDataType, const TensorMeta&) -> SlotDataStatus {
 				return SlotDataStatus{};
 			});

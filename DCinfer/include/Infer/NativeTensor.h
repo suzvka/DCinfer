@@ -5,7 +5,7 @@
 
 #include "SlotType.h"
 #include "DCtype.h"
-#include "Infer/SlotType.h"
+#include "SlotType.h"
 
 namespace DC {
 
@@ -14,14 +14,14 @@ namespace DC {
 // move-only，避免对可拷贝类型的强制要求，兼容 move-only 的 GPU 资源句柄。
 //
 // 构造时自动从模板参数 T 推导 SlotDataType 标签，
-// 用于 TensorSlotBase::store() 中的校验路由。
-class NativeTensor {
+// 用于 TensorSlot::store() 中的校验路由。
+class Value {
 public:
-	NativeTensor() = default;
+	Value() = default;
 
 	// 通用构造函数：接受任意可调用对象作为 deleter，避免 std::function 导致模板推导失败
 	template<typename T, typename Deleter>
-	NativeTensor(T* ptr, Deleter&& deleter)
+	Value(T* ptr, Deleter&& deleter)
 		: _ptr(ptr)
   {
 		// Ensure default validators and type registrations exist before querying type map
@@ -33,15 +33,15 @@ public:
 	}
 
 
-	~NativeTensor() { if (_ptr && _deleter) _deleter(_ptr); }
+	~Value() { if (_ptr && _deleter) _deleter(_ptr); }
 
 	// move-only
-	NativeTensor(NativeTensor&& other) noexcept
+	Value(Value&& other) noexcept
 		: _ptr(std::exchange(other._ptr, nullptr))
 		, _innerType(other._innerType)
 		, _deleter(std::move(other._deleter)) {}
 
-	NativeTensor& operator=(NativeTensor&& other) noexcept {
+	Value& operator=(Value&& other) noexcept {
 		if (this != &other) {
 			if (_ptr && _deleter) _deleter(_ptr);
 			_ptr = std::exchange(other._ptr, nullptr);
@@ -51,8 +51,8 @@ public:
 		return *this;
 	}
 
-	NativeTensor(const NativeTensor&) = delete;
-	NativeTensor& operator=(const NativeTensor&) = delete;
+	Value(const Value&) = delete;
+	Value& operator=(const Value&) = delete;
 
 	/// @brief 返回内部原生张量的实际 SlotDataType 标签，用于校验路由
 	SlotDataType innerType() const { return _innerType; }
