@@ -3,20 +3,20 @@
 #include <stdexcept>
 
 #include "EngineRegistry.h"
-#include "InferNode.h"
+#include "Node.h"
 
 using namespace DC;
 
 // ── Mock schema ──
-static InferNode::Schema mockSchema() {
-	InferNode::Schema s;
+static Node::Schema mockSchema() {
+	Node::Schema s;
 	s.inputs  = {{"in",  Tensor::TensorType::Float, sizeof(float), {}}};
 	s.outputs = {{"out", Tensor::TensorType::Float, sizeof(float), {}}};
 	return s;
 }
 
 // ── Mock 计算逻辑（magic 值来自 engineConfig）──
-static InferNode::Result mockRunImpl(InferNode::RunContext& ctx, int magic) {
+static Node::Result mockRunImpl(Node::RunContext& ctx, int magic) {
 	const auto& inNT = ctx.input("in");
 	const auto* inVal = inNT.as<Tensor>();
 	Tensor out(Tensor::TensorType::Float, sizeof(float));

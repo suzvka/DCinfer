@@ -1,5 +1,5 @@
 #include "EngineRegistry.h"
-#include "InferNode.h"
+#include "Node.h"
 
 #include <stdexcept>
 #include <memory>
@@ -46,7 +46,7 @@ bool EngineRegistry::registerEngine(const EngineDescriptor& desc) {
 	return true;
 }
 
-std::unique_ptr<InferNode> EngineRegistry::createNode(
+std::unique_ptr<Node> EngineRegistry::createNode(
 	const std::string& engineType,
 	const std::string& nodeName,
 	const void* engineConfig) const
@@ -63,16 +63,16 @@ std::unique_ptr<InferNode> EngineRegistry::createNode(
 	return it->second.factory(nodeName, engineConfig);
 }
 
-std::unique_ptr<InferNode> EngineRegistry::createNode(
+std::unique_ptr<Node> EngineRegistry::createNode(
 	const std::string& nodeName,
-	InferNode::Schema schema,
-	InferNode::RunFn fn) const
+	Node::Schema schema,
+	Node::RunFn fn) const
 {
-	return std::make_unique<InferNode>("Builtin", nodeName,
+	return std::make_unique<Node>("Builtin", nodeName,
 		std::move(schema), std::move(fn));
 }
 
-std::unique_ptr<InferNode> EngineRegistry::createNode(
+std::unique_ptr<Node> EngineRegistry::createNode(
 	const std::string& engineType,
 	const std::string& nodeName,
 	const std::string& modelPath)
@@ -86,7 +86,7 @@ std::unique_ptr<InferNode> EngineRegistry::createNode(
 	if (!engineInstance) return nullptr;
 
 	// 从模型推导 Schema（loadModel 与 createEngine 可独立实现）
-	InferNode::Schema schema;
+	Node::Schema schema;
 	if (it->second.loadModel && it->second.getInputPorts && it->second.getOutputPorts) {
 		auto handle = it->second.loadModel(modelPath);
 		if (handle) {

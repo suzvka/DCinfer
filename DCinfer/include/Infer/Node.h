@@ -29,7 +29,7 @@ struct TensorConverter {
 };
 
 // ── 节点工厂：按名称 + 引擎特定配置创建节点 ──
-using NodeFactory = std::function<std::unique_ptr<class InferNode>(
+using NodeFactory = std::function<std::unique_ptr<class Node>(
 	std::string nodeName,
 	const void* engineConfig
 )>;
@@ -38,7 +38,7 @@ using NodeFactory = std::function<std::unique_ptr<class InferNode>(
 struct EngineDescriptor;
 class  EngineInstance;
 
-class InferNode {
+class Node {
 public:
 	using TensorType = Tensor::TensorType;
 	using Shape      = Tensor::Shape;
@@ -158,15 +158,15 @@ public:
 	using CompletionFn = std::function<void(const TaskId& taskId, const Result& result)>;
 
 	// ── 构造/析构 ──
-	InferNode(std::string type, std::string name, Schema schema, RunFn fn,
+	Node(std::string type, std::string name, Schema schema, RunFn fn,
 	          EngineInstance* engineInstance = nullptr);
-	~InferNode();
+	~Node();
 
 	// 禁止拷贝/移动
-	InferNode(const InferNode&)            = delete;
-	InferNode& operator=(const InferNode&) = delete;
-	InferNode(InferNode&&)                 = delete;
-	InferNode& operator=(InferNode&&)      = delete;
+	Node(const Node&)            = delete;
+	Node& operator=(const Node&) = delete;
+	Node(Node&&)                 = delete;
+	Node& operator=(Node&&)      = delete;
 
 	// ── 只读属性 ──
 	const std::string& type()   const { return _type; }
@@ -269,8 +269,8 @@ private:
 	EngineInstance*   _engineInstance = nullptr;  // 非拥有引用，Registry 管理生命周期
 };
 
-// ── RunContext 定义（需在 InferNode 类体之后）──
-class InferNode::RunContext {
+// ── RunContext 定义（需在 Node 类体之后）──
+class Node::RunContext {
 public:
 	const Value& input(const std::string& name) const {
 		return _node._inputImpl(name);
@@ -283,10 +283,10 @@ public:
 	/// @return 指向 Value 的指针，若槽位不存在或无数据则返回 nullptr
 	const Value* outputRaw(const std::string& name) const;
 
-	InferNode::Result success(std::string message = {}) const {
+	Node::Result success(std::string message = {}) const {
 		return _node._makeSuccess(std::move(message));
 	}
-	InferNode::Result failure(InferNode::Status status, std::string message) const {
+	Node::Result failure(Node::Status status, std::string message) const {
 		return _node._makeFailure(status, std::move(message));
 	}
 	const TensorConverter* converter() const {
@@ -297,13 +297,13 @@ public:
 	}
 	const EngineInstance* engineInstance() const;
 	void* engine() const;
-	const InferNode::Schema& schema() const { return _node.schema(); }
+	const Node::Schema& schema() const { return _node.schema(); }
 	const std::string&       type()   const { return _node.type(); }
 	const std::string&       name()   const { return _node.name(); }
 private:
-	friend class InferNode;
-	explicit RunContext(InferNode& node) : _node(node) {}
-	InferNode& _node;
+	friend class Node;
+	explicit RunContext(Node& node) : _node(node) {}
+	Node& _node;
 };
 
 } // namespace DC

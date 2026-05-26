@@ -1,6 +1,6 @@
 #pragma once
 
-#include "InferNode.h"
+#include "Node.h"
 #include "NativeTensor.h"
 
 #include <functional>
@@ -68,10 +68,10 @@ struct EngineDescriptor {
 
 	/// 从已加载的模型句柄获取输入端口列表
 	/// 用于自动推导 Schema，消除用户手动声明
-	std::function<std::vector<InferNode::Port>(ModelHandle)> getInputPorts;
+	std::function<std::vector<Node::Port>(ModelHandle)> getInputPorts;
 
 	/// 从已加载的模型句柄获取输出端口列表
-	std::function<std::vector<InferNode::Port>(ModelHandle)> getOutputPorts;
+	std::function<std::vector<Node::Port>(ModelHandle)> getOutputPorts;
 
 	// ── 可选：运行时钩子 ──
 
@@ -93,7 +93,7 @@ struct EngineDescriptor {
 	/// 典型用途：device→host 数据传输、输出格式后处理
 	/// ctx 提供完整的输入/输出槽位访问，可通过 ctx.outputRaw() 读取 GPU 输出、
 	/// ctx.output() 写回 host 数据
-	std::function<void(void* engine, InferNode::RunContext& ctx)> postRun;
+	std::function<void(void* engine, Node::RunContext& ctx)> postRun;
 
 	/// 引擎实例释放前调用，用于有序清理 GPU 资源
 	/// 若为 nullptr，退化为 shared_ptr<void> 默认析构
@@ -111,21 +111,21 @@ public:
 	bool registerEngine(const EngineDescriptor& desc);
 
 	// ── 接口 1：从已注册引擎创建节点 ──
-	std::unique_ptr<InferNode> createNode(
+	std::unique_ptr<Node> createNode(
 		const std::string& engineType,
 		const std::string& nodeName,
 		const void* engineConfig = nullptr) const;
 
 	// ── 接口 2：直接创建一个节点（无需注册引擎，自动标记为 "Builtin"）──
-	std::unique_ptr<InferNode> createNode(
+	std::unique_ptr<Node> createNode(
 		const std::string& nodeName,
-		InferNode::Schema schema,
-		InferNode::RunFn fn) const;
+		Node::Schema schema,
+		Node::RunFn fn) const;
 
 	// ── 接口 3：从已注册引擎 + 模型路径创建节点 ──
 	// 自动调用 getOrCreateEngine → getInputPorts → getOutputPorts → 构建 Schema
 	// 节点持有 EngineInstance 的非拥有引用，引擎生命周期由 Registry 管理
-	std::unique_ptr<InferNode> createNode(
+	std::unique_ptr<Node> createNode(
 		const std::string& engineType,
 		const std::string& nodeName,
 		const std::string& modelPath);
@@ -165,15 +165,15 @@ private:
 // 无配置版本
 template<typename F>
 NodeFactory makeNodeFactory(
-	std::string engineType, InferNode::Schema schema, F&& fn)
+	std::string engineType, Node::Schema schema, F&& fn)
 {
 	return [engineType = std::move(engineType),
 	        schema    = std::move(schema),
 	        fn        = std::forward<F>(fn)]
 	       (std::string name, const void* /*engineConfig*/)
-	       -> std::unique_ptr<InferNode>
+	       -> std::unique_ptr<Node>
 	{
-		return std::make_unique<InferNode>(
+		return std::make_unique<Node>(
 				engineType, std::move(name), schema, fn);
 	};
 }
@@ -181,17 +181,17 @@ NodeFactory makeNodeFactory(
 // 带配置版本：engineConfig 在 createNode 时拷贝为值，lambda 接收 const C&
 template<typename C, typename F>
 NodeFactory makeNodeFactory(
-	std::string engineType, InferNode::Schema schema, F&& fn)
+	std::string engineType, Node::Schema schema, F&& fn)
 {
 	return [engineType = std::move(engineType),
 	        schema    = std::move(schema),
 	        fn        = std::forward<F>(fn)]
 	       (std::string name, const void* engineConfig)
-	       -> std::unique_ptr<InferNode>
+	       -> std::unique_ptr<Node>
 	{
 		C config = engineConfig ? *static_cast<const C*>(engineConfig) : C{};
-		return std::make_unique<InferNode>(engineType, std::move(name), schema,
-			[fn, config = std::move(config)](InferNode::RunContext& ctx) -> InferNode::Result {
+		return std::make_unique<Node>(engineType, std::move(name), schema,
+			[fn, config = std::move(config)](Node::RunContext& ctx) -> Node::Result {
 				return fn(ctx, config);
 			});
 	};
@@ -200,18 +200,18 @@ NodeFactory makeNodeFactory(
 // 带引擎实例版本：自动从 engineConfig 提取 EngineInstance* 并传给节点构造
 template<typename F>
 NodeFactory makeNodeFactoryWithEngine(
-	std::string engineType, InferNode::Schema schema, F&& fn)
+	std::string engineType, Node::Schema schema, F&& fn)
 {
 	return [engineType = std::move(engineType),
 	        schema    = std::move(schema),
 	        fn        = std::forward<F>(fn)]
 	       (std::string name, const void* engineConfig)
-	       -> std::unique_ptr<InferNode>
+	       -> std::unique_ptr<Node>
 	{
 		auto* engineInstance = engineConfig
 			? *static_cast<EngineInstance* const*>(engineConfig)
 			: nullptr;
-		return std::make_unique<InferNode>(
+		return std::make_unique<Node>(
 			engineType, std::move(name), schema, fn, engineInstance);
 	};
 }

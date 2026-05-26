@@ -1,4 +1,4 @@
-#include "InferNode.h"
+#include "Node.h"
 #include "EngineRegistry.h"
 #include "TensorException.h"
 
@@ -8,7 +8,7 @@
 namespace DC {
 
 // ── 构造：从 Schema 构建工作槽位 ──
-InferNode::InferNode(std::string type, std::string name, Schema schema, RunFn fn,
+Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
                      EngineInstance* engineInstance)
 	: _type(std::move(type))
 	, _name(std::move(name))
@@ -31,19 +31,19 @@ InferNode::InferNode(std::string type, std::string name, Schema schema, RunFn fn
 	}
 }
 
-InferNode::~InferNode() = default;
+Node::~Node() = default;
 
 // ── 回调注册 ──
-void InferNode::setCompletionCallback(CompletionFn fn) {
+void Node::setCompletionCallback(CompletionFn fn) {
 	_onComplete = std::move(fn);
 }
 
-bool InferNode::hasCompletionCallback() const {
+bool Node::hasCompletionCallback() const {
 	return static_cast<bool>(_onComplete);
 }
 
 // ── 单端口输入 ──
-bool InferNode::setInput(const TaskId& taskId, const std::string& portName, Value data) {
+bool Node::setInput(const TaskId& taskId, const std::string& portName, Value data) {
 	if (!_schema.findInput(portName)) {
 		return false;
 	}
@@ -60,7 +60,7 @@ bool InferNode::setInput(const TaskId& taskId, const std::string& portName, Valu
 }
 
 // ── 批量输入 ──
-bool InferNode::setInput(const TaskId& taskId,
+bool Node::setInput(const TaskId& taskId,
                           std::unordered_map<std::string, TaskData> inputs) {
 	// 预校验：所有端口名必须存在
 	for (const auto& [name, data] : inputs) {
@@ -84,7 +84,7 @@ bool InferNode::setInput(const TaskId& taskId,
 }
 
 // ── 任务级输出 ──
-bool InferNode::hasOutput(const TaskId& taskId, const std::string& name) const {
+bool Node::hasOutput(const TaskId& taskId, const std::string& name) const {
 
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) return false;
@@ -93,34 +93,34 @@ bool InferNode::hasOutput(const TaskId& taskId, const std::string& name) const {
 	return slotIt->second.has_value();
 }
 
-Value InferNode::getOutput(const TaskId& taskId, const std::string& name) {
+Value Node::getOutput(const TaskId& taskId, const std::string& name) {
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
-		throw std::out_of_range("InferNode::getOutput: task '" + taskId + "' not found");
+		throw std::out_of_range("Node::getOutput: task '" + taskId + "' not found");
 	}
 	auto& optVal = taskIt->second.at(name);
 	if (!optVal.has_value()) {
-		throw std::out_of_range("InferNode::getOutput: output '" + name + "' is empty");
+		throw std::out_of_range("Node::getOutput: output '" + name + "' is empty");
 	}
 	Value result = std::move(optVal.value());
 	optVal.reset();
 	return result;
 }
 
-const Value& InferNode::peekOutput(const TaskId& taskId, const std::string& name) const {
+const Value& Node::peekOutput(const TaskId& taskId, const std::string& name) const {
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
-		throw std::out_of_range("InferNode::peekOutput: task '" + taskId + "' not found");
+		throw std::out_of_range("Node::peekOutput: task '" + taskId + "' not found");
 	}
 	auto& optVal = taskIt->second.at(name);
 	if (!optVal.has_value()) {
-		throw std::out_of_range("InferNode::peekOutput: output '" + name + "' is empty");
+		throw std::out_of_range("Node::peekOutput: output '" + name + "' is empty");
 	}
 	return optVal.value();
 }
 
-InferNode::TaskPortMap::mapped_type
-InferNode::collectOutputs(const TaskId& taskId) {
+Node::TaskPortMap::mapped_type
+Node::collectOutputs(const TaskId& taskId) {
 	std::unordered_map<std::string, TaskData> result;
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) return result;
@@ -135,7 +135,7 @@ InferNode::collectOutputs(const TaskId& taskId) {
 }
 
 // ── 阻塞式一次执行 ──
-Value InferNode::execute(const std::string& outputName,
+Value Node::execute(const std::string& outputName,
                                 std::unordered_map<std::string, Value> inputs) {
 	static size_t execCounter = 0;
 	auto taskId = "__exec_" + std::to_string(++execCounter);
@@ -147,7 +147,7 @@ Value InferNode::execute(const std::string& outputName,
 	try {
 		if (!setInput(taskId, std::move(inputs))) {
 			_onComplete = std::move(savedCallback);
-			throw std::runtime_error("InferNode::execute: setInputs failed");
+			throw std::runtime_error("Node::execute: setInputs failed");
 		}
 	} catch (...) {
 		_onComplete = std::move(savedCallback);
@@ -159,13 +159,13 @@ Value InferNode::execute(const std::string& outputName,
 	// 同步执行已在 setInputs → _checkAndExecute 内完成，直接读取输出
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
-		throw std::runtime_error("InferNode::execute: no output produced for task '" + taskId + "'");
+		throw std::runtime_error("Node::execute: no output produced for task '" + taskId + "'");
 	}
 
 	auto outIt = taskIt->second.find(outputName);
 	if (outIt == taskIt->second.end() || !outIt->second.has_value()) {
 		_taskOutputs.erase(taskId);
-		throw std::runtime_error("InferNode::execute: output '" + outputName + "' not found");
+		throw std::runtime_error("Node::execute: output '" + outputName + "' not found");
 	}
 
 	Value result = std::move(outIt->second.value());
@@ -174,12 +174,12 @@ Value InferNode::execute(const std::string& outputName,
 }
 
 // ── 任务生命周期 ──
-void InferNode::clearTask(const TaskId& taskId) {
+void Node::clearTask(const TaskId& taskId) {
 	_taskInputs.erase(taskId);
 	_taskOutputs.erase(taskId);
 }
 
-size_t InferNode::taskCount() const {
+size_t Node::taskCount() const {
 	return _taskInputs.size();
 }
 
@@ -187,12 +187,12 @@ size_t InferNode::taskCount() const {
 // Tensor 便捷接口（自动完成 Tensor ↔ Value 包装）
 // ════════════════════════════════════════════
 
-bool InferNode::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
+bool Node::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
 	auto* p = new Tensor(std::move(data));
 	return setInput(taskId, portName, Value(p, [](Tensor* ptr) { delete ptr; }));
 }
 
-bool InferNode::setInput(const TaskId& taskId,
+bool Node::setInput(const TaskId& taskId,
                                 std::unordered_map<std::string, Tensor> inputs) {
 	std::unordered_map<std::string, TaskData> wrapped;
 	wrapped.reserve(inputs.size());
@@ -203,11 +203,11 @@ bool InferNode::setInput(const TaskId& taskId,
 	return setInput(taskId, std::move(wrapped));
 }
 
-Tensor InferNode::getOutputTensor(const TaskId& taskId, const std::string& name) {
+Tensor Node::getOutputTensor(const TaskId& taskId, const std::string& name) {
 	auto nt = getOutput(taskId, name);
 	auto* t = nt.as<Tensor>();
 	if (!t) {
-		throw std::out_of_range("InferNode::getOutputTensor: output '" + name
+		throw std::out_of_range("Node::getOutputTensor: output '" + name
 			+ "' is not a DC::Tensor (innerType="
 			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
@@ -215,7 +215,7 @@ Tensor InferNode::getOutputTensor(const TaskId& taskId, const std::string& name)
 }
 
 std::unordered_map<std::string, Tensor>
-InferNode::collectOutputTensors(const TaskId& taskId) {
+Node::collectOutputTensors(const TaskId& taskId) {
 	auto outputs = collectOutputs(taskId);
 	std::unordered_map<std::string, Tensor> result;
 	result.reserve(outputs.size());
@@ -228,7 +228,7 @@ InferNode::collectOutputTensors(const TaskId& taskId) {
 	return result;
 }
 
-Tensor InferNode::executeTensor(const std::string& outputName,
+Tensor Node::executeTensor(const std::string& outputName,
                                 std::unordered_map<std::string, Tensor> inputs) {
 	std::unordered_map<std::string, Value> wrapped;
 	wrapped.reserve(inputs.size());
@@ -240,7 +240,7 @@ Tensor InferNode::executeTensor(const std::string& outputName,
 	auto nt = execute(outputName, std::move(wrapped));
 	auto* t = nt.as<Tensor>();
 	if (!t) {
-		throw std::runtime_error("InferNode::executeTensor: output '" + outputName
+		throw std::runtime_error("Node::executeTensor: output '" + outputName
 			+ "' is not a DC::Tensor (innerType="
 			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
@@ -248,39 +248,39 @@ Tensor InferNode::executeTensor(const std::string& outputName,
 }
 
 // ── RunFn 内部使用的计算 API ──
-const Value& InferNode::_inputImpl(const std::string& name) const {
+const Value& Node::_inputImpl(const std::string& name) const {
 	auto it = _inputSlots.find(name);
 	if (it == _inputSlots.end()) {
-		throw std::out_of_range("InferNode::_inputImpl: input '" + name + "' not found");
+		throw std::out_of_range("Node::_inputImpl: input '" + name + "' not found");
 	}
 	const auto* nt = it->second.peek<Value>();
 	if (!nt) {
-		throw std::runtime_error("InferNode::_inputImpl: input '" + name + "' is not a Value");
+		throw std::runtime_error("Node::_inputImpl: input '" + name + "' is not a Value");
 	}
 	return *nt;
 }
 
-void InferNode::_outputImpl(const std::string& name, Value tensor) {
+void Node::_outputImpl(const std::string& name, Value tensor) {
 	auto it = _outputSlots.find(name);
 	if (it == _outputSlots.end()) {
-		throw std::out_of_range("InferNode::_outputImpl: output '" + name + "' not found");
+		throw std::out_of_range("Node::_outputImpl: output '" + name + "' not found");
 	}
 	it->second.store(std::move(tensor));
 }
 
 // ── 转换钩子访问器 ──
-const TensorConverter* InferNode::_converter() const {
+const TensorConverter* Node::_converter() const {
 	auto* desc = _engineDescriptor();
 	if (!desc) return nullptr;
 	return &desc->converter;
 }
 
-const EngineDescriptor* InferNode::_engineDescriptor() const {
+const EngineDescriptor* Node::_engineDescriptor() const {
 	if (_engineInstance) return _engineInstance->descriptor();
 	return EngineRegistry::instance().find(_type);
 }
 
-void InferNode::_synchronizeEngine() const {
+void Node::_synchronizeEngine() const {
 	if (!_engineInstance) return;
 	auto* desc = _engineInstance->descriptor();
 	if (desc && desc->synchronize) {
@@ -289,29 +289,29 @@ void InferNode::_synchronizeEngine() const {
 }
 
 // ── RunContext out-of-line 实现（需要 EngineInstance 完整类型）──
-const EngineInstance* InferNode::RunContext::engineInstance() const {
+const EngineInstance* Node::RunContext::engineInstance() const {
 	return _node._engineInstance;
 }
 
-void* InferNode::RunContext::engine() const {
+void* Node::RunContext::engine() const {
 	return _node._engineInstance ? _node._engineInstance->get() : nullptr;
 }
 
-const Value* InferNode::RunContext::outputRaw(const std::string& name) const {
+const Value* Node::RunContext::outputRaw(const std::string& name) const {
 	auto it = _node._outputSlots.find(name);
 	if (it == _node._outputSlots.end()) return nullptr;
 	return it->second.peek<Value>();
 }
 
 // ── 结果辅助 ──
-InferNode::Result InferNode::_makeSuccess(std::string message) const {
+Node::Result Node::_makeSuccess(std::string message) const {
 	Result r;
 	r.status = Status::Ok;
 	r.message = std::move(message);
 	return r;
 }
 
-InferNode::Result InferNode::_makeFailure(Status status, std::string message) const {
+Node::Result Node::_makeFailure(Status status, std::string message) const {
 	Result r;
 	r.status = status;
 	r.message = std::move(message);
@@ -322,7 +322,7 @@ InferNode::Result InferNode::_makeFailure(Status status, std::string message) co
 // 内部方法（调用时已持锁）
 // ════════════════════════════════════════════
 
-void InferNode::_ensureTaskExists(const TaskId& taskId) {
+void Node::_ensureTaskExists(const TaskId& taskId) {
 	if (_taskInputs.contains(taskId)) return;
 
 	TaskBuffer inputs;
@@ -333,7 +333,7 @@ void InferNode::_ensureTaskExists(const TaskId& taskId) {
 	_taskInputs.emplace(taskId, std::move(inputs));
 }
 
-bool InferNode::_isTaskReady(const TaskId& taskId) const {
+bool Node::_isTaskReady(const TaskId& taskId) const {
 	auto it = _taskInputs.find(taskId);
 	if (it == _taskInputs.end()) return false;
 
@@ -348,7 +348,7 @@ bool InferNode::_isTaskReady(const TaskId& taskId) const {
 	return true;
 }
 
-void InferNode::_checkAndExecute(const TaskId& taskId) {
+void Node::_checkAndExecute(const TaskId& taskId) {
 	if (!_isTaskReady(taskId)) return;
 
 	// ① 加载输入：_taskInputs[taskId] → _inputSlots (move)
@@ -416,7 +416,7 @@ void InferNode::_checkAndExecute(const TaskId& taskId) {
 	// Diagnostic logging for failures to aid debugging
 	if (!result.ok()) {
 		try {
-			std::cerr << "InferNode[" << _name << "] task '" << taskId
+			std::cerr << "Node[" << _name << "] task '" << taskId
 					  << "' failed: status=" << static_cast<int>(result.status)
 					  << ", message='" << result.message << "'" << std::endl;
 		} catch (...) {
@@ -433,7 +433,7 @@ void InferNode::_checkAndExecute(const TaskId& taskId) {
 	}
 }
 
-void InferNode::_loadTaskToWorkingSlots(const TaskId& taskId) {
+void Node::_loadTaskToWorkingSlots(const TaskId& taskId) {
 	auto& taskInputs = _taskInputs[taskId];
 
 	for (const auto& port : _schema.inputs) {
@@ -448,11 +448,11 @@ void InferNode::_loadTaskToWorkingSlots(const TaskId& taskId) {
 				const auto* t = static_cast<const Tensor*>(nativeData.get());
 				if (!t || !t->valid()) {
 					throw TensorException(TensorException::ErrorType::Other,
-						"InferNode::_loadTaskToWorkingSlots: invalid Tensor in Value for port '" + port.name + "'");
+						"Node::_loadTaskToWorkingSlots: invalid Tensor in Value for port '" + port.name + "'");
 				}
 				if (t->type() != port.type) {
 					throw TensorException(TensorException::ErrorType::TypeMismatch,
-						"InferNode::_loadTaskToWorkingSlots: type mismatch for port '" + port.name + "'");
+						"Node::_loadTaskToWorkingSlots: type mismatch for port '" + port.name + "'");
 				}
 			}
 
@@ -465,13 +465,13 @@ void InferNode::_loadTaskToWorkingSlots(const TaskId& taskId) {
 	}
 }
 
-void InferNode::_clearWorkingOutputs() {
+void Node::_clearWorkingOutputs() {
 	for (auto& [name, slot] : _outputSlots) {
 		slot.clear();
 	}
 }
 
-void InferNode::_collectAndSaveOutputs(const TaskId& taskId) {
+void Node::_collectAndSaveOutputs(const TaskId& taskId) {
 	if (!_taskOutputs.contains(taskId)) {
 		TaskBuffer outputs;
 		for (const auto& port : _schema.outputs) {
