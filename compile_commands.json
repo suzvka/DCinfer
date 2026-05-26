@@ -1,6 +1,18 @@
 [
 {
   "directory": "E:/DClib/DCinfer/build/x64-Debug",
+  "command": "C:\\PROGRA~1\\MICROS~4\\18\\COMMUN~1\\VC\\Tools\\MSVC\\1450~1.357\\bin\\Hostx64\\x64\\cl.exe  /nologo /TP -IE:\\DClib\\DCinfer\\DCinfer\\include -IE:\\DClib\\DCinfer\\DCinfer\\include\\Tensor -IE:\\DClib\\DCinfer\\DCinfer\\include\\Tools -IE:\\DClib\\DCinfer\\DCinfer\\include\\Infer /DWIN32 /D_WINDOWS /GR /EHsc /utf-8 /Zi /Ob0 /Od /RTC1 -std:c++20 -MDd /FoDCinfer\\CMakeFiles\\DConnx.dir\\src\\Node.cpp.obj /FdDCinfer\\CMakeFiles\\DConnx.dir\\DConnx.pdb /FS -c E:\\DClib\\DCinfer\\DCinfer\\src\\Node.cpp",
+  "file": "E:\\DClib\\DCinfer\\DCinfer\\src\\Node.cpp",
+  "output": "DCinfer\\CMakeFiles\\DConnx.dir\\src\\Node.cpp.obj"
+},
+{
+  "directory": "E:/DClib/DCinfer/build/x64-Debug",
+  "command": "C:\\PROGRA~1\\MICROS~4\\18\\COMMUN~1\\VC\\Tools\\MSVC\\1450~1.357\\bin\\Hostx64\\x64\\cl.exe  /nologo /TP -IE:\\DClib\\DCinfer\\DCinfer\\include -IE:\\DClib\\DCinfer\\DCinfer\\include\\Tensor -IE:\\DClib\\DCinfer\\DCinfer\\include\\Tools -IE:\\DClib\\DCinfer\\DCinfer\\include\\Infer /DWIN32 /D_WINDOWS /GR /EHsc /utf-8 /Zi /Ob0 /Od /RTC1 -std:c++20 -MDd /FoDCinfer\\CMakeFiles\\DConnx.dir\\src\\SlotType.cpp.obj /FdDCinfer\\CMakeFiles\\DConnx.dir\\DConnx.pdb /FS -c E:\\DClib\\DCinfer\\DCinfer\\src\\SlotType.cpp",
+  "file": "E:\\DClib\\DCinfer\\DCinfer\\src\\SlotType.cpp",
+  "output": "DCinfer\\CMakeFiles\\DConnx.dir\\src\\SlotType.cpp.obj"
+},
+{
+  "directory": "E:/DClib/DCinfer/build/x64-Debug",
   "command": "C:\\PROGRA~1\\MICROS~4\\18\\COMMUN~1\\VC\\Tools\\MSVC\\1450~1.357\\bin\\Hostx64\\x64\\cl.exe  /nologo /TP -IE:\\DClib\\DCinfer\\DCinfer\\include -IE:\\DClib\\DCinfer\\DCinfer\\include\\Tensor -IE:\\DClib\\DCinfer\\DCinfer\\include\\Tools -IE:\\DClib\\DCinfer\\DCinfer\\include\\Infer /DWIN32 /D_WINDOWS /GR /EHsc /utf-8 /Zi /Ob0 /Od /RTC1 -std:c++20 -MDd /FoDCinfer\\CMakeFiles\\DConnx.dir\\src\\EngineRegistry.cpp.obj /FdDCinfer\\CMakeFiles\\DConnx.dir\\DConnx.pdb /FS -c E:\\DClib\\DCinfer\\DCinfer\\src\\EngineRegistry.cpp",
   "file": "E:\\DClib\\DCinfer\\DCinfer\\src\\EngineRegistry.cpp",
   "output": "DCinfer\\CMakeFiles\\DConnx.dir\\src\\EngineRegistry.cpp.obj"

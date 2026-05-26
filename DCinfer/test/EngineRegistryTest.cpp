@@ -116,6 +116,7 @@ static void runTests() {
 		auto* inPtr = new Tensor(std::move(in));
 		Value nt(inPtr, [](Tensor* p) { delete p; });
 		node->setInput("task1", "in", std::move(nt));
+		node->tryExecute("task1");
 
 		if (!node->hasOutput("task1", "out"))
 			throw std::runtime_error("output not produced");

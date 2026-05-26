@@ -50,12 +50,6 @@ bool Node::setInput(const TaskId& taskId, const std::string& portName, Value dat
 
 	_ensureTaskExists(taskId);
 	_taskInputs[taskId].at(portName) = std::move(data);
-
-	try {
-		_checkAndExecute(taskId);
-	} catch (const TensorException&) {
-		return false;
-	}
 	return true;
 }
 
@@ -73,12 +67,6 @@ bool Node::setInput(const TaskId& taskId,
 
 	for (auto& [name, data] : inputs) {
 		_taskInputs[taskId].at(name) = std::move(data);
-	}
-
-	try {
-		_checkAndExecute(taskId);
-	} catch (const TensorException&) {
-		return false;
 	}
 	return true;
 }
@@ -154,9 +142,20 @@ Value Node::execute(const std::string& outputName,
 		throw;
 	}
 
+	// 显式触发执行（setInput 不再自动触发）
+	try {
+		if (!tryExecute(taskId)) {
+			_onComplete = std::move(savedCallback);
+			throw std::runtime_error("Node::execute: tryExecute failed (not ready or reentrant)");
+		}
+	} catch (...) {
+		_onComplete = std::move(savedCallback);
+		throw;
+	}
+
 	_onComplete = std::move(savedCallback);
 
-	// 同步执行已在 setInputs → _checkAndExecute 内完成，直接读取输出
+	// 同步执行已在 tryExecute → _checkAndExecute 内完成，直接读取输出
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
 		throw std::runtime_error("Node::execute: no output produced for task '" + taskId + "'");
@@ -181,6 +180,30 @@ void Node::clearTask(const TaskId& taskId) {
 
 size_t Node::taskCount() const {
 	return _taskInputs.size();
+}
+
+// ── 调度接口 ──
+bool Node::isReady(const TaskId& taskId) const {
+	return _isTaskReady(taskId);
+}
+
+bool Node::tryExecute(const TaskId& taskId) {
+	if (!_isTaskReady(taskId)) return false;
+
+	// 尝试获取重入锁，若已有 task 在执行则拒绝
+	if (_executing.test_and_set(std::memory_order_acquire)) {
+		return false;
+	}
+
+	try {
+		_checkAndExecute(taskId);
+	} catch (...) {
+		_executing.clear(std::memory_order_release);
+		throw;
+	}
+
+	_executing.clear(std::memory_order_release);
+	return true;
 }
 
 // ════════════════════════════════════════════

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -179,13 +180,14 @@ public:
 
 	// ── 任务级输入 ──
 
-	/// @brief  单端口写入（NativeTensor），写入后立即检查就绪
+	/// @brief  单端口写入（Value），仅写入缓冲，不触发执行
+	/// @return 若端口名存在于 Schema 中则返回 true
 	bool setInput(const TaskId& taskId, const std::string& portName, Value data);
 
 	/// @brief  便捷接口：直接传入 DC::Tensor，内部自动包装为 Value
 	bool setInput(const TaskId& taskId, const std::string& portName, Tensor data);
 
-	/// @brief  批量写入（NativeTensor），全部成功后触发一次检查
+	/// @brief  批量写入（Value），仅写入缓冲，不触发执行
 	bool setInput(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs);
 
 	/// @brief  便捷接口：批量传入 DC::Tensor，内部自动包装
@@ -217,6 +219,16 @@ public:
 	/// @throws  std::runtime_error 若输入不合法、执行失败或输出不是 Tensor 类型
 	Tensor executeTensor(const std::string& outputName,
 	                     std::unordered_map<std::string, Tensor> inputs);
+
+	// ── 调度接口（供 Graph 调用）──
+
+	/// @brief  查询指定任务是否所有必需输入已就绪（含默认值）
+	bool isReady(const TaskId& taskId) const;
+
+	/// @brief  尝试执行就绪任务：获取重入锁 → 加载输入 → RunFn → 收集输出
+	/// @return true 表示执行成功完成，false 表示未就绪或节点正忙（重入被拒）
+	/// @note   线程安全；同一时刻最多一个 task 在执行
+	bool tryExecute(const TaskId& taskId);
 
 	// ── 任务生命周期 ──
 	void   clearTask(const TaskId& taskId);
@@ -267,6 +279,7 @@ private:
 	RunFn             _fn;
 	CompletionFn      _onComplete;
 	EngineInstance*   _engineInstance = nullptr;  // 非拥有引用，Registry 管理生命周期
+	std::atomic_flag  _executing = ATOMIC_FLAG_INIT;  // 重入锁：同一时刻最多一个 task 在执行
 };
 
 // ── RunContext 定义（需在 Node 类体之后）──

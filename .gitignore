@@ -73,3 +73,4 @@ coverage.*
 docs/build/
 
 # Keep source, headers, scripts and docs in repo. Exclude local build/IDE artifacts only.
+compile_commands.json

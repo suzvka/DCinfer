@@ -178,4 +178,41 @@ std::vector<std::string> EngineRegistry::engineTypes() const {
 	return types;
 }
 
+// ── 算子注册 ──
+
+bool EngineRegistry::registerOperator(
+	const std::string& operatorName,
+	Node::Schema schema,
+	Node::RunFn fn)
+{
+	if (operatorName.empty()) return false;
+	if (_engines.contains(operatorName)) return false;
+
+	EngineDescriptor desc;
+	desc.engineType = operatorName;
+	desc.converter  = { builtinToNative, builtinToDC };
+
+	// 工厂：捕获 schema 和 fn，创建 Builtin 节点
+	desc.factory = [schema = std::move(schema), fn = std::move(fn)](
+		std::string name, const void* /*engineConfig*/)
+		-> std::unique_ptr<Node>
+	{
+		return std::make_unique<Node>("Builtin", std::move(name), schema, fn);
+	};
+
+	_engines[operatorName] = std::move(desc);
+	return true;
+}
+
+std::unique_ptr<Node> EngineRegistry::createOperator(
+	const std::string& operatorName,
+	const std::string& nodeName) const
+{
+	auto it = _engines.find(operatorName);
+	if (it == _engines.end() || !it->second.factory) {
+		return nullptr;
+	}
+	return it->second.factory(nodeName, nullptr);
+}
+
 } // namespace DC

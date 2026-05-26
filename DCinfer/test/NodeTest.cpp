@@ -112,7 +112,7 @@ void runTests() {
 	auto& reg = EngineRegistry::instance();
 
 	// ── Test 1: 基本乱序 setInput ──
-	TEST("out-of-order setInput triggers auto-execute") {
+	TEST("out-of-order setInput with explicit tryExecute") {
 		auto node = reg.createNode("add1", scalarAddSchema(), addRunImpl);
 
 		std::atomic<bool> completed{false};
@@ -130,9 +130,11 @@ void runTests() {
 		// a 先到，不应触发
 		node->setInput("task1", "a", makeScalarNative(3.0f));
 		CHECK(!completed, "should not complete after only 'a'");
+		CHECK(!node->tryExecute("task1"), "tryExecute should fail when not ready");
 
-		// b 后到，应触发
+		// b 后到 → 就绪
 		node->setInput("task1", "b", makeScalarNative(4.0f));
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed when ready");
 		CHECK(completed, "should complete after 'b'");
 		CHECK(std::abs(resultValue - 7.0f) < 1e-6f, "scalar add mismatch");
 	}
@@ -159,7 +161,8 @@ void runTests() {
 		inputs.emplace("b", makeScalarNative(20.0f));
 
 		CHECK(node->setInput("task1", std::move(inputs)), "setInputs should succeed");
-		CHECK(completed, "should auto-execute after setInputs");
+		CHECK(node->tryExecute("task1"), "tryExecute after batch setInputs");
+		CHECK(completed, "should execute after tryExecute");
 		CHECK(std::abs(resultValue - 30.0f) < 1e-6f, "batch add mismatch");
 	}
 	END_TEST();
@@ -179,11 +182,13 @@ void runTests() {
 		node->setInput("task1", "a", makeScalarNative(1.0f));
 		node->setInput("task2", "b", makeScalarNative(6.0f));
 		node->setInput("task1", "b", makeScalarNative(2.0f));  // task1 就绪
+		CHECK(node->tryExecute("task1"), "task1 should execute");
 
 		CHECK(completedTasks.size() == 1, "task1 should complete");
 		CHECK(completedTasks[0] == "task1", "task1 should complete first");
 
 		node->setInput("task2", "a", makeScalarNative(5.0f));  // task2 就绪
+		CHECK(node->tryExecute("task2"), "task2 should execute");
 		CHECK(completedTasks.size() == 2, "task2 should also complete");
 	}
 	END_TEST();
@@ -198,6 +203,8 @@ void runTests() {
 		});
 
 		node->setInput("task1", "a", makeScalarNative(1.0f));
+		CHECK(!node->isReady("task1"), "should not be ready with only one input");
+		CHECK(!node->tryExecute("task1"), "tryExecute should fail when not ready");
 		CHECK(!completed, "should not execute with only one input");
 		CHECK(node->taskCount() == 1, "one pending task");
 	}
@@ -232,7 +239,9 @@ void runTests() {
 
 		// 只设置 a，b 有默认值 100 → 应立即触发
 		node->setInput("task1", "a", makeScalarNative(5.0f));
-		CHECK(completed, "should auto-execute with default value");
+		CHECK(node->isReady("task1"), "task should be ready with default value");
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
+		CHECK(completed, "should execute with default value");
 		CHECK(std::abs(resultValue - 105.0f) < 1e-6f, "default value add mismatch");
 	}
 	END_TEST();
@@ -269,6 +278,7 @@ void runTests() {
 		inputs.emplace("b", makeScalarNative(200.0f));
 
 		CHECK(node->setInput("task1", std::move(inputs)), "batch setInputs should succeed");
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 		CHECK(completed, "should execute");
 		CHECK(std::abs(resultValue - 205.0f) < 1e-6f, "overridden default add mismatch");
 	}
@@ -298,6 +308,7 @@ void runTests() {
 		});
 
 		node->setInput("task1", "x", makeScalarNative(1.0f));
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 		CHECK(completed, "callback should be invoked even on failure");
 		CHECK(lastStatus == Node::Status::ExecutionFailed,
 			"status should be ExecutionFailed");
@@ -329,6 +340,7 @@ void runTests() {
 		});
 
 		node->setInput("task1", "x", makeScalarNative(1.0f));
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 		CHECK(completed, "callback should be invoked");
 		CHECK(lastStatus == Node::Status::InternalError,
 			"status should be InternalError for missing output");
@@ -341,6 +353,7 @@ void runTests() {
 
 		node->setInput("task1", "a", makeScalarNative(7.0f));
 		node->setInput("task1", "b", makeScalarNative(8.0f));
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 
 		CHECK(node->hasOutput("task1", "s"), "hasOutput should be true");
 		auto outNT = node->getOutput("task1", "s");
@@ -363,14 +376,25 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 11: 类型不匹配（需要任务就绪才触发校验）──
-	TEST("type mismatch rejected") {
+	// ── Test 11: 类型不匹配（tryExecute 时校验触发）──
+	TEST("type mismatch rejected at tryExecute") {
 		auto node = reg.createNode("add11", scalarAddSchema(), addRunImpl);
 
-		// 设置 a 为 int（类型不匹配），b 为 float → 任务就绪，校验触发
+		// 设置 a 为 int（类型不匹配），b 为 float → 缓冲阶段不校验
 		node->setInput("task1", "b", makeScalarNative(1.0f));
-		CHECK(!node->setInput("task1", "a", makeIntNative(42)),
-			"setInput should return false for type mismatch");
+		CHECK(node->setInput("task1", "a", makeIntNative(42)),
+			"setInput should buffer even with wrong type");
+
+		CHECK(node->isReady("task1"), "task should appear ready");
+
+		// tryExecute 时在校验阶段抛出
+		bool threw = false;
+		try {
+			node->tryExecute("task1");
+		} catch (const TensorException&) {
+			threw = true;
+		}
+		CHECK(threw, "tryExecute should throw for type mismatch");
 	}
 	END_TEST();
 
@@ -394,6 +418,7 @@ void runTests() {
 		node->setInput("task1", "a", makeScalarNative(1.0f));
 		node->setInput("task1", "a", makeScalarNative(10.0f));  // 覆盖
 		node->setInput("task1", "b", makeScalarNative(2.0f));
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 
 		CHECK(callCount == 1, "should execute exactly once");
 		CHECK(std::abs(resultValue - 12.0f) < 1e-6f, "should use latest value");
@@ -423,6 +448,8 @@ void runTests() {
 
 		// 之前正常设置的端口数据应保留
 		node->setInput("task1", "b", makeScalarNative(5.0f));
+		CHECK(node->isReady("task1"), "task should be ready");
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 		CHECK(completed, "task should still be executable after rollback");
 	}
 	END_TEST();
@@ -445,34 +472,43 @@ void runTests() {
 
 		node->setInput("task1", "a", makeScalarNative(4.0f));
 		node->setInput("task1", "b", makeScalarNative(5.0f));
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 
 		CHECK(gotOutput, "callback should get correct output");
 		CHECK(cleared, "callback should clear task");
 	}
 	END_TEST();
 
-	// ── Test 15: 回调中 setInput 触发下游（模拟）──
-	TEST("callback re-entrant setInput") {
+	// ── Test 15: 回调中 setInput 但不重入执行 ──
+	TEST("callback sets input without re-entrant execution") {
 		auto node = reg.createNode("add15", scalarAddSchema(), addRunImpl);
 
 		std::atomic<int> callCount{0};
+		bool needsTask2{false};
 
 		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
 			++callCount;
 			CHECK(result.ok(), "result should be Ok");
 			node->clearTask(taskId);
 
-			// 在回调中触发新任务
+			// 在回调中设置新任务输入（但不执行，禁止重入）
 			if (callCount == 1) {
 				node->setInput("task2", "a", makeScalarNative(1.0f));
 				node->setInput("task2", "b", makeScalarNative(1.0f));
+				needsTask2 = true;
 			}
 		});
 
 		node->setInput("task1", "a", makeScalarNative(3.0f));
 		node->setInput("task1", "b", makeScalarNative(3.0f));
+		CHECK(node->tryExecute("task1"), "task1 should execute");
 
-		CHECK(callCount == 2, "should process both tasks (callback triggered new one)");
+		// 回调中设置了 task2 的输入，需要外部触发执行
+		CHECK(needsTask2, "callback should have set up task2");
+		CHECK(callCount == 1, "only task1 completed so far");
+		CHECK(node->tryExecute("task2"), "task2 should execute now");
+
+		CHECK(callCount == 2, "should process both tasks");
 	}
 	END_TEST();
 
@@ -493,6 +529,8 @@ void runTests() {
 		node->setInput("task2", "a", makeScalarNative(10.0f));
 		node->setInput("task1", "b", makeScalarNative(2.0f));
 		node->setInput("task2", "b", makeScalarNative(20.0f));
+		CHECK(node->tryExecute("task1"), "task1 should execute");
+		CHECK(node->tryExecute("task2"), "task2 should execute");
 
 		CHECK(callCount == 2, "both tasks should complete");
 	}
@@ -524,6 +562,7 @@ void runTests() {
 
 		node->setInput("task1", "a", makeVectorNative(aVals));
 		node->setInput("task1", "b", makeVectorNative(bVals));
+		CHECK(node->tryExecute("task1"), "tryExecute should succeed");
 
 		CHECK(completed, "vector task should complete");
 		CHECK(match, "vector add values should match");
