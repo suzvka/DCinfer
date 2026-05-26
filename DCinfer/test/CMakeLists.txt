@@ -3,9 +3,9 @@
 
 cmake_minimum_required(VERSION 3.12)
 
-# This CMakeLists is included from the root; ensure DConnx target exists
-if (NOT TARGET DConnx::DConnx)
-    message(FATAL_ERROR "DConnx::DConnx target not found. Ensure parent adds DConnx first.")
+# This CMakeLists is included from the root; ensure DCinfer target exists
+if (NOT TARGET DCinfer::DCinfer)
+    message(FATAL_ERROR "DCinfer::DCinfer target not found. Ensure parent adds DCinfer first.")
 endif()
 
 # Enable CTest support
@@ -18,7 +18,7 @@ foreach(test_src IN LISTS TEST_SOURCES)
     # Each test source is expected to be a standalone test with its own main.
     # Do not force-include a common test harness to avoid multiple main definitions.
     add_executable(${test_name} ${test_src})
-    target_link_libraries(${test_name} PRIVATE DConnx::DConnx)
+    target_link_libraries(${test_name} PRIVATE DCinfer::DCinfer)
     # Use generator expression to pass the full path to the built executable to CTest.
     # This avoids issues where the build tool tries to execute the test by target name.
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
