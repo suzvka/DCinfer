@@ -31,9 +31,9 @@ static int failures = 0;
 // ── 辅助 ──
 
 static Value makeFloatTensor(float value) {
-	auto* p = new Tensor(TensorType::Float, sizeof(float));
-	*p = value;
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+	*t = value;
+	return Value(std::move(t));
 }
 
 // ── 加法算子 Schema + RunFn ──
@@ -54,9 +54,9 @@ static Node::RunFn addRunFn() {
 		if (!a || !b) return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
 
 		float sum = a->item<float>() + b->item<float>();
-		auto* p = new Tensor(TensorType::Float, sizeof(float));
-		*p = sum;
-		ctx.output("s", Value(p, [](Tensor* ptr) { delete ptr; }));
+		auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+		*t = sum;
+		ctx.output("s", Value(std::move(t)));
 		return ctx.success();
 	};
 }
@@ -75,8 +75,7 @@ static Node::RunFn identityRunFn() {
 		const auto* t = inVal.as<Tensor>();
 		if (!t) return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
 
-		auto* copy = new Tensor(*t);
-		ctx.output("y", Value(copy, [](Tensor* ptr) { delete ptr; }));
+		ctx.output("y", Value(std::make_unique<Tensor>(*t)));
 		return ctx.success();
 	};
 }
@@ -87,7 +86,7 @@ static Node::RunFn identityRunFn() {
 // ════════════════════════════════════════════
 
 void testBuildGraph() {
-	TEST("build graph - addNode and connect") {
+	TEST("build graph - addNode and wire") {
 		InferGraph graph;
 
 		auto* n1 = graph.addNode(
@@ -106,14 +105,20 @@ void testBuildGraph() {
 		CHECK(dup == nullptr, "duplicate name should be rejected");
 		CHECK(graph.nodeCount() == 2, "nodeCount still 2");
 
-		// 接线
-		bool ok = graph.connect("add1", "s", "id1", "x");
-		CHECK(ok, "connect should succeed");
-		CHECK(graph.edgeCount() == 1, "edgeCount should be 1");
+		// 接线：两个业务节点之间 → wire() 自动插入导线连接器
+		auto* w = graph.wire("add1", "s", "id1", "x");
+		CHECK(w != nullptr, "wire should succeed");
+		CHECK(w->isConnector(), "wire node should be a connector");
+		CHECK(graph.nodeCount() == 3, "nodeCount should be 3 (add1, id1, __wire_0)");
+		CHECK(graph.edgeCount() == 2, "edgeCount should be 2 (add1→wire, wire→id1)");
 
-		// 无效接线
-		bool bad = graph.connect("add1", "no_such", "id1", "x");
-		CHECK(!bad, "connect with bad src port should fail");
+		// 无效接线：端口不存在
+		auto* bad = graph.wire("add1", "no_such", "id1", "x");
+		CHECK(bad == nullptr, "wire with bad src port should fail");
+
+		// 业务节点直连应被 connect() 拒绝
+		bool direct = graph.connect("add1", "s", "id1", "x");
+		CHECK(!direct, "direct connect between non-connectors should be rejected");
 	}
 	END_TEST();
 }
@@ -124,7 +129,7 @@ void testSimpleDataflow() {
 
 		graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 		graph.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
-		graph.connect("add1", "s", "id1", "x");
+		graph.wire("add1", "s", "id1", "x");
 
 		// 注入输入
 		CHECK(graph.feedInput("t1", "add1", "a", makeFloatTensor(3.0f)), "feed a");
@@ -132,9 +137,6 @@ void testSimpleDataflow() {
 
 		// 检查就绪
 		CHECK(graph.node("add1")->isReady("t1"), "add1 should be ready");
-
-		// 调度入口节点
-		graph.schedule("add1", "t1");
 
 		// 驱动执行
 		graph.run();
@@ -156,7 +158,10 @@ void testBroadcastConnectorInGraph() {
 		// 广播连接器：1 输入 → 2 输出
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcRunFn  = Connector::broadcastRunFn();
-		graph.addNode(std::make_unique<Node>("Builtin", "bc", bcSchema, bcRunFn));
+		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn,
+			nullptr, ThreadPoolAffinity::System);
+		bcNode->setConnector(true);
+		graph.addNode(std::move(bcNode));
 
 		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
@@ -170,7 +175,6 @@ void testBroadcastConnectorInGraph() {
 		graph.feedInput("t1", "add1", "a", makeFloatTensor(10.0f));
 		graph.feedInput("t1", "add1", "b", makeFloatTensor(20.0f));
 
-		graph.schedule("add1", "t1");
 		graph.run();
 
 		// 两个下游都应该有结果
@@ -193,7 +197,10 @@ void testRoutingConnectorInGraph() {
 
 		auto rtSchema = Connector::routingSchema(2);
 		auto rtRunFn  = Connector::routingRunFn();
-		graph.addNode(std::make_unique<Node>("Builtin", "rt", rtSchema, rtRunFn));
+		auto rtNode = std::make_unique<Node>("Connector.Routing", "rt", rtSchema, rtRunFn,
+			nullptr, ThreadPoolAffinity::System);
+		rtNode->setConnector(true);
+		graph.addNode(std::move(rtNode));
 
 		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
@@ -205,7 +212,6 @@ void testRoutingConnectorInGraph() {
 		// 第一轮：t1 → out_0 → id_a
 		graph.feedInput("t1", "add1", "a", makeFloatTensor(1.0f));
 		graph.feedInput("t1", "add1", "b", makeFloatTensor(2.0f));
-		graph.schedule("add1", "t1");
 		graph.run();
 
 		CHECK(graph.hasOutput("t1", "id_a", "y"), "t1 should route to id_a (out_0)");
@@ -217,7 +223,6 @@ void testRoutingConnectorInGraph() {
 		// 第二轮：t2 → out_1 → id_b
 		graph.feedInput("t2", "add1", "a", makeFloatTensor(5.0f));
 		graph.feedInput("t2", "add1", "b", makeFloatTensor(6.0f));
-		graph.schedule("add1", "t2");
 		graph.run();
 
 		CHECK(!graph.hasOutput("t2", "id_a", "y"), "t2 should NOT route to id_a");
@@ -235,7 +240,10 @@ void testConnectAll() {
 
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcRunFn  = Connector::broadcastRunFn();
-		graph.addNode(std::make_unique<Node>("Builtin", "bc", bcSchema, bcRunFn));
+		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn,
+			nullptr, ThreadPoolAffinity::System);
+		bcNode->setConnector(true);
+		graph.addNode(std::move(bcNode));
 
 		// 创建一个有两个输入端口的节点：in_0, in_1（注意与 Connector 的 out_0, out_1 命名不同则不会匹配）
 		// 改为与 Connector 输出同名的 Schema
@@ -251,9 +259,9 @@ void testConnectAll() {
 			const auto* b = bNT.as<Tensor>();
 			if (!a || !b) return ctx.failure(Node::Status::InvalidInput, "not Tensor");
 			float sum = a->item<float>() + b->item<float>();
-			auto* p = new Tensor(TensorType::Float, sizeof(float));
-			*p = sum;
-			ctx.output("sum", Value(p, [](Tensor* ptr) { delete ptr; }));
+			auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+			*t = sum;
+			ctx.output("sum", Value(std::move(t)));
 			return ctx.success();
 		};
 
@@ -265,7 +273,6 @@ void testConnectAll() {
 
 		// 验证数据流
 		graph.feedInput("t1", "bc", "in", makeFloatTensor(5.0f));
-		graph.schedule("bc", "t1");
 		graph.run();
 
 		CHECK(graph.hasOutput("t1", "adder", "sum"), "adder should have output");

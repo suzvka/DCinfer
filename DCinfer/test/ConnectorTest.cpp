@@ -31,15 +31,15 @@ static int failures = 0;
 // ── 辅助函数 ──
 
 static Value makeFloatTensor(float value) {
-	auto* p = new Tensor(TensorType::Float, sizeof(float));
-	*p = value;
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+	*t = value;
+	return Value(std::move(t));
 }
 
 static Value makeIntTensor(int value) {
-	auto* p = new Tensor(TensorType::Int, sizeof(int));
-	*p = value;
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	auto t = std::make_unique<Tensor>(TensorType::Int, sizeof(int));
+	*t = value;
+	return Value(std::move(t));
 }
 
 // ── 广播连接器测试 ──

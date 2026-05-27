@@ -19,17 +19,15 @@ static Node::Schema mockSchema() {
 static Node::Result mockRunImpl(Node::RunContext& ctx, int magic) {
 	const auto& inNT = ctx.input("in");
 	const auto* inVal = inNT.as<Tensor>();
-	Tensor out(Tensor::TensorType::Float, sizeof(float));
-	out = inVal->item<float>() + static_cast<float>(magic);
-	auto* p = new Tensor(std::move(out));
-	ctx.output("out", Value(p, [](Tensor* ptr) { delete ptr; }));
+	auto t = std::make_unique<Tensor>(Tensor::TensorType::Float, sizeof(float));
+	*t = inVal->item<float>() + static_cast<float>(magic);
+	ctx.output("out", Value(std::move(t)));
 	return ctx.success();
 }
 
 // ── 模拟转换钩子 ──
 static Value mockToNative(const Tensor& dc) {
-	auto* p = new Tensor(dc);
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	return Value(std::make_unique<Tensor>(dc));
 }
 
 static Tensor mockToDC(const void* native) {
@@ -113,9 +111,7 @@ static void runTests() {
 
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 50.0f;
-		auto* inPtr = new Tensor(std::move(in));
-		Value nt(inPtr, [](Tensor* p) { delete p; });
-		node->setInput("task1", "in", std::move(nt));
+		node->setInput("task1", "in", Value(std::make_unique<Tensor>(std::move(in))));
 		node->tryExecute("task1");
 
 		if (!node->hasOutput("task1", "out"))

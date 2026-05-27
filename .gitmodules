@@ -1,3 +1,6 @@
 [submodule "external/onnxruntime"]
 	path = external/onnxruntime
 	url = https://github.com/microsoft/onnxruntime
+[submodule "external/vcpkg"]
+	path = external/vcpkg
+	url = https://github.com/microsoft/vcpkg.git

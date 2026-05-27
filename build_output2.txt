@@ -1,0 +1,3 @@
+[0/2] Re-checking globbed directories...
+[1/3] Building CXX object DCinfer\test\CMakeFiles\InferGraphTest.dir\InferGraphTest.cpp.obj
+[2/3] Linking CXX executable bin\InferGraphTest.exe

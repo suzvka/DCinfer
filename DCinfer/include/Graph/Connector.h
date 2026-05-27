@@ -38,7 +38,23 @@ Node::Schema routingSchema(size_t downstreamCount);
 Node::RunFn routingRunFn();
 
 
-// ── 便捷：将两种 Connector 注册到 EngineRegistry ──
+// ── 导线连接器 ──
+// 1 进 1 出直通，实现"边即节点"语义。
+// 由 InferGraph::wire() 自动插入，用户无需手动创建。
+//
+// Schema:  inputs  = [{"in",  Void, 0, {}}]
+//          outputs = [{"out", Void, 0, {}}]
+//
+// 注册名："Connector.Wire"
+
+/// @brief 导线 Schema（1 输入 + 1 输出）
+Node::Schema wireSchema();
+
+/// @brief 导线 RunFn：从 "in" 读入 → 写入 "out"
+Node::RunFn wireRunFn();
+
+
+// ── 便捷：将三种 Connector 注册到 EngineRegistry ──
 // 由于下游数量在创建节点时才知道，Schema 和 RunFn 是参数化的，
 // 此处注册的是 1→1 的退化版本作为占位模板。
 // 实际使用时通过 broadcastSchema(n) / routingSchema(n) 构造。

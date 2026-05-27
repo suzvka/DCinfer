@@ -1,0 +1,13 @@
+[0/2] Re-checking globbed directories...
+[1/13] Building CXX object DCinfer\test\CMakeFiles\TensorDataTest.dir\TensorDataTest.cpp.obj
+[2/13] Building CXX object DCinfer\test\CMakeFiles\TensorTest.dir\TensorTest.cpp.obj
+[3/13] Linking CXX executable bin\TensorDataTest.exe
+[4/13] Building CXX object DCinfer\test\CMakeFiles\ConnectorTest.dir\ConnectorTest.cpp.obj
+[5/13] Building CXX object DCinfer\test\CMakeFiles\TensorSlotTest.dir\TensorSlotTest.cpp.obj
+[6/13] Building CXX object DCinfer\test\CMakeFiles\EngineRegistryTest.dir\EngineRegistryTest.cpp.obj
+[7/13] Linking CXX executable bin\TensorTest.exe
+[8/13] Linking CXX executable bin\TensorSlotTest.exe
+[9/13] Linking CXX executable bin\ConnectorTest.exe
+[10/13] Linking CXX executable bin\EngineRegistryTest.exe
+[11/13] Building CXX object DCinfer\test\CMakeFiles\NodeTest.dir\NodeTest.cpp.obj
+[12/13] Linking CXX executable bin\NodeTest.exe

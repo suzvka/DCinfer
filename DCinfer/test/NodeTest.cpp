@@ -47,32 +47,32 @@ static Node::Result addRunImpl(Node::RunContext& self) {
 	std::vector<std::byte> bytes(result.size() * sizeof(float));
 	std::memcpy(bytes.data(), result.data(), bytes.size());
 
-	auto* p = new Tensor(TensorType::Float, sizeof(float), a->shape(), std::move(bytes));
-	self.output("s", Value(p, [](Tensor* ptr) { delete ptr; }));
+	self.output("s", Value(std::make_unique<Tensor>(
+		TensorType::Float, sizeof(float), a->shape(), Tensor::DataBlock(std::move(bytes)))));
 
 	return self.success();
 }
 
 // ── 创建辅助张量（用于 setInput 的 Value 包装）──
 static Value makeScalarNative(float value) {
-	auto* p = new Tensor(TensorType::Float, sizeof(float));
-	*p = value;
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+	*t = value;
+	return Value(std::move(t));
 }
 
 static Value makeVectorNative(const std::vector<float>& values) {
 	std::vector<std::byte> bytes(values.size() * sizeof(float));
 	std::memcpy(bytes.data(), values.data(), bytes.size());
-	auto* p = new Tensor(TensorType::Float, sizeof(float),
-		{static_cast<int64_t>(values.size())},
-		Tensor::DataBlock(std::move(bytes)));
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	return Value(std::make_unique<Tensor>(
+		TensorType::Float, sizeof(float),
+		Tensor::Shape{static_cast<int64_t>(values.size())},
+		Tensor::DataBlock(std::move(bytes))));
 }
 
 static Value makeIntNative(int value) {
-	auto* p = new Tensor(TensorType::Int, sizeof(int));
-	*p = value;
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	auto t = std::make_unique<Tensor>(TensorType::Int, sizeof(int));
+	*t = value;
+	return Value(std::move(t));
 }
 
 // ── 创建辅助张量（用于默认值等 Schema 定义）──

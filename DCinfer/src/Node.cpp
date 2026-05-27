@@ -9,10 +9,12 @@ namespace DC {
 
 // ── 构造：从 Schema 构建工作槽位 ──
 Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
-                     EngineInstance* engineInstance)
+                     EngineInstance* engineInstance,
+                     ThreadPoolAffinity affinity)
 	: _type(std::move(type))
 	, _name(std::move(name))
 	, _schema(std::move(schema))
+	, _affinity(affinity)
 	, _fn(std::move(fn))
 	, _engineInstance(engineInstance)
 {
@@ -176,6 +178,10 @@ Value Node::execute(const std::string& outputName,
 void Node::clearTask(const TaskId& taskId) {
 	_taskInputs.erase(taskId);
 	_taskOutputs.erase(taskId);
+	{
+		std::lock_guard lk(_waitersMutex);
+		_completedTasks.erase(taskId);
+	}
 }
 
 size_t Node::taskCount() const {
@@ -195,15 +201,23 @@ bool Node::tryExecute(const TaskId& taskId) {
 		return false;
 	}
 
+	_currentTaskId = taskId;
+
 	try {
 		_checkAndExecute(taskId);
 	} catch (...) {
+		_currentTaskId.reset();
 		_executing.clear(std::memory_order_release);
 		throw;
 	}
 
+	_currentTaskId.reset();
 	_executing.clear(std::memory_order_release);
 	return true;
+}
+
+std::optional<Node::TaskId> Node::currentTaskId() const {
+	return _currentTaskId;
 }
 
 // ════════════════════════════════════════════
@@ -211,8 +225,7 @@ bool Node::tryExecute(const TaskId& taskId) {
 // ════════════════════════════════════════════
 
 bool Node::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
-	auto* p = new Tensor(std::move(data));
-	return setInput(taskId, portName, Value(p, [](Tensor* ptr) { delete ptr; }));
+	return setInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
 }
 
 bool Node::setInput(const TaskId& taskId,
@@ -220,8 +233,7 @@ bool Node::setInput(const TaskId& taskId,
 	std::unordered_map<std::string, TaskData> wrapped;
 	wrapped.reserve(inputs.size());
 	for (auto& [name, t] : inputs) {
-		auto* p = new Tensor(std::move(t));
-		wrapped.emplace(name, Value(p, [](Tensor* ptr) { delete ptr; }));
+		wrapped.emplace(name, Value(std::make_unique<Tensor>(std::move(t))));
 	}
 	return setInput(taskId, std::move(wrapped));
 }
@@ -256,8 +268,7 @@ Tensor Node::executeTensor(const std::string& outputName,
 	std::unordered_map<std::string, Value> wrapped;
 	wrapped.reserve(inputs.size());
 	for (auto& [name, t] : inputs) {
-		auto* p = new Tensor(std::move(t));
-		wrapped.emplace(name, Value(p, [](Tensor* ptr) { delete ptr; }));
+		wrapped.emplace(name, Value(std::make_unique<Tensor>(std::move(t))));
 	}
 
 	auto nt = execute(outputName, std::move(wrapped));
@@ -450,6 +461,9 @@ void Node::_checkAndExecute(const TaskId& taskId) {
 	// ⑥ 清理输入缓冲（输出缓冲保留，供调用方拉取）
 	_taskInputs.erase(taskId);
 
+	// ⑥½ 通知等待协程（在回调之前，保证协程能看到结果）
+	_notifyWaiters(taskId, result);
+
 	// ⑦ 调用回调（仅通知）
 	if (_onComplete) {
 		_onComplete(taskId, result);
@@ -482,8 +496,7 @@ void Node::_loadTaskToWorkingSlots(const TaskId& taskId) {
 			workSlot.store(std::move(taskIt->second.value()));
 			taskIt->second.reset();
 		} else if (port.defaultValue.has_value()) {
-			auto* p = new Tensor(port.defaultValue.value());
-			workSlot.store(Value(p, [](Tensor* ptr) { delete ptr; }));
+			workSlot.store(Value(std::make_unique<Tensor>(port.defaultValue.value())));
 		}
 	}
 }
@@ -510,6 +523,78 @@ void Node::_collectAndSaveOutputs(const TaskId& taskId) {
 		if (taskIt == taskOutputs.end()) continue;
 		taskIt->second = workSlot.take<Value>();
 	}
+}
+
+// ════════════════════════════════════════════
+// 协程支持
+// ════════════════════════════════════════════
+
+NodeCompletion Node::whenComplete(const TaskId& taskId) {
+	return NodeCompletion(*this, taskId);
+}
+
+void Node::_notifyWaiters(const TaskId& taskId, const Result& result) {
+	std::vector<std::coroutine_handle<>> handles;
+	{
+		std::lock_guard lk(_waitersMutex);
+		// 先标记完成：即使 _waiters 中尚无等待者，
+		// await_suspend 也能通过此标记发现任务已结束，直接 resume
+		_completedTasks.insert(taskId);
+		auto it = _waiters.find(taskId);
+		if (it == _waiters.end()) return;
+		handles = std::move(it->second);
+		_waiters.erase(it);
+	}
+	// 在锁外 resume，避免协程恢复后可能的死锁
+	for (auto h : handles) {
+		if (h) h.resume();
+	}
+}
+
+// ── NodeCompletion 实现 ──
+
+bool NodeCompletion::await_ready() const {
+	// 如果任务已完成（输出已存在），不需要挂起
+	auto taskIt = _node->_taskOutputs.find(_taskId);
+	if (taskIt == _node->_taskOutputs.end()) return false;
+	// 检查是否有任意端口已有输出数据
+	for (const auto& [name, optVal] : taskIt->second) {
+		if (optVal.has_value()) return true;
+	}
+	return false;
+}
+
+void NodeCompletion::await_suspend(std::coroutine_handle<> h) {
+	_handle = h;
+
+	std::lock_guard lk(_node->_waitersMutex);
+
+	// 关键：await_ready() 到 await_suspend() 之间存在竞态窗口——
+	// 目标 task 可能已在 ThreadPool 中完成且 _notifyWaiters 已执行完毕。
+	// _completedTasks 在 _waitersMutex 保护下充当原子"完成标记"，
+	// 避免协程句柄被孤儿化（永远无人 resume）。
+	if (_node->_completedTasks.contains(_taskId)) {
+		h.resume();
+		return;
+	}
+
+	_node->_waiters[_taskId].push_back(h);
+}
+
+Node::Result NodeCompletion::await_resume() const {
+	// 协程恢复后，从 task 输出中收集结果状态
+	auto taskIt = _node->_taskOutputs.find(_taskId);
+	if (taskIt != _node->_taskOutputs.end()) {
+		// 检查所有输出是否已产生（有任意输出即认为完成）
+		for (const auto& port : _node->_schema.outputs) {
+			auto outIt = taskIt->second.find(port.name);
+			if (outIt != taskIt->second.end() && outIt->second.has_value()) {
+				return _node->_makeSuccess();
+			}
+		}
+	}
+	return _node->_makeFailure(Node::Status::ExecutionFailed,
+		"NodeCompletion: task '" + _taskId + "' completed without outputs");
 }
 
 } // namespace DC

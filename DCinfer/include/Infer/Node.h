@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -16,6 +17,8 @@
 #include "TensorSlot.h"
 #include "SlotType.h"
 #include "NativeTensor.h"
+
+#include <coroutine>
 
 namespace DC {
 
@@ -38,6 +41,25 @@ using NodeFactory = std::function<std::unique_ptr<class Node>(
 // ── 引擎描述符 / 引擎实例（前向声明，定义见 Graph/EngineRegistry.h）──
 struct EngineDescriptor;
 class  EngineInstance;
+
+// ── 线程池归属：标识节点应由三层线程池中的哪一个执行 ──
+// 仅在 Node 创建时赋值，之后只读
+enum class ThreadPoolAffinity {
+	Compute,   // 计算线程池 —— 执行推理过程（GPU 加速，如 ONNX/TensorRT）
+	Operator,  // 算子线程池 —— 执行 CPU 密集过程（如 Pre/Post 处理）
+	System,    // 系统线程池 —— 数据流动与连接器（Broadcast/Routing/Wire）
+};
+
+// ── 节点执行策略 ──
+enum class ExecutionPolicy {
+	Exclusive,    // 同时最多 1 个 task（默认行为）
+	Concurrent,   // 多个 task 可并发（无状态节点）
+	Serialized,   // 多 task 排队，FIFO 串行
+	Batched,      // 攒 N 个 task 后批量执行
+};
+
+// ── 前向声明：co_await-able 节点完成通知 ──
+struct NodeCompletion;
 
 class Node {
 public:
@@ -160,7 +182,8 @@ public:
 
 	// ── 构造/析构 ──
 	Node(std::string type, std::string name, Schema schema, RunFn fn,
-	          EngineInstance* engineInstance = nullptr);
+	          EngineInstance* engineInstance = nullptr,
+	          ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator);
 	~Node();
 
 	// 禁止拷贝/移动
@@ -173,6 +196,21 @@ public:
 	const std::string& type()   const { return _type; }
 	const std::string& name()   const { return _name; }
 	const Schema&      schema() const { return _schema; }
+
+	// ── 线程池归属与分组 ──
+	ThreadPoolAffinity affinity() const { return _affinity; }
+
+	/// @brief  设置节点分组标签（用于线程池分组限流）
+	void setTag(std::string tag) { _tag = std::move(tag); }
+	const std::string& tag() const { return _tag; }
+
+	/// @brief  是否为连接器节点（导线/扇出等基础设施节点）
+	bool isConnector() const { return _isConnector; }
+	void setConnector(bool v) { _isConnector = v; }
+
+	/// @brief  执行策略（当前默认 Exclusive）
+	ExecutionPolicy policy() const { return _execPolicy; }
+	void setExecutionPolicy(ExecutionPolicy p) { _execPolicy = p; }
 
 	// ── 完成回调注册 ──
 	void setCompletionCallback(CompletionFn fn);
@@ -220,6 +258,12 @@ public:
 	Tensor executeTensor(const std::string& outputName,
 	                     std::unordered_map<std::string, Tensor> inputs);
 
+	// ── 协程支持 ──
+
+	/// @brief  co_await-able 等待器：挂起当前协程，直到指定 task 执行完成
+	///         完成后返回 Result，协程自动恢复
+	NodeCompletion whenComplete(const TaskId& taskId);
+
 	// ── 调度接口（供 Graph 调用）──
 
 	/// @brief  查询指定任务是否所有必需输入已就绪（含默认值）
@@ -229,6 +273,10 @@ public:
 	/// @return true 表示执行成功完成，false 表示未就绪或节点正忙（重入被拒）
 	/// @note   线程安全；同一时刻最多一个 task 在执行
 	bool tryExecute(const TaskId& taskId);
+
+	/// @brief  返回当前正在执行的任务 ID（用于冒泡事件、任务-节点亲和性）
+	/// @return 若节点空闲则返回 std::nullopt
+	std::optional<TaskId> currentTaskId() const;
 
 	// ── 任务生命周期 ──
 	void   clearTask(const TaskId& taskId);
@@ -240,6 +288,7 @@ public:
 
 private:
 	friend class RunContext;
+	friend struct NodeCompletion;
 
 	// ── 内部类型 ──
 	using SlotMap       = std::unordered_map<std::string, TensorSlot>;
@@ -254,6 +303,7 @@ private:
 	void _loadTaskToWorkingSlots(const TaskId& taskId);
 	void _clearWorkingOutputs();
 	void _collectAndSaveOutputs(const TaskId& taskId);
+	void _notifyWaiters(const TaskId& taskId, const Result& result);
 
 	// ── RunContext 可调用的内部方法 ──
 	const Value&     _inputImpl(const std::string& name) const;
@@ -272,6 +322,10 @@ private:
 	std::string       _type;
 	std::string       _name;
 	Schema            _schema;
+	ThreadPoolAffinity _affinity = ThreadPoolAffinity::Operator;
+	std::string       _tag;
+	ExecutionPolicy   _execPolicy = ExecutionPolicy::Exclusive;
+	bool              _isConnector = false;
 	SlotMap           _inputSlots;     // 工作输入槽位
 	SlotMap           _outputSlots;    // 工作输出槽位
 	TaskBufferMap     _taskInputs;     // 任务级输入缓冲 (port → optional<TaskData>)
@@ -280,6 +334,15 @@ private:
 	CompletionFn      _onComplete;
 	EngineInstance*   _engineInstance = nullptr;  // 非拥有引用，Registry 管理生命周期
 	std::atomic_flag  _executing = ATOMIC_FLAG_INIT;  // 重入锁：同一时刻最多一个 task 在执行
+	std::optional<TaskId> _currentTaskId;            // 当前执行中的 task（由 tryExecute 设置/清除）
+
+	// 协程等待者：key=taskId，value=等待该 task 完成的协程 handles
+	std::unordered_map<TaskId, std::vector<std::coroutine_handle<>>> _waiters;
+	mutable std::mutex _waitersMutex;  // 保护 _waiters 的并发访问
+
+	// 已完成标记：在 _waitersMutex 保护下充当原子桥接，
+	// 解决 await_ready → await_suspend 之间的竞态窗口
+	std::unordered_set<TaskId> _completedTasks;
 };
 
 // ── RunContext 定义（需在 Node 类体之后）──
@@ -317,6 +380,24 @@ private:
 	friend class Node;
 	explicit RunContext(Node& node) : _node(node) {}
 	Node& _node;
+};
+
+// ── NodeCompletion：co_await-able 等待器 ──
+// co_await node.whenComplete(taskId) 挂起当前协程，
+// 直到 tryExecute(taskId) 完成后被 resume，返回执行结果
+struct NodeCompletion {
+	bool await_ready() const;
+	void await_suspend(std::coroutine_handle<> h);
+	Node::Result await_resume() const;
+
+private:
+	friend class Node;
+	NodeCompletion(Node& node, const Node::TaskId& taskId)
+		: _node(&node), _taskId(taskId) {}
+
+	Node*             _node;
+	Node::TaskId      _taskId;
+	std::coroutine_handle<> _handle;  // await_suspend 时设置
 };
 
 } // namespace DC

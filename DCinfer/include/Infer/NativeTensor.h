@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <utility>
 
 #include "SlotType.h"
@@ -19,12 +20,26 @@ class Value {
 public:
 	Value() = default;
 
-	// 通用构造函数：接受任意可调用对象作为 deleter，避免 std::function 导致模板推导失败
+	// ── 主构造函数：从 unique_ptr 接管所有权（推荐，无需手动 new）──
+	// 用法：
+	//   DC::Value v(std::make_unique<Tensor>(TensorType::Float, sizeof(float)));
+	//   DC::Value v(std::unique_ptr<Ort::Value>(new Ort::Value(...)));  // 自定义 deleter
+	template<typename T, typename Deleter>
+	Value(std::unique_ptr<T, Deleter> ptr) {
+		ValidatorRegistry::ensureDefaults();
+		_innerType = DC::Type::getType<SlotDataType, T>();
+		auto d = ptr.get_deleter();  // 在 release 前拷贝 deleter
+		_ptr = ptr.release();
+		_deleter = [d = std::move(d)](void* p) {
+			if (p) d(static_cast<T*>(p));
+		};
+	}
+
+	// ── 兼容构造函数（保留，用于 C API 原始指针场景）──
 	template<typename T, typename Deleter>
 	Value(T* ptr, Deleter&& deleter)
 		: _ptr(ptr)
-  {
-		// Ensure default validators and type registrations exist before querying type map
+	{
 		ValidatorRegistry::ensureDefaults();
 		_innerType = DC::Type::getType<SlotDataType, T>();
 		_deleter = [d = std::forward<Deleter>(deleter)](void* p) {

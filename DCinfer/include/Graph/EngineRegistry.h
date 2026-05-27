@@ -191,7 +191,8 @@ NodeFactory makeNodeFactory(
 	       -> std::unique_ptr<Node>
 	{
 		return std::make_unique<Node>(
-				engineType, std::move(name), schema, fn);
+				engineType, std::move(name), schema, fn,
+				nullptr, ThreadPoolAffinity::Compute);
 	};
 }
 
@@ -210,7 +211,8 @@ NodeFactory makeNodeFactory(
 		return std::make_unique<Node>(engineType, std::move(name), schema,
 			[fn, config = std::move(config)](Node::RunContext& ctx) -> Node::Result {
 				return fn(ctx, config);
-			});
+			},
+			nullptr, ThreadPoolAffinity::Compute);
 	};
 }
 
@@ -229,7 +231,8 @@ NodeFactory makeNodeFactoryWithEngine(
 			? *static_cast<EngineInstance* const*>(engineConfig)
 			: nullptr;
 		return std::make_unique<Node>(
-			engineType, std::move(name), schema, fn, engineInstance);
+			engineType, std::move(name), schema, fn, engineInstance,
+			ThreadPoolAffinity::Compute);
 	};
 }
 

@@ -8,8 +8,7 @@ namespace DC {
 
 // ── Builtin 引擎的 TensorConverter（DC::Tensor ↔ NativeTensor）──
 static Value builtinToNative(const Tensor& t) {
-	auto* p = new Tensor(t);
-	return Value(p, [](Tensor* ptr) { delete ptr; });
+	return Value(std::make_unique<Tensor>(t));
 }
 
 static Tensor builtinToDC(const void* native) {
@@ -69,7 +68,8 @@ std::unique_ptr<Node> EngineRegistry::createNode(
 	Node::RunFn fn) const
 {
 	return std::make_unique<Node>("Builtin", nodeName,
-		std::move(schema), std::move(fn));
+		std::move(schema), std::move(fn),
+		nullptr, ThreadPoolAffinity::Operator);
 }
 
 std::unique_ptr<Node> EngineRegistry::createNode(
@@ -192,12 +192,13 @@ bool EngineRegistry::registerOperator(
 	desc.engineType = operatorName;
 	desc.converter  = { builtinToNative, builtinToDC };
 
-	// 工厂：捕获 schema 和 fn，创建 Builtin 节点
+	// 工厂：捕获 schema 和 fn，创建算子节点
 	desc.factory = [schema = std::move(schema), fn = std::move(fn)](
 		std::string name, const void* /*engineConfig*/)
 		-> std::unique_ptr<Node>
 	{
-		return std::make_unique<Node>("Builtin", std::move(name), schema, fn);
+		return std::make_unique<Node>("Builtin", std::move(name), schema, fn,
+			nullptr, ThreadPoolAffinity::Operator);
 	};
 
 	_engines[operatorName] = std::move(desc);
