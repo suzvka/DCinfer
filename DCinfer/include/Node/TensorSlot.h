@@ -13,6 +13,11 @@
 #include <iostream>
 
 namespace DC {
+
+	/// @brief 张量数据槽位：类型擦除的运行时数据容器，支持 store/take/peek。
+	///
+	/// TensorSlot 是 Node 输入/输出端口的基础存储单元。
+	/// 通过 ValidatorRegistry 在 store() 时自动完成类型校验。
 	class TensorSlot {
 		using TensorType = TensorMeta::TensorType;
 		using ErrorType  = TensorException::ErrorType;
@@ -20,25 +25,34 @@ namespace DC {
 	public:
 		using Shape = Tensor::Shape;
 
-		// ── 配置（精简后）──
+		/// @brief 槽位配置：仅含位置标记（Input / Output / Auto）。
 		class Config {
 		public:
+			/// @brief 槽位位置枚举。
 			enum class Position {
-				Input,
-				Output,
-				Auto
+				Input,   ///< 输入槽位
+				Output,  ///< 输出槽位
+				Auto     ///< 自动推断
 			};
 
+			/// @brief  设置槽位位置。
 			Config& setPosition(Position p);
 
-			Position position = Position::Auto;
+			Position position = Position::Auto;  ///< 当前位置标记。
 		};
 
+		// ── 生命周期 ──
 		TensorSlot(const TensorSlot&) = delete;
 		TensorSlot& operator=(const TensorSlot&) = delete;
 		TensorSlot(TensorSlot&&) noexcept = default;
 		TensorSlot& operator=(TensorSlot&&) noexcept = default;
 
+		/// @brief 构造 TensorSlot。
+		/// @param name   槽位名称（对应端口名）。
+		/// @param type   期望的张量逻辑类型。
+		/// @param size   单元素字节数。
+		/// @param shape  期望的形状（空=不校验）。
+		/// @param config 槽位配置（默认 Auto）。
 		TensorSlot(
 			const std::string& name,
 			TensorMeta::TensorType type,
@@ -47,49 +61,76 @@ namespace DC {
 			const Config& config = Config()
 		);
 
-		// ── 元数据（仅与 DC::Tensor 有关）──
+		// ── 元数据 ──
+
+		/// @brief  设置默认张量数据（输入槽位 fallback）。
 		TensorSlot& setDefaultTensor(const Tensor& data);
 
+		/// @brief  槽位名称。
 		const std::string& name()      const;
+		/// @brief  期望的张量逻辑类型。
 		TensorType          type()      const;
+		/// @brief  单元素字节数。
 		size_t              typeSize()  const;
+		/// @brief  期望形状。
 		Shape               shape()     const;
+		/// @brief  运行时数据的实际形状（若为 DCTensor）。
 		Shape               dataShape() const;
 
+		/// @brief  是否为输入槽位。
 		bool isInput()  const;
+		/// @brief  是否为输出槽位。
 		bool isOutput() const;
 
+		/// @brief  是否已设置默认数据。
 		bool hasDefaultData() const;
+		/// @brief  获取默认数据的只读引用。
+		/// @throws TensorException(NotData) 若无默认数据。
 		const Tensor& defaultTensor() const;
 
+		/// @brief  槽位的张量逻辑类型是否与 T 匹配。
 		template<typename T>
 		bool isType() const;
 
 		// ── 运行时存储：类型擦除 ──
-		// store：通过 DC::Type 推导 SlotDataType，经 ValidatorRegistry 校验后存储
+
+		/// @brief  类型擦除存储：通过 DC::Type 推导 SlotDataType，经 ValidatorRegistry 校验后存储。
+		/// @tparam T 要存储的数据类型（自动推导 SlotDataType 标签）。
+		/// @throws TensorException(TypeMismatch)     若类型不匹配且不可转换。
+		/// @throws TensorException(InvalidShape)      若数据无效。
+		/// @throws TensorException(ShapeMismatch)     若形状不匹配且不可对齐。
 		template<typename T>
 		TensorSlot& store(T&& data);
 
-		// take：移动取出，运行时检查类型标签是否匹配
+		/// @brief  移动取出数据，运行时检查类型标签是否匹配。
+		/// @throws TensorException(NotData)       若槽位为空。
+		/// @throws TensorException(TypeMismatch)  若类型标签不匹配。
 		template<typename T>
 		T take();
 
-		// peek：只读指针，类型不匹配返回 nullptr
+		/// @brief  只读指针访问，类型不匹配返回 nullptr。
 		template<typename T>
 		const T* peek() const;
 
-		// 便捷方法：以 const Tensor& 获取 DC::Tensor 数据
-		// 仅当 storedType() == SlotDataType::DCTensor 时有效
+		/// @brief  以 const Tensor& 获取 DC::Tensor 数据（仅 DCTensor 类型有效）。
+		/// @throws TensorException(NotData) 若无数据。
 		const Tensor& view() const;
 
+		/// @brief  槽位是否有数据（含默认数据）。
 		bool              hasData()     const;
+		/// @brief  当前存储数据的 SlotDataType 标签。
 		SlotDataType      storedType()  const;
+		/// @brief  原始数据指针（不担保类型）。
 		const void*       rawPtr()      const;
 
+		/// @brief  清空运行时数据与默认数据。
 		void clear();
+		/// @brief  仅清空运行时数据，保留默认数据。
 		void clearData();
 
+		/// @brief  获取槽位配置的只读引用。
 		const Config& config() const;
+		/// @brief  工厂：创建默认 Config。
 		static Config CreateConfig();
 
 	private:

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Node.h"
-#include "NativeTensor.h"
+#include "Value.h"
 
 #include <functional>
 #include <memory>

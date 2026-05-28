@@ -17,22 +17,23 @@
 #include "TensorSlot.h"
 #include "SlotType.h"
 #include "Value.h"
+#include "NodeException.h"
 
 #include <coroutine>
 
 namespace DC {
 
-// ── 张量转换钩子：DC::Tensor ↔ 引擎原生张量 ──
-// 每种引擎类型注册一份，所有同引擎节点共享
+/// @brief 张量转换钩子：DC::Tensor ↔ 引擎原生张量。
+/// 每种引擎类型注册一份，所有同引擎节点共享。
 struct TensorConverter {
-	// DC::Tensor → heap 原生张量（调用者在 Run 期间持有此 handle）
+	/// @brief DC::Tensor → 引擎原生张量（调用者在 Run 期间持有此 handle）。
 	std::function<Value(const Tensor&)> toNative;
 
-	// 原生张量（借阅指针，不接管所有权）→ DC::Tensor（内部拷贝数据）
+	/// @brief 原生张量（借阅指针，不接管所有权）→ DC::Tensor（内部拷贝数据）。
 	std::function<Tensor(const void*)> toDC;
 };
 
-// ── 节点工厂：按名称 + 引擎特定配置创建节点 ──
+/// @brief 节点工厂：按引擎类型名称 + 引擎特定配置创建节点。
 using NodeFactory = std::function<std::unique_ptr<class Node>(
 	std::string nodeName,
 	const void* engineConfig
@@ -42,20 +43,20 @@ using NodeFactory = std::function<std::unique_ptr<class Node>(
 struct EngineDescriptor;
 class  EngineInstance;
 
-// ── 线程池归属：标识节点应由三层线程池中的哪一个执行 ──
-// 仅在 Node 创建时赋值，之后只读
+/// @brief 线程池归属：标识节点应由三层线程池中的哪一个执行。
+/// 仅在 Node 创建时赋值，之后只读。
 enum class ThreadPoolAffinity {
-	Compute,   // 计算线程池 —— 执行推理过程（GPU 加速，如 ONNX/TensorRT）
-	Operator,  // 算子线程池 —— 执行 CPU 密集过程（如 Pre/Post 处理）
-	System,    // 系统线程池 —— 数据流动与连接器（Broadcast/Routing/Wire）
+	Compute,   ///< 计算线程池 —— 执行推理过程（GPU 加速，如 ONNX/TensorRT）
+	Operator,  ///< 算子线程池 —— 执行 CPU 密集过程（如 Pre/Post 处理）
+	System,    ///< 系统线程池 —— 数据流动与连接器（Broadcast/Routing/Wire）
 };
 
-// ── 节点执行策略 ──
+/// @brief 节点执行策略。
 enum class ExecutionPolicy {
-	Exclusive,    // 同时最多 1 个 task（默认行为）
-	Concurrent,   // 多个 task 可并发（无状态节点）
-	Serialized,   // 多 task 排队，FIFO 串行
-	Batched,      // 攒 N 个 task 后批量执行
+	Exclusive,    ///< 同时最多 1 个 task（默认行为）
+	Concurrent,   ///< 多个 task 可并发（无状态节点）
+	Serialized,   ///< 多 task 排队，FIFO 串行
+	Batched,      ///< 攒 N 个 task 后批量执行
 };
 
 // ── 前向声明：co_await-able 节点完成通知 ──
@@ -74,22 +75,30 @@ public:
 	using TaskData    = Value;
 
 	// ── 端口定义 ──
+	/// @brief 端口定义：描述节点的输入或输出端口元数据。
 	struct Port {
-		std::string name;
-		TensorType  type         = TensorType::Void;
-		size_t      typeSize     = 0;
-		Shape       shape;
-		bool        required     = true;
-		std::optional<Tensor> defaultValue;  // 有默认值时，就绪检查视为已填充
+		std::string name;       ///< 端口名称（在 Schema 内唯一）。
+		TensorType  type         = TensorType::Void;  ///< 期望的张量逻辑类型。
+		size_t      typeSize     = 0;                 ///< 单元素字节数。
+		Shape       shape;                            ///< 期望的形状（空=不校验）。
+		bool        required     = true;              ///< 执行前是否必须填充。
+		std::optional<Tensor> defaultValue;  ///< 有默认值时，就绪检查视为已填充。
 
-		// ── 工厂：必须输入端口 ──
+		/// @brief 工厂：创建必须输入端口。
+		/// @tparam T 期望的 C++ 类型。
+		/// @param name 端口名。
+		/// @param shape 期望形状。
 		template<typename T>
 		static Port in(std::string name, Shape shape = {}) {
 			TensorMeta::ensureTypeMap();
 			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), true};
 		}
 
-		// ── 工厂：可选输入端口（带默认值）──
+		/// @brief 工厂：创建可选输入端口（带默认值）。
+		/// @tparam T 默认值的 C++ 类型。
+		/// @param name 端口名。
+		/// @param defaultValue 默认值。
+		/// @param shape 期望形状。
 		template<typename T>
 		static Port optional(std::string name, T defaultValue, Shape shape = {}) {
 			TensorMeta::ensureTypeMap();
@@ -98,7 +107,10 @@ public:
 			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), false, std::move(dv)};
 		}
 
-		// ── 工厂：输出端口 ──
+		/// @brief 工厂：创建输出端口。
+		/// @tparam T 期望的 C++ 类型。
+		/// @param name 端口名。
+		/// @param shape 期望形状。
 		template<typename T>
 		static Port out(std::string name, Shape shape = {}) {
 			TensorMeta::ensureTypeMap();
@@ -107,67 +119,42 @@ public:
 	};
 
 	// ── Schema ──
+	/// @brief 节点 Schema：定义输入/输出端口的完整元数据。
 	struct Schema {
-		std::vector<Port> inputs;
-		std::vector<Port> outputs;
+		std::vector<Port> inputs;   ///< 输入端口列表。
+		std::vector<Port> outputs;  ///< 输出端口列表。
 
-		const Port* findInput(const std::string& name) const {
-			return find(inputs, name);
-		}
-		const Port* findOutput(const std::string& name) const {
-			return find(outputs, name);
-		}
-		bool valid() const {
-			if (!hasUniqueNames(inputs) || !hasUniqueNames(outputs))
-				return false;
-			auto checkTypeSize = [](const std::vector<Port>& ports) {
-				for (const auto& p : ports) {
-					if (p.type != TensorType::Void && p.typeSize == 0)
-						return false;
-				}
-				return true;
-			};
-			if (!checkTypeSize(inputs) || !checkTypeSize(outputs))
-				return false;
-			// 校验默认值类型一致性
-			for (const auto& p : inputs) {
-				if (p.defaultValue.has_value()) {
-					const auto& dv = p.defaultValue.value();
-					if (dv.type() != p.type || dv.typeSize() != p.typeSize)
-						return false;
-				}
-			}
-			return true;
-		}
+		/// @brief 按名称查找输入端口。
+		/// @return 指向 Port 的指针，若不存在则返回 nullptr。
+		const Port* findInput(const std::string& name) const;
+
+		/// @brief 按名称查找输出端口。
+		/// @return 指向 Port 的指针，若不存在则返回 nullptr。
+		const Port* findOutput(const std::string& name) const;
+
+		/// @brief 校验 Schema 合法性：端口名唯一、非 Void 端口 typeSize>0、默认值类型一致。
+		bool valid() const;
+
 	private:
-		static const Port* find(const std::vector<Port>& ports, const std::string& name) {
-			for (const auto& port : ports) {
-				if (port.name == name) return &port;
-			}
-			return nullptr;
-		}
-		static bool hasUniqueNames(const std::vector<Port>& ports) {
-			std::unordered_set<std::string> names;
-			names.reserve(ports.size());
-			for (const auto& port : ports) {
-				if (!names.insert(port.name).second) return false;
-			}
-			return true;
-		}
+		static const Port* find(const std::vector<Port>& ports, const std::string& name);
+		static bool hasUniqueNames(const std::vector<Port>& ports);
 	};
 
 	// ── 状态 ──
+	/// @brief 节点执行结果状态枚举。
 	enum class Status {
-		Ok,
-		InvalidInput,
-		SchemaMismatch,
-		ExecutionFailed,
-		InternalError
+		Ok,              ///< 执行成功。
+		InvalidInput,    ///< 输入数据不合法（值为空、类型错误等）。
+		SchemaMismatch,  ///< 输入与 Schema 声明不一致。
+		ExecutionFailed, ///< RunFn 执行过程中抛出异常。
+		InternalError    ///< 节点内部状态错误。
 	};
 
+	/// @brief 节点执行结果。
 	struct Result {
-		Status      status  = Status::Ok;
-		std::string message;
+		Status      status  = Status::Ok;  ///< 执行状态。
+		std::string message;               ///< 附加消息。
+		/// @brief 是否执行成功。
 		bool ok() const { return status == Status::Ok; }
 	};
 
@@ -198,63 +185,117 @@ public:
 	const Schema&      schema() const { return _schema; }
 
 	// ── 线程池归属与分组 ──
+	/// @brief  获取线程池归属（Compute / Operator / System）。
 	ThreadPoolAffinity affinity() const { return _affinity; }
 
-	/// @brief  设置节点分组标签（用于线程池分组限流）
+	/// @brief  设置节点分组标签（用于线程池分组限流）。
 	void setTag(std::string tag) { _tag = std::move(tag); }
+	/// @brief  获取节点分组标签。
 	const std::string& tag() const { return _tag; }
 
-	/// @brief  是否为连接器节点（导线/扇出等基础设施节点）
+	/// @brief  是否为连接器节点（导线/扇出等基础设施节点）。
 	bool isConnector() const { return _isConnector; }
+	/// @brief  设置连接器节点标记。
 	void setConnector(bool v) { _isConnector = v; }
 
-	/// @brief  执行策略（当前默认 Exclusive）
+	/// @brief  获取执行策略（当前默认 Exclusive）。
 	ExecutionPolicy policy() const { return _execPolicy; }
+	/// @brief  设置执行策略。
 	void setExecutionPolicy(ExecutionPolicy p) { _execPolicy = p; }
 
 	// ── 完成回调注册 ──
+	/// @brief  注册任务完成回调（纯通知，不传数据）。
 	void setCompletionCallback(CompletionFn fn);
+	/// @brief  是否已注册完成回调。
 	bool hasCompletionCallback() const;
 
 	// ── 任务级输入 ──
 
-	/// @brief  单端口写入（Value），仅写入缓冲，不触发执行
-	/// @return 若端口名存在于 Schema 中则返回 true
-	bool setInput(const TaskId& taskId, const std::string& portName, Value data);
+	/// @brief  单端口写入（Value），仅写入缓冲，不触发执行。
+	/// @param taskId 任务标识符。
+	/// @param portName 目标输入端口名。
+	/// @param data 要写入的数据（Value 包装的原生张量）。
+	/// @throws NodeException(PortNotFound) 若端口名不存在于 Schema 中。
+	void setInput(const TaskId& taskId, const std::string& portName, Value data);
 
-	/// @brief  便捷接口：直接传入 DC::Tensor，内部自动包装为 Value
-	bool setInput(const TaskId& taskId, const std::string& portName, Tensor data);
+	/// @brief  便捷接口：直接传入 DC::Tensor，内部自动包装为 Value。
+	/// @param taskId 任务标识符。
+	/// @param portName 目标输入端口名。
+	/// @param data 要写入的 DC::Tensor 数据。
+	/// @throws NodeException(PortNotFound) 若端口名不存在于 Schema 中。
+	void setInput(const TaskId& taskId, const std::string& portName, Tensor data);
 
-	/// @brief  批量写入（Value），仅写入缓冲，不触发执行
-	bool setInput(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs);
+	/// @brief  批量写入（Value），仅写入缓冲，不触发执行。
+	/// @param taskId 任务标识符。
+	/// @param inputs 端口名到数据的映射。
+	/// @throws NodeException(PortNotFound) 若任一端口名不存在于 Schema 中。
+	void setInput(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs);
 
-	/// @brief  便捷接口：批量传入 DC::Tensor，内部自动包装
-	bool setInput(const TaskId& taskId, std::unordered_map<std::string, Tensor> inputs);
+	/// @brief  便捷接口：批量传入 DC::Tensor，内部自动包装。
+	/// @param taskId 任务标识符。
+	/// @param inputs 端口名到 Tensor 的映射。
+	/// @throws NodeException(PortNotFound) 若任一端口名不存在于 Schema 中。
+	void setInput(const TaskId& taskId, std::unordered_map<std::string, Tensor> inputs);
 
 	// ── 任务级输出（始终从缓冲区拉取）──
+
+	/// @brief 查询指定任务是否已产出指定输出端口的数据。
+	/// @param taskId 任务标识符。
+	/// @param name 输出端口名。
+	/// @return true 若输出已就绪。
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
+	/// @brief 消费式取出输出数据（调用后输出缓冲区被清空）。
+	/// @param taskId 任务标识符。
+	/// @param name 输出端口名。
+	/// @return 输出数据（Value）。
+	/// @throws NodeException(TaskNotFound) 若任务不存在。
+	/// @throws NodeException(OutputNotProduced) 若输出端口为空。
 	Value getOutput(const TaskId& taskId, const std::string& name);
 
-	/// @brief  便捷接口：消费式取出 DC::Tensor，自动完成 Value → Tensor 解包
-	/// @throws  std::out_of_range 若输出不存在或不是 Tensor 类型
+	/// @brief  便捷接口：消费式取出 DC::Tensor，自动完成 Value → Tensor 解包。
+	/// @param taskId 任务标识符。
+	/// @param name 输出端口名。
+	/// @return 输出数据（DC::Tensor）。
+	/// @throws NodeException(TaskNotFound) 若任务不存在。
+	/// @throws NodeException(TypeMismatch) 若输出不是 DC::Tensor 类型。
 	Tensor getOutputTensor(const TaskId& taskId, const std::string& name);
 
+	/// @brief 只读查看输出（不消费，数据保留在缓冲区）。
+	/// @param taskId 任务标识符。
+	/// @param name 输出端口名。
+	/// @return 输出数据的只读引用。
+	/// @throws NodeException(TaskNotFound) 若任务不存在。
+	/// @throws NodeException(OutputNotProduced) 若输出端口为空。
 	const Value& peekOutput(const TaskId& taskId, const std::string& name) const;
 
+	/// @brief 批量消费所有输出。
+	/// @param taskId 任务标识符。
+	/// @return 端口名到数据的映射。
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
 
-	/// @brief  便捷接口：批量消费 DC::Tensor 输出
+	/// @brief 便捷接口：批量消费 DC::Tensor 输出。
+	/// @param taskId 任务标识符。
+	/// @return 端口名到 Tensor 的映射。
 	std::unordered_map<std::string, Tensor> collectOutputTensors(const TaskId& taskId);
 
 	// ── 阻塞式一次执行 ──
-	/// @brief  一次性送入所有 Value 输入，同步执行，返回指定输出的 Value
-	/// @throws  std::runtime_error 若输入不合法或执行失败
+	/// @brief  一次性送入所有 Value 输入，同步执行，返回指定输出的 Value。
+	/// @param outputName 期望的输出端口名。
+	/// @param inputs 输入端口名到数据的映射。
+	/// @return 指定输出端口的数据（Value）。
+	/// @throws NodeException(PortNotFound) 若输入端口名不合法。
+	/// @throws NodeException(NotReady) 若输入不满足执行条件。
+	/// @throws NodeException(InternalError) 若未产出输出。
+	/// @throws NodeException(OutputNotProduced) 若指定端口无输出。
 	Value execute(const std::string& outputName,
 	                     std::unordered_map<std::string, Value> inputs);
 
-	/// @brief  便捷接口：一次性送入 DC::Tensor，同步执行，返回指定输出的 Tensor
-	/// @throws  std::runtime_error 若输入不合法、执行失败或输出不是 Tensor 类型
+	/// @brief  便捷接口：一次性送入 DC::Tensor，同步执行，返回指定输出的 Tensor。
+	/// @param outputName 期望的输出端口名。
+	/// @param inputs 输入端口名到 Tensor 的映射。
+	/// @return 指定输出端口的数据（Tensor）。
+	/// @throws NodeException 若输入不合法、执行失败或输出不是 Tensor 类型。
 	Tensor executeTensor(const std::string& outputName,
 	                     std::unordered_map<std::string, Tensor> inputs);
 
@@ -269,17 +310,22 @@ public:
 	/// @brief  查询指定任务是否所有必需输入已就绪（含默认值）
 	bool isReady(const TaskId& taskId) const;
 
-	/// @brief  尝试执行就绪任务：获取重入锁 → 加载输入 → RunFn → 收集输出
-	/// @return true 表示执行成功完成，false 表示未就绪或节点正忙（重入被拒）
-	/// @note   线程安全；同一时刻最多一个 task 在执行
-	bool tryExecute(const TaskId& taskId);
+	/// @brief  尝试执行就绪任务：获取重入锁 → 加载输入 → RunFn → 收集输出。
+	/// @param taskId 要执行的任务标识符。
+	/// @throws NodeException(NotReady) 若任务输入尚未就绪。
+	/// @throws NodeException(Reentrant) 若节点正忙（Exclusive 策略下重入被拒）。
+	/// @throws NodeException(ExecutionFailed) 若 RunFn 执行失败。
+	/// @note   线程安全；同一时刻最多一个 task 在执行。
+	void tryExecute(const TaskId& taskId);
 
 	/// @brief  返回当前正在执行的任务 ID（用于冒泡事件、任务-节点亲和性）
 	/// @return 若节点空闲则返回 std::nullopt
 	std::optional<TaskId> currentTaskId() const;
 
 	// ── 任务生命周期 ──
+	/// @brief  清除指定任务的所有输入/输出缓冲区及等待者。
 	void   clearTask(const TaskId& taskId);
+	/// @brief  当前活跃任务数量。
 	size_t taskCount() const;
 
 	// ── 直接访问工作槽位（只读，高级场景）──
@@ -297,21 +343,36 @@ private:
 	using TaskBufferMap = std::unordered_map<TaskId, TaskBuffer>;
 
 	// ── 内部方法 ──
+	/// @brief  惰性创建任务的输入缓冲区（若未存在）。
 	void _ensureTaskExists(const TaskId& taskId);
+	/// @brief  判断任务所有必需输入（含默认值）是否已就绪。
 	bool _isTaskReady(const TaskId& taskId) const;
+	/// @brief  执行完整流水线：加载输入 → 清空输出 → preRun → RunFn →
+	///         synchronize → postRun → 收集输出 → 通知等待者 → 回调。
 	void _checkAndExecute(const TaskId& taskId);
+	/// @brief  将任务输入缓冲区数据移动到工作输入槽位（含默认值回退）。
 	void _loadTaskToWorkingSlots(const TaskId& taskId);
+	/// @brief  清空所有工作输出槽位。
 	void _clearWorkingOutputs();
+	/// @brief  将工作输出槽位数据移动到任务输出缓冲区。
 	void _collectAndSaveOutputs(const TaskId& taskId);
+	/// @brief  通知所有等待指定任务完成的协程。
 	void _notifyWaiters(const TaskId& taskId, const Result& result);
 
 	// ── RunContext 可调用的内部方法 ──
+	/// @brief  从输入槽读取 Value（RunContext::input 委托）。
 	const Value&     _inputImpl(const std::string& name) const;
+	/// @brief  将 Value 写入输出槽（RunContext::output 委托）。
 	void                    _outputImpl(const std::string& name, Value tensor);
+	/// @brief  获取当前引擎的 TensorConverter 钩子指针。
 	const TensorConverter*  _converter() const;
+	/// @brief  获取当前引擎的 EngineDescriptor。
 	const EngineDescriptor* _engineDescriptor() const;
+	/// @brief  同步引擎异步计算（调用引擎 synchronize 钩子）。
 	void                    _synchronizeEngine() const;
+	/// @brief  构造 Ok 状态 Result。
 	Result _makeSuccess(std::string message = {}) const;
+	/// @brief  构造失败状态 Result。
 	Result _makeFailure(Status status, std::string message) const;
 
 	// ── 槽位可变访问（由 friend 类访问）──

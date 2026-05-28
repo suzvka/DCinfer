@@ -8,7 +8,7 @@ target_include_directories(DCinfer
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/include/Tensor
         ${CMAKE_CURRENT_SOURCE_DIR}/include/Tools
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/Infer
+        ${CMAKE_CURRENT_SOURCE_DIR}/include/Node
         ${CMAKE_CURRENT_SOURCE_DIR}/include/Graph
 )
 

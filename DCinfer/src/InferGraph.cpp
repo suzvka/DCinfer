@@ -1,8 +1,8 @@
 #include "InferGraph.h"
 #include "Connector.h"
+#include "NodeException.h"
 
 #include <algorithm>
-#include <stdexcept>
 #include <iostream>
 
 namespace DC {
@@ -147,7 +147,12 @@ bool InferGraph::feedInput(
 	auto* n = _findNode(nodeName);
 	if (!n) return false;
 	_activeTasks.insert(taskId);
-	return n->setInput(taskId, portName, std::move(data));
+	try {
+		n->setInput(taskId, portName, std::move(data));
+		return true;
+	} catch (const NodeException&) {
+		return false;
+	}
 }
 
 bool InferGraph::feedInput(
@@ -175,7 +180,11 @@ void InferGraph::run() {
 		for (const auto& tid : _activeTasks) {
 			for (const auto& [nodeName, nodePtr] : _nodes) {
 				if (!nodePtr->isReady(tid)) continue;
-				if (!nodePtr->tryExecute(tid)) continue;
+				try {
+					nodePtr->tryExecute(tid);
+				} catch (const NodeException&) {
+					continue;
+				}
 
 				anyExecuted = true;
 
@@ -211,19 +220,22 @@ void InferGraph::submit(const TaskId& taskId) {
 		case ThreadPoolAffinity::Compute:
 			_computePool.submit(nodePtr->tag(),
 				[nodePtr = nodePtr.get(), taskId] {
-					nodePtr->tryExecute(taskId);
+					try { nodePtr->tryExecute(taskId); }
+					catch (const NodeException&) {}
 				});
 			break;
 		case ThreadPoolAffinity::Operator:
 			_operatorPool.submit(nodePtr->tag(),
 				[nodePtr = nodePtr.get(), taskId] {
-					nodePtr->tryExecute(taskId);
+					try { nodePtr->tryExecute(taskId); }
+					catch (const NodeException&) {}
 				});
 			break;
 		case ThreadPoolAffinity::System:
 			_systemPool.submit(nodePtr->tag(),
 				[nodePtr = nodePtr.get(), taskId] {
-					nodePtr->tryExecute(taskId);
+					try { nodePtr->tryExecute(taskId); }
+					catch (const NodeException&) {}
 				});
 			break;
 		}
@@ -256,22 +268,35 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 		auto* dst = _findNode(edge.dstNode);
 		if (!dst) continue;
 
-		dst->setInput(taskId, edge.dstPort, std::move(data));
+		try {
+			dst->setInput(taskId, edge.dstPort, std::move(data));
+		} catch (const NodeException&) {
+			continue;
+		}
 
 		// 下游就绪 → 按 affinity 提交到相应线程池
 		if (dst->isReady(taskId)) {
 			switch (dst->affinity()) {
 			case ThreadPoolAffinity::Compute:
 				co_await _computePool.submitAsync(dst->tag(),
-					[dst, taskId] { dst->tryExecute(taskId); });
+					[dst, taskId] {
+						try { dst->tryExecute(taskId); }
+						catch (const NodeException&) {}
+					});
 				break;
 			case ThreadPoolAffinity::Operator:
 				co_await _operatorPool.submitAsync(dst->tag(),
-					[dst, taskId] { dst->tryExecute(taskId); });
+					[dst, taskId] {
+						try { dst->tryExecute(taskId); }
+						catch (const NodeException&) {}
+					});
 				break;
 			case ThreadPoolAffinity::System:
 				co_await _systemPool.submitAsync(dst->tag(),
-					[dst, taskId] { dst->tryExecute(taskId); });
+					[dst, taskId] {
+						try { dst->tryExecute(taskId); }
+						catch (const NodeException&) {}
+					});
 				break;
 			}
 

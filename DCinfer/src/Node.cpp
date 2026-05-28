@@ -1,11 +1,59 @@
 #include "Node.h"
 #include "EngineRegistry.h"
-#include "TensorException.h"
+#include "NodeException.h"
 
-#include <stdexcept>
 #include <iostream>
 
 namespace DC {
+
+// ── Schema 方法实现 ──
+
+const Node::Port* Node::Schema::find(const std::vector<Port>& ports, const std::string& name) {
+	for (const auto& port : ports) {
+		if (port.name == name) return &port;
+	}
+	return nullptr;
+}
+
+bool Node::Schema::hasUniqueNames(const std::vector<Port>& ports) {
+	std::unordered_set<std::string> names;
+	names.reserve(ports.size());
+	for (const auto& port : ports) {
+		if (!names.insert(port.name).second) return false;
+	}
+	return true;
+}
+
+const Node::Port* Node::Schema::findInput(const std::string& name) const {
+	return find(inputs, name);
+}
+
+const Node::Port* Node::Schema::findOutput(const std::string& name) const {
+	return find(outputs, name);
+}
+
+bool Node::Schema::valid() const {
+	if (!hasUniqueNames(inputs) || !hasUniqueNames(outputs))
+		return false;
+	auto checkTypeSize = [](const std::vector<Port>& ports) {
+		for (const auto& p : ports) {
+			if (p.type != TensorType::Void && p.typeSize == 0)
+				return false;
+		}
+		return true;
+	};
+	if (!checkTypeSize(inputs) || !checkTypeSize(outputs))
+		return false;
+	// 校验默认值类型一致性
+	for (const auto& p : inputs) {
+		if (p.defaultValue.has_value()) {
+			const auto& dv = p.defaultValue.value();
+			if (dv.type() != p.type || dv.typeSize() != p.typeSize)
+				return false;
+		}
+	}
+	return true;
+}
 
 // ── 构造：从 Schema 构建工作槽位 ──
 Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
@@ -45,23 +93,24 @@ bool Node::hasCompletionCallback() const {
 }
 
 // ── 单端口输入 ──
-bool Node::setInput(const TaskId& taskId, const std::string& portName, Value data) {
+void Node::setInput(const TaskId& taskId, const std::string& portName, Value data) {
 	if (!_schema.findInput(portName)) {
-		return false;
+		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::setInput",
+			"port '" + portName + "' not found in schema");
 	}
 
 	_ensureTaskExists(taskId);
 	_taskInputs[taskId].at(portName) = std::move(data);
-	return true;
 }
 
 // ── 批量输入 ──
-bool Node::setInput(const TaskId& taskId,
+void Node::setInput(const TaskId& taskId,
                           std::unordered_map<std::string, TaskData> inputs) {
 	// 预校验：所有端口名必须存在
 	for (const auto& [name, data] : inputs) {
 		if (!_schema.findInput(name)) {
-			return false;
+			throw NodeException(NodeException::ErrorType::PortNotFound, "Node::setInput",
+				"port '" + name + "' not found in schema");
 		}
 	}
 
@@ -70,7 +119,6 @@ bool Node::setInput(const TaskId& taskId,
 	for (auto& [name, data] : inputs) {
 		_taskInputs[taskId].at(name) = std::move(data);
 	}
-	return true;
 }
 
 // ── 任务级输出 ──
@@ -86,11 +134,13 @@ bool Node::hasOutput(const TaskId& taskId, const std::string& name) const {
 Value Node::getOutput(const TaskId& taskId, const std::string& name) {
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
-		throw std::out_of_range("Node::getOutput: task '" + taskId + "' not found");
+		throw NodeException(NodeException::ErrorType::TaskNotFound, "Node::getOutput",
+			"task '" + taskId + "' not found");
 	}
 	auto& optVal = taskIt->second.at(name);
 	if (!optVal.has_value()) {
-		throw std::out_of_range("Node::getOutput: output '" + name + "' is empty");
+		throw NodeException(NodeException::ErrorType::OutputNotProduced, "Node::getOutput",
+			"output '" + name + "' is empty");
 	}
 	Value result = std::move(optVal.value());
 	optVal.reset();
@@ -100,11 +150,13 @@ Value Node::getOutput(const TaskId& taskId, const std::string& name) {
 const Value& Node::peekOutput(const TaskId& taskId, const std::string& name) const {
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
-		throw std::out_of_range("Node::peekOutput: task '" + taskId + "' not found");
+		throw NodeException(NodeException::ErrorType::TaskNotFound, "Node::peekOutput",
+			"task '" + taskId + "' not found");
 	}
 	auto& optVal = taskIt->second.at(name);
 	if (!optVal.has_value()) {
-		throw std::out_of_range("Node::peekOutput: output '" + name + "' is empty");
+		throw NodeException(NodeException::ErrorType::OutputNotProduced, "Node::peekOutput",
+			"output '" + name + "' is empty");
 	}
 	return optVal.value();
 }
@@ -135,10 +187,7 @@ Value Node::execute(const std::string& outputName,
 	_onComplete = nullptr;
 
 	try {
-		if (!setInput(taskId, std::move(inputs))) {
-			_onComplete = std::move(savedCallback);
-			throw std::runtime_error("Node::execute: setInputs failed");
-		}
+		setInput(taskId, std::move(inputs));
 	} catch (...) {
 		_onComplete = std::move(savedCallback);
 		throw;
@@ -146,10 +195,7 @@ Value Node::execute(const std::string& outputName,
 
 	// 显式触发执行（setInput 不再自动触发）
 	try {
-		if (!tryExecute(taskId)) {
-			_onComplete = std::move(savedCallback);
-			throw std::runtime_error("Node::execute: tryExecute failed (not ready or reentrant)");
-		}
+		tryExecute(taskId);
 	} catch (...) {
 		_onComplete = std::move(savedCallback);
 		throw;
@@ -160,13 +206,15 @@ Value Node::execute(const std::string& outputName,
 	// 同步执行已在 tryExecute → _checkAndExecute 内完成，直接读取输出
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
-		throw std::runtime_error("Node::execute: no output produced for task '" + taskId + "'");
+		throw NodeException(NodeException::ErrorType::InternalError, "Node::execute",
+			"no output produced for task '" + taskId + "'");
 	}
 
 	auto outIt = taskIt->second.find(outputName);
 	if (outIt == taskIt->second.end() || !outIt->second.has_value()) {
 		_taskOutputs.erase(taskId);
-		throw std::runtime_error("Node::execute: output '" + outputName + "' not found");
+		throw NodeException(NodeException::ErrorType::OutputNotProduced, "Node::execute",
+			"output '" + outputName + "' not found");
 	}
 
 	Value result = std::move(outIt->second.value());
@@ -193,12 +241,16 @@ bool Node::isReady(const TaskId& taskId) const {
 	return _isTaskReady(taskId);
 }
 
-bool Node::tryExecute(const TaskId& taskId) {
-	if (!_isTaskReady(taskId)) return false;
+void Node::tryExecute(const TaskId& taskId) {
+	if (!_isTaskReady(taskId)) {
+		throw NodeException(NodeException::ErrorType::NotReady, "Node::tryExecute",
+			"task '" + taskId + "' is not ready");
+	}
 
 	// 尝试获取重入锁，若已有 task 在执行则拒绝
 	if (_executing.test_and_set(std::memory_order_acquire)) {
-		return false;
+		throw NodeException(NodeException::ErrorType::Reentrant, "Node::tryExecute",
+			"node '" + _name + "' is busy executing another task");
 	}
 
 	_currentTaskId = taskId;
@@ -213,7 +265,6 @@ bool Node::tryExecute(const TaskId& taskId) {
 
 	_currentTaskId.reset();
 	_executing.clear(std::memory_order_release);
-	return true;
 }
 
 std::optional<Node::TaskId> Node::currentTaskId() const {
@@ -224,26 +275,26 @@ std::optional<Node::TaskId> Node::currentTaskId() const {
 // Tensor 便捷接口（自动完成 Tensor ↔ Value 包装）
 // ════════════════════════════════════════════
 
-bool Node::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
-	return setInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
+void Node::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
+	setInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
 }
 
-bool Node::setInput(const TaskId& taskId,
+void Node::setInput(const TaskId& taskId,
                                 std::unordered_map<std::string, Tensor> inputs) {
 	std::unordered_map<std::string, TaskData> wrapped;
 	wrapped.reserve(inputs.size());
 	for (auto& [name, t] : inputs) {
 		wrapped.emplace(name, Value(std::make_unique<Tensor>(std::move(t))));
 	}
-	return setInput(taskId, std::move(wrapped));
+	setInput(taskId, std::move(wrapped));
 }
 
 Tensor Node::getOutputTensor(const TaskId& taskId, const std::string& name) {
 	auto nt = getOutput(taskId, name);
 	auto* t = nt.as<Tensor>();
 	if (!t) {
-		throw std::out_of_range("Node::getOutputTensor: output '" + name
-			+ "' is not a DC::Tensor (innerType="
+		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::getOutputTensor",
+			"output '" + name + "' is not a DC::Tensor (innerType="
 			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
 	return std::move(*t);
@@ -274,8 +325,8 @@ Tensor Node::executeTensor(const std::string& outputName,
 	auto nt = execute(outputName, std::move(wrapped));
 	auto* t = nt.as<Tensor>();
 	if (!t) {
-		throw std::runtime_error("Node::executeTensor: output '" + outputName
-			+ "' is not a DC::Tensor (innerType="
+		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::executeTensor",
+			"output '" + outputName + "' is not a DC::Tensor (innerType="
 			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
 	return std::move(*t);
@@ -285,11 +336,13 @@ Tensor Node::executeTensor(const std::string& outputName,
 const Value& Node::_inputImpl(const std::string& name) const {
 	auto it = _inputSlots.find(name);
 	if (it == _inputSlots.end()) {
-		throw std::out_of_range("Node::_inputImpl: input '" + name + "' not found");
+		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_inputImpl",
+			"input '" + name + "' not found");
 	}
 	const auto* nt = it->second.peek<Value>();
 	if (!nt) {
-		throw std::runtime_error("Node::_inputImpl: input '" + name + "' is not a Value");
+		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::_inputImpl",
+			"input '" + name + "' is not a Value");
 	}
 	return *nt;
 }
@@ -297,7 +350,8 @@ const Value& Node::_inputImpl(const std::string& name) const {
 void Node::_outputImpl(const std::string& name, Value tensor) {
 	auto it = _outputSlots.find(name);
 	if (it == _outputSlots.end()) {
-		throw std::out_of_range("Node::_outputImpl: output '" + name + "' not found");
+		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_outputImpl",
+			"output '" + name + "' not found");
 	}
 	it->second.store(std::move(tensor));
 }
@@ -484,12 +538,12 @@ void Node::_loadTaskToWorkingSlots(const TaskId& taskId) {
 			if (nativeData.innerType() == SlotDataType::DCTensor && port.type != TensorType::Void) {
 				const auto* t = static_cast<const Tensor*>(nativeData.get());
 				if (!t || !t->valid()) {
-					throw TensorException(TensorException::ErrorType::Other,
-						"Node::_loadTaskToWorkingSlots: invalid Tensor in Value for port '" + port.name + "'");
+					throw NodeException(NodeException::ErrorType::InternalError, "Node::_loadTaskToWorkingSlots",
+						"invalid Tensor in Value for port '" + port.name + "'");
 				}
 				if (t->type() != port.type) {
-					throw TensorException(TensorException::ErrorType::TypeMismatch,
-						"Node::_loadTaskToWorkingSlots: type mismatch for port '" + port.name + "'");
+					throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::_loadTaskToWorkingSlots",
+						"type mismatch for port '" + port.name + "'");
 				}
 			}
 
