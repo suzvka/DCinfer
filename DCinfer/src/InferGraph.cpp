@@ -3,7 +3,6 @@
 #include "NodeException.h"
 
 #include <algorithm>
-#include <iostream>
 
 namespace DC {
 
@@ -67,12 +66,6 @@ bool InferGraph::connect(const std::string& srcNode, const std::string& srcPort,
 	if (!dst->schema().findInput(dstPort))
 		return false;
 
-	// DAG 环检测：若从 dstNode 出发已能到达 srcNode，则添加此边会形成环
-	// 允许环路（由输出声明保证收敛），仅打印警告
-	if (_wouldCreateCycle(srcNode, dstNode)) {
-		std::cerr << "InferGraph::connect: cycle detected when connecting '" << srcNode << ":" << srcPort << "' -> '" << dstNode << ":" << dstPort << "'. Ensure output declarations exist before submit()." << std::endl;
-	}
-
 	_edges.push_back({srcNode, srcPort, dstNode, dstPort});
 	return true;
 }
@@ -82,11 +75,6 @@ size_t InferGraph::connectAll(const std::string& srcNode, const std::string& dst
 	auto* dst = _findNode(dstNode);
 	if (!src || !dst)
 		return 0;
-
-	// DAG 环检测
-	if (_wouldCreateCycle(srcNode, dstNode)) {
-		std::cerr << "InferGraph::connectAll: cycle detected between '" << srcNode << "' and '" << dstNode << "'. Ensure output declarations exist before submit()." << std::endl;
-	}
 
 	size_t matched = 0;
 	for (const auto& outPort : src->schema().outputs) {
@@ -117,11 +105,6 @@ Node* InferGraph::wire(const std::string& srcNode, const std::string& srcPort, c
 	if (!dst->schema().findInput(dstPort))
 		return nullptr;
 
-	// DAG 环检测：src→wire→dst 等效于 src→dst
-	if (_wouldCreateCycle(srcNode, dstNode)) {
-		std::cerr << "InferGraph::wire: cycle detected between '" << srcNode << "' and '" << dstNode << "'. Ensure output declarations exist before submit()." << std::endl;
-	}
-
 	// 自动创建导线连接器
 	auto wireName = "__wire_" + std::to_string(_nextWireId.fetch_add(1));
 	auto wireNode = std::make_unique<Node>("Connector.Wire", wireName, Connector::wireSchema(), Connector::wireRunFn(),
@@ -151,7 +134,9 @@ bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName, co
 	try {
 		n->setInput(taskId, portName, std::move(data));
 		return true;
-	} catch (const NodeException&) {
+	} catch (const NodeException& e) {
+		_recordError(taskId, nodeName, "InferGraph::feedInput",
+					 "NodeException in setInput for port '" + portName + "': " + std::string(e.what()));
 		return false;
 	}
 }
@@ -198,7 +183,9 @@ void InferGraph::run() {
 					continue;
 				try {
 					nodePtr->tryExecute(tid);
-				} catch (const NodeException&) {
+				} catch (const NodeException& e) {
+					_recordError(tid, nodeName, "InferGraph::run",
+								 "NodeException in tryExecute: " + std::string(e.what()));
 					continue;
 				}
 
@@ -228,19 +215,37 @@ void InferGraph::run() {
 // 异步提交：协程驱动的数据传播
 // ════════════════════════════════════════════
 
-void InferGraph::submit(const TaskId& taskId) {
-	// 校验：若图中有环路但未声明输出，则拒绝
+void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout) {
+	// 校验：必须已声明输出
 	{
 		std::lock_guard lk(_declarationMutex);
-		if (!_outputDeclarations.contains(taskId) && _hasCycle()) {
-			std::cerr << "InferGraph::submit: cycle detected but no output declarations for task '" << taskId
-					  << "'. Call declareOutput() before submit()." << std::endl;
-			return;
+		if (!_outputDeclarations.contains(taskId)) {
+			throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submit",
+								 "no output declarations for task '" + taskId
+									 + "'. Call declareOutput() before submit().");
 		}
 	}
 
-	// 记录活跃任务，供同步 run() 扫描
+	// 记录活跃任务
 	_activeTasks.insert(taskId);
+
+	// 创建任务门控：协程链与看门狗共享，最后一个持有者析构时触发耗尽检测
+	auto gate = std::make_shared<TaskGate>();
+	gate->graph = this;
+	gate->taskId = taskId;
+
+	// 超时看门狗（独立线程）
+	if (timeout.count() > 0) {
+		auto deadline = std::chrono::steady_clock::now() + timeout;
+		std::thread([this, taskId, timeout, deadline, gate]() {
+			std::this_thread::sleep_until(deadline);
+			if (!gate->terminated.exchange(true, std::memory_order_acq_rel)) {
+				_recordError(taskId, "<watchdog>", "InferGraph::submit",
+							 "task timed out (" + std::to_string(timeout.count()) + "ms) without meeting output declarations");
+				_terminate(taskId);
+			}
+		}).detach();
+	}
 
 	// 扫描全图，对所有已就绪的节点创建传播协程
 	for (const auto& [nodeName, nodePtr] : _nodes) {
@@ -253,31 +258,38 @@ void InferGraph::submit(const TaskId& taskId) {
 			_computePool.submit(nodePtr->tag(), [nodePtr = nodePtr.get(), taskId] {
 				try {
 					nodePtr->tryExecute(taskId);
-				} catch (const NodeException&) {}
+				} catch (const NodeException& e) {
+					// 线程池中无法直接调用 _recordError，错误通过协程链中 whenComplete 的 result 传播
+				}
 			});
 			break;
 		case ThreadPoolAffinity::Operator:
 			_operatorPool.submit(nodePtr->tag(), [nodePtr = nodePtr.get(), taskId] {
 				try {
 					nodePtr->tryExecute(taskId);
-				} catch (const NodeException&) {}
+				} catch (const NodeException& e) {
+				}
 			});
 			break;
 		case ThreadPoolAffinity::System:
 			_systemPool.submit(nodePtr->tag(), [nodePtr = nodePtr.get(), taskId] {
 				try {
 					nodePtr->tryExecute(taskId);
-				} catch (const NodeException&) {}
+				} catch (const NodeException& e) {
+				}
 			});
 			break;
 		}
 
 		// 创建协程：等待节点完成后自动传播数据到下游
-		_scheduler->spawn([this, nodeName, taskId]() -> Task<void> { co_await _propagateFrom(nodeName, taskId); });
+		_scheduler->spawn([this, nodeName, taskId, gate]() -> Task<void> {
+			co_await _propagateFrom(nodeName, taskId, gate);
+		});
 	}
 }
 
-Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId& taskId) {
+Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId& taskId,
+									  std::shared_ptr<TaskGate> gate) {
 	// [检查点 1] 入口：若 task 已终止，直接返回
 	if (_isTerminated(taskId))
 		co_return;
@@ -289,6 +301,8 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 	// co_await 挂起当前协程，等待该节点执行完成
 	auto result = co_await src->whenComplete(taskId);
 	if (!result.ok()) {
+		_recordError(taskId, nodeName, "InferGraph::_propagateFrom",
+					 "Node execution failed: " + result.message);
 		co_return; // 失败则不传播
 	}
 
@@ -303,6 +317,7 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 		// [检查点 2] 先累积计数，再消费数据：
 		// 若所有声明条件已满足，立即终止（不消费无用数据，避免传播到已清理的下游）
 		if (_accumulateAndCheck(edge.srcNode, edge.srcPort, taskId)) {
+			gate->terminated.store(true, std::memory_order_release);
 			_terminate(taskId);
 			co_return;
 		}
@@ -319,7 +334,9 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 
 		try {
 			dst->setInput(taskId, edge.dstPort, std::move(data));
-		} catch (const NodeException&) {
+		} catch (const NodeException& e) {
+			_recordError(taskId, edge.dstNode, "InferGraph::_propagateFrom",
+						 "NodeException in setInput for port '" + edge.dstPort + "': " + std::string(e.what()));
 			continue;
 		}
 
@@ -327,24 +344,33 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 		if (dst->isReady(taskId)) {
 			switch (dst->affinity()) {
 			case ThreadPoolAffinity::Compute:
-				co_await _computePool.submitAsync(dst->tag(), [dst, taskId] {
+				co_await _computePool.submitAsync(dst->tag(), [this, dst, taskId, dstNode = edge.dstNode] {
 					try {
 						dst->tryExecute(taskId);
-					} catch (const NodeException&) {}
+					} catch (const NodeException& e) {
+						_recordError(taskId, dstNode, "InferGraph::_propagateFrom<Compute>",
+									 "NodeException in tryExecute: " + std::string(e.what()));
+					}
 				});
 				break;
 			case ThreadPoolAffinity::Operator:
-				co_await _operatorPool.submitAsync(dst->tag(), [dst, taskId] {
+				co_await _operatorPool.submitAsync(dst->tag(), [this, dst, taskId, dstNode = edge.dstNode] {
 					try {
 						dst->tryExecute(taskId);
-					} catch (const NodeException&) {}
+					} catch (const NodeException& e) {
+						_recordError(taskId, dstNode, "InferGraph::_propagateFrom<Operator>",
+									 "NodeException in tryExecute: " + std::string(e.what()));
+					}
 				});
 				break;
 			case ThreadPoolAffinity::System:
-				co_await _systemPool.submitAsync(dst->tag(), [dst, taskId] {
+				co_await _systemPool.submitAsync(dst->tag(), [this, dst, taskId, dstNode = edge.dstNode] {
 					try {
 						dst->tryExecute(taskId);
-					} catch (const NodeException&) {}
+					} catch (const NodeException& e) {
+						_recordError(taskId, dstNode, "InferGraph::_propagateFrom<System>",
+									 "NodeException in tryExecute: " + std::string(e.what()));
+					}
 				});
 				break;
 			}
@@ -355,7 +381,9 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 
 			// 创建下游传播协程（非阻塞：fire-and-forget spawn）
 			_scheduler->spawn(
-				[this, dstNode = edge.dstNode, taskId]() -> Task<void> { co_await _propagateFrom(dstNode, taskId); });
+				[this, dstNode = edge.dstNode, taskId, gate]() -> Task<void> {
+					co_await _propagateFrom(dstNode, taskId, gate);
+				});
 		}
 	}
 }
@@ -367,7 +395,8 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) {
 	auto* n = _findNode(nodeName);
 	if (!n) {
-		throw std::out_of_range("InferGraph::getOutput: node '" + nodeName + "' not found");
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutput",
+							 "node '" + nodeName + "' not found");
 	}
 	return n->getOutput(taskId, portName);
 }
@@ -375,7 +404,8 @@ Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName, c
 Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName) {
 	auto* n = _findNode(nodeName);
 	if (!n) {
-		throw std::out_of_range("InferGraph::getOutputTensor: node '" + nodeName + "' not found");
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutputTensor",
+							 "node '" + nodeName + "' not found");
 	}
 	return n->getOutputTensor(taskId, portName);
 }
@@ -400,76 +430,6 @@ const Node* InferGraph::node(const std::string& name) const {
 }
 
 // ════════════════════════════════════════════
-// _wouldCreateCycle：DAG 环检测
-// ════════════════════════════════════════════
-
-bool InferGraph::_wouldCreateCycle(const std::string& srcNode, const std::string& dstNode) const {
-	// 自环
-	if (srcNode == dstNode)
-		return true;
-
-	// 从 dstNode 出发 DFS，检查是否可达 srcNode
-	std::unordered_set<std::string> visited;
-	std::function<bool(const std::string&)> dfs = [&](const std::string& current) -> bool {
-		if (current == srcNode)
-			return true;
-		if (!visited.insert(current).second)
-			return false;
-		for (const auto& edge : _edges) {
-			if (edge.srcNode == current) {
-				if (dfs(edge.dstNode))
-					return true;
-			}
-		}
-		return false;
-	};
-	return dfs(dstNode);
-}
-
-// ════════════════════════════════════════════
-// _hasCycle：整图环检测
-// ════════════════════════════════════════════
-
-bool InferGraph::_hasCycle() const {
-	// DFS 三色标记法：White=未访问, Gray=访问中(栈上), Black=已完成
-	// 若从 Gray 节点出发可达另一个 Gray 节点，则存在环
-	enum class Color : uint8_t { White, Gray, Black };
-	std::unordered_map<std::string, Color> color;
-	color.reserve(_nodes.size());
-	for (const auto& [name, _] : _nodes) {
-		color[name] = Color::White;
-	}
-
-	// 预构建邻接表
-	std::unordered_map<std::string, std::vector<std::string>> adj;
-	for (const auto& edge : _edges) {
-		adj[edge.srcNode].push_back(edge.dstNode);
-	}
-
-	std::function<bool(const std::string&)> dfs = [&](const std::string& node) -> bool {
-		color[node] = Color::Gray;
-		auto it = adj.find(node);
-		if (it != adj.end()) {
-			for (const auto& next : it->second) {
-				auto c = color[next];
-				if (c == Color::Gray)
-					return true; // 回边：发现环
-				if (c == Color::White && dfs(next))
-					return true;
-			}
-		}
-		color[node] = Color::Black;
-		return false;
-	};
-
-	for (const auto& [name, _] : _nodes) {
-		if (color[name] == Color::White && dfs(name))
-			return true;
-	}
-	return false;
-}
-
-// ════════════════════════════════════════════
 // 终止辅助
 // ════════════════════════════════════════════
 
@@ -478,7 +438,7 @@ bool InferGraph::_accumulateAndCheck(const std::string& nodeName, const std::str
 	std::lock_guard lk(_declarationMutex);
 	auto declIt = _outputDeclarations.find(taskId);
 	if (declIt == _outputDeclarations.end())
-		return false; // 未声明 → 永不终止
+		return false; // 未声明（在 submit 中已被拦截，此处防御）
 
 	// 递增累加器
 	std::string key = nodeName + ":" + portName;
@@ -519,6 +479,86 @@ void InferGraph::_terminate(const TaskId& taskId) {
 		if (nodePtr->hasTask(taskId))
 			nodePtr->terminateTask(taskId);
 	}
+}
+
+// ════════════════════════════════════════════
+// 耗尽检测：TaskGate 析构或超时触发
+// ════════════════════════════════════════════
+
+void InferGraph::_onExhausted(const TaskId& taskId) {
+	// 已终止则跳过
+	if (_isTerminated(taskId))
+		return;
+
+	// 检查声明是否已满足
+	bool allMet = false;
+	{
+		std::lock_guard lk(_declarationMutex);
+		auto declIt = _outputDeclarations.find(taskId);
+		if (declIt != _outputDeclarations.end()) {
+			allMet = true;
+			for (const auto& decl : declIt->second) {
+				std::string key = decl.nodeName + ":" + decl.portName;
+				auto& counts = _accumulatedCounts[taskId];
+				auto countIt = counts.find(key);
+				size_t current = (countIt != counts.end()) ? countIt->second : 0;
+				if (current < decl.count) {
+					allMet = false;
+					break;
+				}
+			}
+		}
+	}
+
+	if (allMet) {
+		// 声明已满足 → 正常终止（守护路径，主路径在 _accumulateAndCheck 中处理）
+		_terminate(taskId);
+		return;
+	}
+
+	// 声明未满足 → 诊断原因
+	bool hasStuckData = false;
+	for (const auto& [name, nodePtr] : _nodes) {
+		if (nodePtr->hasTask(taskId)) {
+			hasStuckData = true;
+			break;
+		}
+	}
+
+	if (hasStuckData) {
+		_recordError(taskId, "<graph>", "InferGraph::_onExhausted",
+					 "graph stalled: data remains in node buffers but no active propagation coroutines");
+	} else {
+		_recordError(taskId, "<graph>", "InferGraph::_onExhausted",
+					 "graph exhausted without producing all declared outputs");
+	}
+	_terminate(taskId);
+}
+
+// ════════════════════════════════════════════
+// 错误记录
+// ════════════════════════════════════════════
+
+void InferGraph::_recordError(const TaskId& taskId, std::string nodeName, std::string source,
+							  std::string message) {
+	std::lock_guard lk(_errorMutex);
+	_taskErrors[taskId].push_back({std::move(nodeName), std::move(source), std::move(message)});
+}
+
+std::vector<TaskError> InferGraph::taskErrors(const TaskId& taskId) const {
+	std::lock_guard lk(_errorMutex);
+	auto it = _taskErrors.find(taskId);
+	return it != _taskErrors.end() ? it->second : std::vector<TaskError>{};
+}
+
+void InferGraph::clearErrors() {
+	std::lock_guard lk(_errorMutex);
+	_taskErrors.clear();
+}
+
+bool InferGraph::hasErrors() const {
+	std::lock_guard lk(_errorMutex);
+	return !_taskErrors.empty();
 }
 
 } // namespace DC

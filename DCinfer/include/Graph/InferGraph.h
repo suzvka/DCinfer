@@ -4,12 +4,15 @@
 #include "EngineRegistry.h"
 #include "CoroScheduler.h"
 #include "ThreadPool.h"
+#include "GraphException.h"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -29,6 +32,13 @@ struct OutputDeclaration {
 	std::string nodeName; ///< 目标节点名
 	std::string portName; ///< 目标端口名
 	size_t count = 1; ///< 预期产出次数（>=1）
+};
+
+/// @brief 单条 task 级错误记录，包含节点名和异常信息
+struct TaskError {
+	std::string nodeName;  ///< 发生错误的节点名
+	std::string source;    ///< 异常来源（如 "InferGraph::_propagateFrom"）
+	std::string message;   ///< 错误详情
 };
 
 class InferGraph {
@@ -109,24 +119,28 @@ public:
 
 	/// @brief  异步启动整张图的计算
 	///         为指定 taskId 扫描入口节点，创建协程链驱动数据流
-	void submit(const TaskId& taskId);
+	/// @param  timeout  超时时间（毫秒），0 表示不启用超时，默认 0
+	/// @throws GraphException(NoDeclaration) 若未事先调用 declareOutput
+	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0));
 
 	// ── 结果获取 ──
 
 	/// @brief  获取输出区中指定端口的结果（消费式取出）
+	/// @throws GraphException(NodeNotFound) 若节点不存在
 	Value getOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
 	/// @brief  便捷接口：取出 DC::Tensor
+	/// @throws GraphException(NodeNotFound) 若节点不存在
 	Tensor getOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
 	/// @brief  检查输出区中是否有结果
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
 
-	// ── 输出声明（环路支持）──
+	// ── 输出声明（submit 前必须调用）──
 
 	/// @brief  声明某 task 的输出期望：指定节点端口需产出 N 次才停止
-	///         调用后允许此 task 的图中存在环路（由声明条件保证收敛）
-	/// @note   必须在 submit() 前调用；有环图若未声明输出，submit 会失败
+	///         声明条件满足时自动终止；数据耗尽而未满足则报错
+	/// @note   必须在 submit() 前调用，否则 submit 会抛出 NoDeclaration
 	void declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations);
 
 	/// @brief  单条声明的便捷重载
@@ -151,7 +165,36 @@ public:
 		return _edges.size();
 	}
 
+	// ── 错误诊断 ──
+
+	/// @brief  查询指定 task 在整条传播链上的所有错误记录
+	///         包含 feedInput、tryExecute、setInput 过程中捕获的异常信息
+	/// @return 按发生顺序排列的错误列表；若无错误则返回空向量
+	std::vector<TaskError> taskErrors(const TaskId& taskId) const;
+
+	/// @brief  清除所有 task 级错误记录（通常在重新 submit 前调用）
+	void clearErrors();
+
+	/// @brief  是否有任何 task 发生过错误
+	bool hasErrors() const;
+
 private:
+	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
+	//
+	// 每个活跃协程 + 超时看门狗各持有一份 shared_ptr<TaskGate>。
+	// 当最后一个持有者析构时，若 task 未被终止，则触发 _onExhausted。
+	struct TaskGate {
+		std::atomic<bool> terminated{false};
+		InferGraph* graph = nullptr;
+		TaskId taskId;
+
+		~TaskGate() {
+			if (!terminated.load(std::memory_order_acquire) && graph) {
+				graph->_onExhausted(taskId);
+			}
+		}
+	};
+
 	// 查找节点：存在返回指针，不存在返回 nullptr
 	Node* _findNode(const std::string& name);
 	const Node* _findNode(const std::string& name) const;
@@ -160,14 +203,9 @@ private:
 	//
 	// 核心：从指定节点出发，沿边传播数据到所有下游
 	// co_await 节点完成 → 消费输出 → 写入下游 → 按 affinity 提交线程池 → spawn 下游传播协程
-	Task<void> _propagateFrom(const std::string& nodeName, const TaskId& taskId);
-
-	/// @brief 检查添加 srcNode→dstNode 边是否会形成环
-	/// 从 dstNode 出发 DFS，判断是否可达 srcNode
-	bool _wouldCreateCycle(const std::string& srcNode, const std::string& dstNode) const;
-
-	/// @brief  检查整张图中是否存在环路
-	bool _hasCycle() const;
+	// @param gate  共享任务门控，最后一个持有者析构时触发耗尽检测
+	Task<void> _propagateFrom(const std::string& nodeName, const TaskId& taskId,
+							  std::shared_ptr<TaskGate> gate);
 
 	// ── 输出声明辅助 ──
 
@@ -179,6 +217,15 @@ private:
 
 	/// @brief  查询 task 是否已被终止
 	bool _isTerminated(const TaskId& taskId) const;
+
+	/// @brief  数据耗尽时的处理：检查声明是否满足，满足则正常终止，否则报错并终止
+	/// @note   由 TaskGate 析构函数调用，或超时看门狗触发
+	void _onExhausted(const TaskId& taskId);
+
+	// ── 错误记录 ──
+
+	/// @brief  记录一条 task 级错误（线程安全，可在协程/线程池中调用）
+	void _recordError(const TaskId& taskId, std::string nodeName, std::string source, std::string message);
 
 	// ── 成员 ──
 	std::unordered_map<std::string, std::unique_ptr<Node>> _nodes;
@@ -211,6 +258,10 @@ private:
 	// 已终止的 task 集合（_terminationMutex 保护）
 	std::unordered_set<TaskId> _terminatedTasks;
 	mutable std::mutex _terminationMutex;
+
+	// task 级错误收集：每 taskId 对应按发生顺序排列的错误列表（_errorMutex 保护）
+	std::unordered_map<TaskId, std::vector<TaskError>> _taskErrors;
+	mutable std::mutex _errorMutex;
 };
 
 } // namespace DC

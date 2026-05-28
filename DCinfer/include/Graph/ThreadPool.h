@@ -37,11 +37,8 @@ struct PoolTicket {
 	}
 	void await_suspend(std::coroutine_handle<> h);
 	/// @brief 恢复后检查是否因 shutdown 被取消
-	void await_resume() const {
-		if (_pool && _pool->_shuttingDown.load(std::memory_order_acquire)) {
-			// 任务因 shutdown 被取消，调用方可按需检测
-		}
-	}
+	/// @note 实现在 ThreadPool 完整定义之后，避免访问未完整类型
+	void await_resume() const;
 
 private:
 	friend class ThreadPool;
@@ -118,5 +115,13 @@ private:
 	// 关闭标记：通知所有 awaiting 协程任务被取消
 	std::atomic<bool> _shuttingDown{false};
 };
+
+// ── PoolTicket::await_resume 需访问 ThreadPool 私有成员，
+// 定义必须在 ThreadPool 完整定义之后 ──
+inline void PoolTicket::await_resume() const {
+	if (_pool && _pool->_shuttingDown.load(std::memory_order_acquire)) {
+		// 任务因 shutdown 被取消，调用方可按需检测
+	}
+}
 
 } // namespace DC
