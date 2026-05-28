@@ -91,35 +91,35 @@ void Tensor::abort(ErrorType errorType, const std::string& message) const {
 	throw TensorException(errorType, source, message);
 }
 
-Expected<bool, Tensor::ErrorType> Tensor::checkTypeMatch(size_t size) const {
+std::optional<Tensor::ErrorType> Tensor::checkTypeMatch(size_t size) const {
 	if (_meta.typeSize == 0)
-		return Expected<bool, Tensor::ErrorType>(Tensor::ErrorType::TypeMismatch);
+		return Tensor::ErrorType::TypeMismatch;
 	if (size != _meta.typeSize)
-		return Expected<bool, Tensor::ErrorType>(Tensor::ErrorType::TypeMismatch);
-	return Expected<bool, Tensor::ErrorType>(true);
+		return Tensor::ErrorType::TypeMismatch;
+	return std::nullopt;
 }
 
-Expected<bool, Tensor::ErrorType> Tensor::checkPathValid(const Shape& path, const TensorData::Shape& shape) const {
+std::optional<Tensor::ErrorType> Tensor::checkPathValid(const Shape& path, const TensorData::Shape& shape) const {
 	if (path.size() > shape.size())
-		return Expected<bool, Tensor::ErrorType>(Tensor::ErrorType::InvalidPath);
+		return Tensor::ErrorType::InvalidPath;
 	for (size_t i = 0; i < path.size(); ++i) {
 		// path is signed (int64_t) while shape elements are size_t (unsigned).
 		// Perform comparisons in a signed domain to avoid signed/unsigned mismatch warnings.
 		int64_t idx = path[i];
 		int64_t bound = static_cast<int64_t>(shape[i]);
 		if (idx < 0 || idx >= bound)
-			return Expected<bool, Tensor::ErrorType>(Tensor::ErrorType::InvalidPath);
+			return Tensor::ErrorType::InvalidPath;
 	}
-	return Expected<bool, Tensor::ErrorType>(true);
+	return std::nullopt;
 }
 
-Expected<bool, Tensor::ErrorType> Tensor::checkSingleElementView(const Shape& path, const Shape& shape) const {
+std::optional<Tensor::ErrorType> Tensor::checkSingleElementView(const Shape& path, const Shape& shape) const {
 	size_t remaining = 1;
 	for (size_t i = path.size(); i < shape.size(); ++i)
 		remaining *= static_cast<size_t>(shape[i]);
 	if (remaining != 1)
-		return Expected<bool, Tensor::ErrorType>(Tensor::ErrorType::NotAScalar);
-	return Expected<bool, Tensor::ErrorType>(true);
+		return Tensor::ErrorType::NotAScalar;
+	return std::nullopt;
 }
 
 void Tensor::moveFrom(Tensor&& other) noexcept {

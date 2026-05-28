@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "Expected.h"
+#include <optional>
 #include "TensorMods.h"
 
 namespace DC {
@@ -189,11 +189,11 @@ private:
 	TensorMeta _meta;
 	TensorData _data;
 
-	Expected<bool, ErrorType> checkTypeMatch(size_t size) const;
+	std::optional<ErrorType> checkTypeMatch(size_t size) const;
 
-	Expected<bool, ErrorType> checkPathValid(const Shape& path, const TensorData::Shape& shape) const;
+	std::optional<ErrorType> checkPathValid(const Shape& path, const TensorData::Shape& shape) const;
 
-	Expected<bool, ErrorType> checkSingleElementView(const Shape& path, const Shape& shape) const;
+	std::optional<ErrorType> checkSingleElementView(const Shape& path, const Shape& shape) const;
 
 	// 向指定路径写数据块 (会在错误时抛出 via abort)
 	template <typename T>
@@ -318,9 +318,8 @@ T Tensor::item() const {
 
 template <typename T>
 Tensor& Tensor::operator=(const T& value) {
-	auto res = checkTypeMatch(sizeof(T));
-	if (!res) {
-		abort(ErrorType::TypeMismatch, "type mismatch in scalar assignment");
+	if (auto err = checkTypeMatch(sizeof(T))) {
+		abort(*err, "type mismatch in scalar assignment");
 	}
 
 	// Prefer dense-write fast-path to safely create 0-D scalar if no cache exists.
@@ -343,9 +342,8 @@ Tensor& Tensor::operator=(const T& value) {
 
 template <typename T>
 Tensor& Tensor::fill(const T& data) {
-	auto resType = checkTypeMatch(sizeof(T));
-	if (!resType) {
-		abort(ErrorType::TypeMismatch, "type mismatch in fill assignment");
+	if (auto err = checkTypeMatch(sizeof(T))) {
+		abort(*err, "type mismatch in fill assignment");
 	}
 
 	Shape shape;
@@ -423,12 +421,10 @@ template <typename T>
 T Tensor::readScalar(const Shape& path) const {
 	// dataShape is TensorData::Shape (vector<size_t>)
 	auto dataShape = _data.getCurrentShape();
-	auto resType = checkTypeMatch(sizeof(T));
-	if (!resType)
-		abort(ErrorType::TypeMismatch, "type mismatch in scalar read");
-	auto resPath = checkPathValid(path, dataShape);
-	if (!resPath)
-		abort(ErrorType::InvalidPath, "invalid path in scalar read");
+	if (auto err = checkTypeMatch(sizeof(T)))
+		abort(*err, "type mismatch in scalar read");
+	if (auto err = checkPathValid(path, dataShape))
+		abort(*err, "invalid path in scalar read");
 
 	// If path length equals rank, read the single element
 	if (path.size() == dataShape.size()) {
@@ -439,9 +435,8 @@ T Tensor::readScalar(const Shape& path) const {
 	// Path shorter than rank: ensure remaining dimensions multiply to 1
 	// convert dataShape to Tensor::Shape for checkSingleElementView
 	Shape asTensorShape(dataShape.begin(), dataShape.end());
-	auto resSingle = checkSingleElementView(path, asTensorShape);
-	if (!resSingle)
-		abort(ErrorType::NotAScalar, "not a scalar view");
+	if (auto err = checkSingleElementView(path, asTensorShape))
+		abort(*err, "not a scalar view");
 
 	// build full path with trailing zeros
 	Shape fullPath = path;
