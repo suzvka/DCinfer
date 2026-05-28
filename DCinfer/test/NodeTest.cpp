@@ -387,7 +387,7 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 11: 类型不匹配（tryExecute 时校验触发）──
+	// ── Test 11: 类型不匹配（tryExecute 时在校验阶段抛出 NodeException::TypeMismatch）──
 	TEST("type mismatch rejected at tryExecute") {
 		auto node = reg.createNode("add11", scalarAddSchema(), addRunImpl);
 
@@ -397,14 +397,14 @@ void runTests() {
 
 		CHECK(node->isReady("task1"), "task should appear ready");
 
-		// tryExecute 时在校验阶段抛出
+		// tryExecute 时在校验阶段抛出 NodeException::TypeMismatch
 		bool threw = false;
 		try {
 			node->tryExecute("task1");
-		} catch (const TensorException&) {
-			threw = true;
+		} catch (const NodeException& e) {
+			threw = (e.getErrorType() == NodeException::ErrorType::TypeMismatch);
 		}
-		CHECK(threw, "tryExecute should throw for type mismatch");
+		CHECK(threw, "tryExecute should throw NodeException::TypeMismatch");
 	}
 	END_TEST();
 
