@@ -34,29 +34,26 @@ struct TensorConverter {
 };
 
 /// @brief 节点工厂：按引擎类型名称 + 引擎特定配置创建节点。
-using NodeFactory = std::function<std::unique_ptr<class Node>(
-	std::string nodeName,
-	const void* engineConfig
-)>;
+using NodeFactory = std::function<std::unique_ptr<class Node>(std::string nodeName, const void* engineConfig)>;
 
 // ── 引擎描述符 / 引擎实例（前向声明，定义见 Graph/EngineRegistry.h）──
 struct EngineDescriptor;
-class  EngineInstance;
+class EngineInstance;
 
 /// @brief 线程池归属：标识节点应由三层线程池中的哪一个执行。
 /// 仅在 Node 创建时赋值，之后只读。
 enum class ThreadPoolAffinity {
-	Compute,   ///< 计算线程池 —— 执行推理过程（GPU 加速，如 ONNX/TensorRT）
-	Operator,  ///< 算子线程池 —— 执行 CPU 密集过程（如 Pre/Post 处理）
-	System,    ///< 系统线程池 —— 数据流动与连接器（Broadcast/Routing/Wire）
+	Compute, ///< 计算线程池 —— 执行推理过程（GPU 加速，如 ONNX/TensorRT）
+	Operator, ///< 算子线程池 —— 执行 CPU 密集过程（如 Pre/Post 处理）
+	System, ///< 系统线程池 —— 数据流动与连接器（Broadcast/Routing/Wire）
 };
 
 /// @brief 节点执行策略。
 enum class ExecutionPolicy {
-	Exclusive,    ///< 同时最多 1 个 task（默认行为）
-	Concurrent,   ///< 多个 task 可并发（无状态节点）
-	Serialized,   ///< 多 task 排队，FIFO 串行
-	Batched,      ///< 攒 N 个 task 后批量执行
+	Exclusive, ///< 同时最多 1 个 task（默认行为）
+	Concurrent, ///< 多个 task 可并发（无状态节点）
+	Serialized, ///< 多 task 排队，FIFO 串行
+	Batched, ///< 攒 N 个 task 后批量执行
 };
 
 // ── 前向声明：co_await-able 节点完成通知 ──
@@ -65,30 +62,30 @@ struct NodeCompletion;
 class Node {
 public:
 	using TensorType = Tensor::TensorType;
-	using Shape      = Tensor::Shape;
+	using Shape = Tensor::Shape;
 
 	// ── 任务标识 ──
-	using TaskId     = std::string;
+	using TaskId = std::string;
 
 	// ── 任务级数据：统一使用 Value 作为数据载体 ──
 	// 实际类型通过 TensorConverter 钩子在边界处透明转换
-	using TaskData    = Value;
+	using TaskData = Value;
 
 	// ── 端口定义 ──
 	/// @brief 端口定义：描述节点的输入或输出端口元数据。
 	struct Port {
-		std::string name;       ///< 端口名称（在 Schema 内唯一）。
-		TensorType  type         = TensorType::Void;  ///< 期望的张量逻辑类型。
-		size_t      typeSize     = 0;                 ///< 单元素字节数。
-		Shape       shape;                            ///< 期望的形状（空=不校验）。
-		bool        required     = true;              ///< 执行前是否必须填充。
-		std::optional<Tensor> defaultValue;  ///< 有默认值时，就绪检查视为已填充。
+		std::string name; ///< 端口名称（在 Schema 内唯一）。
+		TensorType type = TensorType::Void; ///< 期望的张量逻辑类型。
+		size_t typeSize = 0; ///< 单元素字节数。
+		Shape shape; ///< 期望的形状（空=不校验）。
+		bool required = true; ///< 执行前是否必须填充。
+		std::optional<Tensor> defaultValue; ///< 有默认值时，就绪检查视为已填充。
 
 		/// @brief 工厂：创建必须输入端口。
 		/// @tparam T 期望的 C++ 类型。
 		/// @param name 端口名。
 		/// @param shape 期望形状。
-		template<typename T>
+		template <typename T>
 		static Port in(std::string name, Shape shape = {}) {
 			TensorMeta::ensureTypeMap();
 			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), true};
@@ -99,19 +96,20 @@ public:
 		/// @param name 端口名。
 		/// @param defaultValue 默认值。
 		/// @param shape 期望形状。
-		template<typename T>
+		template <typename T>
 		static Port optional(std::string name, T defaultValue, Shape shape = {}) {
 			TensorMeta::ensureTypeMap();
 			Tensor dv(DC::Type::getType<TensorType, T>(), sizeof(T));
 			dv = defaultValue;
-			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), false, std::move(dv)};
+			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), false,
+					std::move(dv)};
 		}
 
 		/// @brief 工厂：创建输出端口。
 		/// @tparam T 期望的 C++ 类型。
 		/// @param name 端口名。
 		/// @param shape 期望形状。
-		template<typename T>
+		template <typename T>
 		static Port out(std::string name, Shape shape = {}) {
 			TensorMeta::ensureTypeMap();
 			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), true};
@@ -121,8 +119,8 @@ public:
 	// ── Schema ──
 	/// @brief 节点 Schema：定义输入/输出端口的完整元数据。
 	struct Schema {
-		std::vector<Port> inputs;   ///< 输入端口列表。
-		std::vector<Port> outputs;  ///< 输出端口列表。
+		std::vector<Port> inputs; ///< 输入端口列表。
+		std::vector<Port> outputs; ///< 输出端口列表。
 
 		/// @brief 按名称查找输入端口。
 		/// @return 指向 Port 的指针，若不存在则返回 nullptr。
@@ -143,19 +141,21 @@ public:
 	// ── 状态 ──
 	/// @brief 节点执行结果状态枚举。
 	enum class Status {
-		Ok,              ///< 执行成功。
-		InvalidInput,    ///< 输入数据不合法（值为空、类型错误等）。
-		SchemaMismatch,  ///< 输入与 Schema 声明不一致。
+		Ok, ///< 执行成功。
+		InvalidInput, ///< 输入数据不合法（值为空、类型错误等）。
+		SchemaMismatch, ///< 输入与 Schema 声明不一致。
 		ExecutionFailed, ///< RunFn 执行过程中抛出异常。
-		InternalError    ///< 节点内部状态错误。
+		InternalError ///< 节点内部状态错误。
 	};
 
 	/// @brief 节点执行结果。
 	struct Result {
-		Status      status  = Status::Ok;  ///< 执行状态。
-		std::string message;               ///< 附加消息。
+		Status status = Status::Ok; ///< 执行状态。
+		std::string message; ///< 附加消息。
 		/// @brief 是否执行成功。
-		bool ok() const { return status == Status::Ok; }
+		bool ok() const {
+			return status == Status::Ok;
+		}
 	};
 
 	// ── RunContext（前向声明，定义见类外）──
@@ -168,40 +168,59 @@ public:
 	using CompletionFn = std::function<void(const TaskId& taskId, const Result& result)>;
 
 	// ── 构造/析构 ──
-	Node(std::string type, std::string name, Schema schema, RunFn fn,
-	          EngineInstance* engineInstance = nullptr,
-	          ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator);
+	Node(std::string type, std::string name, Schema schema, RunFn fn, EngineInstance* engineInstance = nullptr,
+		 ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator);
 	~Node();
 
 	// 禁止拷贝/移动
-	Node(const Node&)            = delete;
+	Node(const Node&) = delete;
 	Node& operator=(const Node&) = delete;
-	Node(Node&&)                 = delete;
-	Node& operator=(Node&&)      = delete;
+	Node(Node&&) = delete;
+	Node& operator=(Node&&) = delete;
 
 	// ── 只读属性 ──
-	const std::string& type()   const { return _type; }
-	const std::string& name()   const { return _name; }
-	const Schema&      schema() const { return _schema; }
+	const std::string& type() const {
+		return _type;
+	}
+	const std::string& name() const {
+		return _name;
+	}
+	const Schema& schema() const {
+		return _schema;
+	}
 
 	// ── 线程池归属与分组 ──
 	/// @brief  获取线程池归属（Compute / Operator / System）。
-	ThreadPoolAffinity affinity() const { return _affinity; }
+	ThreadPoolAffinity affinity() const {
+		return _affinity;
+	}
 
 	/// @brief  设置节点分组标签（用于线程池分组限流）。
-	void setTag(std::string tag) { _tag = std::move(tag); }
+	void setTag(std::string tag) {
+		_tag = std::move(tag);
+	}
 	/// @brief  获取节点分组标签。
-	const std::string& tag() const { return _tag; }
+	const std::string& tag() const {
+		return _tag;
+	}
 
 	/// @brief  是否为连接器节点（导线/扇出等基础设施节点）。
-	bool isConnector() const { return _isConnector; }
+	bool isConnector() const {
+		return _isConnector;
+	}
 	/// @brief  设置连接器节点标记。
-	void setConnector(bool v) { _isConnector = v; }
+	void setConnector(bool v) {
+		_isConnector = v;
+	}
 
 	/// @brief  获取执行策略（当前默认 Exclusive）。
-	ExecutionPolicy policy() const { return _execPolicy; }
+	ExecutionPolicy policy() const {
+		return _execPolicy;
+	}
 	/// @brief  设置执行策略。
-	void setExecutionPolicy(ExecutionPolicy p) { _execPolicy = p; }
+	void setExecutionPolicy(ExecutionPolicy p) {
+		_execPolicy = p;
+	}
 
 	// ── 完成回调注册 ──
 	/// @brief  注册任务完成回调（纯通知，不传数据）。
@@ -288,16 +307,14 @@ public:
 	/// @throws NodeException(NotReady) 若输入不满足执行条件。
 	/// @throws NodeException(InternalError) 若未产出输出。
 	/// @throws NodeException(OutputNotProduced) 若指定端口无输出。
-	Value execute(const std::string& outputName,
-	                     std::unordered_map<std::string, Value> inputs);
+	Value execute(const std::string& outputName, std::unordered_map<std::string, Value> inputs);
 
 	/// @brief  便捷接口：一次性送入 DC::Tensor，同步执行，返回指定输出的 Tensor。
 	/// @param outputName 期望的输出端口名。
 	/// @param inputs 输入端口名到 Tensor 的映射。
 	/// @return 指定输出端口的数据（Tensor）。
 	/// @throws NodeException 若输入不合法、执行失败或输出不是 Tensor 类型。
-	Tensor executeTensor(const std::string& outputName,
-	                     std::unordered_map<std::string, Tensor> inputs);
+	Tensor executeTensor(const std::string& outputName, std::unordered_map<std::string, Tensor> inputs);
 
 	// ── 协程支持 ──
 
@@ -324,22 +341,26 @@ public:
 
 	// ── 任务生命周期 ──
 	/// @brief  清除指定任务的所有输入/输出缓冲区及等待者。
-	void   clearTask(const TaskId& taskId);
+	void clearTask(const TaskId& taskId);
 	/// @brief  当前活跃任务数量。
 	size_t taskCount() const;
 
 	// ── 直接访问工作槽位（只读，高级场景）──
-	const std::unordered_map<std::string, TensorSlot>& inputSlots()  const { return _inputSlots; }
-	const std::unordered_map<std::string, TensorSlot>& outputSlots() const { return _outputSlots; }
+	const std::unordered_map<std::string, TensorSlot>& inputSlots() const {
+		return _inputSlots;
+	}
+	const std::unordered_map<std::string, TensorSlot>& outputSlots() const {
+		return _outputSlots;
+	}
 
 private:
 	friend class RunContext;
 	friend struct NodeCompletion;
 
 	// ── 内部类型 ──
-	using SlotMap       = std::unordered_map<std::string, TensorSlot>;
-	using TaskPortMap   = std::unordered_map<TaskId, std::unordered_map<std::string, TaskData>>;
-	using TaskBuffer    = std::unordered_map<std::string, std::optional<TaskData>>;
+	using SlotMap = std::unordered_map<std::string, TensorSlot>;
+	using TaskPortMap = std::unordered_map<TaskId, std::unordered_map<std::string, TaskData>>;
+	using TaskBuffer = std::unordered_map<std::string, std::optional<TaskData>>;
 	using TaskBufferMap = std::unordered_map<TaskId, TaskBuffer>;
 
 	// ── 内部方法 ──
@@ -361,45 +382,49 @@ private:
 
 	// ── RunContext 可调用的内部方法 ──
 	/// @brief  从输入槽读取 Value（RunContext::input 委托）。
-	const Value&     _inputImpl(const std::string& name) const;
+	const Value& _inputImpl(const std::string& name) const;
 	/// @brief  将 Value 写入输出槽（RunContext::output 委托）。
-	void                    _outputImpl(const std::string& name, Value tensor);
+	void _outputImpl(const std::string& name, Value tensor);
 	/// @brief  获取当前引擎的 TensorConverter 钩子指针。
-	const TensorConverter*  _converter() const;
+	const TensorConverter* _converter() const;
 	/// @brief  获取当前引擎的 EngineDescriptor。
 	const EngineDescriptor* _engineDescriptor() const;
 	/// @brief  同步引擎异步计算（调用引擎 synchronize 钩子）。
-	void                    _synchronizeEngine() const;
+	void _synchronizeEngine() const;
 	/// @brief  构造 Ok 状态 Result。
 	Result _makeSuccess(std::string message = {}) const;
 	/// @brief  构造失败状态 Result。
 	Result _makeFailure(Status status, std::string message) const;
 
 	// ── 槽位可变访问（由 friend 类访问）──
-	SlotMap& _mutableInputSlots()  { return _inputSlots; }
-	SlotMap& _mutableOutputSlots() { return _outputSlots; }
+	SlotMap& _mutableInputSlots() {
+		return _inputSlots;
+	}
+	SlotMap& _mutableOutputSlots() {
+		return _outputSlots;
+	}
 
 	// ── 成员 ──
-	std::string       _type;
-	std::string       _name;
-	Schema            _schema;
+	std::string _type;
+	std::string _name;
+	Schema _schema;
 	ThreadPoolAffinity _affinity = ThreadPoolAffinity::Operator;
-	std::string       _tag;
-	ExecutionPolicy   _execPolicy = ExecutionPolicy::Exclusive;
-	bool              _isConnector = false;
-	SlotMap           _inputSlots;     // 工作输入槽位
-	SlotMap           _outputSlots;    // 工作输出槽位
-	TaskBufferMap     _taskInputs;     // 任务级输入缓冲 (port → optional<TaskData>)
-	TaskBufferMap     _taskOutputs;    // 任务级输出缓冲 (port → optional<TaskData>)
-	RunFn             _fn;
-	CompletionFn      _onComplete;
-	EngineInstance*   _engineInstance = nullptr;  // 非拥有引用，Registry 管理生命周期
-	std::atomic_flag  _executing = ATOMIC_FLAG_INIT;  // 重入锁：同一时刻最多一个 task 在执行
-	std::optional<TaskId> _currentTaskId;            // 当前执行中的 task（由 tryExecute 设置/清除）
+	std::string _tag;
+	ExecutionPolicy _execPolicy = ExecutionPolicy::Exclusive;
+	bool _isConnector = false;
+	SlotMap _inputSlots; // 工作输入槽位
+	SlotMap _outputSlots; // 工作输出槽位
+	TaskBufferMap _taskInputs; // 任务级输入缓冲 (port → optional<TaskData>)
+	TaskBufferMap _taskOutputs; // 任务级输出缓冲 (port → optional<TaskData>)
+	RunFn _fn;
+	CompletionFn _onComplete;
+	EngineInstance* _engineInstance = nullptr; // 非拥有引用，Registry 管理生命周期
+	std::atomic_flag _executing = ATOMIC_FLAG_INIT; // 重入锁：同一时刻最多一个 task 在执行
+	std::optional<TaskId> _currentTaskId; // 当前执行中的 task（由 tryExecute 设置/清除）
 
 	// 协程等待者：key=taskId，value=等待该 task 完成的协程 handles
 	std::unordered_map<TaskId, std::vector<std::coroutine_handle<>>> _waiters;
-	mutable std::mutex _waitersMutex;  // 保护 _waiters 的并发访问
+	mutable std::mutex _waitersMutex; // 保护 _waiters 的并发访问
 
 	// 已完成标记：在 _waitersMutex 保护下充当原子桥接，
 	// 解决 await_ready → await_suspend 之间的竞态窗口
@@ -434,9 +459,16 @@ public:
 	}
 	const EngineInstance* engineInstance() const;
 	void* engine() const;
-	const Node::Schema& schema() const { return _node.schema(); }
-	const std::string&       type()   const { return _node.type(); }
-	const std::string&       name()   const { return _node.name(); }
+	const Node::Schema& schema() const {
+		return _node.schema();
+	}
+	const std::string& type() const {
+		return _node.type();
+	}
+	const std::string& name() const {
+		return _node.name();
+	}
+
 private:
 	friend class Node;
 	explicit RunContext(Node& node) : _node(node) {}
@@ -453,12 +485,11 @@ struct NodeCompletion {
 
 private:
 	friend class Node;
-	NodeCompletion(Node& node, const Node::TaskId& taskId)
-		: _node(&node), _taskId(taskId) {}
+	NodeCompletion(Node& node, const Node::TaskId& taskId) : _node(&node), _taskId(taskId) {}
 
-	Node*             _node;
-	Node::TaskId      _taskId;
-	std::coroutine_handle<> _handle;  // await_suspend 时设置
+	Node* _node;
+	Node::TaskId _taskId;
+	std::coroutine_handle<> _handle; // await_suspend 时设置
 };
 
 } // namespace DC

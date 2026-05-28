@@ -20,15 +20,13 @@ void ValidatorRegistry::ensureDefaults() {
 
 		// DCTensor 校验器
 		ValidatorRegistry::instance().registerValidator(
-			SlotDataType::DCTensor,
-			[](const void* data, SlotDataType, const TensorMeta& rule) -> SlotDataStatus {
+			SlotDataType::DCTensor, [](const void* data, SlotDataType, const TensorMeta& rule) -> SlotDataStatus {
 				const auto* t = static_cast<const Tensor*>(data);
 				if (!t || !t->valid()) {
-					return SlotDataStatus{ .invalid = true };
+					return SlotDataStatus{.invalid = true};
 				}
 				SlotDataStatus s;
-				if (rule.type != TensorMeta::TensorType::Void &&
-				    t->type() != rule.type) {
+				if (rule.type != TensorMeta::TensorType::Void && t->type() != rule.type) {
 					s.needConvert = true;
 				}
 				if (!rule.checkShape(t->shape())) {
@@ -40,9 +38,7 @@ void ValidatorRegistry::ensureDefaults() {
 		// Value 校验器：放行（由具体引擎校验）
 		ValidatorRegistry::instance().registerValidator(
 			SlotDataType::Value,
-			[](const void*, SlotDataType, const TensorMeta&) -> SlotDataStatus {
-				return SlotDataStatus{};
-			});
+			[](const void*, SlotDataType, const TensorMeta&) -> SlotDataStatus { return SlotDataStatus{}; });
 	});
 }
 
@@ -55,12 +51,10 @@ const SlotCheckFn* ValidatorRegistry::find(SlotDataType type) const {
 	return it != _validators.end() ? &it->second : nullptr;
 }
 
-SlotDataStatus ValidatorRegistry::validate(const void*       data,
-                                           SlotDataType      type,
-                                           const TensorMeta& rule) const {
+SlotDataStatus ValidatorRegistry::validate(const void* data, SlotDataType type, const TensorMeta& rule) const {
 	const auto* fn = find(type);
 	if (!fn) {
-		return SlotDataStatus{};  // 未注册类型直接放行
+		return SlotDataStatus{}; // 未注册类型直接放行
 	}
 	return (*fn)(data, type, rule);
 }

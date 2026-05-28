@@ -10,22 +10,25 @@
 using namespace DC;
 
 using TensorType = DC::Tensor::TensorType;
-using Tensor     = DC::Tensor;
-using Shape      = DC::Tensor::Shape;
+using Tensor = DC::Tensor;
+using Shape = DC::Tensor::Shape;
 
 static int failures = 0;
 
-#define CHECK(cond, msg) do { \
-	if (!(cond)) { \
-		std::cerr << "FAIL: " << msg << std::endl; \
-		++failures; \
-		return; \
-	} \
-} while(0)
+#define CHECK(cond, msg)                                                                                               \
+	do {                                                                                                               \
+		if (!(cond)) {                                                                                                 \
+			std::cerr << "FAIL: " << msg << std::endl;                                                                 \
+			++failures;                                                                                                \
+			return;                                                                                                    \
+		}                                                                                                              \
+	} while (0)
 
-#define TEST(name) std::cout << "Test: " << name << " ... " << std::flush; \
+#define TEST(name)                                                                                                     \
+	std::cout << "Test: " << name << " ... " << std::flush;                                                            \
 	[&]()
-#define END_TEST() (); \
+#define END_TEST()                                                                                                     \
+	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
 
 // ── 辅助 ──
@@ -39,8 +42,7 @@ static Value makeFloatTensor(float value) {
 // ── 加法算子 Schema + RunFn ──
 static Node::Schema addSchema() {
 	Node::Schema s;
-	s.inputs  = {{"a", TensorType::Float, sizeof(float), {}},
-	              {"b", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {{"a", TensorType::Float, sizeof(float), {}}, {"b", TensorType::Float, sizeof(float), {}}};
 	s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
 	return s;
 }
@@ -51,7 +53,8 @@ static Node::RunFn addRunFn() {
 		const auto& bNT = ctx.input("b");
 		const auto* a = aNT.as<Tensor>();
 		const auto* b = bNT.as<Tensor>();
-		if (!a || !b) return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+		if (!a || !b)
+			return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
 
 		float sum = a->item<float>() + b->item<float>();
 		auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
@@ -64,7 +67,7 @@ static Node::RunFn addRunFn() {
 // ── 恒等算子 ──
 static Node::Schema identitySchema() {
 	Node::Schema s;
-	s.inputs  = {{"x", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
 	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
 	return s;
 }
@@ -73,13 +76,13 @@ static Node::RunFn identityRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
 		const auto& inVal = ctx.input("x");
 		const auto* t = inVal.as<Tensor>();
-		if (!t) return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+		if (!t)
+			return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
 
 		ctx.output("y", Value(std::make_unique<Tensor>(*t)));
 		return ctx.success();
 	};
 }
-
 
 // ════════════════════════════════════════════
 // 测试用例
@@ -89,19 +92,16 @@ void testBuildGraph() {
 	TEST("build graph - addNode and wire") {
 		InferGraph graph;
 
-		auto* n1 = graph.addNode(
-			std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+		auto* n1 = graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 		CHECK(n1 != nullptr, "addNode should succeed");
 		CHECK(graph.nodeCount() == 1, "nodeCount should be 1");
 
-		auto* n2 = graph.addNode(
-			std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
+		auto* n2 = graph.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
 		CHECK(n2 != nullptr, "second addNode");
 		CHECK(graph.nodeCount() == 2, "nodeCount should be 2");
 
 		// 重名应拒绝
-		auto* dup = graph.addNode(
-			std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+		auto* dup = graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 		CHECK(dup == nullptr, "duplicate name should be rejected");
 		CHECK(graph.nodeCount() == 2, "nodeCount still 2");
 
@@ -157,9 +157,9 @@ void testBroadcastConnectorInGraph() {
 
 		// 广播连接器：1 输入 → 2 输出
 		auto bcSchema = Connector::broadcastSchema(2);
-		auto bcRunFn  = Connector::broadcastRunFn();
-		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn,
-			nullptr, ThreadPoolAffinity::System);
+		auto bcRunFn = Connector::broadcastRunFn();
+		auto bcNode =
+			std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn, nullptr, ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		graph.addNode(std::move(bcNode));
 
@@ -196,9 +196,9 @@ void testRoutingConnectorInGraph() {
 		graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 
 		auto rtSchema = Connector::routingSchema(2);
-		auto rtRunFn  = Connector::routingRunFn();
-		auto rtNode = std::make_unique<Node>("Connector.Routing", "rt", rtSchema, rtRunFn,
-			nullptr, ThreadPoolAffinity::System);
+		auto rtRunFn = Connector::routingRunFn();
+		auto rtNode =
+			std::make_unique<Node>("Connector.Routing", "rt", rtSchema, rtRunFn, nullptr, ThreadPoolAffinity::System);
 		rtNode->setConnector(true);
 		graph.addNode(std::move(rtNode));
 
@@ -239,17 +239,17 @@ void testConnectAll() {
 		InferGraph graph;
 
 		auto bcSchema = Connector::broadcastSchema(2);
-		auto bcRunFn  = Connector::broadcastRunFn();
-		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn,
-			nullptr, ThreadPoolAffinity::System);
+		auto bcRunFn = Connector::broadcastRunFn();
+		auto bcNode =
+			std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn, nullptr, ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		graph.addNode(std::move(bcNode));
 
 		// 创建一个有两个输入端口的节点：in_0, in_1（注意与 Connector 的 out_0, out_1 命名不同则不会匹配）
 		// 改为与 Connector 输出同名的 Schema
 		Node::Schema dualInSchema;
-		dualInSchema.inputs  = {{"out_0", TensorType::Float, sizeof(float), {}},
-		                         {"out_1", TensorType::Float, sizeof(float), {}}};
+		dualInSchema.inputs = {{"out_0", TensorType::Float, sizeof(float), {}},
+							   {"out_1", TensorType::Float, sizeof(float), {}}};
 		dualInSchema.outputs = {{"sum", TensorType::Float, sizeof(float), {}}};
 
 		auto dualRunFn = [](Node::RunContext& ctx) -> Node::Result {
@@ -257,7 +257,8 @@ void testConnectAll() {
 			const auto& bNT = ctx.input("out_1");
 			const auto* a = aNT.as<Tensor>();
 			const auto* b = bNT.as<Tensor>();
-			if (!a || !b) return ctx.failure(Node::Status::InvalidInput, "not Tensor");
+			if (!a || !b)
+				return ctx.failure(Node::Status::InvalidInput, "not Tensor");
 			float sum = a->item<float>() + b->item<float>();
 			auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 			*t = sum;

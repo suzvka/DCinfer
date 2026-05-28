@@ -19,9 +19,9 @@ static Tensor builtinToDC(const void* native) {
 static void ensureBuiltinEngine(EngineRegistry& reg) {
 	EngineDescriptor desc;
 	desc.engineType = "Builtin";
-	desc.converter  = { builtinToNative, builtinToDC };
+	desc.converter = {builtinToNative, builtinToDC};
 	// Builtin 节点不通过工厂创建，由 createNode(name, schema, fn) 直接构造
-	desc.factory    = nullptr;
+	desc.factory = nullptr;
 	reg.registerEngine(desc);
 }
 
@@ -45,11 +45,8 @@ bool EngineRegistry::registerEngine(const EngineDescriptor& desc) {
 	return true;
 }
 
-std::unique_ptr<Node> EngineRegistry::createNode(
-	const std::string& engineType,
-	const std::string& nodeName,
-	const void* engineConfig) const
-{
+std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, const std::string& nodeName,
+												 const void* engineConfig) const {
 	auto it = _engines.find(engineType);
 	if (it == _engines.end()) {
 		return nullptr;
@@ -62,35 +59,31 @@ std::unique_ptr<Node> EngineRegistry::createNode(
 	return it->second.factory(nodeName, engineConfig);
 }
 
-std::unique_ptr<Node> EngineRegistry::createNode(
-	const std::string& nodeName,
-	Node::Schema schema,
-	Node::RunFn fn) const
-{
-	return std::make_unique<Node>("Builtin", nodeName,
-		std::move(schema), std::move(fn),
-		nullptr, ThreadPoolAffinity::Operator);
+std::unique_ptr<Node> EngineRegistry::createNode(const std::string& nodeName, Node::Schema schema,
+												 Node::RunFn fn) const {
+	return std::make_unique<Node>("Builtin", nodeName, std::move(schema), std::move(fn), nullptr,
+								  ThreadPoolAffinity::Operator);
 }
 
-std::unique_ptr<Node> EngineRegistry::createNode(
-	const std::string& engineType,
-	const std::string& nodeName,
-	const std::string& modelPath)
-{
+std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, const std::string& nodeName,
+												 const std::string& modelPath) {
 	auto it = _engines.find(engineType);
-	if (it == _engines.end())  return nullptr;
-	if (!it->second.factory)   return nullptr;
+	if (it == _engines.end())
+		return nullptr;
+	if (!it->second.factory)
+		return nullptr;
 
 	// 获取或创建引擎实例（生命周期由 Registry 管理）
 	auto* engineInstance = getOrCreateEngine(engineType, modelPath);
-	if (!engineInstance) return nullptr;
+	if (!engineInstance)
+		return nullptr;
 
 	// 从模型推导 Schema（loadModel 与 createEngine 可独立实现）
 	Node::Schema schema;
 	if (it->second.loadModel && it->second.getInputPorts && it->second.getOutputPorts) {
 		auto handle = it->second.loadModel(modelPath);
 		if (handle) {
-			schema.inputs  = it->second.getInputPorts(handle);
+			schema.inputs = it->second.getInputPorts(handle);
 			schema.outputs = it->second.getOutputPorts(handle);
 		}
 	}
@@ -102,17 +95,11 @@ std::unique_ptr<Node> EngineRegistry::createNode(
 
 // ── 引擎实例管理 ──
 
-std::string EngineRegistry::_makeEngineKey(
-	const std::string& engineType,
-	const std::string& modelPath)
-{
+std::string EngineRegistry::_makeEngineKey(const std::string& engineType, const std::string& modelPath) {
 	return engineType + ":" + modelPath;
 }
 
-EngineInstance* EngineRegistry::getOrCreateEngine(
-	const std::string& engineType,
-	const std::string& modelPath)
-{
+EngineInstance* EngineRegistry::getOrCreateEngine(const std::string& engineType, const std::string& modelPath) {
 	auto key = _makeEngineKey(engineType, modelPath);
 	auto it = _engineInstances.find(key);
 	if (it != _engineInstances.end()) {
@@ -120,21 +107,20 @@ EngineInstance* EngineRegistry::getOrCreateEngine(
 	}
 
 	auto engIt = _engines.find(engineType);
-	if (engIt == _engines.end())        return nullptr;
-	if (!engIt->second.createEngine)    return nullptr;
+	if (engIt == _engines.end())
+		return nullptr;
+	if (!engIt->second.createEngine)
+		return nullptr;
 
 	auto instance = engIt->second.createEngine(modelPath);
-	if (!instance) return nullptr;
+	if (!instance)
+		return nullptr;
 
-	auto [insertedIt, ok] = _engineInstances.emplace(
-		std::move(key), std::move(instance));
+	auto [insertedIt, ok] = _engineInstances.emplace(std::move(key), std::move(instance));
 	return &insertedIt->second;
 }
 
-void EngineRegistry::releaseEngine(
-	const std::string& engineType,
-	const std::string& modelPath)
-{
+void EngineRegistry::releaseEngine(const std::string& engineType, const std::string& modelPath) {
 	auto key = _makeEngineKey(engineType, modelPath);
 	auto it = _engineInstances.find(key);
 	if (it != _engineInstances.end()) {
@@ -180,35 +166,28 @@ std::vector<std::string> EngineRegistry::engineTypes() const {
 
 // ── 算子注册 ──
 
-bool EngineRegistry::registerOperator(
-	const std::string& operatorName,
-	Node::Schema schema,
-	Node::RunFn fn)
-{
-	if (operatorName.empty()) return false;
-	if (_engines.contains(operatorName)) return false;
+bool EngineRegistry::registerOperator(const std::string& operatorName, Node::Schema schema, Node::RunFn fn) {
+	if (operatorName.empty())
+		return false;
+	if (_engines.contains(operatorName))
+		return false;
 
 	EngineDescriptor desc;
 	desc.engineType = operatorName;
-	desc.converter  = { builtinToNative, builtinToDC };
+	desc.converter = {builtinToNative, builtinToDC};
 
 	// 工厂：捕获 schema 和 fn，创建算子节点
-	desc.factory = [schema = std::move(schema), fn = std::move(fn)](
-		std::string name, const void* /*engineConfig*/)
-		-> std::unique_ptr<Node>
-	{
-		return std::make_unique<Node>("Builtin", std::move(name), schema, fn,
-			nullptr, ThreadPoolAffinity::Operator);
+	desc.factory = [schema = std::move(schema),
+					fn = std::move(fn)](std::string name, const void* /*engineConfig*/) -> std::unique_ptr<Node> {
+		return std::make_unique<Node>("Builtin", std::move(name), schema, fn, nullptr, ThreadPoolAffinity::Operator);
 	};
 
 	_engines[operatorName] = std::move(desc);
 	return true;
 }
 
-std::unique_ptr<Node> EngineRegistry::createOperator(
-	const std::string& operatorName,
-	const std::string& nodeName) const
-{
+std::unique_ptr<Node> EngineRegistry::createOperator(const std::string& operatorName,
+													 const std::string& nodeName) const {
 	auto it = _engines.find(operatorName);
 	if (it == _engines.end() || !it->second.factory) {
 		return nullptr;

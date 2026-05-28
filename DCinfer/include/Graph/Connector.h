@@ -23,7 +23,6 @@ Node::Schema broadcastSchema(size_t downstreamCount);
 /// @brief 广播 RunFn：从 "in" 读入 → 拷贝 N-1 次 → 写入所有 out_i
 Node::RunFn broadcastRunFn();
 
-
 // ── 路由连接器 ──
 // 1 个上游 → N 个下游，轮询选取一个输出口，只拷贝 1 份（不拷贝其余）
 // 阻塞语义由 InferGraph 在分发时处理
@@ -36,7 +35,6 @@ Node::Schema routingSchema(size_t downstreamCount);
 
 /// @brief 路由 RunFn：从 "in" 读入 → 轮询选取 out_i → 写入一份拷贝
 Node::RunFn routingRunFn();
-
 
 // ── 导线连接器 ──
 // 1 进 1 出直通，实现"边即节点"语义。
@@ -52,7 +50,6 @@ Node::Schema wireSchema();
 
 /// @brief 导线 RunFn：从 "in" 读入 → 写入 "out"
 Node::RunFn wireRunFn();
-
 
 // ── 便捷：将三种 Connector 注册到 EngineRegistry ──
 // 由于下游数量在创建节点时才知道，Schema 和 RunFn 是参数化的，

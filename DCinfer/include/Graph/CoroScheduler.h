@@ -12,22 +12,25 @@
 namespace DC {
 
 // ── 协程 Task<T>：惰性启动、move-only 的协程类型 ──
-template<typename T = void>
+template <typename T = void>
 struct Task {
 	struct promise_type {
 		std::coroutine_handle<> _continuation;
-		std::exception_ptr    _error;
-		T                     _value{};
-		bool                  _ready = false;
+		std::exception_ptr _error;
+		T _value{};
+		bool _ready = false;
 
 		Task get_return_object() {
 			return Task(std::coroutine_handle<promise_type>::from_promise(*this));
 		}
 
-		std::suspend_always initial_suspend() noexcept { return {}; }
+		std::suspend_always initial_suspend() noexcept {
+			return {};
+		}
 		std::suspend_always final_suspend() noexcept {
 			_ready = true;
-			if (_continuation) _continuation.resume();
+			if (_continuation)
+				_continuation.resume();
 			return {};
 		}
 
@@ -42,7 +45,8 @@ struct Task {
 		}
 
 		T result() {
-			if (_error) std::rethrow_exception(_error);
+			if (_error)
+				std::rethrow_exception(_error);
 			return std::move(_value);
 		}
 	};
@@ -58,19 +62,23 @@ struct Task {
 	Task(Task&& other) noexcept : _handle(std::exchange(other._handle, nullptr)) {}
 	Task& operator=(Task&& other) noexcept {
 		if (this != &other) {
-			if (_handle) _handle.destroy();
+			if (_handle)
+				_handle.destroy();
 			_handle = std::exchange(other._handle, nullptr);
 		}
 		return *this;
 	}
 
 	~Task() {
-		if (_handle && _handle.done()) _handle.destroy();
+		if (_handle && _handle.done())
+			_handle.destroy();
 	}
 
-	bool await_ready() const noexcept { return false; }
+	bool await_ready() const noexcept {
+		return false;
+	}
 
-	template<typename U>
+	template <typename U>
 	void await_suspend(std::coroutine_handle<U> continuation) noexcept {
 		_handle.promise()._continuation = continuation;
 	}
@@ -79,28 +87,33 @@ struct Task {
 		return _handle.promise().result();
 	}
 
-	handle_type handle() const { return _handle; }
+	handle_type handle() const {
+		return _handle;
+	}
 
 private:
 	handle_type _handle;
 };
 
 // void 特化
-template<>
+template <>
 struct Task<void> {
 	struct promise_type {
 		std::coroutine_handle<> _continuation;
-		std::exception_ptr    _error;
-		bool                  _ready = false;
+		std::exception_ptr _error;
+		bool _ready = false;
 
 		Task get_return_object() {
 			return Task(std::coroutine_handle<promise_type>::from_promise(*this));
 		}
 
-		std::suspend_always initial_suspend() noexcept { return {}; }
+		std::suspend_always initial_suspend() noexcept {
+			return {};
+		}
 		std::suspend_always final_suspend() noexcept {
 			_ready = true;
-			if (_continuation) _continuation.resume();
+			if (_continuation)
+				_continuation.resume();
 			return {};
 		}
 
@@ -109,10 +122,13 @@ struct Task<void> {
 			_ready = true;
 		}
 
-		void return_void() { _ready = true; }
+		void return_void() {
+			_ready = true;
+		}
 
 		void result() {
-			if (_error) std::rethrow_exception(_error);
+			if (_error)
+				std::rethrow_exception(_error);
 		}
 	};
 
@@ -127,19 +143,23 @@ struct Task<void> {
 	Task(Task&& other) noexcept : _handle(std::exchange(other._handle, nullptr)) {}
 	Task& operator=(Task&& other) noexcept {
 		if (this != &other) {
-			if (_handle) _handle.destroy();
+			if (_handle)
+				_handle.destroy();
 			_handle = std::exchange(other._handle, nullptr);
 		}
 		return *this;
 	}
 
 	~Task() {
-		if (_handle && _handle.done()) _handle.destroy();
+		if (_handle && _handle.done())
+			_handle.destroy();
 	}
 
-	bool await_ready() const noexcept { return false; }
+	bool await_ready() const noexcept {
+		return false;
+	}
 
-	template<typename U>
+	template <typename U>
 	void await_suspend(std::coroutine_handle<U> continuation) noexcept {
 		_handle.promise()._continuation = continuation;
 	}
@@ -148,7 +168,9 @@ struct Task<void> {
 		_handle.promise().result();
 	}
 
-	handle_type handle() const { return _handle; }
+	handle_type handle() const {
+		return _handle;
+	}
 
 private:
 	handle_type _handle;
@@ -165,7 +187,7 @@ public:
 
 	/// @brief  生成一个协程并立即调度
 	/// @param  返回 Task<void> 的工厂函数
-	template<typename F>
+	template <typename F>
 	void spawn(F&& factory) {
 		auto task = factory();
 		auto h = task.handle();
@@ -194,12 +216,12 @@ public:
 private:
 	void _workerLoop();
 
-	std::mutex              _mutex;
+	std::mutex _mutex;
 	std::condition_variable _cv;
 	std::queue<std::coroutine_handle<>> _readyQueue;
 
-	std::atomic<bool>       _running{true};
-	std::atomic<size_t>     _activeCoroutines{0};
+	std::atomic<bool> _running{true};
+	std::atomic<size_t> _activeCoroutines{0};
 	std::vector<std::thread> _workers;
 };
 

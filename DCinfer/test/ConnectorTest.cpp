@@ -12,31 +12,34 @@
 using namespace DC;
 
 using TensorType = DC::Tensor::TensorType;
-using Tensor     = DC::Tensor;
+using Tensor = DC::Tensor;
 
 static int failures = 0;
 
-#define CHECK(cond, msg) do { \
-	if (!(cond)) { \
-		std::cerr << "FAIL: " << msg << std::endl; \
-		++failures; \
-		return; \
-	} \
-} while(0)
+#define CHECK(cond, msg)                                                                                               \
+	do {                                                                                                               \
+		if (!(cond)) {                                                                                                 \
+			std::cerr << "FAIL: " << msg << std::endl;                                                                 \
+			++failures;                                                                                                \
+			return;                                                                                                    \
+		}                                                                                                              \
+	} while (0)
 
-#define CHECK_THROWS(stmt, exType, msg) do { \
-	try { \
-		stmt; \
-		std::cerr << "FAIL: " << msg << " (no exception thrown)" << std::endl; \
-		++failures; \
-		return; \
-	} catch (const exType&) { \
-	} \
-} while(0)
+#define CHECK_THROWS(stmt, exType, msg)                                                                                \
+	do {                                                                                                               \
+		try {                                                                                                          \
+			stmt;                                                                                                      \
+			std::cerr << "FAIL: " << msg << " (no exception thrown)" << std::endl;                                     \
+			++failures;                                                                                                \
+			return;                                                                                                    \
+		} catch (const exType&) {}                                                                                     \
+	} while (0)
 
-#define TEST(name) std::cout << "Test: " << name << " ... " << std::flush; \
+#define TEST(name)                                                                                                     \
+	std::cout << "Test: " << name << " ... " << std::flush;                                                            \
 	[&]()
-#define END_TEST() (); \
+#define END_TEST()                                                                                                     \
+	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
 
 // ── 辅助函数 ──
@@ -58,7 +61,7 @@ static Value makeIntTensor(int value) {
 void testBroadcastBasic() {
 	TEST("broadcast 1→3 copies to all outputs") {
 		auto schema = Connector::broadcastSchema(3);
-		auto runFn  = Connector::broadcastRunFn();
+		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc1", schema, runFn);
 
@@ -88,7 +91,7 @@ void testBroadcastBasic() {
 void testBroadcastSingle() {
 	TEST("broadcast 1→1 single output") {
 		auto schema = Connector::broadcastSchema(1);
-		auto runFn  = Connector::broadcastRunFn();
+		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc2", schema, runFn);
 
@@ -107,7 +110,7 @@ void testBroadcastSingle() {
 void testBroadcastNotReady() {
 	TEST("broadcast not ready without input") {
 		auto schema = Connector::broadcastSchema(2);
-		auto runFn  = Connector::broadcastRunFn();
+		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc3", schema, runFn);
 
@@ -122,7 +125,7 @@ void testBroadcastNotReady() {
 void testRoutingRoundRobin() {
 	TEST("routing 1→3 round-robin distribution") {
 		auto schema = Connector::routingSchema(3);
-		auto runFn  = Connector::routingRunFn();
+		auto runFn = Connector::routingRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Routing", "rt1", schema, runFn);
 
@@ -164,7 +167,7 @@ void testRoutingRoundRobin() {
 void testRoutingSingleOutput() {
 	TEST("routing 1→1 always hits out_0") {
 		auto schema = Connector::routingSchema(1);
-		auto runFn  = Connector::routingRunFn();
+		auto runFn = Connector::routingRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Routing", "rt2", schema, runFn);
 
@@ -186,7 +189,7 @@ void testRoutingSingleOutput() {
 void testReentrancy() {
 	TEST("broadcast rejects reentrant execution") {
 		auto schema = Connector::broadcastSchema(2);
-		auto runFn  = Connector::broadcastRunFn();
+		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc_re", schema, runFn);
 

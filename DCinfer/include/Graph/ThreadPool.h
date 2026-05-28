@@ -20,7 +20,9 @@ struct PoolConfig {
 	size_t totalThreads = 1;
 	std::unordered_map<std::string, size_t> groupLimits; // 分组限流
 
-	bool valid() const { return totalThreads > 0; }
+	bool valid() const {
+		return totalThreads > 0;
+	}
 };
 
 // ── 前向声明 ──
@@ -30,7 +32,9 @@ class ThreadPool;
 // co_await pool.submitAsync(tag, task) 挂起协程，
 // 在线程池中执行 task 完成后 resume
 struct PoolTicket {
-	bool await_ready() const noexcept { return false; }
+	bool await_ready() const noexcept {
+		return false;
+	}
 	void await_suspend(std::coroutine_handle<> h);
 	void await_resume() const noexcept {}
 
@@ -38,9 +42,9 @@ private:
 	friend class ThreadPool;
 	PoolTicket(ThreadPool& pool, std::string tag, std::function<void()> task);
 
-	ThreadPool*            _pool;
-	std::string            _tag;
-	std::function<void()>  _task;
+	ThreadPool* _pool;
+	std::string _tag;
+	std::function<void()> _task;
 	std::coroutine_handle<> _handle;
 };
 
@@ -65,15 +69,17 @@ public:
 	/// @brief  优雅关闭
 	void shutdown();
 
-	size_t totalThreads() const { return _totalThreads; }
+	size_t totalThreads() const {
+		return _totalThreads;
+	}
 
 private:
 	friend struct PoolTicket;
 
 	struct PendingTask {
-		std::function<void()>       task;
-		std::coroutine_handle<>     handle;  // 非空 = 需要 resume 的协程句柄
-		std::string                 groupTag;
+		std::function<void()> task;
+		std::coroutine_handle<> handle; // 非空 = 需要 resume 的协程句柄
+		std::string groupTag;
 	};
 
 	void _workerLoop();
@@ -81,18 +87,18 @@ private:
 	bool _tryAcquireGroup(const std::string& tag);
 	void _releaseGroup(const std::string& tag);
 
-	PoolConfig                           _config;
-	size_t                               _totalThreads;
-	std::vector<std::thread>             _workers;
+	PoolConfig _config;
+	size_t _totalThreads;
+	std::vector<std::thread> _workers;
 
-	std::mutex                           _mutex;
-	std::condition_variable              _cv;
-	std::queue<PendingTask>              _taskQueue;
+	std::mutex _mutex;
+	std::condition_variable _cv;
+	std::queue<PendingTask> _taskQueue;
 
-	std::atomic<bool>                    _running{true};
+	std::atomic<bool> _running{true};
 
 	// 分组信号量
-	std::mutex                           _groupMutex;
+	std::mutex _groupMutex;
 	std::unordered_map<std::string, std::unique_ptr<std::counting_semaphore<>>> _groupSemaphores;
 	std::unique_ptr<std::counting_semaphore<>> _globalSemaphore;
 };

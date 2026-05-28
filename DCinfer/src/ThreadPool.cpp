@@ -14,30 +14,24 @@ void PoolTicket::await_suspend(std::coroutine_handle<> h) {
 	_handle = h;
 
 	std::lock_guard lk(_pool->_mutex);
-	_pool->_taskQueue.push(ThreadPool::PendingTask{
-		std::move(_task), h, _tag
-	});
+	_pool->_taskQueue.push(ThreadPool::PendingTask{std::move(_task), h, _tag});
 	_pool->_cv.notify_one();
 }
 
 // ── ThreadPool ──
 
-ThreadPool::ThreadPool(const PoolConfig& config)
-	: _config(config), _totalThreads(config.totalThreads)
-{
+ThreadPool::ThreadPool(const PoolConfig& config) : _config(config), _totalThreads(config.totalThreads) {
 	if (!config.valid()) {
 		throw std::invalid_argument("ThreadPool: config.totalThreads must be > 0");
 	}
 
 	// 初始化组信号量
 	for (const auto& [tag, limit] : config.groupLimits) {
-		_groupSemaphores[tag] = std::make_unique<std::counting_semaphore<>>(
-			static_cast<std::ptrdiff_t>(limit));
+		_groupSemaphores[tag] = std::make_unique<std::counting_semaphore<>>(static_cast<std::ptrdiff_t>(limit));
 	}
 
 	// 全局信号量
-	_globalSemaphore = std::make_unique<std::counting_semaphore<>>(
-		static_cast<std::ptrdiff_t>(_totalThreads));
+	_globalSemaphore = std::make_unique<std::counting_semaphore<>>(static_cast<std::ptrdiff_t>(_totalThreads));
 
 	// 启动工作线程
 	_workers.reserve(_totalThreads);
@@ -52,7 +46,7 @@ ThreadPool::~ThreadPool() {
 
 void ThreadPool::submit(const std::string& nodeTag, std::function<void()> task) {
 	std::lock_guard lk(_mutex);
-	_taskQueue.push(ThreadPool::PendingTask{ std::move(task), {}, nodeTag });
+	_taskQueue.push(ThreadPool::PendingTask{std::move(task), {}, nodeTag});
 	_cv.notify_one();
 }
 
@@ -64,7 +58,8 @@ size_t ThreadPool::activeCount(const std::string& groupTag) const {
 	// 粗略估计：最大 - 当前可用
 	std::lock_guard lk(const_cast<ThreadPool*>(this)->_groupMutex);
 	auto it = _groupSemaphores.find(groupTag);
-	if (it == _groupSemaphores.end()) return 0;
+	if (it == _groupSemaphores.end())
+		return 0;
 	// 无法直接从 counting_semaphore 查询当前值，使用配置减去近似值
 	return 0; // 实际应该维护一个 atomic 计数器
 }
@@ -75,28 +70,33 @@ void ThreadPool::shutdown() {
 	{
 		std::lock_guard lk(_mutex);
 		// 清空等待队列（可选：通知所有协程失败）
-		while (!_taskQueue.empty()) _taskQueue.pop();
+		while (!_taskQueue.empty())
+			_taskQueue.pop();
 	}
 	_cv.notify_all();
 
 	for (auto& t : _workers) {
-		if (t.joinable()) t.join();
+		if (t.joinable())
+			t.join();
 	}
 	_workers.clear();
 }
 
 bool ThreadPool::_tryAcquireGroup(const std::string& tag) {
-	if (tag.empty()) return true; // 无分组，不限流
+	if (tag.empty())
+		return true; // 无分组，不限流
 
 	std::lock_guard lk(_groupMutex);
 	auto it = _groupSemaphores.find(tag);
-	if (it == _groupSemaphores.end()) return true; // 未配置的组不限流
+	if (it == _groupSemaphores.end())
+		return true; // 未配置的组不限流
 
 	return it->second->try_acquire();
 }
 
 void ThreadPool::_releaseGroup(const std::string& tag) {
-	if (tag.empty()) return;
+	if (tag.empty())
+		return;
 
 	std::lock_guard lk(_groupMutex);
 	auto it = _groupSemaphores.find(tag);
@@ -111,12 +111,12 @@ void ThreadPool::_workerLoop() {
 
 		{
 			std::unique_lock lk(_mutex);
-			_cv.wait(lk, [this] {
-				return !_taskQueue.empty() || !_running.load(std::memory_order_acquire);
-			});
+			_cv.wait(lk, [this] { return !_taskQueue.empty() || !_running.load(std::memory_order_acquire); });
 
-			if (!_running.load(std::memory_order_acquire)) break;
-			if (_taskQueue.empty()) continue;
+			if (!_running.load(std::memory_order_acquire))
+				break;
+			if (_taskQueue.empty())
+				continue;
 
 			// 遍历队列，找到可以获取到信号量的任务
 			bool found = false;
@@ -141,15 +141,15 @@ void ThreadPool::_workerLoop() {
 				_taskQueue.push(std::move(temp));
 			}
 
-			if (!found) continue;
+			if (!found)
+				continue;
 		}
 
 		// 执行任务
 		try {
 			pending.task();
 		} catch (const std::exception& e) {
-			std::cerr << "ThreadPool: exception in task: "
-			          << e.what() << std::endl;
+			std::cerr << "ThreadPool: exception in task: " << e.what() << std::endl;
 		} catch (...) {
 			std::cerr << "ThreadPool: unknown exception in task" << std::endl;
 		}

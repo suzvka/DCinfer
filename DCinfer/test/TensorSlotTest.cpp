@@ -19,11 +19,12 @@ static void runTensorSlotTests() {
 		TensorSlot::Config cfg = TensorSlot::CreateConfig();
 		cfg.setPosition(TensorSlot::Config::Position::Input);
 
-		TensorSlot slot("in", TensorMeta::TensorType::Float,
-		                    sizeof(float), {2, 2}, cfg);
+		TensorSlot slot("in", TensorMeta::TensorType::Float, sizeof(float), {2, 2}, cfg);
 
-		if (!slot.isInput()) throw std::runtime_error("slot should be input");
-		if (!slot.isType<float>()) throw std::runtime_error("slot type should be float");
+		if (!slot.isInput())
+			throw std::runtime_error("slot should be input");
+		if (!slot.isType<float>())
+			throw std::runtime_error("slot type should be float");
 
 		// prepare tensor
 		Tensor t = Tensor::Create<float>({2, 2});
@@ -31,21 +32,26 @@ static void runTensorSlotTests() {
 
 		slot.store(std::move(t)); // store via type-erased API
 
-		if (!slot.hasData()) throw std::runtime_error("slot should have data after store");
+		if (!slot.hasData())
+			throw std::runtime_error("slot should have data after store");
 
 		// peek for read-only access
 		auto* viewPtr = slot.peek<Tensor>();
-		if (!viewPtr) throw std::runtime_error("peek<Tensor> returned null");
+		if (!viewPtr)
+			throw std::runtime_error("peek<Tensor> returned null");
 
 		auto sp = viewPtr->data<float>();
-		if (sp.size() != 4) throw std::runtime_error("unexpected data size");
+		if (sp.size() != 4)
+			throw std::runtime_error("unexpected data size");
 		for (auto v : sp) {
-			if (v != 1.5f) throw std::runtime_error("unexpected value in tensor");
+			if (v != 1.5f)
+				throw std::runtime_error("unexpected value in tensor");
 		}
 
 		// view() backward compat
 		const auto& v = slot.view();
-		if (std::abs(v.item<float>() - 1.5f) < 1e-6f) { /* ok */ }
+		if (std::abs(v.item<float>() - 1.5f) < 1e-6f) { /* ok */
+		}
 	}
 
 	// Test 2: default data and take output
@@ -53,20 +59,23 @@ static void runTensorSlotTests() {
 		TensorSlot::Config cfg = TensorSlot::CreateConfig();
 		cfg.setPosition(TensorSlot::Config::Position::Output);
 
-		TensorSlot slot("out", TensorMeta::TensorType::Float,
-		                    sizeof(float), {1, 2}, cfg);
+		TensorSlot slot("out", TensorMeta::TensorType::Float, sizeof(float), {1, 2}, cfg);
 
 		Tensor def = Tensor::Create<float>({1, 2});
 		def.fill<float>(2.5f);
 		slot.setDefaultTensor(def);
 
-		if (!slot.hasDefaultData()) throw std::runtime_error("slot should have default data");
+		if (!slot.hasDefaultData())
+			throw std::runtime_error("slot should have default data");
 
 		// Take via view (backward compat for default data)
 		const auto& out = slot.view();
 		auto sp = out.data<float>();
-		if (sp.size() != 2) throw std::runtime_error("unexpected default tensor size");
-		for (auto v : sp) if (v != 2.5f) throw std::runtime_error("unexpected default tensor value");
+		if (sp.size() != 2)
+			throw std::runtime_error("unexpected default tensor size");
+		for (auto v : sp)
+			if (v != 2.5f)
+				throw std::runtime_error("unexpected default tensor value");
 	}
 
 	// Test 3: shape mismatch should throw when storing
@@ -74,18 +83,17 @@ static void runTensorSlotTests() {
 		TensorSlot::Config cfg = TensorSlot::CreateConfig();
 		cfg.setPosition(TensorSlot::Config::Position::Input);
 
-		TensorSlot slot("badshape", TensorMeta::TensorType::Float,
-		                    sizeof(float), {2, 2}, cfg);
+		TensorSlot slot("badshape", TensorMeta::TensorType::Float, sizeof(float), {2, 2}, cfg);
 		Tensor t = Tensor::Create<float>({1, 2});
 		t.fill<float>(0.0f);
 		bool thrown = false;
 		try {
 			slot.store(std::move(t));
-		}
-		catch (const std::exception& e) {
+		} catch (const std::exception& e) {
 			thrown = true;
 		}
-		if (!thrown) throw std::runtime_error("expected exception on shape mismatch");
+		if (!thrown)
+			throw std::runtime_error("expected exception on shape mismatch");
 	}
 
 	// Test 4: store and take arbitrary external type (DummyExternalTensor)
@@ -93,14 +101,14 @@ static void runTensorSlotTests() {
 		TensorSlot::Config cfg = TensorSlot::CreateConfig();
 		cfg.setPosition(TensorSlot::Config::Position::Input);
 
-		TensorSlot slot("ext", TensorMeta::TensorType::Float,
-		                    sizeof(float), {1}, cfg);
+		TensorSlot slot("ext", TensorMeta::TensorType::Float, sizeof(float), {1}, cfg);
 
 		// store external type directly (no validator registered → pass-through)
-		DummyExternalTensor ext{ "moved" };
+		DummyExternalTensor ext{"moved"};
 		slot.store(std::move(ext));
 
-		if (!slot.hasData()) throw std::runtime_error("slot should have external data");
+		if (!slot.hasData())
+			throw std::runtime_error("slot should have external data");
 		if (slot.storedType() == SlotDataType::DCTensor)
 			throw std::runtime_error("stored type should not be DCTensor");
 
@@ -110,7 +118,8 @@ static void runTensorSlotTests() {
 			throw std::runtime_error("take<DummyExternalTensor> payload mismatch");
 
 		// slot should be empty after take
-		if (slot.hasData()) throw std::runtime_error("slot should be empty after take");
+		if (slot.hasData())
+			throw std::runtime_error("slot should be empty after take");
 	}
 
 	// Test 5: type mismatch on take should throw
@@ -118,8 +127,7 @@ static void runTensorSlotTests() {
 		TensorSlot::Config cfg = TensorSlot::CreateConfig();
 		cfg.setPosition(TensorSlot::Config::Position::Output);
 
-		TensorSlot slot("typemismatch", TensorMeta::TensorType::Float,
-		                    sizeof(float), {}, cfg);
+		TensorSlot slot("typemismatch", TensorMeta::TensorType::Float, sizeof(float), {}, cfg);
 
 		Tensor t(TensorMeta::TensorType::Float, sizeof(float));
 		t = 42.0f;
@@ -135,11 +143,10 @@ static void runTensorSlotTests() {
 		} catch (const std::exception&) {
 			thrown = true;
 		}
-		if (!thrown) throw std::runtime_error("expected exception on type mismatch take");
+		if (!thrown)
+			throw std::runtime_error("expected exception on type mismatch take");
 	}
 }
-
-
 
 int main() {
 	try {
@@ -147,8 +154,7 @@ int main() {
 
 		std::cout << "TensorSlotBase tests passed" << std::endl;
 		return 0;
-	}
-	catch(const std::exception& e) {
+	} catch (const std::exception& e) {
 		std::cerr << "Error: " << e.what() << std::endl;
 		return 1;
 	}

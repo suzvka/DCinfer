@@ -10,7 +10,8 @@ namespace DC {
 
 const Node::Port* Node::Schema::find(const std::vector<Port>& ports, const std::string& name) {
 	for (const auto& port : ports) {
-		if (port.name == name) return &port;
+		if (port.name == name)
+			return &port;
 	}
 	return nullptr;
 }
@@ -19,7 +20,8 @@ bool Node::Schema::hasUniqueNames(const std::vector<Port>& ports) {
 	std::unordered_set<std::string> names;
 	names.reserve(ports.size());
 	for (const auto& port : ports) {
-		if (!names.insert(port.name).second) return false;
+		if (!names.insert(port.name).second)
+			return false;
 	}
 	return true;
 }
@@ -56,28 +58,20 @@ bool Node::Schema::valid() const {
 }
 
 // ── 构造：从 Schema 构建工作槽位 ──
-Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
-                     EngineInstance* engineInstance,
-                     ThreadPoolAffinity affinity)
-	: _type(std::move(type))
-	, _name(std::move(name))
-	, _schema(std::move(schema))
-	, _affinity(affinity)
-	, _fn(std::move(fn))
-	, _engineInstance(engineInstance)
-{
+Node::Node(std::string type, std::string name, Schema schema, RunFn fn, EngineInstance* engineInstance,
+		   ThreadPoolAffinity affinity)
+	: _type(std::move(type)), _name(std::move(name)), _schema(std::move(schema)), _affinity(affinity),
+	  _fn(std::move(fn)), _engineInstance(engineInstance) {
 	for (const auto& port : _schema.inputs) {
 		TensorSlot::Config cfg;
 		cfg.setPosition(TensorSlot::Config::Position::Input);
-		_inputSlots.emplace(port.name, TensorSlot(
-			port.name, port.type, port.typeSize, port.shape, cfg));
+		_inputSlots.emplace(port.name, TensorSlot(port.name, port.type, port.typeSize, port.shape, cfg));
 	}
 
 	for (const auto& port : _schema.outputs) {
 		TensorSlot::Config cfg;
 		cfg.setPosition(TensorSlot::Config::Position::Output);
-		_outputSlots.emplace(port.name, TensorSlot(
-			port.name, port.type, port.typeSize, port.shape, cfg));
+		_outputSlots.emplace(port.name, TensorSlot(port.name, port.type, port.typeSize, port.shape, cfg));
 	}
 }
 
@@ -96,7 +90,7 @@ bool Node::hasCompletionCallback() const {
 void Node::setInput(const TaskId& taskId, const std::string& portName, Value data) {
 	if (!_schema.findInput(portName)) {
 		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::setInput",
-			"port '" + portName + "' not found in schema");
+							"port '" + portName + "' not found in schema");
 	}
 
 	_ensureTaskExists(taskId);
@@ -104,13 +98,12 @@ void Node::setInput(const TaskId& taskId, const std::string& portName, Value dat
 }
 
 // ── 批量输入 ──
-void Node::setInput(const TaskId& taskId,
-                          std::unordered_map<std::string, TaskData> inputs) {
+void Node::setInput(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs) {
 	// 预校验：所有端口名必须存在
 	for (const auto& [name, data] : inputs) {
 		if (!_schema.findInput(name)) {
 			throw NodeException(NodeException::ErrorType::PortNotFound, "Node::setInput",
-				"port '" + name + "' not found in schema");
+								"port '" + name + "' not found in schema");
 		}
 	}
 
@@ -125,9 +118,11 @@ void Node::setInput(const TaskId& taskId,
 bool Node::hasOutput(const TaskId& taskId, const std::string& name) const {
 
 	auto taskIt = _taskOutputs.find(taskId);
-	if (taskIt == _taskOutputs.end()) return false;
+	if (taskIt == _taskOutputs.end())
+		return false;
 	auto slotIt = taskIt->second.find(name);
-	if (slotIt == taskIt->second.end()) return false;
+	if (slotIt == taskIt->second.end())
+		return false;
 	return slotIt->second.has_value();
 }
 
@@ -135,12 +130,12 @@ Value Node::getOutput(const TaskId& taskId, const std::string& name) {
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
 		throw NodeException(NodeException::ErrorType::TaskNotFound, "Node::getOutput",
-			"task '" + taskId + "' not found");
+							"task '" + taskId + "' not found");
 	}
 	auto& optVal = taskIt->second.at(name);
 	if (!optVal.has_value()) {
 		throw NodeException(NodeException::ErrorType::OutputNotProduced, "Node::getOutput",
-			"output '" + name + "' is empty");
+							"output '" + name + "' is empty");
 	}
 	Value result = std::move(optVal.value());
 	optVal.reset();
@@ -151,34 +146,33 @@ const Value& Node::peekOutput(const TaskId& taskId, const std::string& name) con
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
 		throw NodeException(NodeException::ErrorType::TaskNotFound, "Node::peekOutput",
-			"task '" + taskId + "' not found");
+							"task '" + taskId + "' not found");
 	}
 	auto& optVal = taskIt->second.at(name);
 	if (!optVal.has_value()) {
 		throw NodeException(NodeException::ErrorType::OutputNotProduced, "Node::peekOutput",
-			"output '" + name + "' is empty");
+							"output '" + name + "' is empty");
 	}
 	return optVal.value();
 }
 
-Node::TaskPortMap::mapped_type
-Node::collectOutputs(const TaskId& taskId) {
+Node::TaskPortMap::mapped_type Node::collectOutputs(const TaskId& taskId) {
 	std::unordered_map<std::string, TaskData> result;
 	auto taskIt = _taskOutputs.find(taskId);
-	if (taskIt == _taskOutputs.end()) return result;
+	if (taskIt == _taskOutputs.end())
+		return result;
 
 	for (auto& [name, optVal] : taskIt->second) {
 		if (optVal.has_value()) {
 			result.emplace(name, std::move(optVal.value()));
-			optVal.reset();  // 消费
+			optVal.reset(); // 消费
 		}
 	}
 	return result;
 }
 
 // ── 阻塞式一次执行 ──
-Value Node::execute(const std::string& outputName,
-                                std::unordered_map<std::string, Value> inputs) {
+Value Node::execute(const std::string& outputName, std::unordered_map<std::string, Value> inputs) {
 	static size_t execCounter = 0;
 	auto taskId = "__exec_" + std::to_string(++execCounter);
 
@@ -207,14 +201,14 @@ Value Node::execute(const std::string& outputName,
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
 		throw NodeException(NodeException::ErrorType::InternalError, "Node::execute",
-			"no output produced for task '" + taskId + "'");
+							"no output produced for task '" + taskId + "'");
 	}
 
 	auto outIt = taskIt->second.find(outputName);
 	if (outIt == taskIt->second.end() || !outIt->second.has_value()) {
 		_taskOutputs.erase(taskId);
 		throw NodeException(NodeException::ErrorType::OutputNotProduced, "Node::execute",
-			"output '" + outputName + "' not found");
+							"output '" + outputName + "' not found");
 	}
 
 	Value result = std::move(outIt->second.value());
@@ -244,13 +238,13 @@ bool Node::isReady(const TaskId& taskId) const {
 void Node::tryExecute(const TaskId& taskId) {
 	if (!_isTaskReady(taskId)) {
 		throw NodeException(NodeException::ErrorType::NotReady, "Node::tryExecute",
-			"task '" + taskId + "' is not ready");
+							"task '" + taskId + "' is not ready");
 	}
 
 	// 尝试获取重入锁，若已有 task 在执行则拒绝
 	if (_executing.test_and_set(std::memory_order_acquire)) {
 		throw NodeException(NodeException::ErrorType::Reentrant, "Node::tryExecute",
-			"node '" + _name + "' is busy executing another task");
+							"node '" + _name + "' is busy executing another task");
 	}
 
 	_currentTaskId = taskId;
@@ -279,8 +273,7 @@ void Node::setInput(const TaskId& taskId, const std::string& portName, Tensor da
 	setInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
 }
 
-void Node::setInput(const TaskId& taskId,
-                                std::unordered_map<std::string, Tensor> inputs) {
+void Node::setInput(const TaskId& taskId, std::unordered_map<std::string, Tensor> inputs) {
 	std::unordered_map<std::string, TaskData> wrapped;
 	wrapped.reserve(inputs.size());
 	for (auto& [name, t] : inputs) {
@@ -294,14 +287,13 @@ Tensor Node::getOutputTensor(const TaskId& taskId, const std::string& name) {
 	auto* t = nt.as<Tensor>();
 	if (!t) {
 		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::getOutputTensor",
-			"output '" + name + "' is not a DC::Tensor (innerType="
-			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
+							"output '" + name + "' is not a DC::Tensor (innerType=" +
+								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
 	return std::move(*t);
 }
 
-std::unordered_map<std::string, Tensor>
-Node::collectOutputTensors(const TaskId& taskId) {
+std::unordered_map<std::string, Tensor> Node::collectOutputTensors(const TaskId& taskId) {
 	auto outputs = collectOutputs(taskId);
 	std::unordered_map<std::string, Tensor> result;
 	result.reserve(outputs.size());
@@ -314,8 +306,7 @@ Node::collectOutputTensors(const TaskId& taskId) {
 	return result;
 }
 
-Tensor Node::executeTensor(const std::string& outputName,
-                                std::unordered_map<std::string, Tensor> inputs) {
+Tensor Node::executeTensor(const std::string& outputName, std::unordered_map<std::string, Tensor> inputs) {
 	std::unordered_map<std::string, Value> wrapped;
 	wrapped.reserve(inputs.size());
 	for (auto& [name, t] : inputs) {
@@ -326,8 +317,8 @@ Tensor Node::executeTensor(const std::string& outputName,
 	auto* t = nt.as<Tensor>();
 	if (!t) {
 		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::executeTensor",
-			"output '" + outputName + "' is not a DC::Tensor (innerType="
-			+ std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
+							"output '" + outputName + "' is not a DC::Tensor (innerType=" +
+								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
 	return std::move(*t);
 }
@@ -337,12 +328,12 @@ const Value& Node::_inputImpl(const std::string& name) const {
 	auto it = _inputSlots.find(name);
 	if (it == _inputSlots.end()) {
 		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_inputImpl",
-			"input '" + name + "' not found");
+							"input '" + name + "' not found");
 	}
 	const auto* nt = it->second.peek<Value>();
 	if (!nt) {
 		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::_inputImpl",
-			"input '" + name + "' is not a Value");
+							"input '" + name + "' is not a Value");
 	}
 	return *nt;
 }
@@ -351,7 +342,7 @@ void Node::_outputImpl(const std::string& name, Value tensor) {
 	auto it = _outputSlots.find(name);
 	if (it == _outputSlots.end()) {
 		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_outputImpl",
-			"output '" + name + "' not found");
+							"output '" + name + "' not found");
 	}
 	it->second.store(std::move(tensor));
 }
@@ -359,17 +350,20 @@ void Node::_outputImpl(const std::string& name, Value tensor) {
 // ── 转换钩子访问器 ──
 const TensorConverter* Node::_converter() const {
 	auto* desc = _engineDescriptor();
-	if (!desc) return nullptr;
+	if (!desc)
+		return nullptr;
 	return &desc->converter;
 }
 
 const EngineDescriptor* Node::_engineDescriptor() const {
-	if (_engineInstance) return _engineInstance->descriptor();
+	if (_engineInstance)
+		return _engineInstance->descriptor();
 	return EngineRegistry::instance().find(_type);
 }
 
 void Node::_synchronizeEngine() const {
-	if (!_engineInstance) return;
+	if (!_engineInstance)
+		return;
 	auto* desc = _engineInstance->descriptor();
 	if (desc && desc->synchronize) {
 		desc->synchronize(_engineInstance->get());
@@ -387,7 +381,8 @@ void* Node::RunContext::engine() const {
 
 const Value* Node::RunContext::outputRaw(const std::string& name) const {
 	auto it = _node._outputSlots.find(name);
-	if (it == _node._outputSlots.end()) return nullptr;
+	if (it == _node._outputSlots.end())
+		return nullptr;
 	return it->second.peek<Value>();
 }
 
@@ -411,7 +406,8 @@ Node::Result Node::_makeFailure(Status status, std::string message) const {
 // ════════════════════════════════════════════
 
 void Node::_ensureTaskExists(const TaskId& taskId) {
-	if (_taskInputs.contains(taskId)) return;
+	if (_taskInputs.contains(taskId))
+		return;
 
 	TaskBuffer inputs;
 	for (const auto& port : _schema.inputs) {
@@ -423,21 +419,27 @@ void Node::_ensureTaskExists(const TaskId& taskId) {
 
 bool Node::_isTaskReady(const TaskId& taskId) const {
 	auto it = _taskInputs.find(taskId);
-	if (it == _taskInputs.end()) return false;
+	if (it == _taskInputs.end())
+		return false;
 
 	for (const auto& port : _schema.inputs) {
-		if (!port.required) continue;
-		if (port.defaultValue.has_value()) continue;  // 默认值视为已就绪
+		if (!port.required)
+			continue;
+		if (port.defaultValue.has_value())
+			continue; // 默认值视为已就绪
 
 		auto slotIt = it->second.find(port.name);
-		if (slotIt == it->second.end()) return false;
-		if (!slotIt->second.has_value()) return false;
+		if (slotIt == it->second.end())
+			return false;
+		if (!slotIt->second.has_value())
+			return false;
 	}
 	return true;
 }
 
 void Node::_checkAndExecute(const TaskId& taskId) {
-	if (!_isTaskReady(taskId)) return;
+	if (!_isTaskReady(taskId))
+		return;
 
 	// ① 加载输入：_taskInputs[taskId] → _inputSlots (move)
 	_loadTaskToWorkingSlots(taskId);
@@ -494,8 +496,7 @@ void Node::_checkAndExecute(const TaskId& taskId) {
 		for (const auto& port : _schema.outputs) {
 			auto outIt = _taskOutputs[taskId].find(port.name);
 			if (outIt == _taskOutputs[taskId].end() || !outIt->second.has_value()) {
-				result = _makeFailure(Status::InternalError,
-					"Output '" + port.name + "' was not produced by RunFn");
+				result = _makeFailure(Status::InternalError, "Output '" + port.name + "' was not produced by RunFn");
 				break;
 			}
 		}
@@ -505,8 +506,8 @@ void Node::_checkAndExecute(const TaskId& taskId) {
 	if (!result.ok()) {
 		try {
 			std::cerr << "Node[" << _name << "] task '" << taskId
-					  << "' failed: status=" << static_cast<int>(result.status)
-					  << ", message='" << result.message << "'" << std::endl;
+					  << "' failed: status=" << static_cast<int>(result.status) << ", message='" << result.message
+					  << "'" << std::endl;
 		} catch (...) {
 			// swallow any logging errors
 		}
@@ -539,11 +540,11 @@ void Node::_loadTaskToWorkingSlots(const TaskId& taskId) {
 				const auto* t = static_cast<const Tensor*>(nativeData.get());
 				if (!t || !t->valid()) {
 					throw NodeException(NodeException::ErrorType::InternalError, "Node::_loadTaskToWorkingSlots",
-						"invalid Tensor in Value for port '" + port.name + "'");
+										"invalid Tensor in Value for port '" + port.name + "'");
 				}
 				if (t->type() != port.type) {
 					throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::_loadTaskToWorkingSlots",
-						"type mismatch for port '" + port.name + "'");
+										"type mismatch for port '" + port.name + "'");
 				}
 			}
 
@@ -572,9 +573,11 @@ void Node::_collectAndSaveOutputs(const TaskId& taskId) {
 
 	auto& taskOutputs = _taskOutputs[taskId];
 	for (auto& [name, workSlot] : _outputSlots) {
-		if (!workSlot.hasData()) continue;
+		if (!workSlot.hasData())
+			continue;
 		auto taskIt = taskOutputs.find(name);
-		if (taskIt == taskOutputs.end()) continue;
+		if (taskIt == taskOutputs.end())
+			continue;
 		taskIt->second = workSlot.take<Value>();
 	}
 }
@@ -595,13 +598,15 @@ void Node::_notifyWaiters(const TaskId& taskId, const Result& result) {
 		// await_suspend 也能通过此标记发现任务已结束，直接 resume
 		_completedTasks.insert(taskId);
 		auto it = _waiters.find(taskId);
-		if (it == _waiters.end()) return;
+		if (it == _waiters.end())
+			return;
 		handles = std::move(it->second);
 		_waiters.erase(it);
 	}
 	// 在锁外 resume，避免协程恢复后可能的死锁
 	for (auto h : handles) {
-		if (h) h.resume();
+		if (h)
+			h.resume();
 	}
 }
 
@@ -610,10 +615,12 @@ void Node::_notifyWaiters(const TaskId& taskId, const Result& result) {
 bool NodeCompletion::await_ready() const {
 	// 如果任务已完成（输出已存在），不需要挂起
 	auto taskIt = _node->_taskOutputs.find(_taskId);
-	if (taskIt == _node->_taskOutputs.end()) return false;
+	if (taskIt == _node->_taskOutputs.end())
+		return false;
 	// 检查是否有任意端口已有输出数据
 	for (const auto& [name, optVal] : taskIt->second) {
-		if (optVal.has_value()) return true;
+		if (optVal.has_value())
+			return true;
 	}
 	return false;
 }
@@ -648,7 +655,7 @@ Node::Result NodeCompletion::await_resume() const {
 		}
 	}
 	return _node->_makeFailure(Node::Status::ExecutionFailed,
-		"NodeCompletion: task '" + _taskId + "' completed without outputs");
+							   "NodeCompletion: task '" + _taskId + "' completed without outputs");
 }
 
 } // namespace DC

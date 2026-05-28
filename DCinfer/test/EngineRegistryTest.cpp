@@ -10,7 +10,7 @@ using namespace DC;
 // ── Mock schema ──
 static Node::Schema mockSchema() {
 	Node::Schema s;
-	s.inputs  = {{"in",  Tensor::TensorType::Float, sizeof(float), {}}};
+	s.inputs = {{"in", Tensor::TensorType::Float, sizeof(float), {}}};
 	s.outputs = {{"out", Tensor::TensorType::Float, sizeof(float), {}}};
 	return s;
 }
@@ -44,8 +44,8 @@ static void runTests() {
 	{
 		EngineDescriptor desc;
 		desc.engineType = "Mock";
-		desc.converter  = { mockToNative, mockToDC };
-		desc.factory    = makeNodeFactory<int>("Mock", mockSchema(), mockRunImpl);
+		desc.converter = {mockToNative, mockToDC};
+		desc.factory = makeNodeFactory<int>("Mock", mockSchema(), mockRunImpl);
 
 		if (!reg.registerEngine(desc))
 			throw std::runtime_error("registerEngine failed");
@@ -64,23 +64,33 @@ static void runTests() {
 	// ── Test 3: 按名查找引擎 ──
 	{
 		auto* desc = reg.find("Mock");
-		if (!desc) throw std::runtime_error("find returned null");
-		if (desc->engineType != "Mock") throw std::runtime_error("engineType mismatch");
-		if (!desc->converter.toNative) throw std::runtime_error("toNative not set");
-		if (!desc->converter.toDC) throw std::runtime_error("toDC not set");
+		if (!desc)
+			throw std::runtime_error("find returned null");
+		if (desc->engineType != "Mock")
+			throw std::runtime_error("engineType mismatch");
+		if (!desc->converter.toNative)
+			throw std::runtime_error("toNative not set");
+		if (!desc->converter.toDC)
+			throw std::runtime_error("toDC not set");
 	}
 	std::cout << "Test 3 passed: find engine" << std::endl;
 
 	// ── Test 4: hasEngine / engineTypes ──
 	{
-		if (!reg.hasEngine("Mock")) throw std::runtime_error("hasEngine should be true");
-		if (reg.hasEngine("Nonexistent")) throw std::runtime_error("hasEngine should be false");
+		if (!reg.hasEngine("Mock"))
+			throw std::runtime_error("hasEngine should be true");
+		if (reg.hasEngine("Nonexistent"))
+			throw std::runtime_error("hasEngine should be false");
 
 		auto types = reg.engineTypes();
-		if (types.empty()) throw std::runtime_error("engineTypes should not be empty");
+		if (types.empty())
+			throw std::runtime_error("engineTypes should not be empty");
 		bool found = false;
-		for (auto& t : types) if (t == "Mock") found = true;
-		if (!found) throw std::runtime_error("Mock not found in engineTypes");
+		for (auto& t : types)
+			if (t == "Mock")
+				found = true;
+		if (!found)
+			throw std::runtime_error("Mock not found in engineTypes");
 	}
 	std::cout << "Test 4 passed: hasEngine / engineTypes" << std::endl;
 
@@ -88,18 +98,24 @@ static void runTests() {
 	{
 		int magic = 42;
 		auto node = reg.createNode("Mock", "testNode", &magic);
-		if (!node) throw std::runtime_error("createNode returned null");
-		if (node->type() != "Mock") throw std::runtime_error("node type mismatch");
-		if (node->name() != "testNode") throw std::runtime_error("node name mismatch");
-		if (node->schema().inputs.size() != 1) throw std::runtime_error("schema inputs count mismatch");
-		if (node->schema().outputs.size() != 1) throw std::runtime_error("schema outputs count mismatch");
+		if (!node)
+			throw std::runtime_error("createNode returned null");
+		if (node->type() != "Mock")
+			throw std::runtime_error("node type mismatch");
+		if (node->name() != "testNode")
+			throw std::runtime_error("node name mismatch");
+		if (node->schema().inputs.size() != 1)
+			throw std::runtime_error("schema inputs count mismatch");
+		if (node->schema().outputs.size() != 1)
+			throw std::runtime_error("schema outputs count mismatch");
 	}
 	std::cout << "Test 5 passed: createNode" << std::endl;
 
 	// ── Test 6: createNode 未知引擎返回 null ──
 	{
 		auto node = reg.createNode("UnknownEngine", "test");
-		if (node) throw std::runtime_error("createNode for unknown engine should return null");
+		if (node)
+			throw std::runtime_error("createNode for unknown engine should return null");
 	}
 	std::cout << "Test 6 passed: createNode unknown engine" << std::endl;
 
@@ -107,7 +123,8 @@ static void runTests() {
 	{
 		int magic = 100;
 		auto node = reg.createNode("Mock", "runner", &magic);
-		if (!node) throw std::runtime_error("createNode failed");
+		if (!node)
+			throw std::runtime_error("createNode failed");
 
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 50.0f;
@@ -120,8 +137,7 @@ static void runTests() {
 		auto outNT = node->getOutput("task1", "out");
 		auto* out = outNT.as<Tensor>();
 		if (std::abs(out->item<float>() - 150.0f) > 1e-6f)
-			throw std::runtime_error("output value mismatch: expected 150, got " +
-				std::to_string(out->item<float>()));
+			throw std::runtime_error("output value mismatch: expected 150, got " + std::to_string(out->item<float>()));
 	}
 	std::cout << "Test 7 passed: created node runs correctly" << std::endl;
 
@@ -132,9 +148,11 @@ static void runTests() {
 
 		// DC → Native
 		auto native = mockToNative(dc);
-		if (!native) throw std::runtime_error("toNative returned empty");
+		if (!native)
+			throw std::runtime_error("toNative returned empty");
 		auto* t = native.as<Tensor>();
-		if (!t) throw std::runtime_error("toNative did not wrap Tensor");
+		if (!t)
+			throw std::runtime_error("toNative did not wrap Tensor");
 		if (std::abs(t->item<float>() - 3.14f) > 1e-6f)
 			throw std::runtime_error("toNative value mismatch");
 

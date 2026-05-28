@@ -11,22 +11,20 @@
 
 using namespace DC;
 using TensorType = DC::Tensor::TensorType;
-using Tensor     = DC::Tensor;
-using Shape      = DC::Tensor::Shape;
+using Tensor = DC::Tensor;
+using Shape = DC::Tensor::Shape;
 
 // ── Schema 辅助 ──
 static Node::Schema scalarAddSchema() {
 	Node::Schema s;
-	s.inputs  = {{"a", TensorType::Float, sizeof(float), {}},
-	              {"b", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {{"a", TensorType::Float, sizeof(float), {}}, {"b", TensorType::Float, sizeof(float), {}}};
 	s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
 	return s;
 }
 
 static Node::Schema shapedAddSchema(Shape shape) {
 	Node::Schema s;
-	s.inputs  = {{"a", TensorType::Float, sizeof(float), shape},
-	              {"b", TensorType::Float, sizeof(float), shape}};
+	s.inputs = {{"a", TensorType::Float, sizeof(float), shape}, {"b", TensorType::Float, sizeof(float), shape}};
 	s.outputs = {{"s", TensorType::Float, sizeof(float), shape}};
 	return s;
 }
@@ -48,8 +46,8 @@ static Node::Result addRunImpl(Node::RunContext& self) {
 	std::vector<std::byte> bytes(result.size() * sizeof(float));
 	std::memcpy(bytes.data(), result.data(), bytes.size());
 
-	self.output("s", Value(std::make_unique<Tensor>(
-		TensorType::Float, sizeof(float), a->shape(), Tensor::DataBlock(std::move(bytes)))));
+	self.output("s", Value(std::make_unique<Tensor>(TensorType::Float, sizeof(float), a->shape(),
+													Tensor::DataBlock(std::move(bytes)))));
 
 	return self.success();
 }
@@ -64,10 +62,9 @@ static Value makeScalarNative(float value) {
 static Value makeVectorNative(const std::vector<float>& values) {
 	std::vector<std::byte> bytes(values.size() * sizeof(float));
 	std::memcpy(bytes.data(), values.data(), bytes.size());
-	return Value(std::make_unique<Tensor>(
-		TensorType::Float, sizeof(float),
-		Tensor::Shape{static_cast<int64_t>(values.size())},
-		Tensor::DataBlock(std::move(bytes))));
+	return Value(std::make_unique<Tensor>(TensorType::Float, sizeof(float),
+										  Tensor::Shape{static_cast<int64_t>(values.size())},
+										  Tensor::DataBlock(std::move(bytes))));
 }
 
 static Value makeIntNative(int value) {
@@ -86,35 +83,37 @@ static Tensor makeScalarFloat(float value) {
 static Tensor makeVectorFloat(const std::vector<float>& values) {
 	std::vector<std::byte> bytes(values.size() * sizeof(float));
 	std::memcpy(bytes.data(), values.data(), bytes.size());
-	return Tensor(TensorType::Float, sizeof(float),
-		{static_cast<int64_t>(values.size())},
-		Tensor::DataBlock(std::move(bytes)));
+	return Tensor(TensorType::Float, sizeof(float), {static_cast<int64_t>(values.size())},
+				  Tensor::DataBlock(std::move(bytes)));
 }
 
 // ── 测试入口 ──
 static int failures = 0;
 
-#define CHECK(cond, msg) do { \
-	if (!(cond)) { \
-		std::cerr << "FAIL: " << msg << std::endl; \
-		++failures; \
-		return; \
-	} \
-} while(0)
+#define CHECK(cond, msg)                                                                                               \
+	do {                                                                                                               \
+		if (!(cond)) {                                                                                                 \
+			std::cerr << "FAIL: " << msg << std::endl;                                                                 \
+			++failures;                                                                                                \
+			return;                                                                                                    \
+		}                                                                                                              \
+	} while (0)
 
-#define CHECK_THROWS(stmt, exType, msg) do { \
-	try { \
-		stmt; \
-		std::cerr << "FAIL: " << msg << " (no exception thrown)" << std::endl; \
-		++failures; \
-		return; \
-	} catch (const exType&) { \
-	} \
-} while(0)
+#define CHECK_THROWS(stmt, exType, msg)                                                                                \
+	do {                                                                                                               \
+		try {                                                                                                          \
+			stmt;                                                                                                      \
+			std::cerr << "FAIL: " << msg << " (no exception thrown)" << std::endl;                                     \
+			++failures;                                                                                                \
+			return;                                                                                                    \
+		} catch (const exType&) {}                                                                                     \
+	} while (0)
 
-#define TEST(name) std::cout << "Test: " << name << " ... " << std::flush; \
+#define TEST(name)                                                                                                     \
+	std::cout << "Test: " << name << " ... " << std::flush;                                                            \
 	[&]()
-#define END_TEST() (); \
+#define END_TEST()                                                                                                     \
+	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
 
 // ════════════════════════════════════════════
@@ -192,13 +191,13 @@ void runTests() {
 
 		node->setInput("task1", "a", makeScalarNative(1.0f));
 		node->setInput("task2", "b", makeScalarNative(6.0f));
-		node->setInput("task1", "b", makeScalarNative(2.0f));  // task1 就绪
+		node->setInput("task1", "b", makeScalarNative(2.0f)); // task1 就绪
 		node->tryExecute("task1");
 
 		CHECK(completedTasks.size() == 1, "task1 should complete");
 		CHECK(completedTasks[0] == "task1", "task1 should complete first");
 
-		node->setInput("task2", "a", makeScalarNative(5.0f));  // task2 就绪
+		node->setInput("task2", "a", makeScalarNative(5.0f)); // task2 就绪
 		node->tryExecute("task2");
 		CHECK(completedTasks.size() == 2, "task2 should also complete");
 	}
@@ -209,9 +208,7 @@ void runTests() {
 		auto node = reg.createNode("add4", scalarAddSchema(), addRunImpl);
 
 		std::atomic<bool> completed{false};
-		node->setCompletionCallback([&](const auto&, const auto&) {
-			completed = true;
-		});
+		node->setCompletionCallback([&](const auto&, const auto&) { completed = true; });
 
 		node->setInput("task1", "a", makeScalarNative(1.0f));
 		CHECK(!node->isReady("task1"), "should not be ready with only one input");
@@ -225,9 +222,8 @@ void runTests() {
 	TEST("default value unblocks") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs  = {{"a", TensorType::Float, sizeof(float), {}},
-			              {"b", TensorType::Float, sizeof(float), {}, true,
-			               makeScalarFloat(100.0f)}};  // b 有默认值 100
+			s.inputs = {{"a", TensorType::Float, sizeof(float), {}},
+						{"b", TensorType::Float, sizeof(float), {}, true, makeScalarFloat(100.0f)}}; // b 有默认值 100
 			s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
 			return s;
 		}();
@@ -261,9 +257,8 @@ void runTests() {
 	TEST("default value overridden") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs  = {{"a", TensorType::Float, sizeof(float), {}},
-			              {"b", TensorType::Float, sizeof(float), {}, true,
-			               makeScalarFloat(100.0f)}};
+			s.inputs = {{"a", TensorType::Float, sizeof(float), {}},
+						{"b", TensorType::Float, sizeof(float), {}, true, makeScalarFloat(100.0f)}};
 			s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
 			return s;
 		}();
@@ -299,15 +294,13 @@ void runTests() {
 	TEST("RunFn exception handled") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs  = {{"x", TensorType::Float, sizeof(float), {}}};
+			s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
 			s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
 			return s;
 		}();
 
 		auto node = reg.createNode("thrower", schema,
-			[](Node::RunContext&) -> Node::Result {
-				throw std::runtime_error("boom!");
-			});
+								   [](Node::RunContext&) -> Node::Result { throw std::runtime_error("boom!"); });
 
 		std::atomic<bool> completed{false};
 		Node::Status lastStatus = Node::Status::Ok;
@@ -319,10 +312,9 @@ void runTests() {
 		});
 
 		node->setInput("task1", "x", makeScalarNative(1.0f));
-		node->tryExecute("task1");  // RunFn throws internally, caught by _checkAndExecute
+		node->tryExecute("task1"); // RunFn throws internally, caught by _checkAndExecute
 		CHECK(completed, "callback should be invoked even on failure");
-		CHECK(lastStatus == Node::Status::ExecutionFailed,
-			"status should be ExecutionFailed");
+		CHECK(lastStatus == Node::Status::ExecutionFailed, "status should be ExecutionFailed");
 	}
 	END_TEST();
 
@@ -330,16 +322,15 @@ void runTests() {
 	TEST("RunFn missing output") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs  = {{"x", TensorType::Float, sizeof(float), {}}};
+			s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
 			s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
 			return s;
 		}();
 
-		auto node = reg.createNode("bad", schema,
-			[](Node::RunContext& self) -> Node::Result {
-				// 故意不调用 output
-				return self.success();
-			});
+		auto node = reg.createNode("bad", schema, [](Node::RunContext& self) -> Node::Result {
+			// 故意不调用 output
+			return self.success();
+		});
 
 		std::atomic<bool> completed{false};
 		Node::Status lastStatus = Node::Status::Ok;
@@ -351,10 +342,9 @@ void runTests() {
 		});
 
 		node->setInput("task1", "x", makeScalarNative(1.0f));
-		node->tryExecute("task1");  // output not produced → InternalError in callback
+		node->tryExecute("task1"); // output not produced → InternalError in callback
 		CHECK(completed, "callback should be invoked");
-		CHECK(lastStatus == Node::Status::InternalError,
-			"status should be InternalError for missing output");
+		CHECK(lastStatus == Node::Status::InternalError, "status should be InternalError for missing output");
 	}
 	END_TEST();
 
@@ -381,8 +371,8 @@ void runTests() {
 	TEST("invalid port name") {
 		auto node = reg.createNode("add10", scalarAddSchema(), addRunImpl);
 
-		CHECK_THROWS(node->setInput("task1", "no_such_port", makeScalarNative(1.0f)),
-			NodeException, "setInput should throw for invalid port");
+		CHECK_THROWS(node->setInput("task1", "no_such_port", makeScalarNative(1.0f)), NodeException,
+					 "setInput should throw for invalid port");
 		CHECK(node->taskCount() == 0, "no task should be created for invalid port");
 	}
 	END_TEST();
@@ -426,7 +416,7 @@ void runTests() {
 		});
 
 		node->setInput("task1", "a", makeScalarNative(1.0f));
-		node->setInput("task1", "a", makeScalarNative(10.0f));  // 覆盖
+		node->setInput("task1", "a", makeScalarNative(10.0f)); // 覆盖
 		node->setInput("task1", "b", makeScalarNative(2.0f));
 		node->tryExecute("task1");
 
@@ -440,9 +430,7 @@ void runTests() {
 		auto node = reg.createNode("add13", scalarAddSchema(), addRunImpl);
 
 		std::atomic<bool> completed{false};
-		node->setCompletionCallback([&](const auto&, const auto&) {
-			completed = true;
-		});
+		node->setCompletionCallback([&](const auto&, const auto&) { completed = true; });
 
 		// 先正常设置一个端口
 		node->setInput("task1", "a", makeScalarNative(1.0f));
@@ -450,10 +438,10 @@ void runTests() {
 		// 批量设置中包含非法端口名 → 应该抛异常
 		std::unordered_map<std::string, Node::TaskData> inputs;
 		inputs.emplace("b", makeScalarNative(2.0f));
-		inputs.emplace("no_such", makeScalarNative(3.0f));  // 非法端口
+		inputs.emplace("no_such", makeScalarNative(3.0f)); // 非法端口
 
 		CHECK_THROWS(node->setInput("task1", std::move(inputs)), NodeException,
-			"setInputs should throw on invalid port");
+					 "setInputs should throw on invalid port");
 		CHECK(!completed, "should not execute after failed setInputs");
 
 		// 之前正常设置的端口数据应保留
@@ -550,7 +538,7 @@ void runTests() {
 	TEST("vector addition with task API") {
 		std::vector<float> aVals = {1, 2, 3, 4};
 		std::vector<float> bVals = {5, 6, 7, 8};
-		std::vector<float> exp   = {6, 8, 10, 12};
+		std::vector<float> exp = {6, 8, 10, 12};
 
 		auto node = reg.createNode("add17", shapedAddSchema({4}), addRunImpl);
 
@@ -564,7 +552,8 @@ void runTests() {
 			auto outData = out->data<float>();
 			match = true;
 			for (size_t i = 0; i < exp.size(); ++i) {
-				if (std::abs(outData[i] - exp[i]) > 1e-6f) match = false;
+				if (std::abs(outData[i] - exp[i]) > 1e-6f)
+					match = false;
 			}
 			node->clearTask(taskId);
 			completed = true;

@@ -32,7 +32,8 @@ void CoroScheduler::shutdown() {
 	_cv.notify_all();
 
 	for (auto& t : _workers) {
-		if (t.joinable()) t.join();
+		if (t.joinable())
+			t.join();
 	}
 	_workers.clear();
 }
@@ -47,26 +48,26 @@ void CoroScheduler::_workerLoop() {
 
 		{
 			std::unique_lock lk(_mutex);
-			_cv.wait(lk, [this] {
-				return !_readyQueue.empty() || !_running.load(std::memory_order_acquire);
-			});
+			_cv.wait(lk, [this] { return !_readyQueue.empty() || !_running.load(std::memory_order_acquire); });
 
-			if (!_running.load(std::memory_order_acquire)) break;
+			if (!_running.load(std::memory_order_acquire))
+				break;
 
-			if (_readyQueue.empty()) continue;
+			if (_readyQueue.empty())
+				continue;
 
 			h = _readyQueue.front();
 			_readyQueue.pop();
 		}
 
-		if (!h || h.done()) continue;
+		if (!h || h.done())
+			continue;
 
 		_activeCoroutines.fetch_add(1, std::memory_order_release);
 		try {
 			h.resume();
 		} catch (const std::exception& e) {
-			std::cerr << "CoroScheduler: exception in coroutine: "
-			          << e.what() << std::endl;
+			std::cerr << "CoroScheduler: exception in coroutine: " << e.what() << std::endl;
 		} catch (...) {
 			std::cerr << "CoroScheduler: unknown exception in coroutine" << std::endl;
 		}

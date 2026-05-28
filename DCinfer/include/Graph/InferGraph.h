@@ -49,16 +49,14 @@ public:
 	/// @param  computeCfg    计算线程池配置
 	/// @param  operatorCfg   算子线程池配置
 	/// @param  systemCfg     系统线程池配置（连接器、数据搬运等基础设施）
-	InferGraph(CoroScheduler& scheduler,
-	           const PoolConfig& computeCfg = {},
-	           const PoolConfig& operatorCfg = {},
-	           const PoolConfig& systemCfg = {});
+	InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg = {}, const PoolConfig& operatorCfg = {},
+			   const PoolConfig& systemCfg = {});
 	~InferGraph() = default;
 
-	InferGraph(const InferGraph&)            = delete;
+	InferGraph(const InferGraph&) = delete;
 	InferGraph& operator=(const InferGraph&) = delete;
-	InferGraph(InferGraph&&)                 = default;
-	InferGraph& operator=(InferGraph&&)      = default;
+	InferGraph(InferGraph&&) = default;
+	InferGraph& operator=(InferGraph&&) = default;
 
 	// ── 图构建 ──
 
@@ -68,25 +66,21 @@ public:
 
 	/// @brief  端口级接线：上游输出口 → 下游输入口
 	/// @return true 表示两端节点和端口均存在
-	bool connect(
-		const std::string& srcNode, const std::string& srcPort,
-		const std::string& dstNode, const std::string& dstPort);
+	bool connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
+				 const std::string& dstPort);
 
 	/// @brief  快捷接线：自动匹配上游所有输出口到下游同名的输入口
 	///         典型用途：Connector 的 out_0→in_0, out_1→in_1, ...
 	///         多个下游时需为每个下游各调用一次
 	/// @return 成功匹配的端口对数
-	size_t connectAll(
-		const std::string& srcNode,
-		const std::string& dstNode);
+	size_t connectAll(const std::string& srcNode, const std::string& dstNode);
 
 	/// @brief  接线：在两个节点间自动插入导线连接器（Wire Connector）
 	///         等价于 connect(src→wire.in) + connect(wire.out→dst)
 	///         适用于两个业务节点之间的 1→1 直连场景
 	/// @return 指向自动创建的导线连接器的非拥有指针；若节点或端口不存在则返回 nullptr
-	Node* wire(
-		const std::string& srcNode, const std::string& srcPort,
-		const std::string& dstNode, const std::string& dstPort);
+	Node* wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
+			   const std::string& dstPort);
 
 	/// @brief  标记输出：该节点的该端口结果输出到图外
 	void bindOutput(const std::string& nodeName, const std::string& portName);
@@ -94,18 +88,10 @@ public:
 	// ── 数据注入 ──
 
 	/// @brief  从图外注入数据到指定节点的输入端口（写入缓冲，不触发执行）
-	bool feedInput(
-		const TaskId& taskId,
-		const std::string& nodeName,
-		const std::string& portName,
-		Value data);
+	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data);
 
 	/// @brief  便捷接口：直接传入 DC::Tensor
-	bool feedInput(
-		const TaskId& taskId,
-		const std::string& nodeName,
-		const std::string& portName,
-		Tensor data);
+	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
 
 	// ── 执行驱动 ──
 
@@ -136,10 +122,14 @@ public:
 	const Node* node(const std::string& name) const;
 
 	/// @brief  节点数量
-	size_t nodeCount() const { return _nodes.size(); }
+	size_t nodeCount() const {
+		return _nodes.size();
+	}
 
 	/// @brief  边数量
-	size_t edgeCount() const { return _edges.size(); }
+	size_t edgeCount() const {
+		return _edges.size();
+	}
 
 private:
 	// 查找节点：存在返回指针，不存在返回 nullptr
@@ -154,20 +144,20 @@ private:
 
 	// ── 成员 ──
 	std::unordered_map<std::string, std::unique_ptr<Node>> _nodes;
-	std::vector<Edge>                                      _edges;
-	std::vector<OutputBinding>                             _outputBindings;
+	std::vector<Edge> _edges;
+	std::vector<OutputBinding> _outputBindings;
 
 	// 活跃任务集：feedInput 时自动记录，供 run() 扫描
 	std::unordered_set<TaskId> _activeTasks;
 
 	// 协程调度器（非拥有指针，指向外部或 _ownedScheduler）
 	CoroScheduler* _scheduler;
-	std::unique_ptr<CoroScheduler> _ownedScheduler;  // 默认构造时内部持有
+	std::unique_ptr<CoroScheduler> _ownedScheduler; // 默认构造时内部持有
 
 	// 线程池
-	ThreadPool     _computePool;
-	ThreadPool     _operatorPool;
-	ThreadPool     _systemPool;
+	ThreadPool _computePool;
+	ThreadPool _operatorPool;
+	ThreadPool _systemPool;
 
 	// 导线连接器自动命名计数器
 	std::atomic<size_t> _nextWireId{0};
