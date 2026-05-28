@@ -306,21 +306,25 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 		co_return; // 失败则不传播
 	}
 
-	// 节点完成 → 数据冒泡：消费输出 → 写入下游 → 提交到对应线程池
+	// [检查点 2] 节点完成 → 按输出端口累积计数（不依赖出边，终端节点也能触发）：
+	// 若所有声明条件已满足，立即终止（不消费无用数据，避免传播到已清理的下游）
+	for (const auto& outPort : src->schema().outputs) {
+		if (!src->hasOutput(taskId, outPort.name))
+			continue;
+		if (_accumulateAndCheck(nodeName, outPort.name, taskId)) {
+			gate->terminated.store(true, std::memory_order_release);
+			_terminate(taskId);
+			co_return;
+		}
+	}
+
+	// 数据冒泡：消费输出 → 写入下游 → 提交到对应线程池
 	for (const auto& edge : _edges) {
 		if (edge.srcNode != nodeName)
 			continue;
 
 		if (!src->hasOutput(taskId, edge.srcPort))
 			continue;
-
-		// [检查点 2] 先累积计数，再消费数据：
-		// 若所有声明条件已满足，立即终止（不消费无用数据，避免传播到已清理的下游）
-		if (_accumulateAndCheck(edge.srcNode, edge.srcPort, taskId)) {
-			gate->terminated.store(true, std::memory_order_release);
-			_terminate(taskId);
-			co_return;
-		}
 
 		Value data = src->getOutput(taskId, edge.srcPort);
 
