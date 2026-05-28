@@ -9,7 +9,7 @@
 #include "Exception.h"
 #include "DCtype.h"
 #include "SlotType.h"
-#include "NativeTensor.h"
+#include "Value.h"
 #include <iostream>
 
 namespace DC {

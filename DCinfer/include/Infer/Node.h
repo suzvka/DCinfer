@@ -16,7 +16,7 @@
 
 #include "TensorSlot.h"
 #include "SlotType.h"
-#include "NativeTensor.h"
+#include "Value.h"
 
 #include <coroutine>
 
