@@ -1,10 +1,11 @@
-// InferGraph 拓扑连接与数据流 单元测试
+// InferGraph 拓扑连接与数据流 单元测试（异步场景化版本）
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <vector>
 
-#include "InferGraph.h"
+#include "TestHarness.h"
 #include "Connector.h"
 
 using namespace DC;
@@ -90,34 +91,34 @@ static Node::RunFn identityRunFn() {
 
 void testBuildGraph() {
 	TEST("build graph - addNode and wire") {
-		InferGraph graph;
+		TestHarness harness;
 
-		auto* n1 = graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+		auto* n1 = harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 		CHECK(n1 != nullptr, "addNode should succeed");
-		CHECK(graph.nodeCount() == 1, "nodeCount should be 1");
+		CHECK(harness.nodeCount() == 1, "nodeCount should be 1");
 
-		auto* n2 = graph.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
+		auto* n2 = harness.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
 		CHECK(n2 != nullptr, "second addNode");
-		CHECK(graph.nodeCount() == 2, "nodeCount should be 2");
+		CHECK(harness.nodeCount() == 2, "nodeCount should be 2");
 
 		// 重名应拒绝
-		auto* dup = graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+		auto* dup = harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 		CHECK(dup == nullptr, "duplicate name should be rejected");
-		CHECK(graph.nodeCount() == 2, "nodeCount still 2");
+		CHECK(harness.nodeCount() == 2, "nodeCount still 2");
 
 		// 接线：两个业务节点之间 → wire() 自动插入导线连接器
-		auto* w = graph.wire("add1", "s", "id1", "x");
+		auto* w = harness.wire("add1", "s", "id1", "x");
 		CHECK(w != nullptr, "wire should succeed");
 		CHECK(w->isConnector(), "wire node should be a connector");
-		CHECK(graph.nodeCount() == 3, "nodeCount should be 3 (add1, id1, __wire_0)");
-		CHECK(graph.edgeCount() == 2, "edgeCount should be 2 (add1→wire, wire→id1)");
+		CHECK(harness.nodeCount() == 3, "nodeCount should be 3 (add1, id1, __wire_0)");
+		CHECK(harness.edgeCount() == 2, "edgeCount should be 2 (add1→wire, wire→id1)");
 
 		// 无效接线：端口不存在
-		auto* bad = graph.wire("add1", "no_such", "id1", "x");
+		auto* bad = harness.wire("add1", "no_such", "id1", "x");
 		CHECK(bad == nullptr, "wire with bad src port should fail");
 
 		// 业务节点直连应被 connect() 拒绝
-		bool direct = graph.connect("add1", "s", "id1", "x");
+		bool direct = harness.connect("add1", "s", "id1", "x");
 		CHECK(!direct, "direct connect between non-connectors should be rejected");
 	}
 	END_TEST();
@@ -125,35 +126,37 @@ void testBuildGraph() {
 
 void testSimpleDataflow() {
 	TEST("simple 2-node dataflow: add → identity") {
-		InferGraph graph;
+		TestHarness harness;
 
-		graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
-		graph.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
-		graph.wire("add1", "s", "id1", "x");
+		harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
+		harness.wire("add1", "s", "id1", "x");
 
 		// 注入输入
-		CHECK(graph.feedInput("t1", "add1", "a", makeFloatTensor(3.0f)), "feed a");
-		CHECK(graph.feedInput("t1", "add1", "b", makeFloatTensor(4.0f)), "feed b");
+		CHECK(harness.feedInput("t1", "add1", "a", makeFloatTensor(3.0f)), "feed a");
+		CHECK(harness.feedInput("t1", "add1", "b", makeFloatTensor(4.0f)), "feed b");
 
 		// 检查就绪
-		CHECK(graph.node("add1")->isReady("t1"), "add1 should be ready");
+		CHECK(harness.node("add1")->isReady("t1"), "add1 should be ready");
 
-		// 驱动执行
-		graph.run();
+		// 异步驱动执行
+		harness.declareOutput("t1", "id1", "y");
+		harness.submit("t1");
+		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
 
 		// 验证最终结果
-		CHECK(graph.hasOutput("t1", "id1", "y"), "id1 should have output");
-		auto result = graph.getOutputTensor("t1", "id1", "y");
+		CHECK(harness.hasOutput("t1", "id1", "y"), "id1 should have output");
+		auto result = harness.getOutputTensor("t1", "id1", "y");
 		CHECK(std::abs(result.item<float>() - 7.0f) < 1e-6f, "result should be 7.0");
 	}
 	END_TEST();
 }
 
 void testBroadcastConnectorInGraph() {
-	TEST("broadcast connector: add → broadcast → [id1, id2]") {
-		InferGraph graph;
+	TEST("broadcast connector: add → broadcast → [id_a, id_b]") {
+		TestHarness harness;
 
-		graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 
 		// 广播连接器：1 输入 → 2 输出
 		auto bcSchema = Connector::broadcastSchema(2);
@@ -161,28 +164,32 @@ void testBroadcastConnectorInGraph() {
 		auto bcNode =
 			std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn, nullptr, ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
-		graph.addNode(std::move(bcNode));
+		harness.addNode(std::move(bcNode));
 
-		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
 		// 接线：add1 → bc → [id_a, id_b]
-		graph.connect("add1", "s", "bc", "in");
-		graph.connect("bc", "out_0", "id_a", "x");
-		graph.connect("bc", "out_1", "id_b", "x");
+		harness.connect("add1", "s", "bc", "in");
+		harness.connect("bc", "out_0", "id_a", "x");
+		harness.connect("bc", "out_1", "id_b", "x");
 
 		// 注入
-		graph.feedInput("t1", "add1", "a", makeFloatTensor(10.0f));
-		graph.feedInput("t1", "add1", "b", makeFloatTensor(20.0f));
+		harness.feedInput("t1", "add1", "a", makeFloatTensor(10.0f));
+		harness.feedInput("t1", "add1", "b", makeFloatTensor(20.0f));
 
-		graph.run();
+		// 声明两个下游输出
+		harness.declareOutput("t1", "id_a", "y");
+		harness.declareOutput("t1", "id_b", "y");
+		harness.submit("t1");
+		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
 
 		// 两个下游都应该有结果
-		CHECK(graph.hasOutput("t1", "id_a", "y"), "id_a should have output");
-		CHECK(graph.hasOutput("t1", "id_b", "y"), "id_b should have output");
+		CHECK(harness.hasOutput("t1", "id_a", "y"), "id_a should have output");
+		CHECK(harness.hasOutput("t1", "id_b", "y"), "id_b should have output");
 
-		auto ra = graph.getOutputTensor("t1", "id_a", "y");
-		auto rb = graph.getOutputTensor("t1", "id_b", "y");
+		auto ra = harness.getOutputTensor("t1", "id_a", "y");
+		auto rb = harness.getOutputTensor("t1", "id_b", "y");
 		CHECK(std::abs(ra.item<float>() - 30.0f) < 1e-6f, "id_a value");
 		CHECK(std::abs(rb.item<float>() - 30.0f) < 1e-6f, "id_b value");
 	}
@@ -191,44 +198,48 @@ void testBroadcastConnectorInGraph() {
 
 void testRoutingConnectorInGraph() {
 	TEST("routing connector: add → routing → [id_a, id_b]") {
-		InferGraph graph;
+		TestHarness harness;
 
-		graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 
 		auto rtSchema = Connector::routingSchema(2);
 		auto rtRunFn = Connector::routingRunFn();
 		auto rtNode =
 			std::make_unique<Node>("Connector.Routing", "rt", rtSchema, rtRunFn, nullptr, ThreadPoolAffinity::System);
 		rtNode->setConnector(true);
-		graph.addNode(std::move(rtNode));
+		harness.addNode(std::move(rtNode));
 
-		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		graph.connect("add1", "s", "rt", "in");
-		graph.connect("rt", "out_0", "id_a", "x");
-		graph.connect("rt", "out_1", "id_b", "x");
+		harness.connect("add1", "s", "rt", "in");
+		harness.connect("rt", "out_0", "id_a", "x");
+		harness.connect("rt", "out_1", "id_b", "x");
 
 		// 第一轮：t1 → out_0 → id_a
-		graph.feedInput("t1", "add1", "a", makeFloatTensor(1.0f));
-		graph.feedInput("t1", "add1", "b", makeFloatTensor(2.0f));
-		graph.run();
+		harness.feedInput("t1", "add1", "a", makeFloatTensor(1.0f));
+		harness.feedInput("t1", "add1", "b", makeFloatTensor(2.0f));
+		harness.declareOutput("t1", "id_a", "y");
+		harness.submit("t1");
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete within timeout");
 
-		CHECK(graph.hasOutput("t1", "id_a", "y"), "t1 should route to id_a (out_0)");
-		CHECK(!graph.hasOutput("t1", "id_b", "y"), "t1 should NOT route to id_b");
+		CHECK(harness.hasOutput("t1", "id_a", "y"), "t1 should route to id_a (out_0)");
+		CHECK(!harness.hasOutput("t1", "id_b", "y"), "t1 should NOT route to id_b");
 
-		auto r1 = graph.getOutputTensor("t1", "id_a", "y");
+		auto r1 = harness.getOutputTensor("t1", "id_a", "y");
 		CHECK(std::abs(r1.item<float>() - 3.0f) < 1e-6f, "t1 value");
 
 		// 第二轮：t2 → out_1 → id_b
-		graph.feedInput("t2", "add1", "a", makeFloatTensor(5.0f));
-		graph.feedInput("t2", "add1", "b", makeFloatTensor(6.0f));
-		graph.run();
+		harness.feedInput("t2", "add1", "a", makeFloatTensor(5.0f));
+		harness.feedInput("t2", "add1", "b", makeFloatTensor(6.0f));
+		harness.declareOutput("t2", "id_b", "y");
+		harness.submit("t2");
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete within timeout");
 
-		CHECK(!graph.hasOutput("t2", "id_a", "y"), "t2 should NOT route to id_a");
-		CHECK(graph.hasOutput("t2", "id_b", "y"), "t2 should route to id_b (out_1)");
+		CHECK(!harness.hasOutput("t2", "id_a", "y"), "t2 should NOT route to id_a");
+		CHECK(harness.hasOutput("t2", "id_b", "y"), "t2 should route to id_b (out_1)");
 
-		auto r2 = graph.getOutputTensor("t2", "id_b", "y");
+		auto r2 = harness.getOutputTensor("t2", "id_b", "y");
 		CHECK(std::abs(r2.item<float>() - 11.0f) < 1e-6f, "t2 value");
 	}
 	END_TEST();
@@ -236,17 +247,16 @@ void testRoutingConnectorInGraph() {
 
 void testConnectAll() {
 	TEST("connectAll auto-matches output ports to input ports") {
-		InferGraph graph;
+		TestHarness harness;
 
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcRunFn = Connector::broadcastRunFn();
 		auto bcNode =
 			std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn, nullptr, ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
-		graph.addNode(std::move(bcNode));
+		harness.addNode(std::move(bcNode));
 
-		// 创建一个有两个输入端口的节点：in_0, in_1（注意与 Connector 的 out_0, out_1 命名不同则不会匹配）
-		// 改为与 Connector 输出同名的 Schema
+		// 创建一个有两个输入端口的节点，命名为与 Connector 输出同名的 Schema
 		Node::Schema dualInSchema;
 		dualInSchema.inputs = {{"out_0", TensorType::Float, sizeof(float), {}},
 							   {"out_1", TensorType::Float, sizeof(float), {}}};
@@ -266,18 +276,20 @@ void testConnectAll() {
 			return ctx.success();
 		};
 
-		graph.addNode(std::make_unique<Node>("Builtin", "adder", dualInSchema, dualRunFn));
+		harness.addNode(std::make_unique<Node>("Builtin", "adder", dualInSchema, dualRunFn));
 
-		size_t matched = graph.connectAll("bc", "adder");
+		size_t matched = harness.connectAll("bc", "adder");
 		CHECK(matched == 2, "connectAll should match 2 ports");
-		CHECK(graph.edgeCount() == 2, "edgeCount should be 2");
+		CHECK(harness.edgeCount() == 2, "edgeCount should be 2");
 
 		// 验证数据流
-		graph.feedInput("t1", "bc", "in", makeFloatTensor(5.0f));
-		graph.run();
+		harness.feedInput("t1", "bc", "in", makeFloatTensor(5.0f));
+		harness.declareOutput("t1", "adder", "sum");
+		harness.submit("t1");
+		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
 
-		CHECK(graph.hasOutput("t1", "adder", "sum"), "adder should have output");
-		auto r = graph.getOutputTensor("t1", "adder", "sum");
+		CHECK(harness.hasOutput("t1", "adder", "sum"), "adder should have output");
+		auto r = harness.getOutputTensor("t1", "adder", "sum");
 		CHECK(std::abs(r.item<float>() - 10.0f) < 1e-6f, "sum should be 5+5=10");
 	}
 	END_TEST();
@@ -285,14 +297,14 @@ void testConnectAll() {
 
 void testNodeQuery() {
 	TEST("node query by name") {
-		InferGraph graph;
-		graph.addNode(std::make_unique<Node>("Builtin", "test1", addSchema(), addRunFn()));
+		TestHarness harness;
+		harness.addNode(std::make_unique<Node>("Builtin", "test1", addSchema(), addRunFn()));
 
-		auto* n = graph.node("test1");
+		auto* n = harness.node("test1");
 		CHECK(n != nullptr, "node should be found");
 		CHECK(n->name() == "test1", "name should match");
 
-		CHECK(graph.node("phantom") == nullptr, "nonexistent node should be null");
+		CHECK(harness.node("phantom") == nullptr, "nonexistent node should be null");
 	}
 	END_TEST();
 }

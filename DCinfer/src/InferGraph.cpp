@@ -130,7 +130,6 @@ bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName, co
 	auto* n = _findNode(nodeName);
 	if (!n)
 		return false;
-	_activeTasks.insert(taskId);
 	try {
 		n->setInput(taskId, portName, std::move(data));
 		return true;
@@ -167,51 +166,6 @@ void InferGraph::declareOutput(const TaskId& taskId, const std::string& nodeName
 }
 
 // ════════════════════════════════════════════
-// 同步执行驱动
-// ════════════════════════════════════════════
-
-void InferGraph::run() {
-	// 反复扫描全图：对每个活跃 task，检查每个节点是否就绪，
-	// 就绪则执行并级联传播输出到下游，直到本轮无新执行发生
-	bool anyExecuted = true;
-	while (anyExecuted) {
-		anyExecuted = false;
-
-		for (const auto& tid : _activeTasks) {
-			for (const auto& [nodeName, nodePtr] : _nodes) {
-				if (!nodePtr->isReady(tid))
-					continue;
-				try {
-					nodePtr->tryExecute(tid);
-				} catch (const NodeException& e) {
-					_recordError(tid, nodeName, "InferGraph::run",
-								 "NodeException in tryExecute: " + std::string(e.what()));
-					continue;
-				}
-
-				anyExecuted = true;
-
-				// 传播输出到所有下游
-				for (const auto& edge : _edges) {
-					if (edge.srcNode != nodeName)
-						continue;
-					if (!nodePtr->hasOutput(tid, edge.srcPort))
-						continue;
-
-					Value data = nodePtr->getOutput(tid, edge.srcPort);
-
-					auto* dst = _findNode(edge.dstNode);
-					if (!dst)
-						continue;
-
-					dst->setInput(tid, edge.dstPort, std::move(data));
-				}
-			}
-		}
-	}
-}
-
-// ════════════════════════════════════════════
 // 异步提交：协程驱动的数据传播
 // ════════════════════════════════════════════
 
@@ -225,9 +179,6 @@ void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout)
 									 + "'. Call declareOutput() before submit().");
 		}
 	}
-
-	// 记录活跃任务
-	_activeTasks.insert(taskId);
 
 	// 创建任务门控：协程链与看门狗共享，最后一个持有者析构时触发耗尽检测
 	auto gate = std::make_shared<TaskGate>();
@@ -476,6 +427,22 @@ void InferGraph::_terminate(const TaskId& taskId) {
 		std::lock_guard lk(_declarationMutex);
 		_outputDeclarations.erase(taskId);
 		_accumulatedCounts.erase(taskId);
+	}
+
+	// 通知 task 完成回调（在所有节点 cleanup 之前触发，保证调用方能安全读取输出）
+	if (_taskCompleteCb) {
+		// Debug: check all nodes for this task
+		for (auto& [name, nodePtr] : _nodes) {
+			bool hasTask = nodePtr->hasTask(taskId);
+			std::cerr << "[TERMINATE] node=" << name << " hasTask=" << hasTask << std::endl;
+			if (hasTask) {
+				for (auto& port : nodePtr->schema().outputs) {
+					bool ho = nodePtr->hasOutput(taskId, port.name);
+					std::cerr << "[TERMINATE]   port=" << port.name << " hasOutput=" << ho << std::endl;
+				}
+			}
+		}
+		_taskCompleteCb(taskId);
 	}
 
 	// 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者

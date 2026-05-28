@@ -177,51 +177,6 @@ Node::TaskPortMap::mapped_type Node::collectOutputs(const TaskId& taskId) {
 	return result;
 }
 
-// ── 阻塞式一次执行 ──
-Value Node::execute(const std::string& outputName, std::unordered_map<std::string, Value> inputs) {
-	static size_t execCounter = 0;
-	auto taskId = "__exec_" + std::to_string(++execCounter);
-
-	// 暂存并清空外部回调，避免 execute 内部被外部回调干扰
-	auto savedCallback = std::move(_onComplete);
-	_onComplete = nullptr;
-
-	try {
-		setInput(taskId, std::move(inputs));
-	} catch (...) {
-		_onComplete = std::move(savedCallback);
-		throw;
-	}
-
-	// 显式触发执行（setInput 不再自动触发）
-	try {
-		tryExecute(taskId);
-	} catch (...) {
-		_onComplete = std::move(savedCallback);
-		throw;
-	}
-
-	_onComplete = std::move(savedCallback);
-
-	// 同步执行已在 tryExecute → _checkAndExecute 内完成，直接读取输出
-	auto taskIt = _taskOutputs.find(taskId);
-	if (taskIt == _taskOutputs.end()) {
-		throw NodeException(NodeException::ErrorType::InternalError, "Node::execute",
-							"no output produced for task '" + taskId + "'");
-	}
-
-	auto outIt = taskIt->second.find(outputName);
-	if (outIt == taskIt->second.end() || !outIt->second.has_value()) {
-		_taskOutputs.erase(taskId);
-		throw NodeException(NodeException::ErrorType::OutputNotProduced, "Node::execute",
-							"output '" + outputName + "' not found");
-	}
-
-	Value result = std::move(outIt->second.value());
-	_taskOutputs.erase(taskId);
-	return result;
-}
-
 // ── 任务生命周期 ──
 bool Node::hasTask(const TaskId& taskId) const {
 	std::shared_lock lk(_bufferMutex);
@@ -344,23 +299,6 @@ std::unordered_map<std::string, Tensor> Node::collectOutputTensors(const TaskId&
 		}
 	}
 	return result;
-}
-
-Tensor Node::executeTensor(const std::string& outputName, std::unordered_map<std::string, Tensor> inputs) {
-	std::unordered_map<std::string, Value> wrapped;
-	wrapped.reserve(inputs.size());
-	for (auto& [name, t] : inputs) {
-		wrapped.emplace(name, Value(std::make_unique<Tensor>(std::move(t))));
-	}
-
-	auto nt = execute(outputName, std::move(wrapped));
-	auto* t = nt.as<Tensor>();
-	if (!t) {
-		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::executeTensor",
-							"output '" + outputName + "' is not a DC::Tensor (innerType=" +
-								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
-	}
-	return std::move(*t);
 }
 
 // ── RunFn 内部使用的计算 API ──

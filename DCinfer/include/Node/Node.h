@@ -282,24 +282,6 @@ public:
 	/// @return 端口名到 Tensor 的映射。
 	std::unordered_map<std::string, Tensor> collectOutputTensors(const TaskId& taskId);
 
-	// ── 阻塞式一次执行 ──
-	/// @brief  一次性送入所有 Value 输入，同步执行，返回指定输出的 Value。
-	/// @param outputName 期望的输出端口名。
-	/// @param inputs 输入端口名到数据的映射。
-	/// @return 指定输出端口的数据（Value）。
-	/// @throws NodeException(PortNotFound) 若输入端口名不合法。
-	/// @throws NodeException(NotReady) 若输入不满足执行条件。
-	/// @throws NodeException(InternalError) 若未产出输出。
-	/// @throws NodeException(OutputNotProduced) 若指定端口无输出。
-	Value execute(const std::string& outputName, std::unordered_map<std::string, Value> inputs);
-
-	/// @brief  便捷接口：一次性送入 DC::Tensor，同步执行，返回指定输出的 Tensor。
-	/// @param outputName 期望的输出端口名。
-	/// @param inputs 输入端口名到 Tensor 的映射。
-	/// @return 指定输出端口的数据（Tensor）。
-	/// @throws NodeException 若输入不合法、执行失败或输出不是 Tensor 类型。
-	Tensor executeTensor(const std::string& outputName, std::unordered_map<std::string, Tensor> inputs);
-
 	// ── 协程支持 ──
 
 	/// @brief  co_await-able 等待器：挂起当前协程，直到指定 task 执行完成

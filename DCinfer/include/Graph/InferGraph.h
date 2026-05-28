@@ -59,7 +59,7 @@ public:
 		std::string portName;
 	};
 
-	/// @brief  默认构造（向后兼容同步 API）
+	/// @brief  默认构造
 	///         自动创建内部协程调度器和默认线程池
 	InferGraph();
 
@@ -113,9 +113,6 @@ public:
 	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
 
 	// ── 执行驱动 ──
-
-	/// @brief  同步驱动：扫描全图查找已就绪节点，BFS 级联执行直到无更多可执行节点
-	void run();
 
 	/// @brief  异步启动整张图的计算
 	///         为指定 taskId 扫描入口节点，创建协程链驱动数据流
@@ -178,6 +175,15 @@ public:
 	/// @brief  是否有任何 task 发生过错误
 	bool hasErrors() const;
 
+	// ── task 完成回调 ──
+
+	/// @brief  task 完成回调类型：在 _terminate（task 彻底结束）时触发
+	///        此时所有节点已执行完毕、传播链已走完、缓冲区已清理
+	using TaskCompleteCallback = std::function<void(const TaskId&)>;
+
+	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）
+	void setTaskCompleteCallback(TaskCompleteCallback cb) { _taskCompleteCb = std::move(cb); }
+
 private:
 	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
 	//
@@ -232,12 +238,9 @@ private:
 	std::vector<Edge> _edges;
 	std::vector<OutputBinding> _outputBindings;
 
-	// 活跃任务集：feedInput 时自动记录，供 run() 扫描
-	std::unordered_set<TaskId> _activeTasks;
-
-	// 协程调度器（非拥有指针，指向外部或 _ownedScheduler）
-	CoroScheduler* _scheduler;
+	// 协程调度器（_ownedScheduler 必须在 _scheduler 之前声明：C++ 按声明顺序初始化）
 	std::unique_ptr<CoroScheduler> _ownedScheduler; // 默认构造时内部持有
+	CoroScheduler* _scheduler;                       // 非拥有指针，指向外部或 _ownedScheduler
 
 	// 线程池
 	ThreadPool _computePool;
@@ -262,6 +265,9 @@ private:
 	// task 级错误收集：每 taskId 对应按发生顺序排列的错误列表（_errorMutex 保护）
 	std::unordered_map<TaskId, std::vector<TaskError>> _taskErrors;
 	mutable std::mutex _errorMutex;
+
+	// task 完成回调：在 _terminate 末尾触发（无需互斥锁，仅在 _terminate 中调用）
+	TaskCompleteCallback _taskCompleteCb;
 };
 
 } // namespace DC
