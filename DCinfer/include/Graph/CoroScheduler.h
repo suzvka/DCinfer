@@ -194,6 +194,7 @@ public:
 		// 协程在 initial_suspend 处挂起，done() 为 false，
 		// task 析构时不会 destroy 协程帧，安全
 
+		_activeCoroutines.fetch_add(1, std::memory_order_release);
 		{
 			std::lock_guard lk(_mutex);
 			_readyQueue.push(h);

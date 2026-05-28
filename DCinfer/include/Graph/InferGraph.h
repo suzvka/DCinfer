@@ -6,7 +6,9 @@
 #include "ThreadPool.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,6 +23,13 @@ namespace DC {
 // 数据流由协程驱动：节点完成 → 消费输出 → 分发到下游输入端 → 调度下游。
 //
 // Node 不知下游，Connector 即 Node。Graph 对一切顶点统一处理。
+
+/// @brief 输出声明：声明某 task 期望哪个节点的哪个端口产出多少次
+struct OutputDeclaration {
+	std::string nodeName; ///< 目标节点名
+	std::string portName; ///< 目标端口名
+	size_t count = 1; ///< 预期产出次数（>=1）
+};
 
 class InferGraph {
 public:
@@ -113,6 +122,17 @@ public:
 	/// @brief  检查输出区中是否有结果
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
 
+	// ── 输出声明（环路支持）──
+
+	/// @brief  声明某 task 的输出期望：指定节点端口需产出 N 次才停止
+	///         调用后允许此 task 的图中存在环路（由声明条件保证收敛）
+	/// @note   必须在 submit() 前调用；有环图若未声明输出，submit 会失败
+	void declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations);
+
+	/// @brief  单条声明的便捷重载
+	void declareOutput(const TaskId& taskId, const std::string& nodeName,
+					   const std::string& portName, size_t count = 1);
+
 	// ── 查询 ──
 
 	/// @brief  获取节点指针（非拥有），不存在返回 nullptr
@@ -142,6 +162,24 @@ private:
 	// co_await 节点完成 → 消费输出 → 写入下游 → 按 affinity 提交线程池 → spawn 下游传播协程
 	Task<void> _propagateFrom(const std::string& nodeName, const TaskId& taskId);
 
+	/// @brief 检查添加 srcNode→dstNode 边是否会形成环
+	/// 从 dstNode 出发 DFS，判断是否可达 srcNode
+	bool _wouldCreateCycle(const std::string& srcNode, const std::string& dstNode) const;
+
+	/// @brief  检查整张图中是否存在环路
+	bool _hasCycle() const;
+
+	// ── 输出声明辅助 ──
+
+	/// @brief  累积输出计数，返回 true 表示所有声明均已满足
+	bool _accumulateAndCheck(const std::string& nodeName, const std::string& portName, const TaskId& taskId);
+
+	/// @brief  终止指定 task：标记 + 遍历所有节点清理缓冲区
+	void _terminate(const TaskId& taskId);
+
+	/// @brief  查询 task 是否已被终止
+	bool _isTerminated(const TaskId& taskId) const;
+
 	// ── 成员 ──
 	std::unordered_map<std::string, std::unique_ptr<Node>> _nodes;
 	std::vector<Edge> _edges;
@@ -161,6 +199,18 @@ private:
 
 	// 导线连接器自动命名计数器
 	std::atomic<size_t> _nextWireId{0};
+
+	// 输出声明：每 task 的期望输出列表（_declarationMutex 保护）
+	std::unordered_map<TaskId, std::vector<OutputDeclaration>> _outputDeclarations;
+	mutable std::mutex _declarationMutex;
+
+	// 运行时累加器：每 task 的每端口产出次数（_declarationMutex 保护）
+	// key = "nodeName:portName"
+	std::unordered_map<TaskId, std::unordered_map<std::string, size_t>> _accumulatedCounts;
+
+	// 已终止的 task 集合（_terminationMutex 保护）
+	std::unordered_set<TaskId> _terminatedTasks;
+	mutable std::mutex _terminationMutex;
 };
 
 } // namespace DC

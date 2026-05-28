@@ -93,6 +93,7 @@ void Node::setInput(const TaskId& taskId, const std::string& portName, Value dat
 							"port '" + portName + "' not found in schema");
 	}
 
+	std::unique_lock lk(_bufferMutex);
 	_ensureTaskExists(taskId);
 	_taskInputs[taskId].at(portName) = std::move(data);
 }
@@ -107,6 +108,7 @@ void Node::setInput(const TaskId& taskId, std::unordered_map<std::string, TaskDa
 		}
 	}
 
+	std::unique_lock lk(_bufferMutex);
 	_ensureTaskExists(taskId);
 
 	for (auto& [name, data] : inputs) {
@@ -116,6 +118,7 @@ void Node::setInput(const TaskId& taskId, std::unordered_map<std::string, TaskDa
 
 // ── 任务级输出 ──
 bool Node::hasOutput(const TaskId& taskId, const std::string& name) const {
+	std::shared_lock lk(_bufferMutex);
 
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end())
@@ -127,6 +130,7 @@ bool Node::hasOutput(const TaskId& taskId, const std::string& name) const {
 }
 
 Value Node::getOutput(const TaskId& taskId, const std::string& name) {
+	std::unique_lock lk(_bufferMutex);
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
 		throw NodeException(NodeException::ErrorType::TaskNotFound, "Node::getOutput",
@@ -143,6 +147,7 @@ Value Node::getOutput(const TaskId& taskId, const std::string& name) {
 }
 
 const Value& Node::peekOutput(const TaskId& taskId, const std::string& name) const {
+	std::shared_lock lk(_bufferMutex);
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
 		throw NodeException(NodeException::ErrorType::TaskNotFound, "Node::peekOutput",
@@ -157,6 +162,7 @@ const Value& Node::peekOutput(const TaskId& taskId, const std::string& name) con
 }
 
 Node::TaskPortMap::mapped_type Node::collectOutputs(const TaskId& taskId) {
+	std::unique_lock lk(_bufferMutex);
 	std::unordered_map<std::string, TaskData> result;
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end())
@@ -217,21 +223,55 @@ Value Node::execute(const std::string& outputName, std::unordered_map<std::strin
 }
 
 // ── 任务生命周期 ──
+bool Node::hasTask(const TaskId& taskId) const {
+	std::shared_lock lk(_bufferMutex);
+	return _taskInputs.contains(taskId) || _taskOutputs.contains(taskId);
+}
+
 void Node::clearTask(const TaskId& taskId) {
+	std::unique_lock lk(_bufferMutex);
 	_taskInputs.erase(taskId);
 	_taskOutputs.erase(taskId);
+	lk.unlock();
 	{
 		std::lock_guard lk(_waitersMutex);
 		_completedTasks.erase(taskId);
 	}
 }
 
+void Node::terminateTask(const TaskId& taskId) {
+	// 1. 清除 IO 缓冲区
+	{
+		std::unique_lock lk(_bufferMutex);
+		_taskInputs.erase(taskId);
+		_taskOutputs.erase(taskId);
+	}
+
+	// 2. 通知所有等待此 task 的协程（在锁外 resume）
+	std::vector<std::coroutine_handle<>> handles;
+	{
+		std::lock_guard lk(_waitersMutex);
+		_completedTasks.erase(taskId);
+		auto it = _waiters.find(taskId);
+		if (it != _waiters.end()) {
+			handles = std::move(it->second);
+			_waiters.erase(it);
+		}
+	}
+	for (auto h : handles) {
+		if (h)
+			h.resume();
+	}
+}
+
 size_t Node::taskCount() const {
+	std::shared_lock lk(_bufferMutex);
 	return _taskInputs.size();
 }
 
 // ── 调度接口 ──
 bool Node::isReady(const TaskId& taskId) const {
+	std::shared_lock lk(_bufferMutex);
 	return _isTaskReady(taskId);
 }
 
@@ -241,8 +281,8 @@ void Node::tryExecute(const TaskId& taskId) {
 							"task '" + taskId + "' is not ready");
 	}
 
-	// 尝试获取重入锁，若已有 task 在执行则拒绝
-	if (_executing.test_and_set(std::memory_order_acquire)) {
+	// 保护共享工作槽位 _inputSlots / _outputSlots，同一时刻仅允许一个 task 使用
+	if (_executionGuard.test_and_set(std::memory_order_acquire)) {
 		throw NodeException(NodeException::ErrorType::Reentrant, "Node::tryExecute",
 							"node '" + _name + "' is busy executing another task");
 	}
@@ -253,12 +293,12 @@ void Node::tryExecute(const TaskId& taskId) {
 		_checkAndExecute(taskId);
 	} catch (...) {
 		_currentTaskId.reset();
-		_executing.clear(std::memory_order_release);
+		_executionGuard.clear(std::memory_order_release);
 		throw;
 	}
 
 	_currentTaskId.reset();
-	_executing.clear(std::memory_order_release);
+	_executionGuard.clear(std::memory_order_release);
 }
 
 std::optional<Node::TaskId> Node::currentTaskId() const {
@@ -438,90 +478,114 @@ bool Node::_isTaskReady(const TaskId& taskId) const {
 }
 
 void Node::_checkAndExecute(const TaskId& taskId) {
-	if (!_isTaskReady(taskId))
-		return;
-
-	// ① 加载输入：_taskInputs[taskId] → _inputSlots (move)
-	_loadTaskToWorkingSlots(taskId);
-
-	// ② 清空上一轮工作输出
-	_clearWorkingOutputs();
-
-	// ②½ preRun 钩子：推理前准备（I/O 绑定、warmup 等）
-	if (_engineInstance) {
-		auto* desc = _engineInstance->descriptor();
-		if (desc && desc->preRun) {
-			desc->preRun(_engineInstance->get());
-		}
+	{
+		std::shared_lock lk(_bufferMutex);
+		if (!_isTaskReady(taskId))
+			return;
 	}
 
-	// ③ 执行 RunFn（通过 RunContext 隔离接口）
 	Result result;
+
 	try {
-		RunContext ctx(*this);
-		result = _fn(ctx);
-	} catch (const std::exception& e) {
-		result = _makeFailure(Status::ExecutionFailed, e.what());
-	} catch (...) {
-		result = _makeFailure(Status::ExecutionFailed, "Unknown exception in RunFn");
-	}
-
-	// ③¼ onError 钩子：执行失败时重置引擎状态
-	if (!result.ok() && _engineInstance) {
-		auto* desc = _engineInstance->descriptor();
-		if (desc && desc->onError) {
-			desc->onError(_engineInstance->get());
+		// ① 加载输入：_taskInputs[taskId] → _inputSlots (move)
+		{
+			std::unique_lock lk(_bufferMutex);
+			_loadTaskToWorkingSlots(taskId);
 		}
-	}
 
-	// ③½ 同步：确保异步引擎计算已完成
-	if (result.ok()) {
-		_synchronizeEngine();
-	}
+		// ② 清空上一轮工作输出
+		_clearWorkingOutputs();
 
-	// ③¾ postRun 钩子：同步后的后处理（D2H 传输、输出格式转换等）
-	if (result.ok() && _engineInstance) {
-		auto* desc = _engineInstance->descriptor();
-		if (desc && desc->postRun) {
-			RunContext ctx(*this);
-			desc->postRun(_engineInstance->get(), ctx);
-		}
-	}
-
-	// ④ 保存输出：_outputSlots → _taskOutputs[taskId]
-	_collectAndSaveOutputs(taskId);
-
-	// ⑤ 验证输出完整性
-	if (result.ok()) {
-		for (const auto& port : _schema.outputs) {
-			auto outIt = _taskOutputs[taskId].find(port.name);
-			if (outIt == _taskOutputs[taskId].end() || !outIt->second.has_value()) {
-				result = _makeFailure(Status::InternalError, "Output '" + port.name + "' was not produced by RunFn");
-				break;
+		// ②½ preRun 钩子：推理前准备（I/O 绑定、warmup 等）
+		if (_engineInstance) {
+			auto* desc = _engineInstance->descriptor();
+			if (desc && desc->preRun) {
+				desc->preRun(_engineInstance->get());
 			}
 		}
-	}
 
-	// Diagnostic logging for failures to aid debugging
-	if (!result.ok()) {
+		// ③ 执行 RunFn（通过 RunContext 隔离接口）
 		try {
-			std::cerr << "Node[" << _name << "] task '" << taskId
-					  << "' failed: status=" << static_cast<int>(result.status) << ", message='" << result.message
-					  << "'" << std::endl;
+			RunContext ctx(*this);
+			result = _fn(ctx);
+		} catch (const std::exception& e) {
+			result = _makeFailure(Status::ExecutionFailed, e.what());
 		} catch (...) {
-			// swallow any logging errors
+			result = _makeFailure(Status::ExecutionFailed, "Unknown exception in RunFn");
 		}
-	}
 
-	// ⑥ 清理输入缓冲（输出缓冲保留，供调用方拉取）
-	_taskInputs.erase(taskId);
+		// ③¼ onError 钩子：执行失败时重置引擎状态
+		if (!result.ok() && _engineInstance) {
+			auto* desc = _engineInstance->descriptor();
+			if (desc && desc->onError) {
+				desc->onError(_engineInstance->get());
+			}
+		}
 
-	// ⑥½ 通知等待协程（在回调之前，保证协程能看到结果）
-	_notifyWaiters(taskId, result);
+		// ③½ 同步：确保异步引擎计算已完成
+		if (result.ok()) {
+			_synchronizeEngine();
+		}
 
-	// ⑦ 调用回调（仅通知）
-	if (_onComplete) {
-		_onComplete(taskId, result);
+		// ③¾ postRun 钩子：同步后的后处理（D2H 传输、输出格式转换等）
+		if (result.ok() && _engineInstance) {
+			auto* desc = _engineInstance->descriptor();
+			if (desc && desc->postRun) {
+				RunContext ctx(*this);
+				desc->postRun(_engineInstance->get(), ctx);
+			}
+		}
+
+		// ④ 保存输出：_outputSlots → _taskOutputs[taskId]
+		{
+			std::unique_lock lk(_bufferMutex);
+			_collectAndSaveOutputs(taskId);
+
+			// ⑤ 验证输出完整性（持锁读取 _taskOutputs）
+			if (result.ok()) {
+				for (const auto& port : _schema.outputs) {
+					auto outIt = _taskOutputs[taskId].find(port.name);
+					if (outIt == _taskOutputs[taskId].end() || !outIt->second.has_value()) {
+						result = _makeFailure(Status::InternalError, "Output '" + port.name + "' was not produced by RunFn");
+						break;
+					}
+				}
+			}
+		}
+
+		// Diagnostic logging for failures to aid debugging
+		if (!result.ok()) {
+			try {
+				std::cerr << "Node[" << _name << "] task '" << taskId
+						  << "' failed: status=" << static_cast<int>(result.status) << ", message='" << result.message
+						  << "'" << std::endl;
+			} catch (...) {
+				// swallow any logging errors
+			}
+		}
+
+		// ⑥ 清理输入缓冲（输出缓冲保留，供调用方拉取）
+		{
+			std::unique_lock lk(_bufferMutex);
+			_taskInputs.erase(taskId);
+		}
+
+		// ⑥½ 通知等待协程（在回调之前，保证协程能看到结果）
+		_notifyWaiters(taskId, result);
+
+		// ⑦ 调用回调（仅通知）
+		if (_onComplete) {
+			_onComplete(taskId, result);
+		}
+	} catch (const std::exception& e) {
+		// 加载阶段或执行阶段抛出未捕获异常（如终止后 inputs 被清空）
+		// 必须通知等待者，避免协程句柄泄漏
+		result = _makeFailure(Status::ExecutionFailed, e.what());
+		_notifyWaiters(taskId, result);
+		if (_onComplete) {
+			_onComplete(taskId, result);
+		}
+		throw; // 重新抛出给 tryExecute（由其清理 _executionGuard）
 	}
 }
 
@@ -614,6 +678,7 @@ void Node::_notifyWaiters(const TaskId& taskId, const Result& result) {
 
 bool NodeCompletion::await_ready() const {
 	// 如果任务已完成（输出已存在），不需要挂起
+	std::shared_lock lk(_node->_bufferMutex);
 	auto taskIt = _node->_taskOutputs.find(_taskId);
 	if (taskIt == _node->_taskOutputs.end())
 		return false;
@@ -644,6 +709,7 @@ void NodeCompletion::await_suspend(std::coroutine_handle<> h) {
 
 Node::Result NodeCompletion::await_resume() const {
 	// 协程恢复后，从 task 输出中收集结果状态
+	std::shared_lock lk(_node->_bufferMutex);
 	auto taskIt = _node->_taskOutputs.find(_taskId);
 	if (taskIt != _node->_taskOutputs.end()) {
 		// 检查所有输出是否已产生（有任意输出即认为完成）

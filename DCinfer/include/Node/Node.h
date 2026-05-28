@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -46,14 +47,6 @@ enum class ThreadPoolAffinity {
 	Compute, ///< 计算线程池 —— 执行推理过程（GPU 加速，如 ONNX/TensorRT）
 	Operator, ///< 算子线程池 —— 执行 CPU 密集过程（如 Pre/Post 处理）
 	System, ///< 系统线程池 —— 数据流动与连接器（Broadcast/Routing/Wire）
-};
-
-/// @brief 节点执行策略。
-enum class ExecutionPolicy {
-	Exclusive, ///< 同时最多 1 个 task（默认行为）
-	Concurrent, ///< 多个 task 可并发（无状态节点）
-	Serialized, ///< 多 task 排队，FIFO 串行
-	Batched, ///< 攒 N 个 task 后批量执行
 };
 
 // ── 前向声明：co_await-able 节点完成通知 ──
@@ -213,15 +206,6 @@ public:
 		_isConnector = v;
 	}
 
-	/// @brief  获取执行策略（当前默认 Exclusive）。
-	ExecutionPolicy policy() const {
-		return _execPolicy;
-	}
-	/// @brief  设置执行策略。
-	void setExecutionPolicy(ExecutionPolicy p) {
-		_execPolicy = p;
-	}
-
 	// ── 完成回调注册 ──
 	/// @brief  注册任务完成回调（纯通知，不传数据）。
 	void setCompletionCallback(CompletionFn fn);
@@ -340,8 +324,12 @@ public:
 	std::optional<TaskId> currentTaskId() const;
 
 	// ── 任务生命周期 ──
+	/// @brief  查询指定 task 是否存在于此节点（输入或输出缓冲区非空）。
+	bool hasTask(const TaskId& taskId) const;
 	/// @brief  清除指定任务的所有输入/输出缓冲区及等待者。
 	void clearTask(const TaskId& taskId);
+	/// @brief  终止指定 task：清除 IO 缓冲区并通知所有等待协程恢复
+	void terminateTask(const TaskId& taskId);
 	/// @brief  当前活跃任务数量。
 	size_t taskCount() const;
 
@@ -410,7 +398,6 @@ private:
 	Schema _schema;
 	ThreadPoolAffinity _affinity = ThreadPoolAffinity::Operator;
 	std::string _tag;
-	ExecutionPolicy _execPolicy = ExecutionPolicy::Exclusive;
 	bool _isConnector = false;
 	SlotMap _inputSlots; // 工作输入槽位
 	SlotMap _outputSlots; // 工作输出槽位
@@ -419,7 +406,8 @@ private:
 	RunFn _fn;
 	CompletionFn _onComplete;
 	EngineInstance* _engineInstance = nullptr; // 非拥有引用，Registry 管理生命周期
-	std::atomic_flag _executing = ATOMIC_FLAG_INIT; // 重入锁：同一时刻最多一个 task 在执行
+	std::atomic_flag _executionGuard = ATOMIC_FLAG_INIT; // 保护 _inputSlots / _outputSlots 工作槽位，同一时刻仅允许一个 task 使用
+	mutable std::shared_mutex _bufferMutex; // 保护 _taskInputs / _taskOutputs 的并发读写
 	std::optional<TaskId> _currentTaskId; // 当前执行中的 task（由 tryExecute 设置/清除）
 
 	// 协程等待者：key=taskId，value=等待该 task 完成的协程 handles

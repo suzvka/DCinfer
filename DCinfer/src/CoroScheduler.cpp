@@ -63,7 +63,6 @@ void CoroScheduler::_workerLoop() {
 		if (!h || h.done())
 			continue;
 
-		_activeCoroutines.fetch_add(1, std::memory_order_release);
 		try {
 			h.resume();
 		} catch (const std::exception& e) {

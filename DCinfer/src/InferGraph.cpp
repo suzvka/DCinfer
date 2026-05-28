@@ -67,6 +67,12 @@ bool InferGraph::connect(const std::string& srcNode, const std::string& srcPort,
 	if (!dst->schema().findInput(dstPort))
 		return false;
 
+	// DAG 环检测：若从 dstNode 出发已能到达 srcNode，则添加此边会形成环
+	// 允许环路（由输出声明保证收敛），仅打印警告
+	if (_wouldCreateCycle(srcNode, dstNode)) {
+		std::cerr << "InferGraph::connect: cycle detected when connecting '" << srcNode << ":" << srcPort << "' -> '" << dstNode << ":" << dstPort << "'. Ensure output declarations exist before submit()." << std::endl;
+	}
+
 	_edges.push_back({srcNode, srcPort, dstNode, dstPort});
 	return true;
 }
@@ -76,6 +82,11 @@ size_t InferGraph::connectAll(const std::string& srcNode, const std::string& dst
 	auto* dst = _findNode(dstNode);
 	if (!src || !dst)
 		return 0;
+
+	// DAG 环检测
+	if (_wouldCreateCycle(srcNode, dstNode)) {
+		std::cerr << "InferGraph::connectAll: cycle detected between '" << srcNode << "' and '" << dstNode << "'. Ensure output declarations exist before submit()." << std::endl;
+	}
 
 	size_t matched = 0;
 	for (const auto& outPort : src->schema().outputs) {
@@ -105,6 +116,11 @@ Node* InferGraph::wire(const std::string& srcNode, const std::string& srcPort, c
 		return nullptr;
 	if (!dst->schema().findInput(dstPort))
 		return nullptr;
+
+	// DAG 环检测：src→wire→dst 等效于 src→dst
+	if (_wouldCreateCycle(srcNode, dstNode)) {
+		std::cerr << "InferGraph::wire: cycle detected between '" << srcNode << "' and '" << dstNode << "'. Ensure output declarations exist before submit()." << std::endl;
+	}
 
 	// 自动创建导线连接器
 	auto wireName = "__wire_" + std::to_string(_nextWireId.fetch_add(1));
@@ -143,6 +159,26 @@ bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName, co
 bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 						   Tensor data) {
 	return feedInput(taskId, nodeName, portName, Value(std::make_unique<Tensor>(std::move(data))));
+}
+
+// ════════════════════════════════════════════
+// 输出声明
+// ════════════════════════════════════════════
+
+void InferGraph::declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
+	std::lock_guard lk(_declarationMutex);
+	auto& existing = _outputDeclarations[taskId];
+	// 追加式写入（与单条重载语义一致）
+	existing.reserve(existing.size() + declarations.size());
+	for (auto& decl : declarations) {
+		existing.push_back(std::move(decl));
+	}
+}
+
+void InferGraph::declareOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
+							   size_t count) {
+	std::lock_guard lk(_declarationMutex);
+	_outputDeclarations[taskId].push_back({nodeName, portName, count});
 }
 
 // ════════════════════════════════════════════
@@ -193,6 +229,19 @@ void InferGraph::run() {
 // ════════════════════════════════════════════
 
 void InferGraph::submit(const TaskId& taskId) {
+	// 校验：若图中有环路但未声明输出，则拒绝
+	{
+		std::lock_guard lk(_declarationMutex);
+		if (!_outputDeclarations.contains(taskId) && _hasCycle()) {
+			std::cerr << "InferGraph::submit: cycle detected but no output declarations for task '" << taskId
+					  << "'. Call declareOutput() before submit()." << std::endl;
+			return;
+		}
+	}
+
+	// 记录活跃任务，供同步 run() 扫描
+	_activeTasks.insert(taskId);
+
 	// 扫描全图，对所有已就绪的节点创建传播协程
 	for (const auto& [nodeName, nodePtr] : _nodes) {
 		if (!nodePtr->isReady(taskId))
@@ -229,6 +278,10 @@ void InferGraph::submit(const TaskId& taskId) {
 }
 
 Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId& taskId) {
+	// [检查点 1] 入口：若 task 已终止，直接返回
+	if (_isTerminated(taskId))
+		co_return;
+
 	auto* src = _findNode(nodeName);
 	if (!src)
 		co_return;
@@ -247,7 +300,18 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 		if (!src->hasOutput(taskId, edge.srcPort))
 			continue;
 
+		// [检查点 2] 先累积计数，再消费数据：
+		// 若所有声明条件已满足，立即终止（不消费无用数据，避免传播到已清理的下游）
+		if (_accumulateAndCheck(edge.srcNode, edge.srcPort, taskId)) {
+			_terminate(taskId);
+			co_return;
+		}
+
 		Value data = src->getOutput(taskId, edge.srcPort);
+
+		// [检查点 3] 写入下游前再确认一次未被终止
+		if (_isTerminated(taskId))
+			co_return;
 
 		auto* dst = _findNode(edge.dstNode);
 		if (!dst)
@@ -284,6 +348,10 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 				});
 				break;
 			}
+
+			// [检查点 1b] 提交完确认未被终止再 spawn 下游
+			if (_isTerminated(taskId))
+				co_return;
 
 			// 创建下游传播协程（非阻塞：fire-and-forget spawn）
 			_scheduler->spawn(
@@ -329,6 +397,128 @@ Node* InferGraph::node(const std::string& name) {
 
 const Node* InferGraph::node(const std::string& name) const {
 	return _findNode(name);
+}
+
+// ════════════════════════════════════════════
+// _wouldCreateCycle：DAG 环检测
+// ════════════════════════════════════════════
+
+bool InferGraph::_wouldCreateCycle(const std::string& srcNode, const std::string& dstNode) const {
+	// 自环
+	if (srcNode == dstNode)
+		return true;
+
+	// 从 dstNode 出发 DFS，检查是否可达 srcNode
+	std::unordered_set<std::string> visited;
+	std::function<bool(const std::string&)> dfs = [&](const std::string& current) -> bool {
+		if (current == srcNode)
+			return true;
+		if (!visited.insert(current).second)
+			return false;
+		for (const auto& edge : _edges) {
+			if (edge.srcNode == current) {
+				if (dfs(edge.dstNode))
+					return true;
+			}
+		}
+		return false;
+	};
+	return dfs(dstNode);
+}
+
+// ════════════════════════════════════════════
+// _hasCycle：整图环检测
+// ════════════════════════════════════════════
+
+bool InferGraph::_hasCycle() const {
+	// DFS 三色标记法：White=未访问, Gray=访问中(栈上), Black=已完成
+	// 若从 Gray 节点出发可达另一个 Gray 节点，则存在环
+	enum class Color : uint8_t { White, Gray, Black };
+	std::unordered_map<std::string, Color> color;
+	color.reserve(_nodes.size());
+	for (const auto& [name, _] : _nodes) {
+		color[name] = Color::White;
+	}
+
+	// 预构建邻接表
+	std::unordered_map<std::string, std::vector<std::string>> adj;
+	for (const auto& edge : _edges) {
+		adj[edge.srcNode].push_back(edge.dstNode);
+	}
+
+	std::function<bool(const std::string&)> dfs = [&](const std::string& node) -> bool {
+		color[node] = Color::Gray;
+		auto it = adj.find(node);
+		if (it != adj.end()) {
+			for (const auto& next : it->second) {
+				auto c = color[next];
+				if (c == Color::Gray)
+					return true; // 回边：发现环
+				if (c == Color::White && dfs(next))
+					return true;
+			}
+		}
+		color[node] = Color::Black;
+		return false;
+	};
+
+	for (const auto& [name, _] : _nodes) {
+		if (color[name] == Color::White && dfs(name))
+			return true;
+	}
+	return false;
+}
+
+// ════════════════════════════════════════════
+// 终止辅助
+// ════════════════════════════════════════════
+
+bool InferGraph::_accumulateAndCheck(const std::string& nodeName, const std::string& portName,
+									 const TaskId& taskId) {
+	std::lock_guard lk(_declarationMutex);
+	auto declIt = _outputDeclarations.find(taskId);
+	if (declIt == _outputDeclarations.end())
+		return false; // 未声明 → 永不终止
+
+	// 递增累加器
+	std::string key = nodeName + ":" + portName;
+	++_accumulatedCounts[taskId][key];
+
+	// 检查所有声明是否均已满足
+	for (const auto& decl : declIt->second) {
+		std::string dkey = decl.nodeName + ":" + decl.portName;
+		size_t current = _accumulatedCounts[taskId][dkey];
+		if (current < decl.count)
+			return false;
+	}
+	return true;
+}
+
+bool InferGraph::_isTerminated(const TaskId& taskId) const {
+	std::lock_guard lk(_terminationMutex);
+	return _terminatedTasks.contains(taskId);
+}
+
+void InferGraph::_terminate(const TaskId& taskId) {
+	{
+		std::lock_guard lk(_terminationMutex);
+		// 防止重复终止
+		if (!_terminatedTasks.insert(taskId).second)
+			return;
+	}
+
+	// 清理输出声明和累加器（同一 taskId 可安全重新提交）
+	{
+		std::lock_guard lk(_declarationMutex);
+		_outputDeclarations.erase(taskId);
+		_accumulatedCounts.erase(taskId);
+	}
+
+	// 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
+	for (auto& [name, nodePtr] : _nodes) {
+		if (nodePtr->hasTask(taskId))
+			nodePtr->terminateTask(taskId);
+	}
 }
 
 } // namespace DC

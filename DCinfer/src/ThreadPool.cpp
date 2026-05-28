@@ -55,25 +55,36 @@ PoolTicket ThreadPool::submitAsync(const std::string& nodeTag, std::function<voi
 }
 
 size_t ThreadPool::activeCount(const std::string& groupTag) const {
-	// 粗略估计：最大 - 当前可用
-	std::lock_guard lk(const_cast<ThreadPool*>(this)->_groupMutex);
-	auto it = _groupSemaphores.find(groupTag);
-	if (it == _groupSemaphores.end())
+	std::lock_guard lk(const_cast<ThreadPool*>(this)->_activeCountMutex);
+	auto it = _groupActiveCount.find(groupTag);
+	if (it == _groupActiveCount.end())
 		return 0;
-	// 无法直接从 counting_semaphore 查询当前值，使用配置减去近似值
-	return 0; // 实际应该维护一个 atomic 计数器
+	return it->second->load(std::memory_order_acquire);
 }
 
 void ThreadPool::shutdown() {
 	_running = false;
+	_shuttingDown = true;
 
+	std::vector<std::coroutine_handle<>> pendingHandles;
 	{
 		std::lock_guard lk(_mutex);
-		// 清空等待队列（可选：通知所有协程失败）
-		while (!_taskQueue.empty())
+		// 收集所有等待中的协程句柄，以便在锁外 resume
+		while (!_taskQueue.empty()) {
+			auto& task = _taskQueue.front();
+			if (task.handle) {
+				pendingHandles.push_back(task.handle);
+			}
 			_taskQueue.pop();
+		}
 	}
 	_cv.notify_all();
+
+	// 在锁外批量 resume，避免协程恢复后可能的死锁
+	for (auto h : pendingHandles) {
+		if (h)
+			h.resume();
+	}
 
 	for (auto& t : _workers) {
 		if (t.joinable())
@@ -145,6 +156,9 @@ void ThreadPool::_workerLoop() {
 				continue;
 		}
 
+		// 递增活跃计数
+		_incrementActive(pending.groupTag);
+
 		// 执行任务
 		try {
 			pending.task();
@@ -153,6 +167,9 @@ void ThreadPool::_workerLoop() {
 		} catch (...) {
 			std::cerr << "ThreadPool: unknown exception in task" << std::endl;
 		}
+
+		// 递减活跃计数
+		_decrementActive(pending.groupTag);
 
 		// 释放信号量
 		_globalSemaphore->release();
@@ -168,6 +185,31 @@ void ThreadPool::_workerLoop() {
 		if (pending.handle) {
 			pending.handle.resume();
 		}
+	}
+}
+
+// ── 分组活跃计数 ──
+
+void ThreadPool::_incrementActive(const std::string& tag) {
+	if (tag.empty())
+		return;
+
+	std::lock_guard lk(_activeCountMutex);
+	auto it = _groupActiveCount.find(tag);
+	if (it == _groupActiveCount.end()) {
+		it = _groupActiveCount.emplace(tag, std::make_unique<std::atomic<size_t>>(0)).first;
+	}
+	it->second->fetch_add(1, std::memory_order_release);
+}
+
+void ThreadPool::_decrementActive(const std::string& tag) {
+	if (tag.empty())
+		return;
+
+	std::lock_guard lk(_activeCountMutex);
+	auto it = _groupActiveCount.find(tag);
+	if (it != _groupActiveCount.end()) {
+		it->second->fetch_sub(1, std::memory_order_release);
 	}
 }
 

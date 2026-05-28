@@ -36,7 +36,12 @@ struct PoolTicket {
 		return false;
 	}
 	void await_suspend(std::coroutine_handle<> h);
-	void await_resume() const noexcept {}
+	/// @brief 恢复后检查是否因 shutdown 被取消
+	void await_resume() const {
+		if (_pool && _pool->_shuttingDown.load(std::memory_order_acquire)) {
+			// 任务因 shutdown 被取消，调用方可按需检测
+		}
+	}
 
 private:
 	friend class ThreadPool;
@@ -66,7 +71,7 @@ public:
 	/// @brief  查询组当前活跃任务数
 	size_t activeCount(const std::string& groupTag) const;
 
-	/// @brief  优雅关闭
+	/// @brief  优雅关闭（取消所有等待中的协程并 resume 句柄）
 	void shutdown();
 
 	size_t totalThreads() const {
@@ -87,6 +92,10 @@ private:
 	bool _tryAcquireGroup(const std::string& tag);
 	void _releaseGroup(const std::string& tag);
 
+	/// @brief  递增/递减组活跃任务计数（懒初始化原子计数器）
+	void _incrementActive(const std::string& tag);
+	void _decrementActive(const std::string& tag);
+
 	PoolConfig _config;
 	size_t _totalThreads;
 	std::vector<std::thread> _workers;
@@ -101,6 +110,13 @@ private:
 	std::mutex _groupMutex;
 	std::unordered_map<std::string, std::unique_ptr<std::counting_semaphore<>>> _groupSemaphores;
 	std::unique_ptr<std::counting_semaphore<>> _globalSemaphore;
+
+	// 分组活跃任务计数
+	std::unordered_map<std::string, std::unique_ptr<std::atomic<size_t>>> _groupActiveCount;
+	std::mutex _activeCountMutex;
+
+	// 关闭标记：通知所有 awaiting 协程任务被取消
+	std::atomic<bool> _shuttingDown{false};
 };
 
 } // namespace DC
