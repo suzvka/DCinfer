@@ -331,29 +331,29 @@ std::unordered_map<std::string, Tensor> Node::collectOutputTensors(const TaskId&
 }
 
 // ── RunFn 内部使用的计算 API ──
-const Value& Node::_inputImpl(const std::string& name) const {
+const Value& Node::_peekImpl(const std::string& name) const {
 	auto it = _inputSlots.find(name);
 	if (it == _inputSlots.end()) {
-		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_inputImpl",
+		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_peekImpl",
 							"input '" + name + "' not found");
 	}
 	const auto* nt = it->second.peek<Value>();
 	if (!nt) {
-		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::_inputImpl",
+		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::_peekImpl",
 							"input '" + name + "' is not a Value");
 	}
 	return *nt;
 }
 
-Value Node::_takeInputImpl(const std::string& name) {
+Value Node::_popImpl(const std::string& name) {
 	auto it = _inputSlots.find(name);
 	if (it == _inputSlots.end()) {
-		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_takeInputImpl",
+		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_popImpl",
 							"input '" + name + "' not found");
 	}
 	if (!it->second.hasData()) {
-		throw NodeException(NodeException::ErrorType::InternalError, "Node::_takeInputImpl",
-							"input '" + name + "' has no data to take");
+		throw NodeException(NodeException::ErrorType::InternalError, "Node::_popImpl",
+							"input '" + name + "' has no data to pop");
 	}
 	return it->second.take<Value>();
 }

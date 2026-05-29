@@ -17,7 +17,7 @@ static Node::Schema mockSchema() {
 
 // ── Mock 计算逻辑（magic 值来自 engineConfig）──
 static Node::Result mockRunImpl(Node::RunContext& ctx, int magic) {
-	const auto& inNT = ctx.input("in");
+	const auto& inNT = ctx.peek("in");
 	const auto* inVal = inNT.as<Tensor>();
 	auto t = std::make_unique<Tensor>(Tensor::TensorType::Float, sizeof(float));
 	*t = inVal->item<float>() + static_cast<float>(magic);

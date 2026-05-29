@@ -28,7 +28,7 @@ Node::Schema broadcastSchema(size_t downstreamCount) {
 
 Node::RunFn broadcastRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& inVal = ctx.input("in");
+		const auto& inVal = ctx.peek("in");
 		const auto* inTensor = inVal.as<Tensor>();
 		if (!inTensor) {
 			return ctx.failure(Node::Status::InvalidInput, "Broadcast: input is not a DC::Tensor");
@@ -39,13 +39,13 @@ Node::RunFn broadcastRunFn() {
 
 		if (n == 1) {
 			// 单下游：零拷贝 move，等效导线直通
-			ctx.output(outputs[0].name, ctx.takeInput("in"));
+			ctx.output(outputs[0].name, ctx.pop("in"));
 		} else {
 			// 多下游：拷贝 N-1 份，最后一份 move（节省一次拷贝）
 			for (size_t i = 1; i < n; ++i) {
 				ctx.output(outputs[i].name, Value(std::make_unique<Tensor>(*inTensor)));
 			}
-			ctx.output(outputs[0].name, ctx.takeInput("in"));
+			ctx.output(outputs[0].name, ctx.pop("in"));
 		}
 
 		return ctx.success();
@@ -66,7 +66,7 @@ Node::RunFn routingRunFn() {
 	auto roundRobin = std::make_shared<std::atomic<size_t>>(0);
 
 	return [roundRobin](Node::RunContext& ctx) -> Node::Result {
-		const auto& inVal = ctx.input("in");
+		const auto& inVal = ctx.peek("in");
 		const auto* inTensor = inVal.as<Tensor>();
 		if (!inTensor) {
 			return ctx.failure(Node::Status::InvalidInput, "Routing: input is not a DC::Tensor");
@@ -79,7 +79,7 @@ Node::RunFn routingRunFn() {
 		const size_t idx = roundRobin->fetch_add(1, std::memory_order_relaxed) % n;
 
 		// 单下游：零拷贝 move；多下游：仅一份 move（无需拷贝）
-		ctx.output(outputs[idx].name, ctx.takeInput("in"));
+		ctx.output(outputs[idx].name, ctx.pop("in"));
 
 		return ctx.success();
 	};

@@ -371,10 +371,10 @@ private:
 	void _notifyWaiters(const TaskId& taskId, const Result& result);
 
 	// ── RunContext 可调用的内部方法 ──
-	/// @brief  从输入槽读取 Value（RunContext::input 委托）。
-	const Value& _inputImpl(const std::string& name) const;
-	/// @brief  从输入槽移出 Value（RunContext::takeInput 委托），消费后槽位清空。
-	Value _takeInputImpl(const std::string& name);
+	/// @brief  从输入槽读取 Value（RunContext::peek 委托）。
+	const Value& _peekImpl(const std::string& name) const;
+	/// @brief  从输入槽移出 Value（RunContext::pop 委托），消费后槽位清空。
+	Value _popImpl(const std::string& name);
 	/// @brief  将 Value 写入输出槽（RunContext::output 委托）。
 	void _outputImpl(const std::string& name, Value tensor);
 	/// @brief  获取当前引擎的 TensorConverter 钩子指针。
@@ -426,12 +426,13 @@ private:
 // ── RunContext 定义（需在 Node 类体之后）──
 class Node::RunContext {
 public:
-	const Value& input(const std::string& name) const {
-		return _node._inputImpl(name);
+	/// @brief  只读查看输入（不消费），多输入算子校验/读取用
+	const Value& peek(const std::string& name) const {
+		return _node._peekImpl(name);
 	}
 	/// @brief  消费式取出输入：从工作槽移出 Value（槽位清空），用于连接器零拷贝转发
-	Value takeInput(const std::string& name) {
-		return _node._takeInputImpl(name);
+	Value pop(const std::string& name) {
+		return _node._popImpl(name);
 	}
 	void output(const std::string& name, Value tensor) {
 		_node._outputImpl(name, std::move(tensor));

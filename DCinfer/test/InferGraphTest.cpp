@@ -50,8 +50,8 @@ static Node::Schema addSchema() {
 
 static Node::RunFn addRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& aNT = ctx.input("a");
-		const auto& bNT = ctx.input("b");
+		const auto& aNT = ctx.peek("a");
+		const auto& bNT = ctx.peek("b");
 		const auto* a = aNT.as<Tensor>();
 		const auto* b = bNT.as<Tensor>();
 		if (!a || !b)
@@ -75,7 +75,7 @@ static Node::Schema identitySchema() {
 
 static Node::RunFn identityRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& inVal = ctx.input("x");
+		const auto& inVal = ctx.peek("x");
 		const auto* t = inVal.as<Tensor>();
 		if (!t)
 			return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
@@ -263,8 +263,8 @@ void testConnectAll() {
 		dualInSchema.outputs = {{"sum", TensorType::Float, sizeof(float), {}}};
 
 		auto dualRunFn = [](Node::RunContext& ctx) -> Node::Result {
-			const auto& aNT = ctx.input("out_0");
-			const auto& bNT = ctx.input("out_1");
+			const auto& aNT = ctx.peek("out_0");
+			const auto& bNT = ctx.peek("out_1");
 			const auto* a = aNT.as<Tensor>();
 			const auto* b = bNT.as<Tensor>();
 			if (!a || !b)

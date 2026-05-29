@@ -31,8 +31,8 @@ static Node::Schema shapedAddSchema(Shape shape) {
 
 // ── Add 计算逻辑 ──
 static Node::Result addRunImpl(Node::RunContext& self) {
-	const auto& aNT = self.input("a");
-	const auto& bNT = self.input("b");
+	const auto& aNT = self.peek("a");
+	const auto& bNT = self.peek("b");
 	const auto* a = aNT.as<Tensor>();
 	const auto* b = bNT.as<Tensor>();
 
