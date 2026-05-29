@@ -311,8 +311,8 @@ void testNodeQuery() {
 
 int main() {
 	try {
-		testBuildGraph();
 		testSimpleDataflow();
+		testBuildGraph();
 		testBroadcastConnectorInGraph();
 		testRoutingConnectorInGraph();
 		testConnectAll();

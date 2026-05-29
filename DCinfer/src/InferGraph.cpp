@@ -233,17 +233,16 @@ void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout)
 		}
 
 		// 创建协程：等待节点完成后自动传播数据到下游
-		_scheduler->spawn([this, nodeName, taskId, gate]() -> Task<void> {
-			co_await _propagateFrom(nodeName, taskId, gate);
-		});
+		_scheduler->spawnTask(_propagateFrom(nodeName, taskId, gate));
 	}
 }
 
-Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId& taskId,
+Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
 									  std::shared_ptr<TaskGate> gate) {
 	// [检查点 1] 入口：若 task 已终止，直接返回
-	if (_isTerminated(taskId))
+	if (_isTerminated(taskId)) {
 		co_return;
+	}
 
 	auto* src = _findNode(nodeName);
 	if (!src)
@@ -335,10 +334,7 @@ Task<void> InferGraph::_propagateFrom(const std::string& nodeName, const TaskId&
 				co_return;
 
 			// 创建下游传播协程（非阻塞：fire-and-forget spawn）
-			_scheduler->spawn(
-				[this, dstNode = edge.dstNode, taskId, gate]() -> Task<void> {
-					co_await _propagateFrom(dstNode, taskId, gate);
-				});
+			_scheduler->spawnTask(_propagateFrom(edge.dstNode, taskId, gate));
 		}
 	}
 }
@@ -431,17 +427,6 @@ void InferGraph::_terminate(const TaskId& taskId) {
 
 	// 通知 task 完成回调（在所有节点 cleanup 之前触发，保证调用方能安全读取输出）
 	if (_taskCompleteCb) {
-		// Debug: check all nodes for this task
-		for (auto& [name, nodePtr] : _nodes) {
-			bool hasTask = nodePtr->hasTask(taskId);
-			std::cerr << "[TERMINATE] node=" << name << " hasTask=" << hasTask << std::endl;
-			if (hasTask) {
-				for (auto& port : nodePtr->schema().outputs) {
-					bool ho = nodePtr->hasOutput(taskId, port.name);
-					std::cerr << "[TERMINATE]   port=" << port.name << " hasOutput=" << ho << std::endl;
-				}
-			}
-		}
 		_taskCompleteCb(taskId);
 	}
 
@@ -458,8 +443,9 @@ void InferGraph::_terminate(const TaskId& taskId) {
 
 void InferGraph::_onExhausted(const TaskId& taskId) {
 	// 已终止则跳过
-	if (_isTerminated(taskId))
+	if (_isTerminated(taskId)) {
 		return;
+	}
 
 	// 检查声明是否已满足
 	bool allMet = false;

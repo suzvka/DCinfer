@@ -210,7 +210,7 @@ private:
 	// 核心：从指定节点出发，沿边传播数据到所有下游
 	// co_await 节点完成 → 消费输出 → 写入下游 → 按 affinity 提交线程池 → spawn 下游传播协程
 	// @param gate  共享任务门控，最后一个持有者析构时触发耗尽检测
-	Task<void> _propagateFrom(const std::string& nodeName, const TaskId& taskId,
+	Task<void> _propagateFrom(std::string nodeName, TaskId taskId,
 							  std::shared_ptr<TaskGate> gate);
 
 	// ── 输出声明辅助 ──

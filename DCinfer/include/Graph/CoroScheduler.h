@@ -202,6 +202,18 @@ public:
 		_cv.notify_one();
 	}
 
+	/// @brief  直接调度一个已创建的 Task<void>（移动语义）
+	///         用于避免双重协程包装。Task 的协程帧直接入队调度。
+	void spawnTask(Task<void> task) {
+		auto h = task.handle();
+		_activeCoroutines.fetch_add(1, std::memory_order_release);
+		{
+			std::lock_guard lk(_mutex);
+			_readyQueue.push(h);
+		}
+		_cv.notify_one();
+	}
+
 	/// @brief  将协程 handle 重新入队（供 awaitable 内部使用）
 	void enqueue(std::coroutine_handle<> h);
 

@@ -596,19 +596,22 @@ void Node::_notifyWaiters(const TaskId& taskId, const Result& result) {
 	std::vector<std::coroutine_handle<>> handles;
 	{
 		std::lock_guard lk(_waitersMutex);
-		// 先标记完成：即使 _waiters 中尚无等待者，
-		// await_suspend 也能通过此标记发现任务已结束，直接 resume
 		_completedTasks.insert(taskId);
 		auto it = _waiters.find(taskId);
-		if (it == _waiters.end())
+		if (it == _waiters.end()) {
 			return;
+		}
 		handles = std::move(it->second);
 		_waiters.erase(it);
 	}
 	// 在锁外 resume，避免协程恢复后可能的死锁
 	for (auto h : handles) {
-		if (h)
+		if (h) {
 			h.resume();
+			if (h.done()) {
+				h.destroy();
+			}
+		}
 	}
 }
 
@@ -633,10 +636,6 @@ void NodeCompletion::await_suspend(std::coroutine_handle<> h) {
 
 	std::lock_guard lk(_node->_waitersMutex);
 
-	// 关键：await_ready() 到 await_suspend() 之间存在竞态窗口——
-	// 目标 task 可能已在 ThreadPool 中完成且 _notifyWaiters 已执行完毕。
-	// _completedTasks 在 _waitersMutex 保护下充当原子"完成标记"，
-	// 避免协程句柄被孤儿化（永远无人 resume）。
 	if (_node->_completedTasks.contains(_taskId)) {
 		h.resume();
 		return;

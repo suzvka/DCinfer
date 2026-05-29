@@ -79,44 +79,25 @@ public:
 	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
 		// 注册 task 完成回调：在 _terminate（所有传播完成）时触发，在 cleanup 前执行
 		_graph.setTaskCompleteCallback([this](const TaskId& tid) {
-			std::cerr << "[CALLBACK] task=" << tid << std::endl;
 			// 捕获所有声明输出到本地缓存
 			{
 				std::lock_guard lk(_declMutex);
 				auto it = _declaredOutputs.find(tid);
-				if (it == _declaredOutputs.end()) {
-					std::cerr << "[CALLBACK] no declarations for " << tid << std::endl;
-				} else {
-					std::cerr << "[CALLBACK] " << it->second.size() << " declaration(s)" << std::endl;
+				if (it != _declaredOutputs.end()) {
 					auto& captured = _capturedOutputs[tid];
 					for (auto& [nodeName, portName] : it->second) {
 						std::string key = nodeName + ":" + portName;
-						if (captured.contains(key)) {
-							std::cerr << "[CALLBACK] " << key << " already captured" << std::endl;
+						if (captured.contains(key))
 							continue;
-						}
 						auto* n = _graph.node(nodeName);
-						if (!n) {
-							std::cerr << "[CALLBACK] node " << nodeName << " not found" << std::endl;
+						if (!n || !n->hasOutput(tid, portName))
 							continue;
-						}
-						if (!n->hasOutput(tid, portName)) {
-							std::cerr << "[CALLBACK] " << key << " no output" << std::endl;
-							continue;
-						}
 						try {
 							const auto& val = n->peekOutput(tid, portName);
 							auto* t = val.as<Tensor>();
-							if (t) {
+							if (t)
 								captured[key] = Tensor(*t);
-								std::cerr << "[CALLBACK] captured " << key << std::endl;
-							} else {
-								std::cerr << "[CALLBACK] " << key << " not a tensor" << std::endl;
-							}
-						} catch (const std::exception& e) {
-							std::cerr << "[CALLBACK] peekOutput threw: " << e.what() << std::endl;
 						} catch (...) {
-							std::cerr << "[CALLBACK] peekOutput threw unknown" << std::endl;
 						}
 					}
 				}

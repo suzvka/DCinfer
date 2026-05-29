@@ -184,6 +184,9 @@ void ThreadPool::_workerLoop() {
 		// resume 协程句柄
 		if (pending.handle) {
 			pending.handle.resume();
+			if (pending.handle.done()) {
+				pending.handle.destroy();
+			}
 		}
 	}
 }
