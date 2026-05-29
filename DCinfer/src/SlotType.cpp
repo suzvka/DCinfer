@@ -54,7 +54,7 @@ const SlotCheckFn* ValidatorRegistry::find(SlotDataType type) const {
 SlotDataStatus ValidatorRegistry::validate(const void* data, SlotDataType type, const TensorMeta& rule) const {
 	const auto* fn = find(type);
 	if (!fn) {
-		return SlotDataStatus{}; // 未注册类型直接放行
+		return SlotDataStatus{};
 	}
 	return (*fn)(data, type, rule);
 }

@@ -123,10 +123,8 @@ void TensorData::editMode() {
 		setViewFlag();
 		return;
 	}
-	// If no view exists but we are entering edit mode (e.g. first write to an
-	// initially-empty tensor), create an empty view state rather than
-	// failing. This preserves any catalog information that may have been
-	// prepared earlier and allows subsequent write() to populate blocks.
+	// If no view exists but we are entering edit mode,
+	// create an empty view state rather than failing.
 	if (!hasView()) {
 		setViewFlag();
 		return;
@@ -156,11 +154,6 @@ void DC::TensorData::ensureView() {
 		buildView();
 	}
 
-	// If there is no view materialized and no cache to build it from,
-	// do not clear existing catalog/state. Calling clearView() here
-	// would discard catalog information that may have been prepared
-	// by updateCatalog() for upcoming writes. Only set the view flag
-	// when a view actually exists.
 	if (!hasView()) {
 		return;
 	}
@@ -169,7 +162,6 @@ void DC::TensorData::ensureView() {
 }
 
 size_t TensorData::blockOffset(const Shape& blockPath, const Shape& denseShape) const {
-	// 处理标量
 	if (denseShape.empty()) {
 		if (!blockPath.empty()) {
 			throw std::out_of_range("TensorData::calculateBlockOffsetBytes: blockPath rank mismatch");
@@ -214,9 +206,8 @@ TensorData::Shape TensorData::getDenseShape() const {
 	Shape shape(_dataCatalog.size());
 	for (size_t i = 0; i < _dataCatalog.size(); ++i) {
 		if (_dataCatalog[i].empty()) {
-			shape[i] = 0; // if dimension has no index, size is 0
+			shape[i] = 0;
 		} else {
-			// Shape size is max index + 1
 			shape[i] = *std::max_element(_dataCatalog[i].begin(), _dataCatalog[i].end()) + 1;
 		}
 	}

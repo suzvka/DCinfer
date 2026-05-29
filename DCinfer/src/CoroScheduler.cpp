@@ -72,7 +72,6 @@ void CoroScheduler::_workerLoop() {
 		}
 		_activeCoroutines.fetch_sub(1, std::memory_order_release);
 
-		// 协程完成后销毁 handle
 		if (h.done()) {
 			h.destroy();
 		}

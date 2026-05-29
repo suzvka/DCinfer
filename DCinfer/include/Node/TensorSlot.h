@@ -11,7 +11,6 @@
 #include "DCtype.h"
 #include "SlotType.h"
 #include "Value.h"
-#include <iostream>
 
 namespace DC {
 
@@ -179,13 +178,6 @@ TensorSlot& TensorSlot::store(T&& data) {
 
 	// 校验：始终按存储的实际类型进行校验
 	auto status = ValidatorRegistry::instance().validate(std::addressof(data), typeEnum, _rule);
-
-	// Diagnostic log
-	try {
-		std::cerr << "TensorSlot::store name='" << _rule.name << "' type=" << static_cast<int>(typeEnum)
-				  << " status.ready=" << status.ready() << " invalid=" << status.invalid
-				  << " needConvert=" << status.needConvert << " needAlign=" << status.needAlign << std::endl;
-	} catch (...) {}
 
 	if (!status.ready()) {
 		if (status.invalid) {

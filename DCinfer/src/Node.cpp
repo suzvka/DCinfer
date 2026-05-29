@@ -2,8 +2,6 @@
 #include "EngineRegistry.h"
 #include "NodeException.h"
 
-#include <iostream>
-
 namespace DC {
 
 // ── Schema 方法实现 ──
@@ -265,7 +263,6 @@ void Node::tryExecute(const TaskId& taskId) {
 							"task '" + taskId + "' is not ready");
 	}
 
-	// 保护共享工作槽位 _inputSlots / _outputSlots，同一时刻仅允许一个 task 使用
 	if (_executionGuard.test_and_set(std::memory_order_acquire)) {
 		throw NodeException(NodeException::ErrorType::Reentrant, "Node::tryExecute",
 							"node '" + _name + "' is busy executing another task");
@@ -431,7 +428,6 @@ void Node::_ensureTaskExists(const TaskId& taskId) {
 
 	TaskBuffer inputs;
 	for (const auto& port : _schema.inputs) {
-		// 所有端口初始为空（nullopt），数据由 setInput 填充
 		inputs.emplace(port.name, std::nullopt);
 	}
 	_taskInputs.emplace(taskId, std::move(inputs));
@@ -530,17 +526,6 @@ void Node::_checkAndExecute(const TaskId& taskId) {
 						break;
 					}
 				}
-			}
-		}
-
-		// Diagnostic logging for failures to aid debugging
-		if (!result.ok()) {
-			try {
-				std::cerr << "Node[" << _name << "] task '" << taskId
-						  << "' failed: status=" << static_cast<int>(result.status) << ", message='" << result.message
-						  << "'" << std::endl;
-			} catch (...) {
-				// swallow any logging errors
 			}
 		}
 

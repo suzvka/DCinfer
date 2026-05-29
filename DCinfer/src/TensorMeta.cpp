@@ -20,16 +20,13 @@ void TensorMeta::ensureTypeMap() {
 }
 
 bool TensorMeta::checkShape(const std::vector<int64_t>& currentShape) const {
-	// Unset rule: skip check
 	if (shape.empty()) {
 		return true;
 	}
-	// Dimension count must match
 	if (shape.size() != currentShape.size()) {
 		return false;
 	}
 	for (size_t i = 0; i < shape.size(); ++i) {
-		// -1 means dynamic dimension: skip comparison
 		if (shape[i] != -1 && shape[i] != currentShape[i]) {
 			return false;
 		}

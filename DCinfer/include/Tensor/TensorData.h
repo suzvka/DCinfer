@@ -470,9 +470,8 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	auto current = getCurrentShape();
 	if (current == targetShape)
 		return *this;
-	if (targetShape.empty()) { /* handle scalar case */
+	if (targetShape.empty()) {
 	}
-	// 增加这一行，防止非法收缩
 	for (size_t i = 0; i < current.size(); ++i) {
 		if (targetShape[i] < current[i]) {
 			throw std::invalid_argument(

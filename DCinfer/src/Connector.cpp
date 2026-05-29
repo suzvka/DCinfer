@@ -41,7 +41,7 @@ Node::RunFn broadcastRunFn() {
 			// 单下游：零拷贝 move，等效导线直通
 			ctx.output(outputs[0].name, ctx.pop("in"));
 		} else {
-			// 多下游：拷贝 N-1 份，最后一份 move（节省一次拷贝）
+			// 多下游：拷贝 N-1 份，最后一份 move
 			for (size_t i = 1; i < n; ++i) {
 				ctx.output(outputs[i].name, Value(std::make_unique<Tensor>(*inTensor)));
 			}
@@ -75,7 +75,6 @@ Node::RunFn routingRunFn() {
 		const auto& outputs = ctx.schema().outputs;
 		const size_t n = outputs.size();
 
-		// 轮询选取一个输出口
 		const size_t idx = roundRobin->fetch_add(1, std::memory_order_relaxed) % n;
 
 		// 单下游：零拷贝 move；多下游：仅一份 move（无需拷贝）

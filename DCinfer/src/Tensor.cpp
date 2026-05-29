@@ -103,8 +103,6 @@ std::optional<Tensor::ErrorType> Tensor::checkPathValid(const Shape& path, const
 	if (path.size() > shape.size())
 		return Tensor::ErrorType::InvalidPath;
 	for (size_t i = 0; i < path.size(); ++i) {
-		// path is signed (int64_t) while shape elements are size_t (unsigned).
-		// Perform comparisons in a signed domain to avoid signed/unsigned mismatch warnings.
 		int64_t idx = path[i];
 		int64_t bound = static_cast<int64_t>(shape[i]);
 		if (idx < 0 || idx >= bound)
@@ -127,9 +125,6 @@ void Tensor::moveFrom(Tensor&& other) noexcept {
 	_data = std::move(other._data);
 }
 
-// 在这里支持负数索引
-// 先获取当前数据的实际形状，负数维度就可以解释为倒着数
-// 超出范围在这里就可以报错
 std::vector<size_t> Tensor::indexShape(const Shape& shape, bool isRead) const {
 	auto dataShape = _data.getCurrentShape();
 
@@ -141,28 +136,22 @@ std::vector<size_t> Tensor::indexShape(const Shape& shape, bool isRead) const {
 	std::vector<size_t> result;
 	for (size_t i = 0; i < shape.size(); ++i) {
 		int64_t idx = shape[i];
-		// If the requested dimension exists use its size; otherwise treat as not-yet-present.
 		int64_t dimSize = (i < dataShape.size()) ? static_cast<int64_t>(dataShape[i]) : 0;
 
-		// Negative indices can only be resolved when the dimension currently exists.
 		if (idx < 0) {
 			if (i < dataShape.size()) {
-				idx += dimSize; // Convert negative index to positive
+				idx += dimSize;
 			} else {
-				// Writing may create new dimensions, but a negative index cannot be
-				// interpreted for a non-existent dimension.
 				abort(ErrorType::InvalidPath,
 					  "negative index at dimension " + std::to_string(i) + " cannot be resolved");
 			}
 		}
 
 		if (isRead) {
-			// Reads must be fully in-range.
 			if (idx < 0 || idx >= dimSize) {
 				abort(ErrorType::InvalidPath, "index path dimension " + std::to_string(i) + " is out of bounds");
 			}
 		} else {
-			// For writes we allow the index to be >= dimSize (will create/expand).
 			if (idx < 0) {
 				abort(ErrorType::InvalidPath, "index path dimension " + std::to_string(i) + " is out of bounds");
 			}

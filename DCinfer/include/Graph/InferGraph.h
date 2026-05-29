@@ -239,9 +239,9 @@ private:
 	std::vector<Edge> _edges;
 	std::vector<OutputBinding> _outputBindings;
 
-	// 协程调度器（_ownedScheduler 必须在 _scheduler 之前声明：C++ 按声明顺序初始化）
-	std::unique_ptr<CoroScheduler> _ownedScheduler; // 默认构造时内部持有
-	CoroScheduler* _scheduler;                       // 非拥有指针，指向外部或 _ownedScheduler
+	// _ownedScheduler 必须在 _scheduler 之前声明
+	std::unique_ptr<CoroScheduler> _ownedScheduler;
+	CoroScheduler* _scheduler;
 
 	// 线程池
 	ThreadPool _computePool;
