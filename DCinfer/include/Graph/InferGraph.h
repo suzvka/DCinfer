@@ -94,10 +94,11 @@ public:
 	/// @return 成功匹配的端口对数
 	size_t connectAll(const std::string& srcNode, const std::string& dstNode);
 
-	/// @brief  接线：在两个节点间自动插入导线连接器（Wire Connector）
-	///         等价于 connect(src→wire.in) + connect(wire.out→dst)
+	/// @brief  接线：在两个节点间自动插入广播连接器（Broadcast Connector, N=1）
+	///         等价于 connect(src→bc.in) + connect(bc.out_0→dst)
+	///         N=1 广播走 takeInput 零拷贝 move 路径，等效直通导线
 	///         适用于两个业务节点之间的 1→1 直连场景
-	/// @return 指向自动创建的导线连接器的非拥有指针；若节点或端口不存在则返回 nullptr
+	/// @return 指向自动创建的广播连接器的非拥有指针；若节点或端口不存在则返回 nullptr
 	Node* wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
 			   const std::string& dstPort);
 

@@ -91,7 +91,7 @@ void InferGraph::bindOutput(const std::string& nodeName, const std::string& port
 }
 
 // ════════════════════════════════════════════
-// wire：自动插入导线连接器
+// wire：自动插入广播连接器（1→1，零拷贝 move 直通）
 // ════════════════════════════════════════════
 
 Node* InferGraph::wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
@@ -105,19 +105,19 @@ Node* InferGraph::wire(const std::string& srcNode, const std::string& srcPort, c
 	if (!dst->schema().findInput(dstPort))
 		return nullptr;
 
-	// 自动创建导线连接器
+	// 自动创建广播连接器（1 下游 → 零拷贝 move 直通，等效导线）
 	auto wireName = "__wire_" + std::to_string(_nextWireId.fetch_add(1));
-	auto wireNode = std::make_unique<Node>("Connector.Wire", wireName, Connector::wireSchema(), Connector::wireRunFn(),
-										   nullptr, ThreadPoolAffinity::System);
+	auto wireNode = std::make_unique<Node>("Connector.Broadcast", wireName, Connector::broadcastSchema(1),
+										   Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
 	wireNode->setConnector(true);
 	auto* wirePtr = addNode(std::move(wireNode));
 	if (!wirePtr)
 		return nullptr;
 
-	// 上游 → 导线
+	// 上游 → 广播
 	_edges.push_back({srcNode, srcPort, wireName, "in"});
-	// 导线 → 下游
-	_edges.push_back({wireName, "out", dstNode, dstPort});
+	// 广播(out_0) → 下游
+	_edges.push_back({wireName, "out_0", dstNode, dstPort});
 
 	return wirePtr;
 }

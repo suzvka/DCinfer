@@ -37,13 +37,16 @@ Node::RunFn broadcastRunFn() {
 		const auto& outputs = ctx.schema().outputs;
 		const size_t n = outputs.size();
 
-		// 输出[1..n-1]：每个深拷贝一份
-		for (size_t i = 1; i < n; ++i) {
-			ctx.output(outputs[i].name, Value(std::make_unique<Tensor>(*inTensor)));
+		if (n == 1) {
+			// 单下游：零拷贝 move，等效导线直通
+			ctx.output(outputs[0].name, ctx.takeInput("in"));
+		} else {
+			// 多下游：拷贝 N-1 份，最后一份 move（节省一次拷贝）
+			for (size_t i = 1; i < n; ++i) {
+				ctx.output(outputs[i].name, Value(std::make_unique<Tensor>(*inTensor)));
+			}
+			ctx.output(outputs[0].name, ctx.takeInput("in"));
 		}
-
-		// 输出[0]：拷贝一份（不能 move const ref）
-		ctx.output(outputs[0].name, Value(std::make_unique<Tensor>(*inTensor)));
 
 		return ctx.success();
 	};
@@ -75,32 +78,9 @@ Node::RunFn routingRunFn() {
 		// 轮询选取一个输出口
 		const size_t idx = roundRobin->fetch_add(1, std::memory_order_relaxed) % n;
 
-		// 拷贝一份写入选中的输出口（不拷贝其余 N-1 个口）
-		ctx.output(outputs[idx].name, Value(std::make_unique<Tensor>(*inTensor)));
+		// 单下游：零拷贝 move；多下游：仅一份 move（无需拷贝）
+		ctx.output(outputs[idx].name, ctx.takeInput("in"));
 
-		return ctx.success();
-	};
-}
-
-// ════════════════════════════════════════════
-// 导线连接器
-// ════════════════════════════════════════════
-
-Node::Schema wireSchema() {
-	Node::Schema s;
-	s.inputs = {{"in", Node::TensorType::Void, 0, {}}};
-	s.outputs = {{"out", Node::TensorType::Void, 0, {}}};
-	return s;
-}
-
-Node::RunFn wireRunFn() {
-	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& inVal = ctx.input("in");
-		const auto* inTensor = inVal.as<Tensor>();
-		if (!inTensor) {
-			return ctx.failure(Node::Status::InvalidInput, "Wire: input is not a DC::Tensor");
-		}
-		ctx.output("out", Value(std::make_unique<Tensor>(*inTensor)));
 		return ctx.success();
 	};
 }
@@ -115,8 +95,6 @@ void registerBuiltinConnectors(EngineRegistry& reg) {
 	reg.registerOperator("Connector.Broadcast", broadcastSchema(1), broadcastRunFn());
 
 	reg.registerOperator("Connector.Routing", routingSchema(1), routingRunFn());
-
-	reg.registerOperator("Connector.Wire", wireSchema(), wireRunFn());
 }
 
 } // namespace DC::Connector
