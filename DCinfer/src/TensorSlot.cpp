@@ -49,11 +49,29 @@ bool TensorSlot::isOutput() const {
 }
 
 bool TensorSlot::hasData() const {
-	return _blob.has_value() || _defaultData != nullptr;
+	return _blob.has_value() || _defaultData != nullptr || static_cast<bool>(_defaultProvider);
 }
 
 bool TensorSlot::hasDefaultData() const {
 	return _defaultData != nullptr;
+}
+
+TensorSlot& TensorSlot::setDefaultProvider(DefaultProvider fn) {
+	_defaultProvider = std::move(fn);
+	return *this;
+}
+
+bool TensorSlot::hasDefaultProvider() const {
+	return static_cast<bool>(_defaultProvider);
+}
+
+void TensorSlot::resolveDefaultIfNeeded(const SlotMap& peers) {
+	if (_blob.has_value() || !_defaultProvider)
+		return;
+	auto t = _defaultProvider(peers);
+	if (t) {
+		store(Value(std::move(t)));
+	}
 }
 
 const Tensor& TensorSlot::defaultTensor() const {
@@ -101,6 +119,7 @@ void TensorSlot::clear() {
 	}
 	_blob.reset();
 	_defaultData.reset();
+	_defaultProvider = nullptr;
 }
 
 void TensorSlot::clearData() {

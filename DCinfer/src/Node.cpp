@@ -54,6 +54,16 @@ bool Node::Schema::valid() const {
 				return false;
 		}
 	}
+	// 校验 shapeAnchor 引用的端口必须存在（且不能自引用）
+	for (const auto& p : inputs) {
+		if (p.shapeAnchor.has_value()) {
+			const auto& anchorName = p.shapeAnchor.value();
+			if (anchorName == p.name)
+				return false;
+			if (!findInput(anchorName))
+				return false;
+		}
+	}
 	return true;
 }
 
@@ -72,6 +82,25 @@ Node::Node(std::string type, std::string name, Schema schema, RunFn fn, EngineIn
 		TensorSlot::Config cfg;
 		cfg.setPosition(TensorSlot::Config::Position::Output);
 		_outputSlots.emplace(port.name, TensorSlot(port.name, port.type, port.typeSize, port.shape, cfg));
+	}
+
+	// 为 shapeAnchor 端口安装懒求值 DefaultProvider
+	for (const auto& port : _schema.inputs) {
+		if (port.shapeAnchor.has_value()) {
+			auto& slot = _inputSlots.at(port.name);
+			std::string anchorName = port.shapeAnchor.value();
+			slot.setDefaultProvider([anchorName](const TensorSlot::SlotMap& peers) -> std::unique_ptr<Tensor> {
+				auto it = peers.find(anchorName);
+				if (it == peers.end())
+					return nullptr;
+				const auto* anchor = it->second.peek<Tensor>();
+				if (!anchor || !anchor->valid())
+					return nullptr;
+				auto t = std::make_unique<Tensor>(anchor->type(), anchor->typeSize(), anchor->shape());
+				t->fill<char>(0);
+				return t;
+			});
+		}
 	}
 }
 
@@ -316,6 +345,19 @@ const Value& Node::_inputImpl(const std::string& name) const {
 	return *nt;
 }
 
+Value Node::_takeInputImpl(const std::string& name) {
+	auto it = _inputSlots.find(name);
+	if (it == _inputSlots.end()) {
+		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_takeInputImpl",
+							"input '" + name + "' not found");
+	}
+	if (!it->second.hasData()) {
+		throw NodeException(NodeException::ErrorType::InternalError, "Node::_takeInputImpl",
+							"input '" + name + "' has no data to take");
+	}
+	return it->second.take<Value>();
+}
+
 void Node::_outputImpl(const std::string& name, Value tensor) {
 	auto it = _outputSlots.find(name);
 	if (it == _outputSlots.end()) {
@@ -555,6 +597,11 @@ void Node::_loadTaskToWorkingSlots(const TaskId& taskId) {
 		} else if (port.defaultValue.has_value()) {
 			workSlot.store(Value(std::make_unique<Tensor>(port.defaultValue.value())));
 		}
+	}
+
+	// 第二遍：懒求值 DefaultProvider（形状锚定等动态默认值）
+	for (auto& [name, slot] : _inputSlots) {
+		slot.resolveDefaultIfNeeded(_inputSlots);
 	}
 }
 

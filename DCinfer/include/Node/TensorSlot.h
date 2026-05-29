@@ -4,6 +4,7 @@
 #include <optional>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 
 #include "Tensor.hpp"
 #include "Exception.h"
@@ -24,6 +25,14 @@ class TensorSlot {
 
 public:
 	using Shape = Tensor::Shape;
+
+	/// @brief 同节点内所有槽位的映射表，供 DefaultProvider 在懒求值时查阅锚定槽数据。
+	using SlotMap = std::unordered_map<std::string, TensorSlot>;
+
+	/// @brief 懒求值默认值工厂：当槽位无显式输入且无静态默认值时，由该回调按需生成 Tensor。
+	/// @param peers 同节点所有输入槽位的映射（key=槽位名），可从中读取锚定张量的形状。
+	/// @return 生成的默认张量；返回 nullptr 表示放弃（槽位保持空）。
+	using DefaultProvider = std::function<std::unique_ptr<Tensor>(const SlotMap&)>;
 
 	/// @brief 槽位配置：仅含位置标记（Input / Output / Auto）。
 	class Config {
@@ -60,6 +69,18 @@ public:
 
 	/// @brief  设置默认张量数据（输入槽位 fallback）。
 	TensorSlot& setDefaultTensor(const Tensor& data);
+
+	/// @brief  设置懒求值默认值工厂（输入槽位 fallback）。
+	///         当槽位无显式输入且无静态默认值时，resolveDefaultIfNeeded() 调用此工厂生成数据。
+	///         典型用途：形状锚定到同节点另一输入端口，运行时动态创建零张量。
+	TensorSlot& setDefaultProvider(DefaultProvider fn);
+
+	/// @brief  若槽位无运行时数据但有 DefaultProvider，调用工厂填充槽位。
+	/// @param peers 同节点所有输入槽位的映射，供工厂查阅锚定数据。
+	void resolveDefaultIfNeeded(const SlotMap& peers);
+
+	/// @brief  是否设置了 DefaultProvider。
+	bool hasDefaultProvider() const;
 
 	/// @brief  槽位名称。
 	const std::string& name() const;
@@ -138,6 +159,7 @@ private:
 
 	TensorMeta _rule;
 	std::unique_ptr<Tensor> _defaultData; // 默认数据（永远是 DC::Tensor）
+	DefaultProvider _defaultProvider; // 懒求值默认值工厂
 	std::optional<TypedBlob> _blob; // 运行时数据
 	Config _config;
 
