@@ -2,144 +2,30 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "windows-debug",
-      "displayName": "Windows x64 Debug",
+      "name": "default",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      },
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_STANDARD": "20",
         "CMAKE_CXX_STANDARD_REQUIRED": "ON",
-        "BUILD_TESTS": "ON"
+        "CMAKE_RUNTIME_OUTPUT_DIRECTORY": "${sourceDir}/build/bin",
+        "CMAKE_LIBRARY_OUTPUT_DIRECTORY": "${sourceDir}/build/lib",
+        "CMAKE_ARCHIVE_OUTPUT_DIRECTORY": "${sourceDir}/build/lib"
       }
     },
     {
-      "name": "windows-release",
-      "displayName": "Windows x64 Release",
+      "name": "release",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      },
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_STANDARD": "20",
         "CMAKE_CXX_STANDARD_REQUIRED": "ON",
-        "BUILD_TESTS": "ON"
+        "CMAKE_RUNTIME_OUTPUT_DIRECTORY": "${sourceDir}/build/bin",
+        "CMAKE_LIBRARY_OUTPUT_DIRECTORY": "${sourceDir}/build/lib",
+        "CMAKE_ARCHIVE_OUTPUT_DIRECTORY": "${sourceDir}/build/lib"
       }
-    },
-    {
-      "name": "linux-debug",
-      "displayName": "Linux x64 Debug",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
-        "BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "linux-release",
-      "displayName": "Linux x64 Release",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
-        "BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "macos-debug",
-      "displayName": "macOS Debug",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Darwin"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
-        "BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "macos-release",
-      "displayName": "macOS Release",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "toolchainFile": "${sourceDir}/external/vcpkg/scripts/buildsystems/vcpkg.cmake",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Darwin"
-      },
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
-        "BUILD_TESTS": "ON"
-      }
-    }
-  ],
-  "buildPresets": [
-    {
-      "name": "windows-debug",
-      "configurePreset": "windows-debug",
-      "configuration": "Debug"
-    },
-    {
-      "name": "windows-release",
-      "configurePreset": "windows-release",
-      "configuration": "Release"
-    },
-    {
-      "name": "linux-debug",
-      "configurePreset": "linux-debug",
-      "configuration": "Debug"
-    },
-    {
-      "name": "linux-release",
-      "configurePreset": "linux-release",
-      "configuration": "Release"
-    },
-    {
-      "name": "macos-debug",
-      "configurePreset": "macos-debug",
-      "configuration": "Debug"
-    },
-    {
-      "name": "macos-release",
-      "configurePreset": "macos-release",
-      "configuration": "Release"
     }
   ]
 }
