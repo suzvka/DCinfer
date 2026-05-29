@@ -3,6 +3,16 @@ add_library(DCinfer::DCinfer ALIAS DCinfer)
 
 target_compile_features(DCinfer PUBLIC cxx_std_20)
 
+# Linux: <thread>, <mutex>, <semaphore>, <condition_variable> 均需链接 pthread
+# Windows: Threads::Threads 是空操作，不影响
+find_package(Threads REQUIRED)
+target_link_libraries(DCinfer PUBLIC Threads::Threads)
+
+# GCC 10~13 的 <coroutine> 需要显式启用（GCC 14+ 内置）
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
+    target_compile_options(DCinfer PUBLIC -fcoroutines)
+endif()
+
 target_include_directories(DCinfer
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
