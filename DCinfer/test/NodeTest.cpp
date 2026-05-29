@@ -568,6 +568,85 @@ void runTests() {
 	}
 	END_TEST();
 
+	// ── Test 18: shapeAnchor 动态默认值（形状锚定零张量）──
+	TEST("shapeAnchor dynamic default tensor") {
+		Node::Schema s;
+		s.inputs = {
+			{"data", TensorType::Float, sizeof(float), {4}},
+			Node::Port::anchored<float>("output_buf", "data")
+		};
+		s.outputs = {{"sum", TensorType::Float, sizeof(float), {4}}};
+		CHECK(s.valid(), "shapeAnchor schema should be valid");
+
+		// RunFn: 零条件分支，框架保证 output_buf 始终存在
+		auto runFn = [](Node::RunContext& ctx) -> Node::Result {
+			const auto* data = ctx.input("data").as<Tensor>();
+			const auto* buf = ctx.input("output_buf").as<Tensor>();
+
+			auto dSpan = data->data<float>();
+			auto bSpan = buf->data<float>();
+			std::vector<float> result(dSpan.size());
+			for (size_t i = 0; i < dSpan.size(); ++i)
+				result[i] = dSpan[i] + bSpan[i];
+
+			std::vector<std::byte> bytes(result.size() * sizeof(float));
+			std::memcpy(bytes.data(), result.data(), bytes.size());
+			ctx.output("sum", Value(std::make_unique<Tensor>(TensorType::Float, sizeof(float),
+									data->shape(), Tensor::DataBlock(std::move(bytes)))));
+			return ctx.success();
+		};
+
+		auto node = reg.createNode("shapeAnchor1", s, runFn);
+
+		std::atomic<bool> completed{false};
+		bool valuesMatch = false;
+		bool shapeMatch = false;
+
+		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+			CHECK(result.ok(), "result should be Ok");
+			auto outNT = node->getOutput(taskId, "sum");
+			auto* out = outNT.as<Tensor>();
+			auto outData = out->data<float>();
+			std::vector<float> expected = {1, 2, 3, 4};
+			valuesMatch = (outData.size() == expected.size());
+			for (size_t i = 0; i < expected.size() && valuesMatch; ++i) {
+				if (std::abs(outData[i] - expected[i]) > 1e-6f)
+					valuesMatch = false;
+			}
+			shapeMatch = (out->shape() == Tensor::Shape{4});
+			node->clearTask(taskId);
+			completed = true;
+		});
+
+		// 只喂 "data"，不喂 "output_buf"——框架应自动创建同形零张量
+		std::vector<float> dataVals = {1, 2, 3, 4};
+		std::vector<std::byte> bytes(dataVals.size() * sizeof(float));
+		std::memcpy(bytes.data(), dataVals.data(), bytes.size());
+		auto dataT = std::make_unique<Tensor>(TensorType::Float, sizeof(float),
+											  Tensor::Shape{4}, Tensor::DataBlock(std::move(bytes)));
+		node->setInput("task1", "data", Value(std::move(dataT)));
+
+		CHECK(node->isReady("task1"), "should be ready without output_buf (shapeAnchor)");
+		node->tryExecute("task1");
+
+		CHECK(completed, "should complete with shapeAnchor default");
+		CHECK(shapeMatch, "output shape should be [4]");
+		CHECK(valuesMatch, "data + zero = data, values should match");
+	}
+	END_TEST();
+
+	// ── Test 19: shapeAnchor 引用不存在的端口 → Schema 非法 ──
+	TEST("shapeAnchor invalid - nonexistent anchor port") {
+		Node::Schema s;
+		s.inputs = {
+			{"data", TensorType::Float, sizeof(float), {4}},
+			Node::Port::anchored<float>("buf", "no_such_port")
+		};
+		s.outputs = {{"out", TensorType::Float, sizeof(float), {4}}};
+		CHECK(!s.valid(), "schema with bad shapeAnchor should be invalid");
+	}
+	END_TEST();
+
 	std::cout << "\nAll Node tests passed!" << std::endl;
 }
 

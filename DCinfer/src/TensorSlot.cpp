@@ -17,6 +17,20 @@ TensorSlot& TensorSlot::setDefaultTensor(const Tensor& data) {
 	return *this;
 }
 
+TensorSlot& TensorSlot::setDefaultProvider(DefaultProvider fn) {
+	_defaultProvider = std::move(fn);
+	return *this;
+}
+
+void TensorSlot::resolveDefaultIfNeeded(const SlotMap& peers) {
+	if (!_blob.has_value() && _defaultProvider) {
+		auto t = _defaultProvider(peers);
+		if (t) {
+			this->store(Value(std::move(t)));
+		}
+	}
+}
+
 const std::string& TensorSlot::name() const {
 	return _rule.name;
 }
@@ -81,6 +95,9 @@ SlotDataType TensorSlot::storedType() const {
 	if (_defaultData) {
 		return SlotDataType::DCTensor;
 	}
+	if (_defaultProvider) {
+		return SlotDataType::DCTensor;
+	}
 	return SlotDataType::Unknown;
 }
 
@@ -101,6 +118,7 @@ void TensorSlot::clear() {
 	}
 	_blob.reset();
 	_defaultData.reset();
+	_defaultProvider = nullptr;
 }
 
 void TensorSlot::clearData() {

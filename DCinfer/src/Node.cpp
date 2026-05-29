@@ -54,6 +54,11 @@ bool Node::Schema::valid() const {
 				return false;
 		}
 	}
+	// 校验 shapeAnchor 引用端口存在
+	for (const auto& p : inputs) {
+		if (p.shapeAnchor.has_value() && !findInput(*p.shapeAnchor))
+			return false;
+	}
 	return true;
 }
 
@@ -66,6 +71,33 @@ Node::Node(std::string type, std::string name, Schema schema, RunFn fn, EngineIn
 		TensorSlot::Config cfg;
 		cfg.setPosition(TensorSlot::Config::Position::Input);
 		_inputSlots.emplace(port.name, TensorSlot(port.name, port.type, port.typeSize, port.shape, cfg));
+	}
+
+	// 为 shapeAnchor 声明的端口注入 DefaultProvider
+	for (const auto& port : _schema.inputs) {
+		if (!port.shapeAnchor)
+			continue;
+		auto it = _inputSlots.find(port.name);
+		if (it == _inputSlots.end())
+			continue;
+		std::string anchorName = *port.shapeAnchor;
+		it->second.setDefaultProvider([anchorName](const TensorSlot::SlotMap& peers) -> std::unique_ptr<Tensor> {
+			auto anchorIt = peers.find(anchorName);
+			if (anchorIt == peers.end())
+				return nullptr;
+			const auto* anchor = anchorIt->second.peek<Tensor>();
+			if (!anchor)
+				return nullptr;
+			// 计算元素总数
+			const auto& sh = anchor->shape();
+			size_t numElements = 1;
+			for (auto d : sh)
+				numElements *= static_cast<size_t>(d);
+			// 创建全零 DataBlock
+			Tensor::DataBlock zeros(numElements * anchor->typeSize(), std::byte(0));
+			return std::make_unique<Tensor>(anchor->type(), anchor->typeSize(), anchor->shape(),
+										   std::move(zeros));
+		});
 	}
 
 	for (const auto& port : _schema.outputs) {
@@ -316,6 +348,19 @@ const Value& Node::_inputImpl(const std::string& name) const {
 	return *nt;
 }
 
+Value Node::_takeInputImpl(const std::string& name) {
+	auto it = _inputSlots.find(name);
+	if (it == _inputSlots.end()) {
+		throw NodeException(NodeException::ErrorType::PortNotFound, "Node::_takeInputImpl",
+							"input '" + name + "' not found");
+	}
+	if (!it->second.hasData()) {
+		throw NodeException(NodeException::ErrorType::InternalError, "Node::_takeInputImpl",
+							"input '" + name + "' has no data to take");
+	}
+	return it->second.take<Value>();
+}
+
 void Node::_outputImpl(const std::string& name, Value tensor) {
 	auto it = _outputSlots.find(name);
 	if (it == _outputSlots.end()) {
@@ -478,17 +523,6 @@ void Node::_checkAndExecute(const TaskId& taskId) {
 		{
 			std::unique_lock lk(_bufferMutex);
 			_collectAndSaveOutputs(taskId);
-
-			// ⑤ 验证输出完整性（持锁读取 _taskOutputs）
-			if (result.ok()) {
-				for (const auto& port : _schema.outputs) {
-					auto outIt = _taskOutputs[taskId].find(port.name);
-					if (outIt == _taskOutputs[taskId].end() || !outIt->second.has_value()) {
-						result = _makeFailure(Status::InternalError, "Output '" + port.name + "' was not produced by RunFn");
-						break;
-					}
-				}
-			}
 		}
 
 		// Diagnostic logging for failures to aid debugging
@@ -554,7 +588,15 @@ void Node::_loadTaskToWorkingSlots(const TaskId& taskId) {
 			taskIt->second.reset();
 		} else if (port.defaultValue.has_value()) {
 			workSlot.store(Value(std::make_unique<Tensor>(port.defaultValue.value())));
+		} else {
+			// 清空上一轮残留数据，确保第二遍的懒求值 provider 能获取到当前 task 的锚定形状
+			workSlot.clearData();
 		}
+	}
+
+	// 第二遍：解析懒求值默认值（shapeAnchor 等 DynamicProvider）
+	for (auto& [name, slot] : _inputSlots) {
+		slot.resolveDefaultIfNeeded(_inputSlots);
 	}
 }
 

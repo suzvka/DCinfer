@@ -73,6 +73,7 @@ public:
 		Shape shape; ///< 期望的形状（空=不校验）。
 		bool required = true; ///< 执行前是否必须填充。
 		std::optional<Tensor> defaultValue; ///< 有默认值时，就绪检查视为已填充。
+		std::optional<std::string> shapeAnchor; ///< 形状锚定端口名：未提供数据时，创建与该端口同形的零张量。
 
 		/// @brief 工厂：创建必须输入端口。
 		/// @tparam T 期望的 C++ 类型。
@@ -96,6 +97,25 @@ public:
 			dv = defaultValue;
 			return {std::move(name), DC::Type::getType<TensorType, T>(), sizeof(T), std::move(shape), false,
 					std::move(dv)};
+		}
+
+		/// @brief 工厂：创建形状锚定输入端口（required=false，无静态默认值）。
+		///        执行时若未提供数据，自动创建与 anchorPort 同形的零张量。
+		/// @tparam T 期望的 C++ 类型。
+		/// @param name 端口名。
+		/// @param anchorPort 形状锚定的目标端口名。
+		/// @param shape 期望形状（空=不校验）。
+		template <typename T>
+		static Port anchored(std::string name, std::string anchorPort, Shape shape = {}) {
+			TensorMeta::ensureTypeMap();
+			Port p;
+			p.name = std::move(name);
+			p.type = DC::Type::getType<TensorType, T>();
+			p.typeSize = sizeof(T);
+			p.shape = std::move(shape);
+			p.required = false;
+			p.shapeAnchor = std::move(anchorPort);
+			return p;
 		}
 
 		/// @brief 工厂：创建输出端口。
@@ -123,7 +143,7 @@ public:
 		/// @return 指向 Port 的指针，若不存在则返回 nullptr。
 		const Port* findOutput(const std::string& name) const;
 
-		/// @brief 校验 Schema 合法性：端口名唯一、非 Void 端口 typeSize>0、默认值类型一致。
+		/// @brief 校验 Schema 合法性：端口名唯一、非 Void 端口 typeSize>0、默认值类型一致、shapeAnchor 引用存在。
 		bool valid() const;
 
 	private:
@@ -353,6 +373,8 @@ private:
 	// ── RunContext 可调用的内部方法 ──
 	/// @brief  从输入槽读取 Value（RunContext::input 委托）。
 	const Value& _inputImpl(const std::string& name) const;
+	/// @brief  从输入槽移出 Value（RunContext::takeInput 委托），消费后槽位清空。
+	Value _takeInputImpl(const std::string& name);
 	/// @brief  将 Value 写入输出槽（RunContext::output 委托）。
 	void _outputImpl(const std::string& name, Value tensor);
 	/// @brief  获取当前引擎的 TensorConverter 钩子指针。
@@ -406,6 +428,15 @@ class Node::RunContext {
 public:
 	const Value& input(const std::string& name) const {
 		return _node._inputImpl(name);
+	}
+	/// @brief  查询指定输入端口是否已有数据（不抛出异常）。
+	bool hasInput(const std::string& name) const {
+		auto it = _node._inputSlots.find(name);
+		return it != _node._inputSlots.end() && it->second.hasData();
+	}
+	/// @brief  消费式取出输入：从工作槽移出 Value（槽位清空），用于连接器零拷贝转发
+	Value takeInput(const std::string& name) {
+		return _node._takeInputImpl(name);
 	}
 	void output(const std::string& name, Value tensor) {
 		_node._outputImpl(name, std::move(tensor));
