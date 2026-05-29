@@ -18,11 +18,22 @@ endif ()
 
 add_subdirectory(DCinfer)
 
-# Optionally enable tests in subdirectories
+# ── DCIr：推理图编译器（JSON → InferGraph）──
+option(BUILD_IR "Build DCIr graph compiler" ON)
+if (BUILD_IR)
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCIr/CMakeLists.txt)
+        add_subdirectory(DCIr)
+    endif()
+endif()
+
+# ── 测试 ──
 option(BUILD_TESTS "Build DCinfer tests" ON)
 if (BUILD_TESTS)
+    enable_testing()
     if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCinfer/test/CMakeLists.txt)
-        enable_testing()
         add_subdirectory(DCinfer/test)
+    endif()
+    if (BUILD_IR AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCIr/test/CMakeLists.txt)
+        add_subdirectory(DCIr/test)
     endif()
 endif()
