@@ -66,10 +66,6 @@ graph LR
     B --> C["Local policy filter<br/>(user device)"]
 ```
 
-### Policy over Hardcoding
-
-DCinfer 的长期目标不是让开发者手写复杂的调度逻辑，而是通过策略描述意图：AI 架构师描述约束，Runtime 决定执行计划。
-
 ### Separation of Concerns
 
 DCinfer 关注不同角色之间的职责隔离：
