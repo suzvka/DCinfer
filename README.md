@@ -1,7 +1,10 @@
 # DCinfer
 
-**A policy-driven runtime for hybrid AI inference.**
-**面向端云协同 AI 的策略驱动推理运行时。**
+[![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+*A policy-driven runtime for hybrid AI inference.*  
+*面向端云协同 AI 的策略驱动推理运行时。*
 
 DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在 **本地、云端、PC、局域网设备以及不同推理引擎** 之间自由放置模型节点，同时把网络、调度、数据传输、引擎生命周期和执行细节隔离在 Runtime 层。
 
@@ -42,11 +45,9 @@ DCinfer 试图解决的问题是：
 
 > **在保证推理执行自由度的前提下，最大程度隔离业务层、AI 架构层、调度层和系统层之间的复杂度。**
 
----
-
 ## Design Philosophy
 
-### 1. Freedom of Placement
+### Freedom of Placement
 
 同一个推理图中的不同节点可以被放置在不同执行环境中：
 
@@ -65,15 +66,7 @@ graph LR
     B --> C["Local policy filter<br/>(user device)"]
 ```
 
----
-
-### 2. Policy over Hardcoding
-
-DCinfer 的长期目标不是让开发者手写复杂的调度逻辑，而是通过策略描述意图：AI 架构师描述约束，Runtime 决定执行计划。
-
----
-
-### 3. Separation of Concerns
+### Separation of Concerns
 
 DCinfer 关注不同角色之间的职责隔离：
 
@@ -85,8 +78,6 @@ DCinfer 关注不同角色之间的职责隔离：
 | 引擎工程师  | ONNX / TensorRT / Core ML / Custom Backend | 上层业务流程            |
 
 目标是让 AI 架构师专注于模型和管线设计，让网络与系统工程复杂度沉入 Runtime。
-
----
 
 ## Core Features
 
@@ -110,8 +101,6 @@ DCinfer 不强制推理图为传统 DAG。采用 **节点 + 端口 + Connector**
 
 核心库为 static lib，核心模块不依赖第三方库。vcpkg 仅用于后续可选后端和外部引擎集成。
 
----
-
 ## Architecture
 
 ### Conceptual Architecture
@@ -134,8 +123,6 @@ graph TB
     Engine --> Mobile["Mobile Worker<br/>Core ML / ExecuTorch / LiteRT"]
 ```
 
----
-
 ## Core Concepts
 
 ### Node
@@ -144,21 +131,19 @@ Node 是推理图中的基本计算单元。定义输入/输出 Schema 并标记
 
 ### Connector
 
-节点间的数据路由层。Connector 遵循 **Edge as Node** 语义——业务节点不直连，而是通过 Connector 中转。内置三种路由模式：`Wire`（1→1 直通）、`Broadcast`（1→N 广播）、`Routing`（1→N 条件分发）。
+节点间的数据路由层。Connector 遵循 **Edge as Node** 语义——业务节点不直连，而是通过 Connector 中转。内置两种路由模式：`Broadcast`（1→N 广播）、`Routing`（1→N 条件分发）。
 
 ### InferGraph
 
-InferGraph 是推理图容器，负责节点生命周期管理、拓扑连接、输入注入、执行触发与输出收集。
+推理图容器。负责节点生命周期管理、拓扑连接、输入注入、执行触发与输出收集。
 
 ### EngineRegistry
 
-引擎注册中心。通过统一接口管理不同后端的节点创建，注册后即可在图中使用。长期目标是让同一套 Node 语义适配任意执行后端（ONNX、TensorRT、Core ML 等）。
+引擎注册中心。通过统一接口管理不同后端的节点创建，注册后即可在图中使用。
 
 ### CoroScheduler
 
 协程调度器。数据就绪后自动触发下游节点，支持乱序并发执行，无需开发者手动编排执行顺序。
-
----
 
 ## Example Use Cases
 
@@ -177,8 +162,6 @@ graph TB
 * 用户私有模型不上传
 * 云端提供大模型能力
 * 本地执行审计、过滤、偏好控制
-
----
 
 ### PC Client + Cloud Runtime
 
@@ -202,8 +185,6 @@ graph TB
 * 利用用户本地 GPU / NPU
 * 根据设备性能动态调整推理分布
 
----
-
 ### LAN Heterogeneous Inference
 
 ```mermaid
@@ -219,8 +200,6 @@ graph TB
 * 工业视觉
 * 家庭 / 企业边缘推理
 * 多设备协作
-
----
 
 ### Multi-Model Pipeline
 
@@ -239,20 +218,16 @@ graph TB
 * 自定义前后处理
 * 高并发 pipeline
 
----
-
 ## Quick Start
 
 ### Requirements
 
-| Item                        | Version |
-| --------------------------- | ------- |
-| C++ Standard                | C++20   |
-| CMake                       | >= 3.17 |
-| Dependency Manager          | vcpkg   |
-| Core Third-Party Dependency | None    |
-
----
+| Item                  | Detail              |
+| --------------------- | ------------------- |
+| C++ Standard          | C++20               |
+| CMake                 | >= 3.17             |
+| Dependency Manager    | vcpkg (vendored)    |
+| External Dependencies | Zero (core library) |
 
 ### Build
 
@@ -276,15 +251,11 @@ cmake -B build -S . `
 cmake --build build --config Release
 ```
 
----
-
 ### Run Tests
 
 ```bash
 ctest --test-dir build -C Release
 ```
-
----
 
 ## Roadmap
 
@@ -298,26 +269,6 @@ ctest --test-dir build -C Release
 
 ---
 
-## Positioning
-
-DCinfer is not:
-
-* A neural network inference engine
-* A cloud model serving platform
-* A replacement for ONNX Runtime / TensorRT / Core ML
-* A Kubernetes-native serving framework
-* A pure mobile inference framework
-
-DCinfer is:
-
-* A graph runtime for AI inference pipelines
-* A policy-driven placement layer
-* A bridge between local, cloud and heterogeneous workers
-* A C++20 runtime for composable inference execution
-* A foundation for hybrid AI applications
-
----
-
 ## License
 
-TBD
+This project is licensed under the [MIT License](LICENSE).
