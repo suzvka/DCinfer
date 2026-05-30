@@ -2,7 +2,8 @@
 cmake_minimum_required(VERSION 3.12)
 
 if (NOT TARGET DCIr::DCIr)
-	message(FATAL_ERROR "DCIr::DCIr target not found. Ensure parent adds DCIr first.")
+	message(STATUS "DCIr::DCIr target not found; skipping DCIr tests. Ensure parent adds DCIr first to enable these tests.")
+	return()
 endif()
 
 include(CTest)

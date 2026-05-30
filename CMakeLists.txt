@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.17)
 
 project(DCinfer LANGUAGES CXX)
 
+# Guidance: on Windows, prefer configuring with an explicit platform (e.g. -A x64)
+# or from an x64 developer command prompt. If CMake selects NMake Makefiles it may
+# default to x86 toolchain; in that case re-run with -A x64 or use the x64 Native Tools prompt.
+if (MSVC AND CMAKE_GENERATOR MATCHES "NMake")
+    message(WARNING "Selected generator appears to be NMake Makefiles. Ensure you configure for x64 when building (e.g. cmake -A x64) or use an x64 developer prompt.")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -33,7 +40,7 @@ if (BUILD_TESTS)
     if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCinfer/test/CMakeLists.txt)
         add_subdirectory(DCinfer/test)
     endif()
-    if (BUILD_IR AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCIr/test/CMakeLists.txt)
+    if (BUILD_IR AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCIr/CMakeLists.txt AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCIr/test/CMakeLists.txt)
         add_subdirectory(DCIr/test)
     endif()
 endif()
