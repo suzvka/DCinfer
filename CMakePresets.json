@@ -6,7 +6,7 @@
       "displayName": "GCC Linux Debug",
       "description": "Linux GCC + Ninja (Debug) — 需要 GCC ≥ 11",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-linux",
+      "binaryDir": "${sourceDir}/build/gcc-debug",
       "condition": {
         "type": "notEquals",
         "lhs": "${hostSystemName}",
@@ -14,8 +14,8 @@
       },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CXX_STANDARD_REQUIRED": "ON"
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CXX_STANDARD": "20"
       }
     },
     {
@@ -23,7 +23,7 @@
       "displayName": "GCC Linux Release",
       "description": "Linux GCC + Ninja (Release) — 需要 GCC ≥ 11",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build-linux",
+      "binaryDir": "${sourceDir}/build/gcc-release",
       "condition": {
         "type": "notEquals",
         "lhs": "${hostSystemName}",
@@ -31,8 +31,62 @@
       },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_STANDARD": "20",
-        "CMAKE_CXX_STANDARD_REQUIRED": "ON"
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "clang-debug",
+      "displayName": "Clang Debug",
+      "description": "Clang + Ninja (Debug) — 跨平台，需要 Clang ≥ 14",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/clang-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "clang-release",
+      "displayName": "Clang Release",
+      "description": "Clang + Ninja (Release) — 跨平台，需要 Clang ≥ 14",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/clang-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "displayName": "MSVC x64 Debug",
+      "description": "Visual Studio MSVC x64 (Debug)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/msvc-debug",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20"
+      }
+    },
+    {
+      "name": "msvc-release",
+      "displayName": "MSVC x64 Release",
+      "description": "Visual Studio MSVC x64 (Release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/msvc-release",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "20"
       }
     }
   ]

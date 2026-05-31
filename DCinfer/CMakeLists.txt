@@ -8,9 +8,52 @@ target_compile_features(DCinfer PUBLIC cxx_std_20)
 find_package(Threads REQUIRED)
 target_link_libraries(DCinfer PUBLIC Threads::Threads)
 
-# GCC 10~13 的 <coroutine> 需要显式启用（GCC 14+ 内置）
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
-    target_compile_options(DCinfer PUBLIC -fcoroutines)
+# ── GCC 特化处理 ──
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # GCC 10~13 的 <coroutine> 需要显式启用编译期支持（GCC 14+ 内置）
+    # 同时作为链接选项确保静态库消费者也能正确链接协程运行时
+    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
+        target_compile_options(DCinfer PUBLIC -fcoroutines)
+        target_link_options(DCinfer PUBLIC -fcoroutines)
+    endif()
+
+    # GCC 的 <semaphore> / std::counting_semaphore 内部使用 64 位原子操作，
+    # 在某些平台/架构上必须显式链接 libatomic 才能解析符号。
+    # MSVC / Clang 的对应实现在标准库内，无需额外链接。
+    #
+    # 通过 try_compile 检测是否真正需要，避免无谓链接。
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_LIBRARIES "-latomic")
+    check_cxx_source_compiles(
+        "#include <semaphore>
+         #include <atomic>
+         int main() {
+             std::counting_semaphore<> s(1);
+             s.acquire();
+             s.release();
+             std::atomic<std::int64_t> a{0};
+             a.fetch_add(1, std::memory_order_relaxed);
+             return 0;
+         }"
+        DCINFER_NEEDS_LIBATOMIC
+    )
+    set(CMAKE_REQUIRED_LIBRARIES "")
+    if(DCINFER_NEEDS_LIBATOMIC)
+        target_link_libraries(DCinfer PUBLIC atomic)
+    else()
+        # 回退：直接试链，失败则加 atomic
+        check_cxx_source_compiles(
+            "#include <semaphore>
+             int main() {
+                 std::counting_semaphore<> s(1);
+                 return 0;
+             }"
+            DCINFER_SEMAPHORE_NO_ATOMIC
+        )
+        if(NOT DCINFER_SEMAPHORE_NO_ATOMIC)
+            target_link_libraries(DCinfer PUBLIC atomic)
+        endif()
+    endif()
 endif()
 
 target_include_directories(DCinfer
