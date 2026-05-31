@@ -87,7 +87,7 @@ size_t InferGraph::connectAll(const std::string& srcNode, const std::string& dst
 }
 
 void InferGraph::bindOutput(const std::string& nodeName, const std::string& portName) {
-	_outputBindings.push_back({nodeName, portName});
+	_outputZone.bind(nodeName, portName);
 }
 
 // ════════════════════════════════════════════
@@ -150,19 +150,12 @@ bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName, co
 // ════════════════════════════════════════════
 
 void InferGraph::declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
-	std::lock_guard lk(_declarationMutex);
-	auto& existing = _outputDeclarations[taskId];
-	// 追加式写入（与单条重载语义一致）
-	existing.reserve(existing.size() + declarations.size());
-	for (auto& decl : declarations) {
-		existing.push_back(std::move(decl));
-	}
+	_outputZone.declare(taskId, std::move(declarations));
 }
 
 void InferGraph::declareOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 							   size_t count) {
-	std::lock_guard lk(_declarationMutex);
-	_outputDeclarations[taskId].push_back({nodeName, portName, count});
+	_outputZone.declare(taskId, nodeName, portName, count);
 }
 
 // ════════════════════════════════════════════
@@ -172,8 +165,7 @@ void InferGraph::declareOutput(const TaskId& taskId, const std::string& nodeName
 void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout) {
 	// 校验：必须已声明输出
 	{
-		std::lock_guard lk(_declarationMutex);
-		if (!_outputDeclarations.contains(taskId)) {
+		if (!_outputZone.hasDeclaration(taskId)) {
 			throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submit",
 								 "no output declarations for task '" + taskId
 									 + "'. Call declareOutput() before submit().");
@@ -256,19 +248,31 @@ Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
 		co_return; // 失败则不传播
 	}
 
-	// [检查点 2] 节点完成 → 按输出端口累积计数（不依赖出边，终端节点也能触发）：
-	// 若所有声明条件已满足，立即终止（不消费无用数据，避免传播到已清理的下游）
+	// [检查点 2] 节点完成 → 三步流水线：打卡 → OutputZone 搬运 → 边搬运
+	//
+	// 第一步：打卡 — 所有产出端口统一累加计数，不论目的地
 	for (const auto& outPort : src->schema().outputs) {
 		if (!src->hasOutput(taskId, outPort.name))
 			continue;
-		if (_accumulateAndCheck(nodeName, outPort.name, taskId)) {
+		if (_outputZone.accumulateAndCheck(nodeName, outPort.name, taskId)) {
 			gate->terminated.store(true, std::memory_order_release);
 			_terminate(taskId);
 			co_return;
 		}
 	}
 
-	// 数据冒泡：消费输出 → 写入下游 → 提交到对应线程池
+	// 第二步：OutputZone 目的地搬运 — OutputZone 绑定端口消费后自然空
+	for (const auto& outPort : src->schema().outputs) {
+		if (!src->hasOutput(taskId, outPort.name))
+			continue;
+		if (_outputZone.isBound(nodeName, outPort.name)) {
+			Value data = src->getOutput(taskId, outPort.name);
+			_outputZone.append(taskId, nodeName, outPort.name, std::move(data),
+							   {nodeName, outPort.name, taskId});
+		}
+	}
+
+	// 第三步：边目的地搬运 — 已在第二步消费的端口 hasOutput=false，自动跳过
 	for (const auto& edge : _edges) {
 		if (edge.srcNode != nodeName)
 			continue;
@@ -344,6 +348,11 @@ Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
 // ════════════════════════════════════════════
 
 Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) {
+	// 优先查 OutputZone（OutputZone 绑定端口的数据在 _propagateFrom 第二步已搬运至此）
+	auto ozVal = _outputZone.take(taskId, nodeName, portName);
+	if (ozVal)
+		return std::move(*ozVal);
+
 	auto* n = _findNode(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutput",
@@ -353,6 +362,16 @@ Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName, c
 }
 
 Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName) {
+	// 优先查 OutputZone
+	auto ozVal = _outputZone.take(taskId, nodeName, portName);
+	if (ozVal) {
+		auto* t = ozVal->as<Tensor>();
+		if (t)
+			return std::move(*t);
+		throw GraphException(GraphException::ErrorType::Other, "InferGraph::getOutputTensor",
+							 "OutputZone artifact for '" + nodeName + "." + portName + "' is not a DC::Tensor");
+	}
+
 	auto* n = _findNode(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutputTensor",
@@ -362,6 +381,10 @@ Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& node
 }
 
 bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const {
+	// 优先查 OutputZone
+	if (_outputZone.hasOutput(taskId, nodeName, portName))
+		return true;
+
 	auto* n = _findNode(nodeName);
 	if (!n)
 		return false;
@@ -393,27 +416,6 @@ std::vector<std::string> InferGraph::nodeNames() const {
 // 终止辅助
 // ════════════════════════════════════════════
 
-bool InferGraph::_accumulateAndCheck(const std::string& nodeName, const std::string& portName,
-									 const TaskId& taskId) {
-	std::lock_guard lk(_declarationMutex);
-	auto declIt = _outputDeclarations.find(taskId);
-	if (declIt == _outputDeclarations.end())
-		return false; // 未声明（在 submit 中已被拦截，此处防御）
-
-	// 递增累加器
-	std::string key = nodeName + ":" + portName;
-	++_accumulatedCounts[taskId][key];
-
-	// 检查所有声明是否均已满足
-	for (const auto& decl : declIt->second) {
-		std::string dkey = decl.nodeName + ":" + decl.portName;
-		size_t current = _accumulatedCounts[taskId][dkey];
-		if (current < decl.count)
-			return false;
-	}
-	return true;
-}
-
 bool InferGraph::_isTerminated(const TaskId& taskId) const {
 	std::lock_guard lk(_terminationMutex);
 	return _terminatedTasks.contains(taskId);
@@ -427,12 +429,8 @@ void InferGraph::_terminate(const TaskId& taskId) {
 			return;
 	}
 
-	// 清理输出声明和累加器（同一 taskId 可安全重新提交）
-	{
-		std::lock_guard lk(_declarationMutex);
-		_outputDeclarations.erase(taskId);
-		_accumulatedCounts.erase(taskId);
-	}
+	// 清理输出区（同一 taskId 可安全重新提交）
+	_outputZone.clearTask(taskId);
 
 	// 通知 task 完成回调（在所有节点 cleanup 之前触发，保证调用方能安全读取输出）
 	if (_taskCompleteCb) {
@@ -457,27 +455,10 @@ void InferGraph::_onExhausted(const TaskId& taskId) {
 	}
 
 	// 检查声明是否已满足
-	bool allMet = false;
-	{
-		std::lock_guard lk(_declarationMutex);
-		auto declIt = _outputDeclarations.find(taskId);
-		if (declIt != _outputDeclarations.end()) {
-			allMet = true;
-			for (const auto& decl : declIt->second) {
-				std::string key = decl.nodeName + ":" + decl.portName;
-				auto& counts = _accumulatedCounts[taskId];
-				auto countIt = counts.find(key);
-				size_t current = (countIt != counts.end()) ? countIt->second : 0;
-				if (current < decl.count) {
-					allMet = false;
-					break;
-				}
-			}
-		}
-	}
+	bool allMet = _outputZone.checkAllSatisfied(taskId);
 
 	if (allMet) {
-		// 声明已满足 → 正常终止（守护路径，主路径在 _accumulateAndCheck 中处理）
+		// 声明已满足 → 正常终止（守护路径，主路径在 OutputZone::accumulateAndCheck 中处理）
 		_terminate(taskId);
 		return;
 	}

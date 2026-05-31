@@ -93,14 +93,15 @@ public:
 						std::string key = nodeName + ":" + portName;
 						if (captured.contains(key))
 							continue;
-						auto* n = _graph.node(nodeName);
-						if (!n || !n->hasOutput(tid, portName))
+
+						// 优先从 OutputZone / Node 查找（_graph.hasOutput 会双端检查）
+						if (!_graph.hasOutput(tid, nodeName, portName))
 							continue;
 						try {
-							const auto& val = n->peekOutput(tid, portName);
+							auto val = _graph.getOutput(tid, nodeName, portName);
 							auto* t = val.as<Tensor>();
 							if (t)
-								captured[key] = Tensor(*t);
+								captured[key] = std::move(*t);
 						} catch (...) {
 						}
 					}

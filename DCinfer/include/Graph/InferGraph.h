@@ -5,6 +5,7 @@
 #include "CoroScheduler.h"
 #include "ThreadPool.h"
 #include "GraphException.h"
+#include "OutputZone.h"
 
 #include <atomic>
 #include <chrono>
@@ -27,13 +28,6 @@ namespace DC {
 //
 // Node 不知下游，Connector 即 Node。Graph 对一切顶点统一处理。
 
-/// @brief 输出声明：声明某 task 期望哪个节点的哪个端口产出多少次
-struct OutputDeclaration {
-	std::string nodeName; ///< 目标节点名
-	std::string portName; ///< 目标端口名
-	size_t count = 1; ///< 预期产出次数（>=1）
-};
-
 /// @brief 单条 task 级错误记录，包含节点名和异常信息
 struct TaskError {
 	std::string nodeName;  ///< 发生错误的节点名
@@ -51,12 +45,6 @@ public:
 		std::string srcPort;
 		std::string dstNode;
 		std::string dstPort;
-	};
-
-	// ── 输出区绑定 ──
-	struct OutputBinding {
-		std::string nodeName;
-		std::string portName;
 	};
 
 	/// @brief  默认构造
@@ -102,7 +90,7 @@ public:
 	Node* wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
 			   const std::string& dstPort);
 
-	/// @brief  标记输出：该节点的该端口结果输出到图外
+	/// @brief  标记输出：该节点的该端口产出进入 OutputZone（与边目的地互斥）
 	void bindOutput(const std::string& nodeName, const std::string& portName);
 
 	// ── 数据注入 ──
@@ -173,7 +161,7 @@ public:
 
 	/// @brief  获取所有输出绑定的只读引用
 	const std::vector<OutputBinding>& outputBindings() const {
-		return _outputBindings;
+		return _outputZone.bindings();
 	}
 
 	// ── 错误诊断 ──
@@ -227,10 +215,7 @@ private:
 	Task<void> _propagateFrom(std::string nodeName, TaskId taskId,
 							  std::shared_ptr<TaskGate> gate);
 
-	// ── 输出声明辅助 ──
-
-	/// @brief  累积输出计数，返回 true 表示所有声明均已满足
-	bool _accumulateAndCheck(const std::string& nodeName, const std::string& portName, const TaskId& taskId);
+	// ── 终止辅助 ──
 
 	/// @brief  终止指定 task：标记 + 遍历所有节点清理缓冲区
 	void _terminate(const TaskId& taskId);
@@ -250,7 +235,6 @@ private:
 	// ── 成员 ──
 	std::unordered_map<std::string, std::unique_ptr<Node>> _nodes;
 	std::vector<Edge> _edges;
-	std::vector<OutputBinding> _outputBindings;
 
 	// _ownedScheduler 必须在 _scheduler 之前声明
 	std::unique_ptr<CoroScheduler> _ownedScheduler;
@@ -264,13 +248,8 @@ private:
 	// 导线连接器自动命名计数器
 	std::atomic<size_t> _nextWireId{0};
 
-	// 输出声明：每 task 的期望输出列表（_declarationMutex 保护）
-	std::unordered_map<TaskId, std::vector<OutputDeclaration>> _outputDeclarations;
-	mutable std::mutex _declarationMutex;
-
-	// 运行时累加器：每 task 的每端口产出次数（_declarationMutex 保护）
-	// key = "nodeName:portName"
-	std::unordered_map<TaskId, std::unordered_map<std::string, size_t>> _accumulatedCounts;
+	// 输出区：聚合绑定、声明、累加、artifact 存储
+	OutputZone _outputZone;
 
 	// 已终止的 task 集合（_terminationMutex 保护）
 	std::unordered_set<TaskId> _terminatedTasks;
