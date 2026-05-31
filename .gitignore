@@ -78,3 +78,4 @@ compile_commands.json
 
 # vcpkg artifacts (downloaded tools cache lives in ~/.vcpkg)
 CMakeUserPresets.json
+vcpkg_installed/
