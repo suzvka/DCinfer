@@ -226,6 +226,15 @@ public:
 		_isConnector = v;
 	}
 
+	/// @brief  获取模型文件路径（引擎节点反序列化用，Builtin 节点为空）
+	const std::string& modelPath() const {
+		return _modelPath;
+	}
+	/// @brief  设置模型文件路径（引擎节点创建时由 EngineRegistry 调用）
+	void setModelPath(std::string path) {
+		_modelPath = std::move(path);
+	}
+
 	// ── 完成回调注册 ──
 	/// @brief  注册任务完成回调（纯通知，不传数据）。
 	void setCompletionCallback(CompletionFn fn);
@@ -403,6 +412,7 @@ private:
 	ThreadPoolAffinity _affinity = ThreadPoolAffinity::Operator;
 	std::string _tag;
 	bool _isConnector = false;
+	std::string _modelPath; // 模型文件路径（引擎节点反序列化用）
 	SlotMap _inputSlots; // 工作输入槽位
 	SlotMap _outputSlots; // 工作输出槽位
 	TaskBufferMap _taskInputs; // 任务级输入缓冲 (port → optional<TaskData>)

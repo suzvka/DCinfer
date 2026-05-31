@@ -380,6 +380,15 @@ const Node* InferGraph::node(const std::string& name) const {
 	return _findNode(name);
 }
 
+std::vector<std::string> InferGraph::nodeNames() const {
+	std::vector<std::string> names;
+	names.reserve(_nodes.size());
+	for (const auto& [name, nodePtr] : _nodes) {
+		names.push_back(name);
+	}
+	return names;
+}
+
 // ════════════════════════════════════════════
 // 终止辅助
 // ════════════════════════════════════════════

@@ -51,6 +51,14 @@ public:
 	/// @return true 若形状匹配（空规则、维度数匹配且每维相等或规则维为 -1）。
 	bool checkShape(const std::vector<int64_t>& currentShape) const;
 
+	/// @brief 将 TensorType 枚举转换为字符串（用于序列化）
+	/// @return 如 "Float", "Int", "Uint", "Bool", "Char", "Data", "Void"
+	static std::string typeToString(TensorType type);
+
+	/// @brief 将字符串转换为 TensorType 枚举（用于反序列化）
+	/// @return 对应的 TensorType；无法识别则返回 Void
+	static TensorType stringToType(const std::string& str);
+
 private:
 	static void setTypeMap();
 };

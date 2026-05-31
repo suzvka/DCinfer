@@ -60,4 +60,40 @@ void TensorMeta::setTypeMap() {
 	Type::registerType<std::vector<unsigned char>>(TensorType::Data);
 }
 
+std::string TensorMeta::typeToString(TensorType type) {
+	switch (type) {
+	case TensorType::Float:
+		return "Float";
+	case TensorType::Int:
+		return "Int";
+	case TensorType::Uint:
+		return "Uint";
+	case TensorType::Bool:
+		return "Bool";
+	case TensorType::Char:
+		return "Char";
+	case TensorType::Data:
+		return "Data";
+	case TensorType::Void:
+		return "Void";
+	}
+	return "Void";
+}
+
+TensorMeta::TensorType TensorMeta::stringToType(const std::string& str) {
+	if (str == "Float")
+		return TensorType::Float;
+	if (str == "Int")
+		return TensorType::Int;
+	if (str == "Uint")
+		return TensorType::Uint;
+	if (str == "Bool")
+		return TensorType::Bool;
+	if (str == "Char")
+		return TensorType::Char;
+	if (str == "Data")
+		return TensorType::Data;
+	return TensorType::Void;
+}
+
 } // namespace DC

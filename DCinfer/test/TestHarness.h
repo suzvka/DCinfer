@@ -53,6 +53,10 @@ public:
 		return _graph.wire(srcNode, srcPort, dstNode, dstPort);
 	}
 
+	void bindOutput(const std::string& nodeName, const std::string& portName) {
+		_graph.bindOutput(nodeName, portName);
+	}
+
 	// ── 数据注入 ──
 
 	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data) {
@@ -170,6 +174,11 @@ public:
 
 	void clearErrors() {
 		_graph.clearErrors();
+	}
+
+	/// @brief  获取底层 InferGraph 的只读引用（供序列化等场景遍历图结构）
+	const InferGraph& graph() const {
+		return _graph;
 	}
 
 private:

@@ -309,6 +309,32 @@ void testNodeQuery() {
 	END_TEST();
 }
 
+void testSerializationAccessors() {
+	TEST("serialization accessors - nodeNames, edges, outputBindings, modelPath") {
+		TestHarness harness;
+		harness.addNode(std::make_unique<Node>("ONNX", "test1", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "test2", identitySchema(), identityRunFn()));
+		harness.wire("test1", "y", "test2", "x");
+		harness.bindOutput("test2", "y");
+
+		// 遍历
+		auto names = harness.graph().nodeNames();
+		CHECK(names.size() == 3, "should have 3 nodes (test1, test2, __wire_0)");
+		CHECK(harness.graph().edges().size() == 2, "should have 2 edges");
+		CHECK(harness.graph().outputBindings().size() == 1, "should have 1 output binding");
+
+		// modelPath
+		auto* n = harness.node("test1");
+		n->setModelPath("models/test.onnx");
+		CHECK(n->modelPath() == "models/test.onnx", "modelPath should be set");
+
+		// Builtin 节点 modelPath 默认为空
+		auto* builtinNode = harness.node("test2");
+		CHECK(builtinNode->modelPath().empty(), "Builtin node modelPath should be empty");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
@@ -317,6 +343,7 @@ int main() {
 		testRoutingConnectorInGraph();
 		testConnectAll();
 		testNodeQuery();
+		testSerializationAccessors();
 
 		if (failures == 0) {
 			std::cout << "\nAll InferGraph tests passed!" << std::endl;

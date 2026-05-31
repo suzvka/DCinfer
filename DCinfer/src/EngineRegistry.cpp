@@ -90,7 +90,10 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, 
 
 	// 将 EngineInstance* 通过 engineConfig 传给工厂
 	// 使用 makeNodeFactoryWithEngine 注册的工厂会正确提取
-	return it->second.factory(nodeName, engineInstance);
+	auto node = it->second.factory(nodeName, engineInstance);
+	if (node)
+		node->setModelPath(modelPath);
+	return node;
 }
 
 // ── 引擎实例管理 ──

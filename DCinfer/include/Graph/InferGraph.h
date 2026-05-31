@@ -163,6 +163,19 @@ public:
 		return _edges.size();
 	}
 
+	/// @brief  获取所有节点名的列表
+	std::vector<std::string> nodeNames() const;
+
+	/// @brief  获取所有边的只读引用
+	const std::vector<Edge>& edges() const {
+		return _edges;
+	}
+
+	/// @brief  获取所有输出绑定的只读引用
+	const std::vector<OutputBinding>& outputBindings() const {
+		return _outputBindings;
+	}
+
 	// ── 错误诊断 ──
 
 	/// @brief  查询指定 task 在整条传播链上的所有错误记录
