@@ -7,7 +7,7 @@
     }
   ],
   "requires": {
-    "microsoft:tools/kitware/cmake": "^3.28.0",
+    "microsoft:tools/kitware/cmake": ">=3.28.0",
     "microsoft:tools/ninja-build/ninja": "^1.10.2"
   }
 }
