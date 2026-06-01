@@ -1,57 +1,41 @@
 #pragma once
 
 #include "Node.h"
-#include "EngineRegistry.h"
-#include "CoroScheduler.h"
-#include "ThreadPool.h"
-#include "GraphException.h"
-#include "InputZone.h"
+#include "GraphStore.h"
+#include "ExecutionEngine.h"
 #include "OutputZone.h"
 #include "SignalStore.h"
+#include "ErrorTracker.h"
+#include "GraphException.h"
 
-#include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
-#include <unordered_map>
-#include <unordered_set>
-#include <utility>
 #include <vector>
 
 namespace DC {
 
 // ── 推理图：DC 电路图语义 ──
 //
-// 持有所有顶点（Node/Connector），管理端口级拓扑连接。
-// 数据流由协程驱动：节点完成 → 消费输出 → 分发到下游输入端 → 调度下游。
+// InferGraph 是用户唯一接触的 Facade，内部委托给：
+//   - GraphStore      图拓扑存储
+//   - ExecutionEngine 执行调度与协程传播
+//   - OutputZone      输出聚合
+//   - ErrorTracker    错误收集
+//   - SignalStore     信号仓库
 //
 // Node 不知下游，Connector 即 Node。Graph 对一切顶点统一处理。
-
-/// @brief 单条 task 级错误记录，包含节点名和异常信息
-struct TaskError {
-	std::string nodeName;  ///< 发生错误的节点名
-	std::string source;    ///< 异常来源（如 "InferGraph::_propagateFrom"）
-	std::string message;   ///< 错误详情
-};
 
 class InferGraph {
 public:
 	using TaskId = Node::TaskId;
 
-	/// @brief  默认最大跳数（TTL），防止循环无限传播
-	static constexpr uint32_t kDefaultMaxHops = 10000;
+	/// @brief  端口级边（类型别名，定义见 GraphStore::Edge）
+	using Edge = GraphStore::Edge;
 
-	// ── 端口级边 ──
-	struct Edge {
-		std::string srcNode;
-		std::string srcPort;
-		std::string dstNode;
-		std::string dstPort;
-	};
+	/// @brief  默认最大跳数（TTL），防止循环无限传播
+	static constexpr uint32_t kDefaultMaxHops = ExecutionEngine::kDefaultMaxHops;
 
 	/// @brief  默认构造
 	///         自动创建内部协程调度器和默认线程池
@@ -75,32 +59,37 @@ public:
 
 	/// @brief  添加节点（转移所有权），返回裸指针供后续接线引用
 	/// @return 指向已存入图内节点的非拥有指针；若节点名为空或重名则返回 nullptr
-	Node* addNode(std::unique_ptr<Node> node);
+	Node* addNode(std::unique_ptr<Node> node) { return _store.addNode(std::move(node)); }
 
 	/// @brief  端口级接线：上游输出口 → 下游输入口
 	/// @return true 表示两端节点和端口均存在
-	bool connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
-				 const std::string& dstPort);
+	bool connect(const std::string& srcNode, const std::string& srcPort,
+				 const std::string& dstNode, const std::string& dstPort) {
+		return _store.connect(srcNode, srcPort, dstNode, dstPort);
+	}
 
 	/// @brief  快捷接线：自动匹配上游所有输出口到下游同名的输入口
-	///         典型用途：Connector 的 out_0→in_0, out_1→in_1, ...
-	///         多个下游时需为每个下游各调用一次
 	/// @return 成功匹配的端口对数
-	size_t connectAll(const std::string& srcNode, const std::string& dstNode);
+	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
+		return _store.connectAll(srcNode, dstNode);
+	}
 
 	/// @brief  接线：在两个节点间自动插入广播连接器（Broadcast Connector, N=1）
-	///         等价于 connect(src→bc.in) + connect(bc.out_0→dst)
-	///         N=1 广播走 takeInput 零拷贝 move 路径，等效直通导线
-	///         适用于两个业务节点之间的 1→1 直连场景
 	/// @return 指向自动创建的广播连接器的非拥有指针；若节点或端口不存在则返回 nullptr
-	Node* wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
-			   const std::string& dstPort);
+	Node* wire(const std::string& srcNode, const std::string& srcPort,
+			   const std::string& dstNode, const std::string& dstPort) {
+		return _store.wire(srcNode, srcPort, dstNode, dstPort);
+	}
 
 	/// @brief  标记输入：该节点的该端口为图级输入口，外部通过此口注入数据
-	void bindInput(const std::string& nodeName, const std::string& portName);
+	void bindInput(const std::string& nodeName, const std::string& portName) {
+		_store.bindInput(nodeName, portName);
+	}
 
 	/// @brief  标记输出：该节点的该端口产出进入 OutputZone（与边目的地互斥）
-	void bindOutput(const std::string& nodeName, const std::string& portName);
+	void bindOutput(const std::string& nodeName, const std::string& portName) {
+		_outputZone.bind(nodeName, portName);
+	}
 
 	// ── 数据注入 ──
 
@@ -113,12 +102,11 @@ public:
 	// ── 执行驱动 ──
 
 	/// @brief  异步启动整张图的计算
-	///         为指定 taskId 扫描入口节点，创建协程链驱动数据流
-	/// @param  timeout  超时时间（毫秒），0 表示不启用超时，默认 0
-	/// @param  maxHops  传播最大跳数（TTL），超过后不再 spawn 下游协程，默认 kDefaultMaxHops
 	/// @throws GraphException(NoDeclaration) 若未事先调用 declareOutput
 	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
-				uint32_t maxHops = kDefaultMaxHops);
+				uint32_t maxHops = kDefaultMaxHops) {
+		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
+	}
 
 	// ── 结果获取 ──
 
@@ -136,71 +124,59 @@ public:
 	// ── 输出声明（submit 前必须调用）──
 
 	/// @brief  声明某 task 的输出期望：指定节点端口需产出 N 次才停止
-	///         声明条件满足时自动终止；数据耗尽而未满足则报错
-	/// @note   必须在 submit() 前调用，否则 submit 会抛出 NoDeclaration
-	void declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations);
+	void declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
+		_outputZone.declare(taskId, std::move(declarations));
+	}
 
 	/// @brief  单条声明的便捷重载
 	void declareOutput(const TaskId& taskId, const std::string& nodeName,
-					   const std::string& portName, size_t count = 1);
+					   const std::string& portName, size_t count = 1) {
+		_outputZone.declare(taskId, nodeName, portName, count);
+	}
 
 	// ── 查询 ──
 
 	/// @brief  获取节点指针（非拥有），不存在返回 nullptr
-	Node* node(const std::string& name);
+	Node* node(const std::string& name) { return _store.node(name); }
 
 	/// @brief  获取节点指针（只读）
-	const Node* node(const std::string& name) const;
+	const Node* node(const std::string& name) const { return _store.node(name); }
 
 	/// @brief  节点数量
-	size_t nodeCount() const {
-		return _nodes.size();
-	}
+	size_t nodeCount() const { return _store.nodeCount(); }
 
 	/// @brief  边数量
-	size_t edgeCount() const {
-		return _edges.size();
-	}
+	size_t edgeCount() const { return _store.edgeCount(); }
 
 	/// @brief  获取所有节点名的列表
-	std::vector<std::string> nodeNames() const;
+	std::vector<std::string> nodeNames() const { return _store.nodeNames(); }
 
 	/// @brief  获取所有边的只读引用
-	const std::vector<Edge>& edges() const {
-		return _edges;
-	}
+	const std::vector<Edge>& edges() const { return _store.edges(); }
 
 	/// @brief  获取所有输入绑定的只读引用
-	const std::vector<InputBinding>& inputBindings() const {
-		return _inputZone.bindings();
-	}
+	const std::vector<InputBinding>& inputBindings() const { return _store.inputBindings(); }
 
 	/// @brief  获取所有输出绑定的只读引用
-	const std::vector<OutputBinding>& outputBindings() const {
-		return _outputZone.bindings();
-	}
+	const std::vector<OutputBinding>& outputBindings() const { return _outputZone.bindings(); }
 
 	// ── 错误诊断 ──
 
 	/// @brief  查询指定 task 在整条传播链上的所有错误记录
-	///         包含 feedInput、tryExecute、setInput 过程中捕获的异常信息
-	/// @return 按发生顺序排列的错误列表；若无错误则返回空向量
-	std::vector<TaskError> taskErrors(const TaskId& taskId) const;
+	std::vector<TaskError> taskErrors(const TaskId& taskId) const { return _errors.taskErrors(taskId); }
 
 	/// @brief  清除所有 task 级错误记录（通常在重新 submit 前调用）
-	void clearErrors();
+	void clearErrors() { _errors.clearErrors(); }
 
 	/// @brief  是否有任何 task 发生过错误
-	bool hasErrors() const;
+	bool hasErrors() const { return _errors.hasErrors(); }
 
 	// ── task 完成回调 ──
 
-	/// @brief  task 完成回调类型：在 _terminate（task 彻底结束）时触发
-	///        此时所有节点已执行完毕、传播链已走完、缓冲区已清理
 	using TaskCompleteCallback = std::function<void(const TaskId&)>;
 
 	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）
-	void setTaskCompleteCallback(TaskCompleteCallback cb) { _taskCompleteCb = std::move(cb); }
+	void setTaskCompleteCallback(TaskCompleteCallback cb) { _engine.setTaskCompleteCallback(std::move(cb)); }
 
 	// ── 信号系统 ──
 
@@ -222,108 +198,27 @@ public:
 	// ── 同步等待与图导出 ──
 
 	/// @brief  同步等待 task 完成（内部阻塞，供 exportNode / 外部同步使用）
-	/// @note   调用前必须先 submit()；不持有任何锁，安全阻塞
-	/// @return true 在超时内完成，false 超时
 	bool wait(const TaskId& taskId,
-			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
+		return _engine.wait(taskId, timeout);
+	}
 
 	/// @brief  导出为可嵌入父图的包装 Node
 	///         子图内部用独立 CoroScheduler 执行，与父图隔离
-	/// @param  nodeName  包装 Node 在父图中的名字
-	/// @param  maxHops   子图内部传播的最大跳数（TTL）
-	/// @return 持有子图逻辑的独立 Node 实例
 	/// @note   前提：已调用 bindInput + bindOutput 定义了图接口
 	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活
 	std::unique_ptr<Node> exportNode(const std::string& nodeName,
 									uint32_t maxHops = kDefaultMaxHops);
 
 private:
-	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
-	//
-	// 每个活跃协程 + 超时看门狗各持有一份 shared_ptr<TaskGate>。
-	// 当最后一个持有者析构时，若 task 未被终止，则触发 _onExhausted。
-	struct TaskGate {
-		std::atomic<bool> terminated{false};
-		InferGraph* graph = nullptr;
-		TaskId taskId;
-
-		~TaskGate() {
-			if (!terminated.load(std::memory_order_acquire) && graph) {
-				graph->_onExhausted(taskId);
-			}
-		}
-	};
-
-	// 查找节点：存在返回指针，不存在返回 nullptr
-	Node* _findNode(const std::string& name);
-	const Node* _findNode(const std::string& name) const;
-
-	// ── 协程数据传播 ──
-	//
-	// 核心：从指定节点出发，沿边传播数据到所有下游
-	// co_await 节点完成 → 消费输出 → 写入下游 → 按 affinity 提交线程池 → spawn 下游传播协程
-	// @param gate           共享任务门控，最后一个持有者析构时触发耗尽检测
-	// @param remainingHops  剩余跳数（TTL），每 spawn 一个下游减 1，耗尽时停止传播
-	Task<void> _propagateFrom(std::string nodeName, TaskId taskId,
-							  std::shared_ptr<TaskGate> gate,
-							  uint32_t remainingHops = kDefaultMaxHops);
-
-	// ── 终止辅助 ──
-
-	/// @brief  终止指定 task：标记 + 遍历所有节点清理缓冲区
-	void _terminate(const TaskId& taskId);
-
-	/// @brief  查询 task 是否已被终止
-	bool _isTerminated(const TaskId& taskId) const;
-
-	/// @brief  数据耗尽时的处理：检查声明是否满足，满足则正常终止，否则报错并终止
-	/// @note   由 TaskGate 析构函数调用，或超时看门狗触发
-	void _onExhausted(const TaskId& taskId);
-
-	// ── 错误记录 ──
-
-	/// @brief  记录一条 task 级错误（线程安全，可在协程/线程池中调用）
-	void _recordError(const TaskId& taskId, std::string nodeName, std::string source, std::string message);
-
-	// ── 成员 ──
-	std::unordered_map<std::string, std::unique_ptr<Node>> _nodes;
-	std::vector<Edge> _edges;
-
-	// _ownedScheduler 必须在 _scheduler 之前声明
-	std::unique_ptr<CoroScheduler> _ownedScheduler;
-	CoroScheduler* _scheduler;
-
-	// 线程池
-	ThreadPool _computePool;
-	ThreadPool _operatorPool;
-	ThreadPool _systemPool;
-
-	// 导线连接器自动命名计数器
-	std::atomic<size_t> _nextWireId{0};
-
-	// 输入区：图级输入端口声明（纯结构，无 task 级状态）
-	InputZone _inputZone;
-	
-	// 输出区：聚合绑定、声明、累加、artifact 存储
-	OutputZone _outputZone;
-
-	// 信号仓库：图级键值对信号，与数据流正交解耦
+	// ── 内部组件（声明顺序决定析构顺序）──
+	// ExecutionEngine 必须最后声明 → 最先析构：
+	//   其 CoroScheduler shutdown 期间 TaskGate 析构函数需访问下方成员。
 	std::shared_ptr<SignalStore> _signalStore;
-
-	// 已终止的 task 集合（_terminationMutex 保护）
-	std::unordered_set<TaskId> _terminatedTasks;
-	mutable std::mutex _terminationMutex;
-
-	// task 级错误收集：每 taskId 对应按发生顺序排列的错误列表（_errorMutex 保护）
-	std::unordered_map<TaskId, std::vector<TaskError>> _taskErrors;
-	mutable std::mutex _errorMutex;
-
-	// task 完成回调：在 _terminate 末尾触发（无需互斥锁，仅在 _terminate 中调用）
-	TaskCompleteCallback _taskCompleteCb;
-
-	// 同步等待支持：在 _terminate 末尾 notify_all，供 wait() 阻塞等待
-	mutable std::mutex _completionMutex;
-	mutable std::condition_variable _completionCv;
+	ErrorTracker    _errors;
+	OutputZone      _outputZone;
+	GraphStore      _store;
+	ExecutionEngine _engine;
 };
 
 } // namespace DC

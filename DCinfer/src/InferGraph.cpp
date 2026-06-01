@@ -1,8 +1,6 @@
 #include "InferGraph.h"
-#include "Connector.h"
 #include "NodeException.h"
-
-#include <algorithm>
+#include "GraphException.h"
 
 namespace DC {
 
@@ -11,370 +9,50 @@ namespace DC {
 // ════════════════════════════════════════════
 
 InferGraph::InferGraph()
-	: _ownedScheduler(std::make_unique<CoroScheduler>(2)), _scheduler(_ownedScheduler.get()), _computePool({}),
-	  _operatorPool({}), _systemPool({}), _signalStore(std::make_shared<SignalStore>()) {}
+	: _signalStore(std::make_shared<SignalStore>()), _engine(2) {}
 
-InferGraph::InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg, const PoolConfig& operatorCfg,
-					   const PoolConfig& systemCfg)
-	: _scheduler(&scheduler), _computePool(computeCfg), _operatorPool(operatorCfg), _systemPool(systemCfg),
-	  _signalStore(std::make_shared<SignalStore>()) {}
-
-// ════════════════════════════════════════════
-// _findNode
-// ════════════════════════════════════════════
-
-Node* InferGraph::_findNode(const std::string& name) {
-	auto it = _nodes.find(name);
-	return it != _nodes.end() ? it->second.get() : nullptr;
-}
-
-const Node* InferGraph::_findNode(const std::string& name) const {
-	auto it = _nodes.find(name);
-	return it != _nodes.end() ? it->second.get() : nullptr;
-}
-
-// ════════════════════════════════════════════
-// 图构建
-// ════════════════════════════════════════════
-
-Node* InferGraph::addNode(std::unique_ptr<Node> node) {
-	if (!node || node->name().empty())
-		return nullptr;
-
-	const auto& name = node->name();
-	if (_nodes.contains(name))
-		return nullptr;
-
-	auto* raw = node.get();
-	_nodes.emplace(name, std::move(node));
-	return raw;
-}
-
-bool InferGraph::connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
-						 const std::string& dstPort) {
-	auto* src = _findNode(srcNode);
-	auto* dst = _findNode(dstNode);
-	if (!src || !dst)
-		return false;
-
-	// 约束：至少有一端是连接器（两个业务节点禁止直连，必须通过 Connector 中转）
-	if (!src->isConnector() && !dst->isConnector())
-		return false;
-
-	// 验证端口存在
-	if (!src->schema().findOutput(srcPort))
-		return false;
-	if (!dst->schema().findInput(dstPort))
-		return false;
-
-	_edges.push_back({srcNode, srcPort, dstNode, dstPort});
-	return true;
-}
-
-size_t InferGraph::connectAll(const std::string& srcNode, const std::string& dstNode) {
-	auto* src = _findNode(srcNode);
-	auto* dst = _findNode(dstNode);
-	if (!src || !dst)
-		return 0;
-
-	size_t matched = 0;
-	for (const auto& outPort : src->schema().outputs) {
-		if (dst->schema().findInput(outPort.name)) {
-			_edges.push_back({srcNode, outPort.name, dstNode, outPort.name});
-			++matched;
-		}
-	}
-	return matched;
-}
-
-void InferGraph::bindOutput(const std::string& nodeName, const std::string& portName) {
-	_outputZone.bind(nodeName, portName);
-}
-
-void InferGraph::bindInput(const std::string& nodeName, const std::string& portName) {
-	_inputZone.bind(nodeName, portName);
-}
-
-// ════════════════════════════════════════════
-// wire：自动插入广播连接器（1→1，零拷贝 move 直通）
-// ════════════════════════════════════════════
-
-Node* InferGraph::wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
-					   const std::string& dstPort) {
-	auto* src = _findNode(srcNode);
-	auto* dst = _findNode(dstNode);
-	if (!src || !dst)
-		return nullptr;
-	if (!src->schema().findOutput(srcPort))
-		return nullptr;
-	if (!dst->schema().findInput(dstPort))
-		return nullptr;
-
-	// 自动创建广播连接器（1 下游 → 零拷贝 move 直通，等效导线）
-	auto wireName = "__wire_" + std::to_string(_nextWireId.fetch_add(1));
-	auto wireNode = std::make_unique<Node>("Connector.Broadcast", wireName, Connector::broadcastSchema(1),
-										   Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
-	wireNode->setConnector(true);
-	auto* wirePtr = addNode(std::move(wireNode));
-	if (!wirePtr)
-		return nullptr;
-
-	// 上游 → 广播
-	_edges.push_back({srcNode, srcPort, wireName, "in"});
-	// 广播(out_0) → 下游
-	_edges.push_back({wireName, "out_0", dstNode, dstPort});
-
-	return wirePtr;
-}
+InferGraph::InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg,
+					   const PoolConfig& operatorCfg, const PoolConfig& systemCfg)
+	: _signalStore(std::make_shared<SignalStore>()),
+	  _engine(scheduler, computeCfg, operatorCfg, systemCfg) {}
 
 // ════════════════════════════════════════════
 // 数据注入
 // ════════════════════════════════════════════
 
-bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data) {
-	auto* n = _findNode(nodeName);
+bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
+						   const std::string& portName, Value data) {
+	auto* n = _store.node(nodeName);
 	if (!n)
 		return false;
 	try {
 		n->setInput(taskId, portName, std::move(data));
 		return true;
 	} catch (const NodeException& e) {
-		_recordError(taskId, nodeName, "InferGraph::feedInput",
-					 "NodeException in setInput for port '" + portName + "': " + std::string(e.what()));
+		_errors.recordError(taskId, nodeName, "InferGraph::feedInput",
+							"NodeException in setInput for port '" + portName
+								+ "': " + std::string(e.what()));
 		return false;
 	}
 }
 
-bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
-						   Tensor data) {
+bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
+						   const std::string& portName, Tensor data) {
 	return feedInput(taskId, nodeName, portName, Value(std::make_unique<Tensor>(std::move(data))));
-}
-
-// ════════════════════════════════════════════
-// 输出声明
-// ════════════════════════════════════════════
-
-void InferGraph::declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
-	_outputZone.declare(taskId, std::move(declarations));
-}
-
-void InferGraph::declareOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
-							   size_t count) {
-	_outputZone.declare(taskId, nodeName, portName, count);
-}
-
-// ════════════════════════════════════════════
-// 异步提交：协程驱动的数据传播
-// ════════════════════════════════════════════
-
-void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout,
-						uint32_t maxHops) {
-	// 校验：必须已声明输出
-	{
-		if (!_outputZone.hasDeclaration(taskId)) {
-			throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submit",
-								 "no output declarations for task '" + taskId
-									 + "'. Call declareOutput() before submit().");
-		}
-	}
-
-	// 创建任务门控：协程链与看门狗共享，最后一个持有者析构时触发耗尽检测
-	auto gate = std::make_shared<TaskGate>();
-	gate->graph = this;
-	gate->taskId = taskId;
-
-	// 超时看门狗（独立线程）
-	if (timeout.count() > 0) {
-		auto deadline = std::chrono::steady_clock::now() + timeout;
-		std::thread([this, taskId, timeout, deadline, gate]() {
-			std::this_thread::sleep_until(deadline);
-			if (!gate->terminated.exchange(true, std::memory_order_acq_rel)) {
-				_recordError(taskId, "<watchdog>", "InferGraph::submit",
-							 "task timed out (" + std::to_string(timeout.count()) + "ms) without meeting output declarations");
-				_terminate(taskId);
-			}
-		}).detach();
-	}
-
-	// 扫描全图，对所有已就绪的节点创建传播协程
-	for (const auto& [nodeName, nodePtr] : _nodes) {
-		if (!nodePtr->isReady(taskId))
-			continue;
-
-		// 根据 affinity 将入口节点提交到对应线程池
-		switch (nodePtr->affinity()) {
-		case ThreadPoolAffinity::Compute:
-			_computePool.submit(nodePtr->tag(), [nodePtr = nodePtr.get(), taskId] {
-				try {
-					nodePtr->tryExecute(taskId);
-				} catch (const NodeException& e) {
-					// 线程池中无法直接调用 _recordError，错误通过协程链中 whenComplete 的 result 传播
-				}
-			});
-			break;
-		case ThreadPoolAffinity::Operator:
-			_operatorPool.submit(nodePtr->tag(), [nodePtr = nodePtr.get(), taskId] {
-				try {
-					nodePtr->tryExecute(taskId);
-				} catch (const NodeException& e) {
-				}
-			});
-			break;
-		case ThreadPoolAffinity::System:
-			_systemPool.submit(nodePtr->tag(), [nodePtr = nodePtr.get(), taskId] {
-				try {
-					nodePtr->tryExecute(taskId);
-				} catch (const NodeException& e) {
-				}
-			});
-			break;
-		}
-
-		// 创建协程：等待节点完成后自动传播数据到下游
-		_scheduler->spawnTask(_propagateFrom(nodeName, taskId, gate, maxHops));
-	}
-}
-
-Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
-									  std::shared_ptr<TaskGate> gate,
-									  uint32_t remainingHops) {
-	// [检查点 0] TTL 耗尽：主动终止 task（不依赖 _onExhausted）
-	if (remainingHops == 0) {
-		_recordError(taskId, nodeName, "InferGraph::_propagateFrom",
-					 "propagation hops exhausted (TTL=0) at node '" + nodeName
-						 + "': cycle or excessively deep graph detected");
-		gate->terminated.store(true, std::memory_order_release);
-		_terminate(taskId);
-		co_return;
-	}
-
-	// [检查点 1] 入口：若 task 已终止，直接返回
-	if (_isTerminated(taskId)) {
-		co_return;
-	}
-
-	auto* src = _findNode(nodeName);
-	if (!src)
-		co_return;
-
-	// co_await 挂起当前协程，等待该节点执行完成
-	auto result = co_await src->whenComplete(taskId);
-	if (!result.ok()) {
-		_recordError(taskId, nodeName, "InferGraph::_propagateFrom",
-					 "Node execution failed: " + result.message);
-		co_return; // 失败则不传播
-	}
-
-	// [检查点 2] 节点完成 → 三步流水线：打卡 → OutputZone 搬运 → 边搬运
-	//
-	// 第一步：打卡 — 所有产出端口统一累加计数，不论目的地
-	for (const auto& outPort : src->schema().outputs) {
-		if (!src->hasOutput(taskId, outPort.name))
-			continue;
-		if (_outputZone.accumulateAndCheck(nodeName, outPort.name, taskId)) {
-			gate->terminated.store(true, std::memory_order_release);
-			_terminate(taskId);
-			co_return;
-		}
-	}
-
-	// 第二步：OutputZone 目的地搬运 — OutputZone 绑定端口消费后自然空
-	for (const auto& outPort : src->schema().outputs) {
-		if (!src->hasOutput(taskId, outPort.name))
-			continue;
-		if (_outputZone.isBound(nodeName, outPort.name)) {
-			Value data = src->getOutput(taskId, outPort.name);
-			_outputZone.append(taskId, nodeName, outPort.name, std::move(data),
-							   {nodeName, outPort.name, taskId});
-		}
-	}
-
-	// 第三步：边目的地搬运 — 已在第二步消费的端口 hasOutput=false，自动跳过
-	for (const auto& edge : _edges) {
-		if (edge.srcNode != nodeName)
-			continue;
-
-		if (!src->hasOutput(taskId, edge.srcPort))
-			continue;
-
-		// 阻塞检查：下游节点被信号阻塞时跳过此边，不消费上游输出
-		// 数据留在上游输出槽中等待其他出边消费或自然背压释放
-		auto* dst = _findNode(edge.dstNode);
-		if (!dst)
-			continue;
-		if (dst->isBlocked(taskId))
-			continue;
-
-		Value data = src->getOutput(taskId, edge.srcPort);
-
-		// [检查点 3] 写入下游前再确认一次未被终止
-		if (_isTerminated(taskId))
-			co_return;
-
-		try {
-			dst->setInput(taskId, edge.dstPort, std::move(data));
-		} catch (const NodeException& e) {
-			_recordError(taskId, edge.dstNode, "InferGraph::_propagateFrom",
-						 "NodeException in setInput for port '" + edge.dstPort + "': " + std::string(e.what()));
-			continue;
-		}
-
-		// 下游就绪 → 按 affinity 提交到相应线程池
-		if (dst->isReady(taskId)) {
-			switch (dst->affinity()) {
-			case ThreadPoolAffinity::Compute:
-				co_await _computePool.submitAsync(dst->tag(), [this, dst, taskId, dstNode = edge.dstNode] {
-					try {
-						dst->tryExecute(taskId);
-					} catch (const NodeException& e) {
-						_recordError(taskId, dstNode, "InferGraph::_propagateFrom<Compute>",
-									 "NodeException in tryExecute: " + std::string(e.what()));
-					}
-				});
-				break;
-			case ThreadPoolAffinity::Operator:
-				co_await _operatorPool.submitAsync(dst->tag(), [this, dst, taskId, dstNode = edge.dstNode] {
-					try {
-						dst->tryExecute(taskId);
-					} catch (const NodeException& e) {
-						_recordError(taskId, dstNode, "InferGraph::_propagateFrom<Operator>",
-									 "NodeException in tryExecute: " + std::string(e.what()));
-					}
-				});
-				break;
-			case ThreadPoolAffinity::System:
-				co_await _systemPool.submitAsync(dst->tag(), [this, dst, taskId, dstNode = edge.dstNode] {
-					try {
-						dst->tryExecute(taskId);
-					} catch (const NodeException& e) {
-						_recordError(taskId, dstNode, "InferGraph::_propagateFrom<System>",
-									 "NodeException in tryExecute: " + std::string(e.what()));
-					}
-				});
-				break;
-			}
-
-			// [检查点 1b] 提交完确认未被终止再 spawn 下游
-			if (_isTerminated(taskId))
-				co_return;
-
-			// 创建下游传播协程（非阻塞：fire-and-forget spawn）
-			_scheduler->spawnTask(_propagateFrom(edge.dstNode, taskId, gate, remainingHops - 1));
-		}
-	}
 }
 
 // ════════════════════════════════════════════
 // 结果获取
 // ════════════════════════════════════════════
 
-Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) {
+Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName,
+							const std::string& portName) {
 	// 优先查 OutputZone（OutputZone 绑定端口的数据在 _propagateFrom 第二步已搬运至此）
 	auto ozVal = _outputZone.take(taskId, nodeName, portName);
 	if (ozVal)
 		return std::move(*ozVal);
 
-	auto* n = _findNode(nodeName);
+	auto* n = _store.node(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutput",
 							 "node '" + nodeName + "' not found");
@@ -382,7 +60,8 @@ Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName, c
 	return n->getOutput(taskId, portName);
 }
 
-Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName) {
+Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& nodeName,
+								   const std::string& portName) {
 	// 优先查 OutputZone
 	auto ozVal = _outputZone.take(taskId, nodeName, portName);
 	if (ozVal) {
@@ -390,10 +69,11 @@ Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& node
 		if (t)
 			return std::move(*t);
 		throw GraphException(GraphException::ErrorType::Other, "InferGraph::getOutputTensor",
-							 "OutputZone artifact for '" + nodeName + "." + portName + "' is not a DC::Tensor");
+							 "OutputZone artifact for '" + nodeName + "." + portName
+								 + "' is not a DC::Tensor");
 	}
 
-	auto* n = _findNode(nodeName);
+	auto* n = _store.node(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutputTensor",
 							 "node '" + nodeName + "' not found");
@@ -401,108 +81,16 @@ Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& node
 	return n->getOutputTensor(taskId, portName);
 }
 
-bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const {
+bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
+						   const std::string& portName) const {
 	// 优先查 OutputZone
 	if (_outputZone.hasOutput(taskId, nodeName, portName))
 		return true;
 
-	auto* n = _findNode(nodeName);
+	auto* n = _store.node(nodeName);
 	if (!n)
 		return false;
 	return n->hasOutput(taskId, portName);
-}
-
-// ════════════════════════════════════════════
-// 查询
-// ════════════════════════════════════════════
-
-Node* InferGraph::node(const std::string& name) {
-	return _findNode(name);
-}
-
-const Node* InferGraph::node(const std::string& name) const {
-	return _findNode(name);
-}
-
-std::vector<std::string> InferGraph::nodeNames() const {
-	std::vector<std::string> names;
-	names.reserve(_nodes.size());
-	for (const auto& [name, nodePtr] : _nodes) {
-		names.push_back(name);
-	}
-	return names;
-}
-
-// ════════════════════════════════════════════
-// 终止辅助
-// ════════════════════════════════════════════
-
-bool InferGraph::_isTerminated(const TaskId& taskId) const {
-	std::lock_guard lk(_terminationMutex);
-	return _terminatedTasks.contains(taskId);
-}
-
-void InferGraph::_terminate(const TaskId& taskId) {
-	{
-		std::lock_guard lk(_terminationMutex);
-		// 防止重复终止
-		if (!_terminatedTasks.insert(taskId).second)
-			return;
-	}
-
-	// ① 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
-	if (_taskCompleteCb) {
-		_taskCompleteCb(taskId);
-	}
-
-	// ② 清理输出区（同一 taskId 可安全重新提交）
-	_outputZone.clearTask(taskId);
-
-	// ③ 清理该 task 的所有 task 级信号（防止泄漏）
-	_signalStore->clearTask(taskId);
-
-	// ④ 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
-	for (auto& [name, nodePtr] : _nodes) {
-		if (nodePtr->hasTask(taskId))
-			nodePtr->terminateTask(taskId);
-	}
-
-	// ⑤ 通知同步等待者（所有清理已完成，数据应由回调预先捕获）
-	_completionCv.notify_all();
-}
-
-// ════════════════════════════════════════════
-// 耗尽检测：TaskGate 析构或超时触发
-// ════════════════════════════════════════════
-
-void InferGraph::_onExhausted(const TaskId& taskId) {
-	// 已终止则跳过
-	if (_isTerminated(taskId)) {
-		return;
-	}
-
-	// 检查声明是否已满足
-	bool allMet = _outputZone.checkAllSatisfied(taskId);
-
-	if (allMet) {
-		// 声明已满足 → 正常终止（守护路径，主路径在 OutputZone::accumulateAndCheck 中处理）
-		_terminate(taskId);
-		return;
-	}
-
-	// 声明未满足，数据可能残留在阻塞路径上（节点 isBlocked=true 导致边被跳过）——
-	// 这是正常工作流的一部分，不是异常。不报错、不终止，留给看门狗检测真正的死锁。
-}
-
-// ════════════════════════════════════════════
-// 同步等待
-// ════════════════════════════════════════════
-
-bool InferGraph::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
-	std::unique_lock lk(_completionMutex);
-	return _completionCv.wait_for(lk, timeout, [this, &taskId] {
-		return _isTerminated(taskId);
-	});
 }
 
 // ════════════════════════════════════════════
@@ -512,8 +100,8 @@ bool InferGraph::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
 std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32_t maxHops) {
 	// ① 从 InputZone 推导输入 Schema
 	Node::Schema inSchema;
-	for (auto& b : _inputZone.bindings()) {
-		auto* n = _findNode(b.nodeName);
+	for (auto& b : _store.inputBindings()) {
+		auto* n = _store.node(b.nodeName);
 		if (!n) continue;
 		auto* port = n->schema().findInput(b.portName);
 		if (port) inSchema.inputs.push_back(*port);
@@ -522,7 +110,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 	// ② 从 OutputZone 推导输出 Schema（跳过连接器）
 	Node::Schema outSchema;
 	for (auto& b : _outputZone.bindings()) {
-		auto* n = _findNode(b.nodeName);
+		auto* n = _store.node(b.nodeName);
 		if (!n || n->isConnector()) continue;
 		auto* port = n->schema().findOutput(b.portName);
 		if (port) outSchema.outputs.push_back(*port);
@@ -539,7 +127,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 		// 将 RunContext 的输入注入子图
 		int fedCount = 0;
-		for (auto& ib : _inputZone.bindings()) {
+		for (auto& ib : _store.inputBindings()) {
 			const auto& inVal = ctx.peek(ib.portName);
 			if (!inVal.as<Tensor>()) {
 				continue;
@@ -555,7 +143,6 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		}
 
 		// 通过回调在 _terminate 清理数据前捕获输出
-		// 使用 shared_ptr 包装确保回调可被 std::function 安全复制
 		auto mtx = std::make_shared<std::mutex>();
 		auto cv = std::make_shared<std::condition_variable>();
 		auto done = std::make_shared<bool>(false);
@@ -565,7 +152,6 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			if (task != tid) {
 				return;
 			}
-			// 回调在 _terminate 清理前触发，此时 Node 缓冲区和 OutputZone 数据仍可用
 			for (auto& ob : _outputZone.bindings()) {
 				if (!hasOutput(tid, ob.nodeName, ob.portName)) continue;
 				(*capturedOutputs)[ob.portName] = getOutput(tid, ob.nodeName, ob.portName);
@@ -610,32 +196,6 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		"GraphNode", nodeName, fullSchema,
 		std::move(runFn), nullptr,
 		ThreadPoolAffinity::Compute);
-}
-
-// ════════════════════════════════════════════
-// 错误记录
-// ════════════════════════════════════════════
-
-void InferGraph::_recordError(const TaskId& taskId, std::string nodeName, std::string source,
-							  std::string message) {
-	std::lock_guard lk(_errorMutex);
-	_taskErrors[taskId].push_back({std::move(nodeName), std::move(source), std::move(message)});
-}
-
-std::vector<TaskError> InferGraph::taskErrors(const TaskId& taskId) const {
-	std::lock_guard lk(_errorMutex);
-	auto it = _taskErrors.find(taskId);
-	return it != _taskErrors.end() ? it->second : std::vector<TaskError>{};
-}
-
-void InferGraph::clearErrors() {
-	std::lock_guard lk(_errorMutex);
-	_taskErrors.clear();
-}
-
-bool InferGraph::hasErrors() const {
-	std::lock_guard lk(_errorMutex);
-	return !_taskErrors.empty();
 }
 
 } // namespace DC
