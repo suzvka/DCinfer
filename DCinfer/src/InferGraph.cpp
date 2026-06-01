@@ -162,7 +162,8 @@ void InferGraph::declareOutput(const TaskId& taskId, const std::string& nodeName
 // 异步提交：协程驱动的数据传播
 // ════════════════════════════════════════════
 
-void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout) {
+void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout,
+						uint32_t maxHops) {
 	// 校验：必须已声明输出
 	{
 		if (!_outputZone.hasDeclaration(taskId)) {
@@ -225,12 +226,21 @@ void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout)
 		}
 
 		// 创建协程：等待节点完成后自动传播数据到下游
-		_scheduler->spawnTask(_propagateFrom(nodeName, taskId, gate));
+		_scheduler->spawnTask(_propagateFrom(nodeName, taskId, gate, maxHops));
 	}
 }
 
 Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
-									  std::shared_ptr<TaskGate> gate) {
+									  std::shared_ptr<TaskGate> gate,
+									  uint32_t remainingHops) {
+	// [检查点 0] TTL 耗尽：不再 spawn 下游传播
+	if (remainingHops == 0) {
+		_recordError(taskId, nodeName, "InferGraph::_propagateFrom",
+					 "propagation hops exhausted (TTL=0) at node '" + nodeName
+						 + "': cycle or excessively deep graph detected");
+		co_return;
+	}
+
 	// [检查点 1] 入口：若 task 已终止，直接返回
 	if (_isTerminated(taskId)) {
 		co_return;
@@ -338,7 +348,7 @@ Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
 				co_return;
 
 			// 创建下游传播协程（非阻塞：fire-and-forget spawn）
-			_scheduler->spawnTask(_propagateFrom(edge.dstNode, taskId, gate));
+			_scheduler->spawnTask(_propagateFrom(edge.dstNode, taskId, gate, remainingHops - 1));
 		}
 	}
 }

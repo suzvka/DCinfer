@@ -85,6 +85,29 @@ static Node::RunFn identityRunFn() {
 	};
 }
 
+// ── 增 1 算子（用于反馈环测试）──
+static Node::Schema incSchema() {
+	Node::Schema s;
+	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
+	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+	return s;
+}
+
+static Node::RunFn incRunFn() {
+	return [](Node::RunContext& ctx) -> Node::Result {
+		const auto& inVal = ctx.peek("x");
+		const auto* t = inVal.as<Tensor>();
+		if (!t)
+			return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+
+		float val = t->item<float>() + 1.0f;
+		auto out = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+		*out = val;
+		ctx.output("y", Value(std::move(out)));
+		return ctx.success();
+	};
+}
+
 // ════════════════════════════════════════════
 // 测试用例
 // ════════════════════════════════════════════
@@ -335,6 +358,100 @@ void testSerializationAccessors() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 循环测试
+// ════════════════════════════════════════════
+
+void testSimpleCycle() {
+	TEST("simple feedback cycle: inc.y → inc.x, count=3 termination") {
+		TestHarness harness;
+
+		harness.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
+
+		// 反馈环：inc.y → inc.x
+		harness.wire("inc", "y", "inc", "x");
+
+		// 注入初始值
+		harness.feedInput("t1", "inc", "x", makeFloatTensor(0.0f));
+
+		// 期望产出 3 次
+		harness.declareOutput("t1", "inc", "y", 3);
+		harness.submit("t1");
+		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
+
+		CHECK(harness.hasOutput("t1", "inc", "y"), "inc should have output");
+		auto result = harness.getOutputTensor("t1", "inc", "y");
+		// 3 iterations: 0→1→2→3
+		CHECK(std::abs(result.item<float>() - 3.0f) < 1e-6f, "result after 3 iterations should be 3.0");
+	}
+	END_TEST();
+}
+
+void testCycleHopsExhaustion() {
+	TEST("cycle TTL exhaustion: maxHops=5 truncates loop before count=100") {
+		TestHarness harness;
+
+		harness.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
+
+		// 反馈环
+		harness.wire("inc", "y", "inc", "x");
+		harness.feedInput("t1", "inc", "x", makeFloatTensor(0.0f));
+
+		// 声明一个极大的 count，不可能在 5 跳内完成
+		harness.declareOutput("t1", "inc", "y", 100);
+		harness.submit("t1", std::chrono::milliseconds(0), 5);
+
+		CHECK(harness.awaitCompletion("t1"), "should complete (via TTL exhaustion, not hang)");
+
+		// 应该有 TTL 耗尽错误记录
+		auto errors = harness.taskErrors("t1");
+		bool hasHopsError = false;
+		for (auto& e : errors) {
+			if (e.message.find("hops exhausted") != std::string::npos) {
+				hasHopsError = true;
+				break;
+			}
+		}
+		CHECK(hasHopsError, "should record hops exhaustion error");
+
+		// 输出应少于声明（5 跳意味着最多 5 次迭代，实际约 ≤5）
+		if (harness.hasOutput("t1", "inc", "y")) {
+			auto result = harness.getOutputTensor("t1", "inc", "y");
+			CHECK(result.item<float>() < 100.0f, "output should be truncated (less than declared count)");
+		}
+	}
+	END_TEST();
+}
+
+void testCycleMultiNode() {
+	TEST("multi-node cycle: A → B → C → A with TTL") {
+		TestHarness harness;
+
+		// 三个恒等节点成环: A → B → C → A
+		harness.addNode(std::make_unique<Node>("Builtin", "A", incSchema(), incRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "B", incSchema(), incRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "C", incSchema(), incRunFn()));
+
+		harness.wire("A", "y", "B", "x");
+		harness.wire("B", "y", "C", "x");
+		harness.wire("C", "y", "A", "x");
+
+		harness.feedInput("t1", "A", "x", makeFloatTensor(0.0f));
+
+		// 每圈 3 节点 + 3 导线 = 6 跳，3 圈 = 18 跳 → TTL=19 刚好完成
+		harness.declareOutput("t1", "C", "y", 3);
+		harness.submit("t1", std::chrono::milliseconds(0), 19);
+
+		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
+		CHECK(harness.hasOutput("t1", "C", "y"), "C should have output after 3 cycles");
+
+		auto result = harness.getOutputTensor("t1", "C", "y");
+		// 3 nodes + 3 wires per lap = 6 hops/lap，3 laps = +9, starting from 0
+		CHECK(std::abs(result.item<float>() - 9.0f) < 1e-6f, "result after 3 laps should be 9.0");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
@@ -344,6 +461,11 @@ int main() {
 		testConnectAll();
 		testNodeQuery();
 		testSerializationAccessors();
+
+		// 循环测试
+		testSimpleCycle();
+		testCycleHopsExhaustion();
+		testCycleMultiNode();
 
 		if (failures == 0) {
 			std::cout << "\nAll InferGraph tests passed!" << std::endl;

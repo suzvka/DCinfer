@@ -39,6 +39,9 @@ class InferGraph {
 public:
 	using TaskId = Node::TaskId;
 
+	/// @brief  默认最大跳数（TTL），防止循环无限传播
+	static constexpr uint32_t kDefaultMaxHops = 10000;
+
 	// ── 端口级边 ──
 	struct Edge {
 		std::string srcNode;
@@ -106,8 +109,10 @@ public:
 	/// @brief  异步启动整张图的计算
 	///         为指定 taskId 扫描入口节点，创建协程链驱动数据流
 	/// @param  timeout  超时时间（毫秒），0 表示不启用超时，默认 0
+	/// @param  maxHops  传播最大跳数（TTL），超过后不再 spawn 下游协程，默认 kDefaultMaxHops
 	/// @throws GraphException(NoDeclaration) 若未事先调用 declareOutput
-	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0));
+	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
+				uint32_t maxHops = kDefaultMaxHops);
 
 	// ── 结果获取 ──
 
@@ -211,9 +216,11 @@ private:
 	//
 	// 核心：从指定节点出发，沿边传播数据到所有下游
 	// co_await 节点完成 → 消费输出 → 写入下游 → 按 affinity 提交线程池 → spawn 下游传播协程
-	// @param gate  共享任务门控，最后一个持有者析构时触发耗尽检测
+	// @param gate           共享任务门控，最后一个持有者析构时触发耗尽检测
+	// @param remainingHops  剩余跳数（TTL），每 spawn 一个下游减 1，耗尽时停止传播
 	Task<void> _propagateFrom(std::string nodeName, TaskId taskId,
-							  std::shared_ptr<TaskGate> gate);
+							  std::shared_ptr<TaskGate> gate,
+							  uint32_t remainingHops = kDefaultMaxHops);
 
 	// ── 终止辅助 ──
 

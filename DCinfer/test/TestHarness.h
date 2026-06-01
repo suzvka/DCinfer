@@ -80,7 +80,8 @@ public:
 	// ── 异步提交 ──
 
 	/// @brief  提交 task。内部设置 task 完成回调：在 _terminate 触发时捕获输出并通知等待者。
-	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) {
+	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
+				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
 		// 注册 task 完成回调：在 _terminate（所有传播完成）时触发，在 cleanup 前执行
 		_graph.setTaskCompleteCallback([this](const TaskId& tid) {
 			// 捕获所有声明输出到本地缓存
@@ -115,7 +116,7 @@ public:
 			_cv.notify_all();
 		});
 
-		_graph.submit(taskId, timeout);
+		_graph.submit(taskId, timeout, maxHops);
 	}
 
 	// ── 同步等待 ──
