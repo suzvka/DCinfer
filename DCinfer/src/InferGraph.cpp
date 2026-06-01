@@ -91,6 +91,10 @@ void InferGraph::bindOutput(const std::string& nodeName, const std::string& port
 	_outputZone.bind(nodeName, portName);
 }
 
+void InferGraph::bindInput(const std::string& nodeName, const std::string& portName) {
+	_inputZone.bind(nodeName, portName);
+}
+
 // ════════════════════════════════════════════
 // wire：自动插入广播连接器（1→1，零拷贝 move 直通）
 // ════════════════════════════════════════════
@@ -446,22 +450,25 @@ void InferGraph::_terminate(const TaskId& taskId) {
 			return;
 	}
 
-	// 清理输出区（同一 taskId 可安全重新提交）
-	_outputZone.clearTask(taskId);
-
-	// 清理该 task 的所有 task 级信号（防止泄漏）
-	_signalStore->clearTask(taskId);
-
-	// 通知 task 完成回调（在所有节点 cleanup 之前触发，保证调用方能安全读取输出）
+	// ① 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
 	if (_taskCompleteCb) {
 		_taskCompleteCb(taskId);
 	}
 
-	// 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
+	// ② 清理输出区（同一 taskId 可安全重新提交）
+	_outputZone.clearTask(taskId);
+
+	// ③ 清理该 task 的所有 task 级信号（防止泄漏）
+	_signalStore->clearTask(taskId);
+
+	// ④ 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
 	for (auto& [name, nodePtr] : _nodes) {
 		if (nodePtr->hasTask(taskId))
 			nodePtr->terminateTask(taskId);
 	}
+
+	// ⑤ 通知同步等待者（所有清理已完成，数据应由回调预先捕获）
+	_completionCv.notify_all();
 }
 
 // ════════════════════════════════════════════
@@ -485,6 +492,124 @@ void InferGraph::_onExhausted(const TaskId& taskId) {
 
 	// 声明未满足，数据可能残留在阻塞路径上（节点 isBlocked=true 导致边被跳过）——
 	// 这是正常工作流的一部分，不是异常。不报错、不终止，留给看门狗检测真正的死锁。
+}
+
+// ════════════════════════════════════════════
+// 同步等待
+// ════════════════════════════════════════════
+
+bool InferGraph::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
+	std::unique_lock lk(_completionMutex);
+	return _completionCv.wait_for(lk, timeout, [this, &taskId] {
+		return _isTerminated(taskId);
+	});
+}
+
+// ════════════════════════════════════════════
+// 图导出：将完整推理图包装为可嵌入父图的 Node
+// ════════════════════════════════════════════
+
+std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32_t maxHops) {
+	// ① 从 InputZone 推导输入 Schema
+	Node::Schema inSchema;
+	for (auto& b : _inputZone.bindings()) {
+		auto* n = _findNode(b.nodeName);
+		if (!n) continue;
+		auto* port = n->schema().findInput(b.portName);
+		if (port) inSchema.inputs.push_back(*port);
+	}
+
+	// ② 从 OutputZone 推导输出 Schema（跳过连接器）
+	Node::Schema outSchema;
+	for (auto& b : _outputZone.bindings()) {
+		auto* n = _findNode(b.nodeName);
+		if (!n || n->isConnector()) continue;
+		auto* port = n->schema().findOutput(b.portName);
+		if (port) outSchema.outputs.push_back(*port);
+	}
+
+	Node::Schema fullSchema;
+	fullSchema.inputs = std::move(inSchema.inputs);
+	fullSchema.outputs = std::move(outSchema.outputs);
+
+	// ③ 构造 RunFn：捕获 this + maxHops
+	//    调用者必须保证 this 在 Node 生命周期内有效
+	auto runFn = [this, maxHops](Node::RunContext& ctx) -> Node::Result {
+		const std::string tid = ctx.name();
+
+		// 将 RunContext 的输入注入子图
+		int fedCount = 0;
+		for (auto& ib : _inputZone.bindings()) {
+			const auto& inVal = ctx.peek(ib.portName);
+			if (!inVal.as<Tensor>()) {
+				continue;
+			}
+			auto val = ctx.pop(ib.portName);
+			feedInput(tid, ib.nodeName, ib.portName, std::move(val));
+			++fedCount;
+		}
+
+		// 声明输出
+		for (auto& ob : _outputZone.bindings()) {
+			declareOutput(tid, ob.nodeName, ob.portName, 1);
+		}
+
+		// 通过回调在 _terminate 清理数据前捕获输出
+		// 使用 shared_ptr 包装确保回调可被 std::function 安全复制
+		auto mtx = std::make_shared<std::mutex>();
+		auto cv = std::make_shared<std::condition_variable>();
+		auto done = std::make_shared<bool>(false);
+		auto capturedOutputs = std::make_shared<std::unordered_map<std::string, Value>>();
+
+		setTaskCompleteCallback([this, tid, mtx, cv, done, capturedOutputs](const TaskId& task) {
+			if (task != tid) {
+				return;
+			}
+			// 回调在 _terminate 清理前触发，此时 Node 缓冲区和 OutputZone 数据仍可用
+			for (auto& ob : _outputZone.bindings()) {
+				if (!hasOutput(tid, ob.nodeName, ob.portName)) continue;
+				(*capturedOutputs)[ob.portName] = getOutput(tid, ob.nodeName, ob.portName);
+			}
+			{
+				std::lock_guard lk(*mtx);
+				*done = true;
+			}
+			cv->notify_one();
+		});
+
+		// 驱动子图（不启用内部超时，由父图控制）
+		submit(tid, std::chrono::milliseconds(0), maxHops);
+
+		// 等待回调完成
+		{
+			std::unique_lock lk(*mtx);
+			cv->wait(lk, [&] { return *done; });
+		}
+		setTaskCompleteCallback(nullptr);
+
+		// 检查是否有错误
+		if (hasErrors()) {
+			auto errors = taskErrors(tid);
+			std::string msg = errors.empty() ? "unknown error" : errors[0].message;
+			clearErrors();
+			return ctx.failure(Node::Status::ExecutionFailed, msg);
+		}
+
+		// 收集输出到 RunContext
+		for (auto& ob : _outputZone.bindings()) {
+			auto it = capturedOutputs->find(ob.portName);
+			if (it != capturedOutputs->end()) {
+				ctx.output(ob.portName, std::move(it->second));
+			}
+		}
+
+		return ctx.success();
+	};
+
+	return std::make_unique<Node>(
+		"GraphNode", nodeName, fullSchema,
+		std::move(runFn), nullptr,
+		ThreadPoolAffinity::Compute);
 }
 
 // ════════════════════════════════════════════

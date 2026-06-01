@@ -5,11 +5,13 @@
 #include "CoroScheduler.h"
 #include "ThreadPool.h"
 #include "GraphException.h"
+#include "InputZone.h"
 #include "OutputZone.h"
 #include "SignalStore.h"
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -94,6 +96,9 @@ public:
 	Node* wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
 			   const std::string& dstPort);
 
+	/// @brief  标记输入：该节点的该端口为图级输入口，外部通过此口注入数据
+	void bindInput(const std::string& nodeName, const std::string& portName);
+
 	/// @brief  标记输出：该节点的该端口产出进入 OutputZone（与边目的地互斥）
 	void bindOutput(const std::string& nodeName, const std::string& portName);
 
@@ -165,6 +170,11 @@ public:
 		return _edges;
 	}
 
+	/// @brief  获取所有输入绑定的只读引用
+	const std::vector<InputBinding>& inputBindings() const {
+		return _inputZone.bindings();
+	}
+
 	/// @brief  获取所有输出绑定的只读引用
 	const std::vector<OutputBinding>& outputBindings() const {
 		return _outputZone.bindings();
@@ -208,6 +218,24 @@ public:
 
 	/// @brief  获取信号仓库指针，供 Node::bindSignal 使用。
 	std::shared_ptr<SignalStore> signalStore() { return _signalStore; }
+
+	// ── 同步等待与图导出 ──
+
+	/// @brief  同步等待 task 完成（内部阻塞，供 exportNode / 外部同步使用）
+	/// @note   调用前必须先 submit()；不持有任何锁，安全阻塞
+	/// @return true 在超时内完成，false 超时
+	bool wait(const TaskId& taskId,
+			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+
+	/// @brief  导出为可嵌入父图的包装 Node
+	///         子图内部用独立 CoroScheduler 执行，与父图隔离
+	/// @param  nodeName  包装 Node 在父图中的名字
+	/// @param  maxHops   子图内部传播的最大跳数（TTL）
+	/// @return 持有子图逻辑的独立 Node 实例
+	/// @note   前提：已调用 bindInput + bindOutput 定义了图接口
+	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活
+	std::unique_ptr<Node> exportNode(const std::string& nodeName,
+									uint32_t maxHops = kDefaultMaxHops);
 
 private:
 	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
@@ -273,6 +301,9 @@ private:
 	// 导线连接器自动命名计数器
 	std::atomic<size_t> _nextWireId{0};
 
+	// 输入区：图级输入端口声明（纯结构，无 task 级状态）
+	InputZone _inputZone;
+	
 	// 输出区：聚合绑定、声明、累加、artifact 存储
 	OutputZone _outputZone;
 
@@ -289,6 +320,10 @@ private:
 
 	// task 完成回调：在 _terminate 末尾触发（无需互斥锁，仅在 _terminate 中调用）
 	TaskCompleteCallback _taskCompleteCb;
+
+	// 同步等待支持：在 _terminate 末尾 notify_all，供 wait() 阻塞等待
+	mutable std::mutex _completionMutex;
+	mutable std::condition_variable _completionCv;
 };
 
 } // namespace DC

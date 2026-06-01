@@ -6,7 +6,6 @@
 #include "SignalStore.h"
 
 #include <chrono>
-#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -83,7 +82,7 @@ public:
 	/// @brief  提交 task。内部设置 task 完成回调：在 _terminate 触发时捕获输出并通知等待者。
 	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
-		// 注册 task 完成回调：在 _terminate（所有传播完成）时触发，在 cleanup 前执行
+		// 注册 task 完成回调：在 _terminate（所有传播完成）时触发，捕获输出到本地缓存
 		_graph.setTaskCompleteCallback([this](const TaskId& tid) {
 			// 捕获所有声明输出到本地缓存
 			{
@@ -109,12 +108,7 @@ public:
 					}
 				}
 			}
-			// 通知等待者
-			{
-				std::lock_guard lk(_cvMutex);
-				_completedTasks.insert(tid);
-			}
-			_cv.notify_all();
+			// 注意：无需手动通知 CV，InferGraph::wait() 通过 _completionCv 同步
 		});
 
 		_graph.submit(taskId, timeout, maxHops);
@@ -122,13 +116,10 @@ public:
 
 	// ── 同步等待 ──
 
-	/// @brief  等待指定 task 完成（回调触发后返回）
+	/// @brief  同步等待 task 完成（复用 InferGraph::wait）
 	/// @return true 在超时前完成，false 超时
 	bool awaitCompletion(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
-		std::unique_lock lk(_cvMutex);
-		return _cv.wait_for(lk, timeout, [this, &taskId] {
-			return _completedTasks.contains(taskId);
-		});
+		return _graph.wait(taskId, timeout);
 	}
 
 	// ── 结果获取（从缓存读取）──
@@ -216,10 +207,7 @@ private:
 	// 回调中捕获的输出缓存：taskId → {"nodeName:portName" → Tensor}
 	std::unordered_map<TaskId, std::unordered_map<std::string, Tensor>> _capturedOutputs;
 
-	// 条件变量同步
-	std::unordered_set<TaskId> _completedTasks;
-	std::mutex _cvMutex;
-	std::condition_variable _cv;
+
 };
 
 } // namespace DC

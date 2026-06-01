@@ -183,6 +183,18 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	}
 	root["outputBindings"] = std::move(bindingsArr);
 
+	// 输入绑定
+	nlohmann::json inputBindingsArr = nlohmann::json::array();
+	for (auto& b : graph.inputBindings()) {
+		auto* boundNode = graph.node(b.nodeName);
+		if (boundNode && boundNode->isConnector()) continue;
+		nlohmann::json jb;
+		jb["nodeName"] = b.nodeName;
+		jb["portName"] = b.portName;
+		inputBindingsArr.push_back(std::move(jb));
+	}
+	root["inputBindings"] = std::move(inputBindingsArr);
+
 	return root;
 }
 
@@ -369,6 +381,15 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 	if (root.contains("outputBindings")) {
 		for (auto& b : root["outputBindings"]) {
 			graph.bindOutput(
+				b.at("nodeName").get<std::string>(),
+				b.at("portName").get<std::string>());
+		}
+	}
+
+	// 输入绑定
+	if (root.contains("inputBindings")) {
+		for (auto& b : root["inputBindings"]) {
+			graph.bindInput(
 				b.at("nodeName").get<std::string>(),
 				b.at("portName").get<std::string>());
 		}

@@ -198,13 +198,15 @@ NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn)
 }
 
 // 带引擎实例版本：自动从 engineConfig 提取 EngineInstance* 并传给节点构造
+// 同时注入 engineInstance->descriptor()，消除 EngineRegistry::instance() 隐式依赖
 template <typename F>
 NodeFactory makeNodeFactoryWithEngine(std::string engineType, Node::Schema schema, F&& fn) {
 	return [engineType = std::move(engineType), schema = std::move(schema),
 			fn = std::forward<F>(fn)](std::string name, const void* engineConfig) -> std::unique_ptr<Node> {
 		auto* engineInstance = engineConfig ? *static_cast<EngineInstance* const*>(engineConfig) : nullptr;
 		return std::make_unique<Node>(engineType, std::move(name), schema, fn, engineInstance,
-									  ThreadPoolAffinity::Compute);
+									  ThreadPoolAffinity::Compute,
+									  engineInstance ? engineInstance->descriptor() : nullptr);
 	};
 }
 
