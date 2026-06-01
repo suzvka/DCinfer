@@ -43,10 +43,13 @@ public:
 			Auto ///< 自动推断
 		};
 
+		/// @brief  默认构造：位置标记为 Auto。
+		Config() : position(Position::Auto) {}
+
 		/// @brief  设置槽位位置。
 		Config& setPosition(Position p);
 
-		Position position = Position::Auto; ///< 当前位置标记。
+		Position position; ///< 当前位置标记。
 	};
 
 	// ── 生命周期 ──

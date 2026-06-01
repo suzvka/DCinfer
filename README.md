@@ -169,6 +169,9 @@ graph TB
 ```bash
 cd DCinfer
 
+# 初始化 submodule（首次克隆后必须执行）
+git submodule update --init --recursive
+
 cmake -B build -S . \
   -DCMAKE_TOOLCHAIN_FILE=external/vcpkg/scripts/buildsystems/vcpkg.cmake
 

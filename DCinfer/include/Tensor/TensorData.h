@@ -2,6 +2,9 @@
 #include <map>
 #include <unordered_set>
 #include <string>
+#include <vector>
+#include <cstddef>
+#include <cstring>
 #include <memory>
 #include <span>
 #include <algorithm>

@@ -128,7 +128,7 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		float resultValue = 0.0f;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
 			auto outNT = node->getOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
@@ -157,7 +157,7 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		float resultValue = 0.0f;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
 			auto outNT = node->getOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
@@ -183,7 +183,7 @@ void runTests() {
 
 		std::vector<std::string> completedTasks;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
 			completedTasks.push_back(taskId);
 			node->clearTask(taskId);
@@ -208,7 +208,7 @@ void runTests() {
 		auto node = reg.createNode("add4", scalarAddSchema(), addRunImpl);
 
 		std::atomic<bool> completed{false};
-		node->setCompletionCallback([&](const auto&, const auto&) { completed = true; });
+		node->setCompletionCallback([&](const Node::TaskId&, const Node::Result&) { completed = true; });
 
 		node->setInput("task1", "a", makeScalarNative(1.0f));
 		CHECK(!node->isReady("task1"), "should not be ready with only one input");
@@ -234,7 +234,7 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		float resultValue = 0.0f;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			completed = true;
 			if (result.ok()) {
 				auto outNT = node->getOutput(taskId, "s");
@@ -268,7 +268,7 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		float resultValue = 0.0f;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			completed = true;
 			if (result.ok()) {
 				auto outNT = node->getOutput(taskId, "s");
@@ -305,7 +305,7 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		Node::Status lastStatus = Node::Status::Ok;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			completed = true;
 			lastStatus = result.status;
 			node->clearTask(taskId);
@@ -335,7 +335,7 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		Node::Status lastStatus = Node::Status::Ok;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			completed = true;
 			lastStatus = result.status;
 			node->clearTask(taskId);
@@ -405,7 +405,7 @@ void runTests() {
 		std::atomic<int> callCount{0};
 		float resultValue = 0.0f;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			++callCount;
 			if (result.ok()) {
 				auto outNT = node->getOutput(taskId, "s");
@@ -430,7 +430,7 @@ void runTests() {
 		auto node = reg.createNode("add13", scalarAddSchema(), addRunImpl);
 
 		std::atomic<bool> completed{false};
-		node->setCompletionCallback([&](const auto&, const auto&) { completed = true; });
+		node->setCompletionCallback([&](const Node::TaskId&, const Node::Result&) { completed = true; });
 
 		// 先正常设置一个端口
 		node->setInput("task1", "a", makeScalarNative(1.0f));
@@ -459,7 +459,7 @@ void runTests() {
 		std::atomic<bool> gotOutput{false};
 		std::atomic<bool> cleared{false};
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
 			auto outNT = node->getOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
@@ -484,7 +484,7 @@ void runTests() {
 		std::atomic<int> callCount{0};
 		bool needsTask2{false};
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			++callCount;
 			CHECK(result.ok(), "result should be Ok");
 			node->clearTask(taskId);
@@ -516,7 +516,7 @@ void runTests() {
 
 		std::atomic<int> callCount{0};
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			++callCount;
 			CHECK(result.ok(), "result should be Ok");
 			node->clearTask(taskId);
@@ -545,7 +545,7 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		bool match = false;
 
-		node->setCompletionCallback([&](const auto& taskId, const auto& result) {
+		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
 			auto outNT = node->getOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
