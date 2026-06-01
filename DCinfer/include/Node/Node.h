@@ -237,10 +237,15 @@ public:
 	/// @param name  信号名。
 	void bindSignal(std::shared_ptr<SignalStore> store, std::string name);
 
-	/// @brief  查询节点是否被信号阻塞。
+	/// @brief  查询节点是否被信号阻塞（无 taskId，只查全局信号）。
 	///         signal==false → 阻塞（true）；signal==true 或未绑定 → 不阻塞（false）。
 	///         阻塞时搬运线程跳过此节点的入边，数据留在上游输出槽不消费。
 	bool isBlocked() const;
+
+	/// @brief  查询节点是否被信号阻塞（带 taskId，task 级信号优先）。
+	///         查找顺序：task 级信号 → 全局信号 → 默认值(false)。
+	/// @param taskId 任务标识符（非空时查询 task 级覆盖；为空退化为全局查询）。
+	bool isBlocked(const TaskId& taskId) const;
 
 	/// @brief  获取模型文件路径（引擎节点反序列化用，Builtin 节点为空）
 	const std::string& modelPath() const {

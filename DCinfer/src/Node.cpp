@@ -127,6 +127,13 @@ bool Node::isBlocked() const {
 	return !_signalStore->get(_signalName, /*defaultVal=*/false);
 }
 
+bool Node::isBlocked(const TaskId& taskId) const {
+	if (!_signalStore || _signalName.empty())
+		return false; // 未绑定信号 → 永远不阻塞
+	// task 级优先 → 全局回退 → 默认 false(导通)
+	return !_signalStore->get(_signalName, taskId, /*defaultVal=*/false);
+}
+
 // ── 单端口输入 ──
 void Node::setInput(const TaskId& taskId, const std::string& portName, Value data) {
 	if (!_schema.findInput(portName)) {

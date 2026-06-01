@@ -190,8 +190,16 @@ public:
 		_graph.setSignal(name, value);
 	}
 
+	void setSignal(const std::string& name, const TaskId& taskId, bool value) {
+		_graph.setSignal(name, taskId, value);
+	}
+
 	bool getSignal(const std::string& name) const {
 		return _graph.getSignal(name);
+	}
+
+	bool getSignal(const std::string& name, const TaskId& taskId) const {
+		return _graph.getSignal(name, taskId);
 	}
 
 	std::shared_ptr<SignalStore> signalStore() {

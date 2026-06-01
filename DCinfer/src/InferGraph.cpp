@@ -298,7 +298,7 @@ Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
 		auto* dst = _findNode(edge.dstNode);
 		if (!dst)
 			continue;
-		if (dst->isBlocked())
+		if (dst->isBlocked(taskId))
 			continue;
 
 		Value data = src->getOutput(taskId, edge.srcPort);
@@ -448,6 +448,9 @@ void InferGraph::_terminate(const TaskId& taskId) {
 
 	// 清理输出区（同一 taskId 可安全重新提交）
 	_outputZone.clearTask(taskId);
+
+	// 清理该 task 的所有 task 级信号（防止泄漏）
+	_signalStore->clearTask(taskId);
 
 	// 通知 task 完成回调（在所有节点 cleanup 之前触发，保证调用方能安全读取输出）
 	if (_taskCompleteCb) {

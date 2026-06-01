@@ -567,6 +567,159 @@ void testUnboundNodeNeverBlocked() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// Task 级信号测试
+// ════════════════════════════════════════════
+
+void testTaskScopedSignalBlocksOnlyOneTask() {
+	TEST("task-scoped signal: broadcast=false blocks all, task-scoped=true overrides for one task") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+
+		harness.wire("id_a", "y", "id_b", "x");
+
+		b->bindSignal(harness.signalStore(), "gate");
+
+		// 广播阻塞所有 task
+		harness.setSignal("gate", false);
+
+		// task1 单独覆盖：导通
+		harness.setSignal("gate", "t1", true);
+
+		// task1: 应该能跑通（task 级覆盖=true）
+		harness.declareOutput("t1", "id_b", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete (task-scoped signal=true overrides broadcast)");
+		CHECK(harness.hasOutput("t1", "id_b", "y"), "id_b should have output for t1");
+
+		// task2: 被广播阻塞（无 task 级覆盖）
+		harness.clearErrors();
+		harness.declareOutput("t2", "id_a", "y");
+		harness.feedInput("t2", "id_a", "x", makeFloatTensor(20.0f));
+		harness.submit("t2", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete (id_a output declared)");
+		CHECK(!harness.hasOutput("t2", "id_b", "y"), "id_b should NOT have output for t2 (blocked by broadcast)");
+	}
+	END_TEST();
+}
+
+void testTaskScopedSignalBlocksOnlyTargetTask() {
+	TEST("task-scoped signal: only target task blocked, other tasks proceed") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+
+		harness.wire("id_a", "y", "id_b", "x");
+
+		b->bindSignal(harness.signalStore(), "gate");
+
+		// 全局导通（无广播阻塞）
+		harness.setSignal("gate", true);
+
+		// 只阻塞 task2
+		harness.setSignal("gate", "t2", false);
+
+		// task1: 不受影响
+		harness.declareOutput("t1", "id_b", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(5.0f));
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+		CHECK(harness.hasOutput("t1", "id_b", "y"), "id_b should have output for t1");
+
+		// task2: 被 task 级信号阻塞
+		harness.clearErrors();
+		harness.declareOutput("t2", "id_a", "y");
+		harness.feedInput("t2", "id_a", "x", makeFloatTensor(30.0f));
+		harness.submit("t2", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete (id_a output declared)");
+		CHECK(!harness.hasOutput("t2", "id_b", "y"), "id_b should NOT have output for t2 (task-scoped block)");
+	}
+	END_TEST();
+}
+
+void testTaskSignalCleanupOnTerminate() {
+	TEST("task signal cleanup: terminated task's signals don't leak to subsequent tasks") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+
+		harness.wire("id_a", "y", "id_b", "x");
+
+		b->bindSignal(harness.signalStore(), "gate");
+
+		// 全局导通
+		harness.setSignal("gate", true);
+
+		// task1: 设置 task 级阻塞
+		harness.setSignal("gate", "t1", false);
+		harness.declareOutput("t1", "id_a", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(7.0f));
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+		// t1 被阻塞，id_b 无输出
+		CHECK(!harness.hasOutput("t1", "id_b", "y"), "id_b should NOT have output for t1 (blocked)");
+
+		// task2: 使用相同的 signal name "gate"，但不应受 t1 的 task 级信号影响
+		harness.clearErrors();
+		harness.declareOutput("t2", "id_b", "y");
+		harness.feedInput("t2", "id_a", "x", makeFloatTensor(99.0f));
+		harness.submit("t2", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
+		CHECK(harness.hasOutput("t2", "id_b", "y"), "id_b should have output for t2 (t1 signal cleaned up)");
+
+		auto r = harness.getOutputTensor("t2", "id_b", "y");
+		CHECK(std::abs(r.item<float>() - 99.0f) < 1e-6f, "t2 value should be 99.0");
+	}
+	END_TEST();
+}
+
+void testTaskScopedSignalWithPartialBlock() {
+	TEST("task-scoped partial block: broadcast path + task-scoped control on fan-out") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		auto* c = harness.addNode(std::make_unique<Node>("Builtin", "id_c", identitySchema(), identityRunFn()));
+
+		// 扇出：id_a → bc → [id_b, id_c]
+		auto bcSchema = Connector::broadcastSchema(2);
+		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
+			Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
+		bcNode->setConnector(true);
+		harness.addNode(std::move(bcNode));
+		harness.connect("id_a", "y", "bc", "in");
+		harness.connect("bc", "out_0", "id_b", "x");
+		harness.connect("bc", "out_1", "id_c", "x");
+
+		// id_b 绑定信号
+		b->bindSignal(harness.signalStore(), "enable_b");
+		// 全局允许
+		harness.setSignal("enable_b", true);
+
+		// task1: task 级阻塞 id_b
+		harness.setSignal("enable_b", "t1", false);
+
+		harness.declareOutput("t1", "id_c", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(50.0f));
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+
+		// id_c 应该有输出（未阻塞）
+		CHECK(harness.hasOutput("t1", "id_c", "y"), "id_c should have output (not blocked)");
+		auto r = harness.getOutputTensor("t1", "id_c", "y");
+		CHECK(std::abs(r.item<float>() - 50.0f) < 1e-6f, "id_c value should be 50.0");
+
+		// id_b 被 task 级信号阻塞
+		CHECK(!harness.hasOutput("t1", "id_b", "y"), "id_b should NOT have output (task-scoped block)");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
@@ -587,6 +740,12 @@ int main() {
 		testPartialBlockKeepsOtherPath();
 		testDynamicSignalToggle();
 		testUnboundNodeNeverBlocked();
+
+		// Task 级信号测试
+		testTaskScopedSignalBlocksOnlyOneTask();
+		testTaskScopedSignalBlocksOnlyTargetTask();
+		testTaskSignalCleanupOnTerminate();
+		testTaskScopedSignalWithPartialBlock();
 
 		if (failures == 0) {
 			std::cout << "\nAll InferGraph tests passed!" << std::endl;

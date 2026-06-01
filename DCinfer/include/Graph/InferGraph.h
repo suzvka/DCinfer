@@ -194,11 +194,17 @@ public:
 
 	// ── 信号系统 ──
 
-	/// @brief  写入图级信号值（任意时刻、任意线程调用）。
+	/// @brief  写入图级信号值（广播，所有 task 生效）。
 	void setSignal(const std::string& name, bool value) { _signalStore->set(name, value); }
 
-	/// @brief  读取图级信号值。
+	/// @brief  写入 task 级信号值（仅对指定 taskId 生效，覆盖同名的广播信号）。
+	void setSignal(const std::string& name, const TaskId& taskId, bool value) { _signalStore->set(name, taskId, value); }
+
+	/// @brief  读取全局信号值。
 	bool getSignal(const std::string& name) const { return _signalStore->get(name); }
+
+	/// @brief  读取信号值（task 级优先 → 全局回退）。
+	bool getSignal(const std::string& name, const TaskId& taskId) const { return _signalStore->get(name, taskId); }
 
 	/// @brief  获取信号仓库指针，供 Node::bindSignal 使用。
 	std::shared_ptr<SignalStore> signalStore() { return _signalStore; }
