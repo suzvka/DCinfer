@@ -452,6 +452,121 @@ void testCycleMultiNode() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 信号 + 阻塞标志测试
+// ════════════════════════════════════════════
+
+void testBlockedNodeNotReceiving() {
+	TEST("blocked node never receives data, upstream output stays") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+
+		harness.wire("id_a", "y", "id_b", "x");
+
+		b->bindSignal(harness.signalStore(), "enable_b");
+		harness.setSignal("enable_b", false);
+
+		harness.declareOutput("t1", "id_a", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
+
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete within timeout");
+
+		CHECK(harness.hasOutput("t1", "id_a", "y"), "id_a should have output");
+		CHECK(!harness.hasOutput("t1", "id_b", "y"), "id_b should NOT have output (was blocked)");
+	}
+	END_TEST();
+}
+
+void testPartialBlockKeepsOtherPath() {
+	TEST("partial block: one path blocked, other path completes normally") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		auto* c = harness.addNode(std::make_unique<Node>("Builtin", "id_c", identitySchema(), identityRunFn()));
+
+		// 使用广播连接器扇出（避免 wire 同端口 getOutput 抢消费）
+		auto bcSchema = Connector::broadcastSchema(2);
+		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
+			Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
+		bcNode->setConnector(true);
+		harness.addNode(std::move(bcNode));
+		harness.connect("id_a", "y", "bc", "in");
+		harness.connect("bc", "out_0", "id_b", "x");
+		harness.connect("bc", "out_1", "id_c", "x");
+
+		b->bindSignal(harness.signalStore(), "enable_b");
+		harness.setSignal("enable_b", false);
+
+		harness.declareOutput("t1", "id_c", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
+
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete within timeout");
+
+		CHECK(harness.hasOutput("t1", "id_c", "y"), "id_c should have output");
+		auto r = harness.getOutputTensor("t1", "id_c", "y");
+		CHECK(std::abs(r.item<float>() - 10.0f) < 1e-6f, "id_c value should be 10.0");
+	}
+	END_TEST();
+}
+
+void testDynamicSignalToggle() {
+	TEST("dynamic signal toggle: same graph different behavior") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		auto* c = harness.addNode(std::make_unique<Node>("Builtin", "id_c", identitySchema(), identityRunFn()));
+
+		harness.wire("id_a", "y", "id_b", "x");
+		harness.wire("id_b", "y", "id_c", "x");
+
+		b->bindSignal(harness.signalStore(), "gate");
+
+		// run 1: signal=true (conducting), full chain
+		harness.setSignal("gate", true);
+		harness.declareOutput("t1", "id_c", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(5.0f));
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+		CHECK(harness.hasOutput("t1", "id_c", "y"), "id_c should have output when signal=true");
+
+		// run 2: signal=false (blocked), id_b and downstream don't run
+		harness.setSignal("gate", false);
+		harness.declareOutput("t2", "id_a", "y");
+		harness.feedInput("t2", "id_a", "x", makeFloatTensor(5.0f));
+		harness.submit("t2", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete (id_a output declared)");
+		CHECK(harness.hasOutput("t2", "id_a", "y"), "id_a should have output");
+		CHECK(!harness.hasOutput("t2", "id_c", "y"), "id_c should NOT have output when blocked");
+	}
+	END_TEST();
+}
+
+void testUnboundNodeNeverBlocked() {
+	TEST("unbound node is never blocked") {
+		TestHarness harness;
+
+		auto* a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		auto* b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+
+		harness.wire("id_a", "y", "id_b", "x");
+
+		CHECK(!b->isBlocked(), "unbound node should not be blocked");
+
+		harness.declareOutput("t1", "id_b", "y");
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(42.0f));
+		harness.submit("t1", std::chrono::milliseconds(2000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+		CHECK(harness.hasOutput("t1", "id_b", "y"), "id_b should have output");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
@@ -466,6 +581,12 @@ int main() {
 		testSimpleCycle();
 		testCycleHopsExhaustion();
 		testCycleMultiNode();
+
+		// 信号 + 阻塞标志测试
+		testBlockedNodeNotReceiving();
+		testPartialBlockKeepsOtherPath();
+		testDynamicSignalToggle();
+		testUnboundNodeNeverBlocked();
 
 		if (failures == 0) {
 			std::cout << "\nAll InferGraph tests passed!" << std::endl;

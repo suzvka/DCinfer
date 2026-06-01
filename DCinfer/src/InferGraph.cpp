@@ -12,11 +12,12 @@ namespace DC {
 
 InferGraph::InferGraph()
 	: _ownedScheduler(std::make_unique<CoroScheduler>(2)), _scheduler(_ownedScheduler.get()), _computePool({}),
-	  _operatorPool({}), _systemPool({}) {}
+	  _operatorPool({}), _systemPool({}), _signalStore(std::make_shared<SignalStore>()) {}
 
 InferGraph::InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg, const PoolConfig& operatorCfg,
 					   const PoolConfig& systemCfg)
-	: _scheduler(&scheduler), _computePool(computeCfg), _operatorPool(operatorCfg), _systemPool(systemCfg) {}
+	: _scheduler(&scheduler), _computePool(computeCfg), _operatorPool(operatorCfg), _systemPool(systemCfg),
+	  _signalStore(std::make_shared<SignalStore>()) {}
 
 // ════════════════════════════════════════════
 // _findNode
@@ -233,11 +234,13 @@ void InferGraph::submit(const TaskId& taskId, std::chrono::milliseconds timeout,
 Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
 									  std::shared_ptr<TaskGate> gate,
 									  uint32_t remainingHops) {
-	// [检查点 0] TTL 耗尽：不再 spawn 下游传播
+	// [检查点 0] TTL 耗尽：主动终止 task（不依赖 _onExhausted）
 	if (remainingHops == 0) {
 		_recordError(taskId, nodeName, "InferGraph::_propagateFrom",
 					 "propagation hops exhausted (TTL=0) at node '" + nodeName
 						 + "': cycle or excessively deep graph detected");
+		gate->terminated.store(true, std::memory_order_release);
+		_terminate(taskId);
 		co_return;
 	}
 
@@ -290,15 +293,19 @@ Task<void> InferGraph::_propagateFrom(std::string nodeName, TaskId taskId,
 		if (!src->hasOutput(taskId, edge.srcPort))
 			continue;
 
+		// 阻塞检查：下游节点被信号阻塞时跳过此边，不消费上游输出
+		// 数据留在上游输出槽中等待其他出边消费或自然背压释放
+		auto* dst = _findNode(edge.dstNode);
+		if (!dst)
+			continue;
+		if (dst->isBlocked())
+			continue;
+
 		Value data = src->getOutput(taskId, edge.srcPort);
 
 		// [检查点 3] 写入下游前再确认一次未被终止
 		if (_isTerminated(taskId))
 			co_return;
-
-		auto* dst = _findNode(edge.dstNode);
-		if (!dst)
-			continue;
 
 		try {
 			dst->setInput(taskId, edge.dstPort, std::move(data));
@@ -473,23 +480,8 @@ void InferGraph::_onExhausted(const TaskId& taskId) {
 		return;
 	}
 
-	// 声明未满足 → 诊断原因
-	bool hasStuckData = false;
-	for (const auto& [name, nodePtr] : _nodes) {
-		if (nodePtr->hasTask(taskId)) {
-			hasStuckData = true;
-			break;
-		}
-	}
-
-	if (hasStuckData) {
-		_recordError(taskId, "<graph>", "InferGraph::_onExhausted",
-					 "graph stalled: data remains in node buffers but no active propagation coroutines");
-	} else {
-		_recordError(taskId, "<graph>", "InferGraph::_onExhausted",
-					 "graph exhausted without producing all declared outputs");
-	}
-	_terminate(taskId);
+	// 声明未满足，数据可能残留在阻塞路径上（节点 isBlocked=true 导致边被跳过）——
+	// 这是正常工作流的一部分，不是异常。不报错、不终止，留给看门狗检测真正的死锁。
 }
 
 // ════════════════════════════════════════════

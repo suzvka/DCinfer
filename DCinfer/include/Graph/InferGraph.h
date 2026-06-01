@@ -6,6 +6,7 @@
 #include "ThreadPool.h"
 #include "GraphException.h"
 #include "OutputZone.h"
+#include "SignalStore.h"
 
 #include <atomic>
 #include <chrono>
@@ -191,6 +192,17 @@ public:
 	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）
 	void setTaskCompleteCallback(TaskCompleteCallback cb) { _taskCompleteCb = std::move(cb); }
 
+	// ── 信号系统 ──
+
+	/// @brief  写入图级信号值（任意时刻、任意线程调用）。
+	void setSignal(const std::string& name, bool value) { _signalStore->set(name, value); }
+
+	/// @brief  读取图级信号值。
+	bool getSignal(const std::string& name) const { return _signalStore->get(name); }
+
+	/// @brief  获取信号仓库指针，供 Node::bindSignal 使用。
+	std::shared_ptr<SignalStore> signalStore() { return _signalStore; }
+
 private:
 	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
 	//
@@ -257,6 +269,9 @@ private:
 
 	// 输出区：聚合绑定、声明、累加、artifact 存储
 	OutputZone _outputZone;
+
+	// 信号仓库：图级键值对信号，与数据流正交解耦
+	std::shared_ptr<SignalStore> _signalStore;
 
 	// 已终止的 task 集合（_terminationMutex 保护）
 	std::unordered_set<TaskId> _terminatedTasks;

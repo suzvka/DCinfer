@@ -3,6 +3,7 @@
 #include "InferGraph.h"
 #include "GraphException.h"
 #include "Tensor.hpp"
+#include "SignalStore.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -181,6 +182,20 @@ public:
 	/// @brief  获取底层 InferGraph 的只读引用（供序列化等场景遍历图结构）
 	const InferGraph& graph() const {
 		return _graph;
+	}
+
+	// ── 信号系统 ──
+
+	void setSignal(const std::string& name, bool value) {
+		_graph.setSignal(name, value);
+	}
+
+	bool getSignal(const std::string& name) const {
+		return _graph.getSignal(name);
+	}
+
+	std::shared_ptr<SignalStore> signalStore() {
+		return _graph.signalStore();
 	}
 
 private:

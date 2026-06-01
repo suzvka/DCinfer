@@ -41,6 +41,9 @@ using NodeFactory = std::function<std::unique_ptr<class Node>(std::string nodeNa
 struct EngineDescriptor;
 class EngineInstance;
 
+// ── 信号仓库（前向声明，定义见 Graph/SignalStore.h）──
+class SignalStore;
+
 /// @brief 线程池归属：标识节点应由三层线程池中的哪一个执行。
 /// 仅在 Node 创建时赋值，之后只读。
 enum class ThreadPoolAffinity {
@@ -225,6 +228,19 @@ public:
 	void setConnector(bool v) {
 		_isConnector = v;
 	}
+
+	// ── 信号绑定（阻塞标志）──
+
+	/// @brief  绑定图级信号到此节点。
+	///         未绑定信号时，isBlocked() 永远返回 false（向后兼容）。
+	/// @param store 信号仓库指针（共享所有权）。
+	/// @param name  信号名。
+	void bindSignal(std::shared_ptr<SignalStore> store, std::string name);
+
+	/// @brief  查询节点是否被信号阻塞。
+	///         signal==false → 阻塞（true）；signal==true 或未绑定 → 不阻塞（false）。
+	///         阻塞时搬运线程跳过此节点的入边，数据留在上游输出槽不消费。
+	bool isBlocked() const;
 
 	/// @brief  获取模型文件路径（引擎节点反序列化用，Builtin 节点为空）
 	const std::string& modelPath() const {
@@ -413,6 +429,8 @@ private:
 	std::string _tag;
 	bool _isConnector = false;
 	std::string _modelPath; // 模型文件路径（引擎节点反序列化用）
+	std::shared_ptr<SignalStore> _signalStore;
+	std::string _signalName;
 	SlotMap _inputSlots; // 工作输入槽位
 	SlotMap _outputSlots; // 工作输出槽位
 	TaskBufferMap _taskInputs; // 任务级输入缓冲 (port → optional<TaskData>)

@@ -1,6 +1,7 @@
 #include "Node.h"
 #include "EngineRegistry.h"
 #include "NodeException.h"
+#include "SignalStore.h"
 
 namespace DC {
 
@@ -111,6 +112,19 @@ void Node::setCompletionCallback(CompletionFn fn) {
 
 bool Node::hasCompletionCallback() const {
 	return static_cast<bool>(_onComplete);
+}
+
+// ── 信号绑定 ──
+
+void Node::bindSignal(std::shared_ptr<SignalStore> store, std::string name) {
+	_signalStore = std::move(store);
+	_signalName = std::move(name);
+}
+
+bool Node::isBlocked() const {
+	if (!_signalStore || _signalName.empty())
+		return false; // 未绑定信号 → 永远不阻塞
+	return !_signalStore->get(_signalName, /*defaultVal=*/false);
 }
 
 // ── 单端口输入 ──
