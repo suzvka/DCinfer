@@ -1,5 +1,7 @@
 // GraphCompiler 单元测试
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -314,6 +316,168 @@ void testModelPathHandling() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 异常 / 边界路径测试
+// ════════════════════════════════════════════
+
+void testInvalidJsonThrows() {
+	TEST("invalid JSON throws GraphException") {
+		bool caught = false;
+		try {
+			InferGraph graph;
+			GraphCompiler::compileString(graph, "not valid json {{{{{{");
+		} catch (const GraphException&) {
+			caught = true;
+		} catch (...) {
+			// 不应该捕获其他类型的异常
+		}
+		CHECK(caught, "should throw GraphException on invalid JSON");
+	}
+	END_TEST();
+}
+
+void testEmptyGraph() {
+	TEST("empty graph — no nodes, edges, or bindings") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [],
+  "edges": [],
+  "outputBindings": []
+})";
+		InferGraph graph; GraphCompiler::compileString(graph, json);
+		CHECK(graph.nodeCount() == 0, "should have 0 nodes");
+		CHECK(graph.edgeCount() == 0, "should have 0 edges");
+		CHECK(graph.outputBindings().size() == 0, "should have 0 output bindings");
+	}
+	END_TEST();
+}
+
+void testEdgeToMissingNode() {
+	TEST("edge referencing non-existent dstNode — does not crash") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "n1", "type": "Builtin", "affinity": "Operator",
+      "inputs": [
+        {"name":"x","tensorType":"Float","typeSize":4,"shape":[],"required":true}
+      ],
+      "outputs": [
+        {"name":"y","tensorType":"Float","typeSize":4,"shape":[],"required":true}
+      ]
+    }
+  ],
+  "edges": [
+    {"srcNode":"n1","srcPort":"y","dstNode":"ghost","dstPort":"x"}
+  ],
+  "outputBindings": []
+})";
+		InferGraph graph; GraphCompiler::compileString(graph, json);
+		// 图仍应构建成功（n1 存在），但 wire 失败会输出 warning
+		CHECK(graph.nodeCount() >= 1, "n1 should exist even if edge target is missing");
+		CHECK(graph.node("n1") != nullptr, "n1 should exist");
+	}
+	END_TEST();
+}
+
+void testUnregisteredType() {
+	TEST("unregistered engine type — creates skeleton with warning") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "custom1", "type": "UnknownEngineV2", "affinity": "Compute",
+      "inputs": [
+        {"name":"in","tensorType":"Float","typeSize":4,"shape":[],"required":true}
+      ],
+      "outputs": [
+        {"name":"out","tensorType":"Float","typeSize":4,"shape":[],"required":true}
+      ]
+    }
+  ],
+  "edges": [],
+  "outputBindings": []
+})";
+		InferGraph graph; GraphCompiler::compileString(graph, json);
+		CHECK(graph.nodeCount() == 1, "skeleton node should be created for unregistered type");
+		auto* n = graph.node("custom1");
+		CHECK(n != nullptr, "custom1 should exist");
+		CHECK(n->type() == "UnknownEngineV2", "type should be preserved");
+		// RunFn 为空，这是个骨架节点
+	}
+	END_TEST();
+}
+
+void testDcgRoundTrip() {
+	TEST("dcg round-trip — serialize then compile .dcg") {
+		// 创建一个临时 model 文件
+		std::string modelContent = "mock-model-data-12345";
+		std::string modelFile = "test_dcg_model.bin";
+		{
+			std::ofstream ofs(modelFile, std::ios::binary);
+			ofs.write(modelContent.data(), static_cast<std::streamsize>(modelContent.size()));
+		}
+
+		// 构建图（节点有 modelPath）
+		TestHarness harness;
+		auto n1 = std::make_unique<Node>("ONNX", "dcg_n1", identitySchema(), identityRunFn());
+		n1->setModelPath(modelFile); // 指向刚才创建的临时文件
+		harness.addNode(std::move(n1));
+		harness.addNode(std::make_unique<Node>("Builtin", "dcg_n2", identitySchema(), identityRunFn()));
+		harness.wire("dcg_n1", "y", "dcg_n2", "x");
+		harness.bindOutput("dcg_n2", "y");
+
+		// 序列化为 .dcg
+		std::string dcgFile = "test_dcg_roundtrip.dcg";
+		GraphCompiler::serialize(harness.graph(), dcgFile);
+
+		// 验证 .dcg 文件存在且大于 0
+		CHECK(std::filesystem::exists(dcgFile), "dcg file should exist");
+		CHECK(std::filesystem::file_size(dcgFile) > 0, "dcg file should not be empty");
+
+		// 反序列化
+		InferGraph graph2; GraphCompiler::compileFile(graph2, dcgFile);
+
+		// 验证图结构
+		CHECK(graph2.nodeCount() >= 2, "dcg roundtrip: should have at least 2 nodes");
+		CHECK(graph2.node("dcg_n1") != nullptr, "dcg roundtrip: dcg_n1 should exist");
+		CHECK(graph2.node("dcg_n2") != nullptr, "dcg roundtrip: dcg_n2 should exist");
+		CHECK(graph2.edgeCount() >= 1, "dcg roundtrip: should have edges");
+		CHECK(graph2.outputBindings().size() == 1, "dcg roundtrip: should have 1 output binding");
+
+		// modelPath 应该保留相对路径格式
+		auto* node1 = graph2.node("dcg_n1");
+		CHECK(node1 != nullptr, "dcg roundtrip: dcg_n1 not null");
+		CHECK(!node1->modelPath().empty(), "dcg roundtrip: modelPath should not be empty");
+
+		// 清理
+		std::remove(dcgFile.c_str());
+		std::remove(modelFile.c_str());
+	}
+	END_TEST();
+}
+
+void testDcgSerializeNoModels() {
+	TEST("dcg serialize — graph without models") {
+		TestHarness harness;
+		harness.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
+		harness.bindOutput("n1", "y");
+
+		std::string dcgFile = "test_dcg_nomodel.dcg";
+		GraphCompiler::serialize(harness.graph(), dcgFile);
+
+		CHECK(std::filesystem::exists(dcgFile), "dcg file should exist");
+
+		// 反序列化
+		InferGraph graph2; GraphCompiler::compileFile(graph2, dcgFile);
+		CHECK(graph2.nodeCount() == 1, "dcg nomodel: should have 1 node");
+		CHECK(graph2.node("n1") != nullptr, "dcg nomodel: n1 should exist");
+
+		std::remove(dcgFile.c_str());
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testCompileStringBasic();
@@ -322,6 +486,13 @@ int main() {
 		testRoundTrip();
 		testSerializeToJsonString();
 		testModelPathHandling();
+		// 异常/边界路径
+		testInvalidJsonThrows();
+		testEmptyGraph();
+		testEdgeToMissingNode();
+		testUnregisteredType();
+		testDcgRoundTrip();
+		testDcgSerializeNoModels();
 
 		if (failures == 0) {
 			std::cout << "\nAll GraphCompiler tests passed!" << std::endl;

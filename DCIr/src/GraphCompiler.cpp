@@ -3,9 +3,12 @@
 #include "Connector.h"
 #include "EngineRegistry.h"
 #include "GraphException.h"
+#include "Ir/DcgArchive.h"
 
 #include <fstream>
+#include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace DC::Ir {
@@ -248,16 +251,27 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 			graph.addNode(std::move(connNode));
 
 			// src → conn.in
-			graph.connect(key.srcNode, key.srcPort, connName, "in");
+			if (!graph.connect(key.srcNode, key.srcPort, connName, "in")) {
+				std::cerr << "GraphCompiler: warning — failed to connect '" << key.srcNode
+					<< "." << key.srcPort << "' → '" << connName << ".in'" << std::endl;
+			}
 			// conn.out_i → dst_i
 			for (size_t i = 0; i < targets.size(); ++i) {
 				std::string outPort = "out_" + std::to_string(i);
-				graph.connect(connName, outPort, targets[i].dstNode, targets[i].dstPort);
+				if (!graph.connect(connName, outPort, targets[i].dstNode, targets[i].dstPort)) {
+					std::cerr << "GraphCompiler: warning — failed to connect '" << connName
+						<< "." << outPort << "' → '" << targets[i].dstNode
+						<< "." << targets[i].dstPort << "'" << std::endl;
+				}
 			}
 		} else {
 			// 默认 1→1：用 wire() 自动插入导线连接器
 			for (auto& tgt : targets) {
-				graph.wire(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
+				if (!graph.wire(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort)) {
+					std::cerr << "GraphCompiler: warning — failed to wire '" << key.srcNode
+						<< "." << key.srcPort << "' → '" << tgt.dstNode
+						<< "." << tgt.dstPort << "'" << std::endl;
+				}
 			}
 		}
 	}
@@ -318,7 +332,6 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			}
 			auto node = reg.createNode(type, name, modelPath);
 			if (node) {
-				node->setModelPath(modelPath);
 				if (j.contains("tag")) {
 					node->setTag(j["tag"].get<std::string>());
 				}
@@ -326,6 +339,8 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			}
 		} else {
 			// 未注册类型：创建骨架节点（RunFn 留空）
+			std::cerr << "GraphCompiler: warning — unregistered engine type '" << type
+				<< "' for node '" << name << "', creating skeleton (RunFn=nullptr)" << std::endl;
 			auto node = std::make_unique<DC::Node>(
 				type, name, std::move(schema), nullptr, nullptr,
 				stringToAffinity(j.value("affinity", "Operator")));
@@ -369,6 +384,50 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 	std::filesystem::path p(path);
 	std::string ext = p.extension().string();
 
+	if (ext == ".dcg") {
+		// ── .dcg 反序列化 ──
+		auto archive = DcgArchive::openRead(p);
+
+		// 1. 读取并解析 graph.json
+		std::string json = archive->readGraphJson();
+
+		// 2. 解析 JSON 找出所有 modelPath，批量解压到临时目录
+		//    这样 buildGraph → createNode → getOrCreateEngine 能找到模型文件
+		try {
+			auto root = nlohmann::json::parse(json);
+			if (root.contains("nodes") && root["nodes"].is_array()) {
+				std::set<std::string> extracted;
+				for (auto& j : root["nodes"]) {
+					if (j.contains("modelPath")) {
+						std::string mp = j["modelPath"].get<std::string>();
+						if (extracted.insert(mp).second) {
+							archive->extractOne(mp);
+						}
+					}
+				}
+			}
+		} catch (const nlohmann::json::exception& e) {
+			throw GraphException(GraphException::ErrorType::Other,
+				"GraphCompiler::compileFile",
+				std::string("JSON parse error in .dcg: ") + e.what());
+		}
+
+		// 3. 构建图（baseDir = 临时目录，相对路径 models/xxx 自动解析）
+		compileString(graph, json, archive->tempDir());
+
+		// 4. 引擎已加载模型，清理临时文件
+		//    （逐个删除 models/ 下的文件，最后删除临时目录）
+		std::error_code ec;
+		for (auto& entry : std::filesystem::recursive_directory_iterator(archive->tempDir(), ec)) {
+			if (entry.is_regular_file()) {
+				archive->cleanup(entry.path());
+			}
+		}
+		return;
+	}
+
+	// ── .json 反序列化（原有逻辑）──
+
 	// 读取文件内容
 	std::ifstream ifs(p, std::ios::binary);
 	if (!ifs.is_open()) {
@@ -382,13 +441,6 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 
 	// baseDir = 文件所在目录
 	std::filesystem::path baseDir = p.parent_path();
-
-	// TODO: .dcg zip 解压支持（需 minizip/libzip）
-	if (ext == ".dcg") {
-		throw GraphException(GraphException::ErrorType::Other,
-							"GraphCompiler::compileFile",
-							".dcg zip format not yet supported; use .json instead");
-	}
 
 	compileString(graph, content, baseDir);
 }
@@ -405,6 +457,51 @@ void GraphCompiler::compileString(InferGraph& graph, std::string_view json, std:
 }
 
 void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
+	std::filesystem::path p(path);
+	std::string ext = p.extension().string();
+
+	if (ext == ".dcg") {
+		// ── .dcg 序列化 ──
+		auto json = graphToJson(graph);
+
+		// 收集所有模型文件：原 modelPath → archive 内路径
+		std::map<std::string, std::string> modelFiles; // original path → archive path
+		std::set<std::string> usedNames;
+
+		for (auto& j : json["nodes"]) {
+			if (!j.contains("modelPath")) continue;
+			std::string origPath = j["modelPath"].get<std::string>();
+
+			// 生成 archive 内唯一名称: models/<basename>
+			std::filesystem::path orig(origPath);
+			std::string baseName = orig.filename().string();
+			std::string archiveName = "models/" + baseName;
+
+			// 同名冲突：加数字后缀
+			int suffix = 1;
+			while (!usedNames.insert(archiveName).second) {
+				archiveName = "models/" + orig.stem().string() + "_" + std::to_string(suffix++)
+					+ orig.extension().string();
+			}
+
+			modelFiles[origPath] = archiveName;
+			// 将 modelPath 替换为相对路径
+			j["modelPath"] = archiveName;
+		}
+
+		// 写入 ZIP
+		auto archive = DcgArchive::openWrite(p);
+		archive->writeGraphJson(json.dump(2));
+
+		for (auto& [origPath, archivePath] : modelFiles) {
+			archive->addModelFile(archivePath, origPath);
+		}
+
+		archive->finalize();
+		return;
+	}
+
+	// ── .json 序列化（原有逻辑）──
 	auto json = graphToJson(graph);
 	std::string out = json.dump(2);
 

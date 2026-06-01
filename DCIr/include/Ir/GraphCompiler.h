@@ -39,9 +39,9 @@ public:
 
 	// ── 序列化 ──
 
-	/// @brief 将推理图序列化为 JSON 文件
+	/// @brief 将推理图序列化为文件（自动识别 .json 或 .dcg 扩展名）
 	/// @param graph 推理图
-	/// @param path 输出 JSON 文件路径
+	/// @param path 输出文件路径（.json → 纯 JSON；.dcg → ZIP 打包图+模型）
 	static void serialize(const InferGraph& graph, std::string_view path);
 
 private:
