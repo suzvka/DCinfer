@@ -46,8 +46,12 @@ void CoroutineBridge::terminateTask(const TaskId& taskId) {
 		}
 	}
 	for (auto h : handles) {
-		if (h)
+		if (h) {
 			h.resume();
+			if (h.done()) {
+				h.destroy();
+			}
+		}
 	}
 }
 

@@ -7,6 +7,7 @@
 #include "NodeException.h"
 
 #include <thread>
+#include <chrono>
 
 namespace DC {
 
@@ -90,18 +91,27 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	gate->signals = &signals;
 	gate->taskId = taskId;
 
-	// 超时看门狗（独立线程）
+	// 超时看门狗（std::jthread + stop_token，生命周期由 ExecutionEngine 管理）
 	if (timeout.count() > 0) {
 		auto deadline = std::chrono::steady_clock::now() + timeout;
-		std::thread([this, taskId, timeout, deadline, gate, &graph, &output, &signals, &errors]() {
-			std::this_thread::sleep_until(deadline);
-			if (!gate->terminated.exchange(true, std::memory_order_acq_rel)) {
-				errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit",
-								   "task timed out (" + std::to_string(timeout.count())
-									   + "ms) without meeting output declarations");
-				_terminate(taskId, graph, output, signals);
-			}
-		}).detach();
+		_watchdogs[taskId] = std::jthread(
+			[this, taskId, timeout, deadline, gate, &graph, &output, &signals, &errors](
+				std::stop_token stoken) {
+				// 轮询 sleep，支持 stop_token 提前取消
+				while (!stoken.stop_requested()
+					   && std::chrono::steady_clock::now() < deadline) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				}
+				if (stoken.stop_requested())
+					return; // task 正常完成，_terminate 已请求停止
+
+				if (!gate->terminated.exchange(true, std::memory_order_acq_rel)) {
+					errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit",
+									   "task timed out (" + std::to_string(timeout.count())
+										   + "ms) without meeting output declarations");
+					_terminate(taskId, graph, output, signals);
+				}
+			});
 	}
 
 	// 扫描全图，对所有已就绪的节点创建传播协程
@@ -262,24 +272,28 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 			return;
 	}
 
-	// ① 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
+	// ① 取消并 join 超时看门狗（若存在）
+	//    erase 触发 std::jthread 析构 → request_stop() → join()
+	_watchdogs.erase(taskId);
+
+	// ② 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
 	if (_taskCompleteCb) {
 		_taskCompleteCb(taskId);
 	}
 
-	// ② 清理输出区（同一 taskId 可安全重新提交）
+	// ③ 清理输出区（同一 taskId 可安全重新提交）
 	output.clearTask(taskId);
 
-	// ③ 清理该 task 的所有 task 级信号（防止泄漏）
+	// ④ 清理该 task 的所有 task 级信号（防止泄漏）
 	signals.clearTask(taskId);
 
-	// ④ 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
+	// ⑤ 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
 	for (auto& [name, nodePtr] : graph.nodes()) {
 		if (nodePtr->hasTask(taskId))
 			nodePtr->terminateTask(taskId);
 	}
 
-	// ⑤ 通知同步等待者（所有清理已完成，数据应由回调预先捕获）
+	// ⑥ 通知同步等待者（所有清理已完成，数据应由回调预先捕获）
 	_completionCv.notify_all();
 }
 

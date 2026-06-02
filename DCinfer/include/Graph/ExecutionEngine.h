@@ -132,6 +132,9 @@ private:
 	std::unordered_set<TaskId> _terminatedTasks;
 	mutable std::mutex _terminationMutex;
 
+	// 超时看门狗线程（per-task），在 _terminate 时 join
+	std::unordered_map<TaskId, std::jthread> _watchdogs;
+
 	TaskCompleteCallback _taskCompleteCb;
 
 	mutable std::mutex _completionMutex;

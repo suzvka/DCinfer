@@ -52,8 +52,11 @@ public:
 
 	InferGraph(const InferGraph&) = delete;
 	InferGraph& operator=(const InferGraph&) = delete;
-	InferGraph(InferGraph&&) = default;
-	InferGraph& operator=(InferGraph&&) = default;
+
+	// 移动语义禁止：ExecutionEngine 持有活跃线程和协程状态，
+	// 移动会导致 TaskGate 中裸指针（graph/output/signals）悬空。
+	InferGraph(InferGraph&&) = delete;
+	InferGraph& operator=(InferGraph&&) = delete;
 
 	// ── 图构建 ──
 
