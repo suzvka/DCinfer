@@ -258,31 +258,38 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 
 			auto connNode = std::make_unique<DC::Node>(
 				connType, connName, std::move(connSchema), std::move(connRunFn),
-				nullptr, ThreadPoolAffinity::System);
+				ThreadPoolAffinity::System);
 			connNode->setConnector(true);
 			graph.addNode(std::move(connNode));
 
 			// src → conn.in
-			if (!graph.connect(key.srcNode, key.srcPort, connName, "in")) {
+			try {
+				graph.connect(key.srcNode, key.srcPort, connName, "in");
+			} catch (const DC::GraphException& e) {
 				std::cerr << "GraphCompiler: warning — failed to connect '" << key.srcNode
-					<< "." << key.srcPort << "' → '" << connName << ".in'" << std::endl;
+					<< "." << key.srcPort << "' → '" << connName << ".in': "
+					<< e.what() << std::endl;
 			}
 			// conn.out_i → dst_i
 			for (size_t i = 0; i < targets.size(); ++i) {
 				std::string outPort = "out_" + std::to_string(i);
-				if (!graph.connect(connName, outPort, targets[i].dstNode, targets[i].dstPort)) {
+				try {
+					graph.connect(connName, outPort, targets[i].dstNode, targets[i].dstPort);
+				} catch (const DC::GraphException& e) {
 					std::cerr << "GraphCompiler: warning — failed to connect '" << connName
 						<< "." << outPort << "' → '" << targets[i].dstNode
-						<< "." << targets[i].dstPort << "'" << std::endl;
+						<< "." << targets[i].dstPort << "': " << e.what() << std::endl;
 				}
 			}
 		} else {
 			// 默认 1→1：用 wire() 自动插入导线连接器
 			for (auto& tgt : targets) {
-				if (!graph.wire(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort)) {
+				try {
+					graph.wire(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
+				} catch (const DC::GraphException& e) {
 					std::cerr << "GraphCompiler: warning — failed to wire '" << key.srcNode
 						<< "." << key.srcPort << "' → '" << tgt.dstNode
-						<< "." << tgt.dstPort << "'" << std::endl;
+						<< "." << tgt.dstPort << "': " << e.what() << std::endl;
 				}
 			}
 		}
@@ -315,7 +322,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			// Builtin 节点：尝试从 Registry 查找已注册算子
 			// 反序列化时 RunFn 由上层注册，此处仅创建 Schema 骨架
 			auto node = std::make_unique<DC::Node>(
-				type, name, std::move(schema), nullptr, nullptr,
+				type, name, std::move(schema), nullptr,
 				stringToAffinity(j.value("affinity", "Operator")));
 			if (j.contains("tag")) {
 				node->setTag(j["tag"].get<std::string>());
@@ -354,7 +361,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			std::cerr << "GraphCompiler: warning — unregistered engine type '" << type
 				<< "' for node '" << name << "', creating skeleton (RunFn=nullptr)" << std::endl;
 			auto node = std::make_unique<DC::Node>(
-				type, name, std::move(schema), nullptr, nullptr,
+				type, name, std::move(schema), nullptr,
 				stringToAffinity(j.value("affinity", "Operator")));
 			if (j.contains("modelPath")) {
 				std::string mp = j["modelPath"].get<std::string>();

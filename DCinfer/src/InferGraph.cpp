@@ -20,25 +20,27 @@ InferGraph::InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg,
 // 数据注入
 // ════════════════════════════════════════════
 
-bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
+void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName, Value data) {
 	auto* n = _store.node(nodeName);
 	if (!n)
-		return false;
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
+							 "node '" + nodeName + "' not found");
 	try {
 		n->setInput(taskId, portName, std::move(data));
-		return true;
 	} catch (const NodeException& e) {
 		_errors.recordError(taskId, nodeName, "InferGraph::feedInput",
 							"NodeException in setInput for port '" + portName
 								+ "': " + std::string(e.what()));
-		return false;
+		throw GraphException(GraphException::ErrorType::FeedFailed, "InferGraph::feedInput",
+							"failed to feed input '" + portName + "' on node '" + nodeName
+								+ "': " + std::string(e.what()));
 	}
 }
 
-bool InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
+void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName, Tensor data) {
-	return feedInput(taskId, nodeName, portName, Value(std::make_unique<Tensor>(std::move(data))));
+	feedInput(taskId, nodeName, portName, Value(std::make_unique<Tensor>(std::move(data))));
 }
 
 // ════════════════════════════════════════════
@@ -137,9 +139,10 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			++fedCount;
 		}
 
-		// 声明输出
+		// 收集输出声明
+		std::vector<OutputDeclaration> declarations;
 		for (auto& ob : _outputZone.bindings()) {
-			declareOutput(tid, ob.nodeName, ob.portName, 1);
+			declarations.push_back({ob.nodeName, ob.portName, 1});
 		}
 
 		// 通过回调在 _terminate 清理数据前捕获输出
@@ -164,7 +167,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		});
 
 		// 驱动子图（不启用内部超时，由父图控制）
-		submit(tid, std::chrono::milliseconds(0), maxHops);
+		submit(tid, std::move(declarations), std::chrono::milliseconds(0), maxHops);
 
 		// 等待回调完成
 		{
@@ -194,7 +197,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 	return std::make_unique<Node>(
 		"GraphNode", nodeName, fullSchema,
-		std::move(runFn), nullptr,
+		std::move(runFn),
 		ThreadPoolAffinity::Compute);
 }
 

@@ -159,7 +159,7 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		co_return;
 	}
 
-	auto* src = graph.findNode(nodeName);
+	auto* src = graph.node(nodeName);
 	if (!src)
 		co_return;
 
@@ -205,7 +205,7 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 
 		// 阻塞检查：下游节点被信号阻塞时跳过此边，不消费上游输出
 		// 数据留在上游输出槽中等待其他出边消费或自然背压释放
-		auto* dst = graph.findNode(edge.dstNode);
+		auto* dst = graph.node(edge.dstNode);
 		if (!dst)
 			continue;
 		if (dst->isBlocked(taskId))

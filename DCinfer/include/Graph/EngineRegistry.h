@@ -180,7 +180,7 @@ template <typename F>
 NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn) {
 	return [engineType = std::move(engineType), schema = std::move(schema),
 			fn = std::forward<F>(fn)](std::string name, const void* /*engineConfig*/) -> std::unique_ptr<Node> {
-		return std::make_unique<Node>(engineType, std::move(name), schema, fn, nullptr, ThreadPoolAffinity::Compute);
+		return std::make_unique<Node>(engineType, std::move(name), schema, fn, ThreadPoolAffinity::Compute);
 	};
 }
 
@@ -193,7 +193,7 @@ NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn)
 		return std::make_unique<Node>(
 			engineType, std::move(name), schema,
 			[fn, config = std::move(config)](Node::RunContext& ctx) -> Node::Result { return fn(ctx, config); },
-			nullptr, ThreadPoolAffinity::Compute);
+			ThreadPoolAffinity::Compute);
 	};
 }
 
@@ -204,9 +204,11 @@ NodeFactory makeNodeFactoryWithEngine(std::string engineType, Node::Schema schem
 	return [engineType = std::move(engineType), schema = std::move(schema),
 			fn = std::forward<F>(fn)](std::string name, const void* engineConfig) -> std::unique_ptr<Node> {
 		auto* engineInstance = engineConfig ? *static_cast<EngineInstance* const*>(engineConfig) : nullptr;
-		return std::make_unique<Node>(engineType, std::move(name), schema, fn, engineInstance,
-									  ThreadPoolAffinity::Compute,
-									  engineInstance ? engineInstance->descriptor() : nullptr);
+		auto node = std::make_unique<Node>(engineType, std::move(name), schema, fn,
+									  ThreadPoolAffinity::Compute);
+		if (engineInstance)
+			node->bindEngine(engineInstance, engineInstance->descriptor());
+		return node;
 	};
 }
 
