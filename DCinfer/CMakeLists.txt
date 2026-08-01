@@ -70,7 +70,4 @@ file(GLOB_RECURSE DCINFER_SRC_FILES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c
 )
 target_sources(DCinfer PRIVATE ${DCINFER_SRC_FILES})
-# ORT engine is intentionally not part of the core build.
-# ORT-related sources/headers remain in the repository for local debugging only.
-
 # Tests are handled in DCinfer/test when BUILD_TESTS is enabled from the root CMakeLists
