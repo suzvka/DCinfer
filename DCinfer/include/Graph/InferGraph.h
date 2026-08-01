@@ -60,15 +60,15 @@ public:
 
 	// ── 图构建 ──
 
-	/// @brief  添加节点（转移所有权），返回裸指针供后续接线引用
-	/// @return 指向已存入图内节点的非拥有指针；若节点名为空或重名则返回 nullptr
-	Node* addNode(std::unique_ptr<Node> node) { return _store.addNode(std::move(node)); }
+	/// @brief  添加节点（转移所有权），返回引用供后续接线引用
+	/// @throws GraphException(DuplicateNode) 若节点名为空或重名
+	Node& addNode(std::unique_ptr<Node> node) { return _store.addNode(std::move(node)); }
 
 	/// @brief  端口级接线：上游输出口 → 下游输入口
-	/// @return true 表示两端节点和端口均存在
-	bool connect(const std::string& srcNode, const std::string& srcPort,
+	/// @throws GraphException(NodeNotFound/PortNotFound/DirectConnect) 若接线不合法
+	void connect(const std::string& srcNode, const std::string& srcPort,
 				 const std::string& dstNode, const std::string& dstPort) {
-		return _store.connect(srcNode, srcPort, dstNode, dstPort);
+		_store.connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	/// @brief  快捷接线：自动匹配上游所有输出口到下游同名的输入口
@@ -78,8 +78,9 @@ public:
 	}
 
 	/// @brief  接线：在两个节点间自动插入广播连接器（Broadcast Connector, N=1）
-	/// @return 指向自动创建的广播连接器的非拥有指针；若节点或端口不存在则返回 nullptr
-	Node* wire(const std::string& srcNode, const std::string& srcPort,
+	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
+	/// @return 指向自动创建的广播连接器的引用
+	Node& wire(const std::string& srcNode, const std::string& srcPort,
 			   const std::string& dstNode, const std::string& dstPort) {
 		return _store.wire(srcNode, srcPort, dstNode, dstPort);
 	}
@@ -97,17 +98,30 @@ public:
 	// ── 数据注入 ──
 
 	/// @brief  从图外注入数据到指定节点的输入端口（写入缓冲，不触发执行）
-	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data);
+	/// @throws GraphException(NodeNotFound) 若节点不存在
+	/// @throws GraphException(FeedFailed) 若 setInput 失败
+	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data);
 
 	/// @brief  便捷接口：直接传入 DC::Tensor
-	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
+	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
 
 	// ── 执行驱动 ──
 
-	/// @brief  异步启动整张图的计算
-	/// @throws GraphException(NoDeclaration) 若未事先调用 declareOutput
-	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
+	/// @brief  异步启动整张图的计算。输出声明直接作为 submit 参数，消除 temporal coupling。
+	/// @param declarations  期望产出：{nodeName, portName, count} 列表
+	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
+				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
+		_outputZone.declare(taskId, std::move(declarations));
+		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
+	}
+
+	/// @brief  单输出便捷重载
+	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
+				size_t count = 1,
+				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
+				uint32_t maxHops = kDefaultMaxHops) {
+		_outputZone.declare(taskId, nodeName, portName, count);
 		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
 	}
 
@@ -123,19 +137,6 @@ public:
 
 	/// @brief  检查输出区中是否有结果
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
-
-	// ── 输出声明（submit 前必须调用）──
-
-	/// @brief  声明某 task 的输出期望：指定节点端口需产出 N 次才停止
-	void declareOutput(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
-		_outputZone.declare(taskId, std::move(declarations));
-	}
-
-	/// @brief  单条声明的便捷重载
-	void declareOutput(const TaskId& taskId, const std::string& nodeName,
-					   const std::string& portName, size_t count = 1) {
-		_outputZone.declare(taskId, nodeName, portName, count);
-	}
 
 	// ── 查询 ──
 

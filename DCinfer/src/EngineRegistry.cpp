@@ -61,7 +61,7 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, 
 
 std::unique_ptr<Node> EngineRegistry::createNode(const std::string& nodeName, Node::Schema schema,
 												 Node::RunFn fn) const {
-	return std::make_unique<Node>("Builtin", nodeName, std::move(schema), std::move(fn), nullptr,
+	return std::make_unique<Node>("Builtin", nodeName, std::move(schema), std::move(fn),
 								  ThreadPoolAffinity::Operator);
 }
 
@@ -182,7 +182,7 @@ bool EngineRegistry::registerOperator(const std::string& operatorName, Node::Sch
 	// 工厂：捕获 schema 和 fn，创建算子节点
 	desc.factory = [schema = std::move(schema),
 					fn = std::move(fn)](std::string name, const void* /*engineConfig*/) -> std::unique_ptr<Node> {
-		return std::make_unique<Node>("Builtin", std::move(name), schema, fn, nullptr, ThreadPoolAffinity::Operator);
+		return std::make_unique<Node>("Builtin", std::move(name), schema, fn, ThreadPoolAffinity::Operator);
 	};
 
 	_engines[operatorName] = std::move(desc);

@@ -33,14 +33,16 @@ public:
 
 	// ── 图构建 ──
 
-	/// @brief  添加节点（转移所有权），返回裸指针供后续接线引用
-	/// @return 指向已存入图内节点的非拥有指针；若节点名为空或重名则返回 nullptr
-	Node* addNode(std::unique_ptr<Node> node);
+	/// @brief  添加节点（转移所有权），返回引用供后续接线引用
+	/// @throws GraphException(DuplicateNode) 若节点名为空或重名
+	Node& addNode(std::unique_ptr<Node> node);
 
 	/// @brief  端口级接线：上游输出口 → 下游输入口
 	///         约束：至少有一端是连接器（两个业务节点禁止直连）
-	/// @return true 表示两端节点和端口均存在且接线成功
-	bool connect(const std::string& srcNode, const std::string& srcPort,
+	/// @throws GraphException(NodeNotFound) 若节点不存在
+	/// @throws GraphException(PortNotFound) 若端口不存在
+	/// @throws GraphException(DirectConnect) 若两个非连接器节点直连
+	void connect(const std::string& srcNode, const std::string& srcPort,
 				 const std::string& dstNode, const std::string& dstPort);
 
 	/// @brief  快捷接线：自动匹配上游所有输出口到下游同名的输入口
@@ -49,20 +51,16 @@ public:
 
 	/// @brief  接线：在两个节点间自动插入广播连接器（Broadcast Connector, N=1）
 	///         适用于两个业务节点之间的 1→1 直连场景
-	/// @return 指向自动创建的广播连接器的非拥有指针；若节点或端口不存在则返回 nullptr
-	Node* wire(const std::string& srcNode, const std::string& srcPort,
+	/// @throws GraphException(NodeNotFound) 若节点不存在
+	/// @throws GraphException(PortNotFound) 若端口不存在
+	/// @return 指向自动创建的广播连接器的引用
+	Node& wire(const std::string& srcNode, const std::string& srcPort,
 			   const std::string& dstNode, const std::string& dstPort);
 
 	/// @brief  标记输入：该节点的该端口为图级输入口
 	void bindInput(const std::string& nodeName, const std::string& portName);
 
 	// ── 查找 ──
-
-	/// @brief  查找节点（非拥有），不存在返回 nullptr
-	Node* findNode(const std::string& name);
-
-	/// @brief  查找节点（只读）
-	const Node* findNode(const std::string& name) const;
 
 	/// @brief  获取节点指针（非拥有），不存在返回 nullptr
 	Node* node(const std::string& name);

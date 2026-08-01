@@ -112,7 +112,7 @@ void testBasicGraphEmbedding() {
 		// 使用 Broadcast(2) 将 source.y 扇出到 SubAdder 的两个输入 (a, b)
 		auto bc2 = Connector::broadcastSchema(2);
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "source_bc", bc2,
-		                                     Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
+		                                     Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		parent.addNode(std::move(bcNode));
 		parent.connect("source", "y", "source_bc", "in");
@@ -122,8 +122,7 @@ void testBasicGraphEmbedding() {
 		parent.wire("SubAdder", "y", "sink", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(3.0f));
-		parent.declareOutput("t1", "sink", "y");
-		parent.submit("t1");
+		parent.submit("t1", "sink", "y");
 
 		bool completed = parent.awaitCompletion("t1");
 		CHECK(completed, "parent should complete");
@@ -146,7 +145,7 @@ void testBranchSubgraph() {
 
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "sub_bc", bcSchema,
-											 Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
+											 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		subGraph.addNode(std::move(bcNode));
 
@@ -173,8 +172,7 @@ void testBranchSubgraph() {
 		parent.wire("FanOutGraph", "y", "sink", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(7.0f));
-		parent.declareOutput("t1", "sink", "y");
-		parent.submit("t1");
+		parent.submit("t1", "sink", "y");
 
 		CHECK(parent.awaitCompletion("t1"), "parent should complete");
 		CHECK(parent.hasOutput("t1", "sink", "y"), "sink should have output");
@@ -225,8 +223,7 @@ void testThreeLevelNesting() {
 		parent.wire("LevelA", "y", "sink", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(42.0f));
-		parent.declareOutput("t1", "sink", "y");
-		parent.submit("t1");
+		parent.submit("t1", "sink", "y");
 
 		CHECK(parent.awaitCompletion("t1"), "three-level nested should complete");
 		CHECK(parent.hasOutput("t1", "sink", "y"), "sink should have output");
@@ -275,8 +272,7 @@ void testSubgraphTimeout() {
 		parent.wire("source", "y", "LoopGraph", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(0.0f));
-		parent.declareOutput("t1", "LoopGraph", "y");
-		parent.submit("t1", std::chrono::milliseconds(5000));
+		parent.submit("t1", "LoopGraph", "y", 1, std::chrono::milliseconds(5000));
 
 		CHECK(parent.awaitCompletion("t1"), "should complete (via TTL, not hang)");
 
@@ -319,7 +315,7 @@ void testChainedSubgraphs() {
 		// src1 扇出到 Adder1.a 和 Adder2.a
 		auto bc1Schema = Connector::broadcastSchema(2);
 		auto bc1Node = std::make_unique<Node>("Connector.Broadcast", "bc1", bc1Schema,
-		                                      Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
+		                                      Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bc1Node->setConnector(true);
 		parent.addNode(std::move(bc1Node));
 		parent.connect("src1", "y", "bc1", "in");
@@ -329,7 +325,7 @@ void testChainedSubgraphs() {
 		// src2 扇出到 Adder1.b 和 Adder2.b
 		auto bc2Schema = Connector::broadcastSchema(2);
 		auto bc2Node = std::make_unique<Node>("Connector.Broadcast", "bc2", bc2Schema,
-		                                      Connector::broadcastRunFn(), nullptr, ThreadPoolAffinity::System);
+		                                      Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bc2Node->setConnector(true);
 		parent.addNode(std::move(bc2Node));
 		parent.connect("src2", "y", "bc2", "in");
@@ -338,9 +334,7 @@ void testChainedSubgraphs() {
 
 		parent.feedInput("t1", "src1", "x", makeFloatTensor(10.0f));
 		parent.feedInput("t1", "src2", "x", makeFloatTensor(20.0f));
-		parent.declareOutput("t1", "Adder1", "s");
-		parent.declareOutput("t1", "Adder2", "s");
-		parent.submit("t1");
+		parent.submit("t1", {{"Adder1", "s"}, {"Adder2", "s"}});
 		CHECK(parent.awaitCompletion("t1"), "should complete");
 		CHECK(parent.hasOutput("t1", "Adder1", "s"), "Adder1 should have output");
 		CHECK(parent.hasOutput("t1", "Adder2", "s"), "Adder2 should have output");
@@ -453,7 +447,7 @@ void testWaitMechanism() {
 		graph.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
 
 		graph.feedInput("t1", "n1", "x", makeFloatTensor(99.0f));
-		graph.declareOutput("t1", "n1", "y", 1);
+		graph.submit("t1", "n1", "y", 1);
 
 		// 通过回调在 _terminate 清理前捕获输出
 		auto mtx = std::make_shared<std::mutex>();
@@ -473,7 +467,7 @@ void testWaitMechanism() {
 			cv->notify_one();
 		});
 
-		graph.submit("t1");
+		graph.submit("t1", "n1", "y", 1);
 
 		bool completed = graph.wait("t1", std::chrono::milliseconds(5000));
 		CHECK(completed, "wait should return true (completed within timeout)");

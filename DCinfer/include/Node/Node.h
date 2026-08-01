@@ -146,15 +146,17 @@ public:
 	using RunFn = std::function<Result(RunContext&)>;
 	using CompletionFn = std::function<void(const TaskId& taskId, const Result& result)>;
 
-	Node(std::string type, std::string name, Schema schema, RunFn fn, EngineInstance* engineInstance = nullptr,
-		 ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator,
-		 const EngineDescriptor* engineDesc = nullptr);
+	Node(std::string type, std::string name, Schema schema, RunFn fn,
+		 ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator);
 	~Node();
 
 	Node(const Node&) = delete;
 	Node& operator=(const Node&) = delete;
 	Node(Node&&) = delete;
 	Node& operator=(Node&&) = delete;
+
+	// ── 引擎绑定（引擎支持节点构造后绑定）──
+	void bindEngine(EngineInstance* engineInstance, const EngineDescriptor* engineDesc = nullptr);
 
 	// ── 只读属性 ──
 	const std::string& type() const { return _meta.type; }
@@ -287,6 +289,60 @@ private:
 	Node::TaskId taskId;
 	const Node::Schema* schema = nullptr;
 	std::coroutine_handle<> handle;
+};
+
+// ── NodeBuilder：流式 API ──
+
+/// @brief Node 构造语法糖，链式调用替代冗长的 make_unique<Node>(...) + setConnector(true) 模式。
+///
+/// 用法：
+///   auto node = NodeBuilder("Connector.Broadcast", "bc")
+///       .schema(bcSchema)
+///       .runFn(Connector::broadcastRunFn())
+///       .affinity(ThreadPoolAffinity::System)
+///       .connector()
+///       .build();
+class NodeBuilder {
+public:
+	NodeBuilder(std::string type, std::string name)
+		: _type(std::move(type)), _name(std::move(name)) {}
+
+	NodeBuilder& schema(Node::Schema s) { _schema = std::move(s); return *this; }
+	NodeBuilder& runFn(Node::RunFn fn) { _fn = std::move(fn); return *this; }
+	NodeBuilder& affinity(ThreadPoolAffinity a) { _affinity = a; return *this; }
+	NodeBuilder& connector(bool v = true) { _isConnector = v; return *this; }
+	NodeBuilder& tag(std::string t) { _tag = std::move(t); return *this; }
+	NodeBuilder& modelPath(std::string path) { _modelPath = std::move(path); return *this; }
+	NodeBuilder& engine(EngineInstance* instance, const EngineDescriptor* desc = nullptr) {
+		_engineInstance = instance;
+		_engineDesc = desc;
+		return *this;
+	}
+
+	std::unique_ptr<Node> build() {
+		auto node = std::make_unique<Node>(_type, _name, std::move(_schema), std::move(_fn), _affinity);
+		if (_isConnector)
+			node->setConnector(true);
+		if (!_tag.empty())
+			node->setTag(std::move(_tag));
+		if (!_modelPath.empty())
+			node->setModelPath(std::move(_modelPath));
+		if (_engineInstance || _engineDesc)
+			node->bindEngine(_engineInstance, _engineDesc);
+		return node;
+	}
+
+private:
+	std::string _type;
+	std::string _name;
+	Node::Schema _schema;
+	Node::RunFn _fn;
+	ThreadPoolAffinity _affinity = ThreadPoolAffinity::Operator;
+	EngineInstance* _engineInstance = nullptr;
+	const EngineDescriptor* _engineDesc = nullptr;
+	bool _isConnector = false;
+	std::string _tag;
+	std::string _modelPath;
 };
 
 } // namespace DC

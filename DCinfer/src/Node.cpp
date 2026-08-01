@@ -71,19 +71,23 @@ bool NodeSchema::valid() const {
 
 // ── 构造/析构 ──
 
-Node::Node(std::string type, std::string name, Schema schema, RunFn fn, EngineInstance* engineInstance,
-		   ThreadPoolAffinity affinity, const EngineDescriptor* engineDesc)
+Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
+		   ThreadPoolAffinity affinity)
 	: _fn(std::move(fn)) {
 	_meta.type = std::move(type);
 	_meta.name = std::move(name);
 	_meta.affinity = affinity;
-	_meta.engineDescriptor = engineDesc;
 	_meta.schema = std::move(schema);
 
 	_buffer = std::make_unique<TaskBuffer>();
 	_workspace = std::make_unique<SlotWorkspace>(_meta.schema);
 	_bridge = std::make_unique<CoroutineBridge>();
 	_signal = std::make_unique<SignalGate>();
+	_engine = std::make_unique<EngineAdapter>(nullptr, nullptr);
+}
+
+void Node::bindEngine(EngineInstance* engineInstance, const EngineDescriptor* engineDesc) {
+	_meta.engineDescriptor = engineDesc;
 	_engine = std::make_unique<EngineAdapter>(engineInstance, engineDesc);
 }
 

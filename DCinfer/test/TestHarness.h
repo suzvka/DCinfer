@@ -19,10 +19,9 @@ namespace DC {
 /// 使用方式：
 ///   1. 构建图：addNode / wire / connect / connectAll
 ///   2. 注入数据：feedInput
-///   3. 声明输出：declareOutput（submit 前必须调用）
-///   4. 异步提交：submit（内部设置 task 完成回调）
-///   5. 等待完成：awaitCompletion（由 _terminate 中的回调触发）
-///   6. 取结果：getOutputTensor（从回调捕获的缓存中读取）
+///   3. 声明输出并异步提交：submit（输出声明已融入 submit 参数）
+///   4. 等待完成：awaitCompletion（由 _terminate 中的回调触发）
+///   5. 取结果：getOutputTensor（从回调捕获的缓存中读取）
 ///
 /// 关键设计：task 完成回调在 _terminate 中、节点缓冲区 cleanup 前触发，
 /// 确保回调中能安全读取输出。TestHarness 在回调中捕获输出数据到本地缓存，
@@ -35,20 +34,20 @@ public:
 
 	// ── 图构建（透传）──
 
-	Node* addNode(std::unique_ptr<Node> node) {
+	Node& addNode(std::unique_ptr<Node> node) {
 		return _graph.addNode(std::move(node));
 	}
 
-	bool connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
+	void connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
 				 const std::string& dstPort) {
-		return _graph.connect(srcNode, srcPort, dstNode, dstPort);
+		_graph.connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
 		return _graph.connectAll(srcNode, dstNode);
 	}
 
-	Node* wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
+	Node& wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
 			   const std::string& dstPort) {
 		return _graph.wire(srcNode, srcPort, dstNode, dstPort);
 	}
@@ -59,59 +58,46 @@ public:
 
 	// ── 数据注入 ──
 
-	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data) {
-		return _graph.feedInput(taskId, nodeName, portName, std::move(data));
+	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data) {
+		_graph.feedInput(taskId, nodeName, portName, std::move(data));
 	}
 
-	bool feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data) {
-		return _graph.feedInput(taskId, nodeName, portName, std::move(data));
+	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data) {
+		_graph.feedInput(taskId, nodeName, portName, std::move(data));
 	}
 
 	// ── 输出声明 ──
 
-	void declareOutput(const TaskId& taskId, const std::string& nodeName,
-					   const std::string& portName, size_t count = 1) {
-		_graph.declareOutput(taskId, nodeName, portName, count);
-		// 记录位置供回调捕获
-		std::lock_guard lk(_declMutex);
-		_declaredOutputs[taskId].emplace_back(nodeName, portName);
-	}
+	// （已合并到 submit：输出声明作为 submit 的第一个参数，消除 temporal coupling）
 
 	// ── 异步提交 ──
 
-	/// @brief  提交 task。内部设置 task 完成回调：在 _terminate 触发时捕获输出并通知等待者。
-	void submit(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
+	/// @brief  单输出便捷提交：声明输出 + 异步启动
+	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
+				size_t count = 1,
+				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
-		// 注册 task 完成回调：在 _terminate（所有传播完成）时触发，捕获输出到本地缓存
-		_graph.setTaskCompleteCallback([this](const TaskId& tid) {
-			// 捕获所有声明输出到本地缓存
-			{
-				std::lock_guard lk(_declMutex);
-				auto it = _declaredOutputs.find(tid);
-				if (it != _declaredOutputs.end()) {
-					auto& captured = _capturedOutputs[tid];
-					for (auto& [nodeName, portName] : it->second) {
-						std::string key = nodeName + ":" + portName;
-						if (captured.contains(key))
-							continue;
+		// 记录位置供回调捕获
+		{
+			std::lock_guard lk(_declMutex);
+			_declaredOutputs[taskId].emplace_back(nodeName, portName);
+		}
+		_setupCallback();
+		_graph.submit(taskId, nodeName, portName, count, timeout, maxHops);
+	}
 
-						// 优先从 OutputZone / Node 查找（_graph.hasOutput 会双端检查）
-						if (!_graph.hasOutput(tid, nodeName, portName))
-							continue;
-						try {
-							auto val = _graph.getOutput(tid, nodeName, portName);
-							auto* t = val.as<Tensor>();
-							if (t)
-								captured[key] = std::move(*t);
-						} catch (...) {
-						}
-					}
-				}
+	/// @brief  多输出提交：声明多个输出 + 异步启动
+	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
+				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
+				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
+		{
+			std::lock_guard lk(_declMutex);
+			for (auto& d : declarations) {
+				_declaredOutputs[taskId].emplace_back(d.nodeName, d.portName);
 			}
-			// 注意：无需手动通知 CV，InferGraph::wait() 通过 _completionCv 同步
-		});
-
-		_graph.submit(taskId, timeout, maxHops);
+		}
+		_setupCallback();
+		_graph.submit(taskId, std::move(declarations), timeout, maxHops);
 	}
 
 	// ── 同步等待 ──
@@ -198,6 +184,31 @@ public:
 	}
 
 private:
+	/// @brief  注册 task 完成回调：在 _terminate 触发时捕获输出到本地缓存
+	void _setupCallback() {
+		_graph.setTaskCompleteCallback([this](const TaskId& tid) {
+			std::lock_guard lk(_declMutex);
+			auto it = _declaredOutputs.find(tid);
+			if (it != _declaredOutputs.end()) {
+				auto& captured = _capturedOutputs[tid];
+				for (auto& [nodeName, portName] : it->second) {
+					std::string key = nodeName + ":" + portName;
+					if (captured.contains(key))
+						continue;
+					if (!_graph.hasOutput(tid, nodeName, portName))
+						continue;
+					try {
+						auto val = _graph.getOutput(tid, nodeName, portName);
+						auto* t = val.as<Tensor>();
+						if (t)
+							captured[key] = std::move(*t);
+					} catch (...) {
+					}
+				}
+			}
+		});
+	}
+
 	InferGraph _graph;
 
 	// 声明输出位置记录（submit 时供回调使用）
