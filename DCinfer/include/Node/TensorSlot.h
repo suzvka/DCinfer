@@ -112,7 +112,7 @@ public:
 
 	// ── 运行时存储：类型擦除 ──
 
-	/// @brief  类型擦除存储：通过 DC::Type 推导 SlotDataType，经 ValidatorRegistry 校验后存储。
+	/// @brief  类型擦除存储：通过 ensureSlotType 推导类型标签，经 ValidatorRegistry 校验后存储。
 	/// @tparam T 要存储的数据类型（自动推导 SlotDataType 标签）。
 	/// @throws TensorException(TypeMismatch)     若类型不匹配且不可转换。
 	/// @throws TensorException(InvalidShape)      若数据无效。
@@ -156,7 +156,7 @@ private:
 	struct TypedBlob {
 		void* ptr = nullptr;
 		std::function<void(void*)> deleter;
-		SlotDataType type = SlotDataType::Unknown;
+		SlotDataType type = SlotDataTypeUnknown;
 	};
 
 	TensorMeta _rule;
@@ -177,7 +177,7 @@ bool TensorSlot::isType() const {
 template <typename T>
 TensorSlot& TensorSlot::store(T&& data) {
 	ValidatorRegistry::ensureDefaults(); // 保证默认注册已执行（std::call_once）
-	auto typeEnum = DC::Type::getType<SlotDataType, std::decay_t<T>>();
+	auto typeEnum = ensureSlotType<std::decay_t<T>>();
 
 	// 校验：始终按存储的实际类型进行校验
 	auto status = ValidatorRegistry::instance().validate(std::addressof(data), typeEnum, _rule);
@@ -215,11 +215,11 @@ T TensorSlot::take() {
 		abort(ErrorType::NotData, "Slot is empty");
 	}
 
-	auto expectedType = DC::Type::getType<SlotDataType, T>();
+	auto expectedType = ensureSlotType<T>();
 	if (_blob->type != expectedType) {
 		abort(ErrorType::TypeMismatch,
-			  "take<T>: type mismatch, stored=" + std::to_string(static_cast<uint32_t>(_blob->type)) +
-				  " expected=" + std::to_string(static_cast<uint32_t>(expectedType)));
+			  "take<T>: type mismatch, stored=" + std::to_string(_blob->type) +
+				  " expected=" + std::to_string(expectedType));
 	}
 
 	auto* typed = static_cast<T*>(_blob->ptr);
@@ -239,7 +239,7 @@ const T* TensorSlot::peek() const {
 		return nullptr;
 	}
 
-	auto expectedType = DC::Type::getType<SlotDataType, T>();
+	auto expectedType = ensureSlotType<T>();
 	if (_blob->type != expectedType) {
 		return nullptr;
 	}

@@ -97,9 +97,9 @@ SlotDataType TensorSlot::storedType() const {
 		return _blob->type;
 	}
 	if (_defaultData) {
-		return SlotDataType::DCTensor;
+		return ensureSlotType<Tensor>();
 	}
-	return SlotDataType::Unknown;
+	return SlotDataTypeUnknown;
 }
 
 const void* TensorSlot::rawPtr() const {

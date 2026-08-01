@@ -1,6 +1,6 @@
 #include "SlotType.h"
-#include "DCtype.h"
-#include "EngineRegistry.h"
+#include "Tensor.hpp"
+#include "Value.h"
 
 #include <mutex>
 
@@ -14,13 +14,13 @@ ValidatorRegistry& ValidatorRegistry::instance() {
 void ValidatorRegistry::ensureDefaults() {
 	static std::once_flag flag;
 	std::call_once(flag, []() {
-		// 类型映射
-		DC::Type::registerType<DC::Tensor>(SlotDataType::DCTensor);
-		DC::Type::registerType<DC::Value>(SlotDataType::Value);
+		// 自动分配类型标签（首次调用 ensureSlotType 触发递增分配）
+		auto dctensorId = ensureSlotType<DC::Tensor>();
+		auto valueId = ensureSlotType<DC::Value>();
 
 		// DCTensor 校验器
 		ValidatorRegistry::instance().registerValidator(
-			SlotDataType::DCTensor, [](const void* data, SlotDataType, const TensorMeta& rule) -> SlotDataStatus {
+			dctensorId, [](const void* data, SlotDataType, const TensorMeta& rule) -> SlotDataStatus {
 				const auto* t = static_cast<const Tensor*>(data);
 				if (!t || !t->valid()) {
 					return SlotDataStatus{.invalid = true};
@@ -37,7 +37,7 @@ void ValidatorRegistry::ensureDefaults() {
 
 		// Value 校验器：放行（由具体引擎校验）
 		ValidatorRegistry::instance().registerValidator(
-			SlotDataType::Value,
+			valueId,
 			[](const void*, SlotDataType, const TensorMeta&) -> SlotDataStatus { return SlotDataStatus{}; });
 	});
 }

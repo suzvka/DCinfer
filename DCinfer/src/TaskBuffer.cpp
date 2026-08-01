@@ -158,7 +158,7 @@ void TaskBuffer::drainInputsTo(const TaskId& taskId, SlotWorkspace& workspace,
 			auto& nativeData = taskIt->second.value();
 
 			// 对 DCTensor 类型的 Value 进行类型校验
-			if (nativeData.innerType() == SlotDataType::DCTensor && port.type != Tensor::TensorType::Void) {
+			if (nativeData.innerType() == ensureSlotType<Tensor>() && port.type != Tensor::TensorType::Void) {
 				const auto* t = static_cast<const Tensor*>(nativeData.get());
 				if (!t || !t->valid()) {
 					throw NodeException(NodeException::ErrorType::InternalError,

@@ -5,8 +5,6 @@
 #include <utility>
 
 #include "SlotType.h"
-#include "DCtype.h"
-#include "SlotType.h"
 
 namespace DC {
 
@@ -35,7 +33,7 @@ public:
 	template <typename T, typename Deleter>
 	Value(std::unique_ptr<T, Deleter> ptr) {
 		ValidatorRegistry::ensureDefaults();
-		_innerType = DC::Type::getType<SlotDataType, T>();
+		_innerType = ensureSlotType<T>();
 		auto d = ptr.get_deleter(); // 在 release 前拷贝 deleter
 		_ptr = ptr.release();
 		_deleter = [d = std::move(d)](void* p) {
@@ -52,7 +50,7 @@ public:
 	template <typename T, typename Deleter>
 	Value(T* ptr, Deleter&& deleter) : _ptr(ptr) {
 		ValidatorRegistry::ensureDefaults();
-		_innerType = DC::Type::getType<SlotDataType, T>();
+		_innerType = ensureSlotType<T>();
 		_deleter = [d = std::forward<Deleter>(deleter)](void* p) {
 			if (p)
 				d(static_cast<T*>(p));
@@ -117,7 +115,7 @@ public:
 
 private:
 	void* _ptr = nullptr; ///< 原始指针（类型擦除）。
-	SlotDataType _innerType = SlotDataType::Unknown; ///< 内部数据类型的 SlotDataType 标签。
+	SlotDataType _innerType = SlotDataTypeUnknown; ///< 内部数据类型的标签。
 	std::function<void(void*)> _deleter; ///< 自定义删除器。
 };
 

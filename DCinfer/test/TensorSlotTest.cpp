@@ -109,7 +109,7 @@ static void runTensorSlotTests() {
 
 		if (!slot.hasData())
 			throw std::runtime_error("slot should have external data");
-		if (slot.storedType() == SlotDataType::DCTensor)
+		if (slot.storedType() == ensureSlotType<Tensor>())
 			throw std::runtime_error("stored type should not be DCTensor");
 
 		// take back
@@ -133,7 +133,7 @@ static void runTensorSlotTests() {
 		t = 42.0f;
 		slot.store(std::move(t));
 
-		if (slot.storedType() != SlotDataType::DCTensor)
+		if (slot.storedType() != ensureSlotType<Tensor>())
 			throw std::runtime_error("expected DCTensor type");
 
 		// Try to take as wrong type

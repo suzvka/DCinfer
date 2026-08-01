@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
@@ -8,19 +9,32 @@
 
 namespace DC {
 
-/// @brief 槽位数据类型枚举。
+/// @brief 槽位数据类型标签。
 ///
-/// DC::Type 注册 T → SlotDataType 映射，store<T>() 时自动推导。
-/// 引擎原生类型预留从 100 起始的编号段。
-enum class SlotDataType : uint32_t {
-	Unknown = 0, ///< 未知类型
-	DCTensor = 1, ///< DC::Tensor
-	Value = 2, ///< DC::Value（原生张量包装）
-	// 引擎原生类型预留从 100 开始
-	ONNX_OrtValue = 100, ///< Ort::Value（ONNX Runtime）
-	// TensorRT_ITensor = 200,
-	UserDefined = 1000, ///< 用户自定义类型起始编号
-};
+/// 框架内部自动递增分配，用户不直接指定值。
+/// 通过 ensureSlotType<T>() 获取类型 T 对应的唯一标签。
+using SlotDataType = uint32_t;
+
+/// @brief 未分配的类型标签。
+inline constexpr SlotDataType SlotDataTypeUnknown = 0;
+
+namespace detail {
+inline std::atomic<SlotDataType>& slotTypeCounter() {
+	static std::atomic<SlotDataType> counter{1};
+	return counter;
+}
+} // namespace detail
+
+/// @brief 获取类型 T 对应的 SlotDataType 标签（自动分配，线程安全）。
+///
+/// 首次调用时自动分配递增编号，后续调用返回同一编号。
+/// 框架内部类型（DC::Tensor、DC::Value）在 ValidatorRegistry::ensureDefaults() 中自动分配。
+/// 引擎适配器开发者直接调用此函数即可获取自定义类型的标签，无需手动指定编号。
+template <typename T>
+SlotDataType ensureSlotType() {
+	static SlotDataType id = detail::slotTypeCounter().fetch_add(1, std::memory_order_relaxed);
+	return id;
+}
 
 /// @brief 槽位数据校验结果。
 ///
@@ -39,7 +53,7 @@ struct SlotDataStatus {
 
 /// @brief 槽位校验函数签名。
 /// @param data 指向实际存储的 void*（调用方保证生命周期）。
-/// @param type 数据类型枚举。
+/// @param type 数据类型标签。
 /// @param rule 槽位的元规则（期望类型、形状等）。
 using SlotCheckFn = std::function<SlotDataStatus(const void* data, SlotDataType type, const TensorMeta& rule)>;
 
@@ -48,6 +62,10 @@ using SlotCheckFn = std::function<SlotDataStatus(const void* data, SlotDataType 
 /// 引擎注册时通过 registerValidator() 注册校验逻辑。
 /// TensorSlot::store() 调用 validate() 执行运行时校验。
 /// 未注册类型直接放行（返回 ready=true）。
+///
+/// 用法：
+///   auto id = ensureSlotType<MyType>();
+///   ValidatorRegistry::instance().registerValidator(id, myCheckFn);
 class ValidatorRegistry {
 public:
 	/// @brief  获取全局单例。
