@@ -1,8 +1,12 @@
 // InferGraph 拓扑连接与数据流 单元测试（异步场景化版本）
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include "TestHarness.h"
@@ -711,6 +715,159 @@ void testTaskScopedSignalWithPartialBlock() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 子图（分组互斥）测试
+// ════════════════════════════════════════════
+
+// 用于检测并发执行的共享状态
+struct ConcurrencyDetector {
+	std::atomic<int> concurrent{0};
+	std::atomic<int> maxConcurrent{0};
+	std::mutex mtx;
+
+	void enter() {
+		int c = concurrent.fetch_add(1, std::memory_order_acq_rel) + 1;
+		int prev = maxConcurrent.load(std::memory_order_acquire);
+		while (c > prev && !maxConcurrent.compare_exchange_weak(prev, c, std::memory_order_acq_rel)) {}
+	}
+	void leave() {
+		concurrent.fetch_sub(1, std::memory_order_acq_rel);
+	}
+};
+
+// 带延迟的算子（模拟耗时推理），执行时记录并发度
+static Node::RunFn delayedRunFn(ConcurrencyDetector* detector, int delayMs = 50) {
+	return [detector, delayMs](Node::RunContext& ctx) -> Node::Result {
+		const auto& inVal = ctx.peek("x");
+		const auto* t = inVal.as<Tensor>();
+		if (!t)
+			return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+
+		if (detector) detector->enter();
+		std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+		if (detector) detector->leave();
+
+		ctx.output("y", Value(std::make_unique<Tensor>(*t)));
+		return ctx.success();
+	};
+}
+
+void testSubgraphSerializesExecution() {
+	TEST("subgraph serializes execution: two independent nodes never run concurrently") {
+		TestHarness harness;
+
+		ConcurrencyDetector detector;
+
+		// 两个独立节点（无数据依赖），相同 affinity
+		harness.addNode(std::make_unique<Node>("Builtin", "sg_a", identitySchema(),
+			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
+		harness.addNode(std::make_unique<Node>("Builtin", "sg_b", identitySchema(),
+			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
+
+		// 声明子图：两个节点互斥
+		harness.graph().declareSubgraph("sg", {"sg_a", "sg_b"});
+
+		// 同时注入两个 task
+		harness.feedInput("t1", "sg_a", "x", makeFloatTensor(1.0f));
+		harness.feedInput("t2", "sg_b", "x", makeFloatTensor(2.0f));
+
+		// 同时提交
+		harness.submit("t1", "sg_a", "y", 1, std::chrono::milliseconds(3000));
+		harness.submit("t2", "sg_b", "y", 1, std::chrono::milliseconds(3000));
+
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
+
+		// 核心断言：最大并发度不超过 1
+		CHECK(detector.maxConcurrent.load() <= 1,
+			  "subgraph nodes must not run concurrently (maxConcurrent="
+				  + std::to_string(detector.maxConcurrent.load()) + ")");
+	}
+	END_TEST();
+}
+
+void testSubgraphDoesNotAffectOthers() {
+	TEST("subgraph does not affect nodes outside the group") {
+		TestHarness harness;
+
+		ConcurrencyDetector detector;
+
+		// 子图内节点
+		harness.addNode(std::make_unique<Node>("Builtin", "sg_a", identitySchema(),
+			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
+		// 子图外节点（同 affinity，但不在子图中）
+		harness.addNode(std::make_unique<Node>("Builtin", "free", identitySchema(),
+			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
+
+		// 只把 sg_a 放入子图（单节点子图，不影响 free）
+		harness.graph().declareSubgraph("sg", {"sg_a"});
+
+		harness.feedInput("t1", "sg_a", "x", makeFloatTensor(1.0f));
+		harness.feedInput("t2", "free", "x", makeFloatTensor(2.0f));
+
+		harness.submit("t1", "sg_a", "y", 1, std::chrono::milliseconds(3000));
+		harness.submit("t2", "free", "y", 1, std::chrono::milliseconds(3000));
+
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
+
+		// 两个节点应该都有输出（自由节点不受子图约束）
+		CHECK(harness.hasOutput("t1", "sg_a", "y"), "sg_a should have output");
+		CHECK(harness.hasOutput("t2", "free", "y"), "free should have output");
+	}
+	END_TEST();
+}
+
+void testSubgraphRejectsMixedAffinity() {
+	TEST("subgraph rejects nodes with different affinities") {
+		TestHarness harness;
+
+		harness.addNode(std::make_unique<Node>("Builtin", "op_node", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+		harness.addNode(std::make_unique<Node>("Builtin", "sys_node", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::System));
+
+		bool rejected = false;
+		try {
+			harness.graph().declareSubgraph("bad_sg", {"op_node", "sys_node"});
+		} catch (const GraphException& e) {
+			rejected = (e.getErrorType() == GraphException::ErrorType::MixedAffinity);
+		}
+		CHECK(rejected, "mixed affinity subgraph should be rejected");
+	}
+	END_TEST();
+}
+
+void testSubgraphDataflowCorrect() {
+	TEST("subgraph serial chain: data propagates correctly through A→B→C") {
+		TestHarness harness;
+
+		// 串行链：A → B → C（全部 Operator affinity）
+		harness.addNode(std::make_unique<Node>("Builtin", "A", incSchema(), incRunFn(),
+			ThreadPoolAffinity::Operator));
+		harness.addNode(std::make_unique<Node>("Builtin", "B", incSchema(), incRunFn(),
+			ThreadPoolAffinity::Operator));
+		harness.addNode(std::make_unique<Node>("Builtin", "C", incSchema(), incRunFn(),
+			ThreadPoolAffinity::Operator));
+
+		harness.wire("A", "y", "B", "x");
+		harness.wire("B", "y", "C", "x");
+
+		// 声明子图
+		harness.graph().declareSubgraph("chain", {"A", "B", "C"});
+
+		// 注入初始值 0 → +1 → +1 → +1 = 3
+		harness.feedInput("t1", "A", "x", makeFloatTensor(0.0f));
+		harness.submit("t1", "C", "y", 1, std::chrono::milliseconds(3000));
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+
+		CHECK(harness.hasOutput("t1", "C", "y"), "C should have output");
+		auto result = harness.getOutputTensor("t1", "C", "y");
+		CHECK(std::abs(result.item<float>() - 3.0f) < 1e-6f, "result should be 3.0 (0+1+1+1)");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
@@ -737,6 +894,12 @@ int main() {
 		testTaskScopedSignalBlocksOnlyTargetTask();
 		testTaskSignalCleanupOnTerminate();
 		testTaskScopedSignalWithPartialBlock();
+
+		// 子图（分组互斥）测试
+		testSubgraphSerializesExecution();
+		testSubgraphDoesNotAffectOthers();
+		testSubgraphRejectsMixedAffinity();
+		testSubgraphDataflowCorrect();
 
 		if (failures == 0) {
 			std::cout << "\nAll InferGraph tests passed!" << std::endl;

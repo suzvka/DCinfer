@@ -19,6 +19,7 @@ public:
 		FeedFailed,          ///< feedInput 时调用 Node::setInput 失败
 		ExecutionFailed,     ///< 线程池中 Node::tryExecute 抛出 NodeException
 		PropagateFailed,     ///< 协程传播链中写下游输入失败
+		MixedAffinity,       ///< declareSubgraph 时节点分属不同线程池
 		Other                ///< 其他未分类的错误
 	};
 
@@ -65,6 +66,9 @@ private:
 			break;
 		case ErrorType::PropagateFailed:
 			errorStr = "Propagate Failed";
+			break;
+		case ErrorType::MixedAffinity:
+			errorStr = "Mixed Affinity";
 			break;
 		case ErrorType::Other:
 			errorStr = "Other";

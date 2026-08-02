@@ -161,6 +161,11 @@ public:
 		return _graph;
 	}
 
+	/// @brief  获取底层 InferGraph 的可写引用（供 declareSubgraph 等变更操作）
+	InferGraph& graph() {
+		return _graph;
+	}
+
 	// ── 信号系统 ──
 
 	void setSignal(const std::string& name, bool value) {

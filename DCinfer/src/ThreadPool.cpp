@@ -62,6 +62,11 @@ size_t ThreadPool::activeCount(const std::string& groupTag) const {
 	return it->second->load(std::memory_order_acquire);
 }
 
+void ThreadPool::registerGroupLimit(const std::string& tag, size_t limit) {
+	std::lock_guard lk(_groupMutex);
+	_groupSemaphores[tag] = std::make_unique<std::counting_semaphore<>>(static_cast<std::ptrdiff_t>(limit));
+}
+
 void ThreadPool::shutdown() {
 	_running = false;
 	_shuttingDown = true;

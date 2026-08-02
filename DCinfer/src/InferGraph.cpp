@@ -17,6 +17,38 @@ InferGraph::InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg,
 	  _engine(scheduler, computeCfg, operatorCfg, systemCfg) {}
 
 // ════════════════════════════════════════════
+// 子图声明
+// ════════════════════════════════════════════
+
+void InferGraph::declareSubgraph(const std::string& name,
+								  std::initializer_list<std::string> nodeNames) {
+	// 1. 验证所有节点存在且 affinity 一致
+	ThreadPoolAffinity commonAffinity{};
+	bool first = true;
+	for (const auto& nname : nodeNames) {
+		auto* n = _store.node(nname);
+		if (!n)
+			throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::declareSubgraph",
+								 "node '" + nname + "' not found");
+		if (first) {
+			commonAffinity = n->affinity();
+			first = false;
+		} else if (n->affinity() != commonAffinity) {
+			throw GraphException(GraphException::ErrorType::MixedAffinity, "InferGraph::declareSubgraph",
+								 "node '" + nname + "' has different affinity from other nodes in subgraph '"
+									 + name + "'");
+		}
+	}
+
+	// 2. 设置所有节点的 tag 为子图名
+	for (const auto& nname : nodeNames)
+		_store.node(nname)->setTag(name);
+
+	// 3. 在对应线程池注册 groupLimit = 1
+	_engine.registerGroupLimit(commonAffinity, name, 1);
+}
+
+// ════════════════════════════════════════════
 // 数据注入
 // ════════════════════════════════════════════
 

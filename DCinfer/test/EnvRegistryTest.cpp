@@ -114,6 +114,8 @@ static void runTests() {
 		reg.release("WithCleanup");
 		if (!cleanupCalled)
 			throw std::runtime_error("cleanup should have been called on release");
+		if (destroyCount != 1)
+			throw std::runtime_error("released instance should have been destroyed");
 
 		// 释放后 getOrCreate 应重新创建
 		auto* env2 = reg.getOrCreate("WithCleanup");
@@ -121,6 +123,12 @@ static void runTests() {
 			throw std::runtime_error("getOrCreate after release should create new instance");
 		if (env2 == env)
 			throw std::runtime_error("getOrCreate after release should return different instance");
+
+		// 块结束前再次释放：注册表为全局单例，若残留实例，
+		// 其工厂/清理回调捕获的块内局部变量将悬垂，后续 releaseAll 会触发 UB
+		reg.release("WithCleanup");
+		if (destroyCount != 2)
+			throw std::runtime_error("second release should destroy the recreated instance");
 	}
 	std::cout << "Test 8 passed: release with cleanup" << std::endl;
 
@@ -153,6 +161,10 @@ static void runTests() {
 		auto* envA = reg.getOrCreate("RelA");
 		if (!envA)
 			throw std::runtime_error("getOrCreate after releaseAll should succeed");
+
+		// 块结束前释放重建的实例，避免其析构计数器指向块内已销毁的局部变量
+		reg.release("RelA");
+		reg.release("RelB");
 	}
 	std::cout << "Test 9 passed: releaseAll" << std::endl;
 

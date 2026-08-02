@@ -76,6 +76,14 @@ public:
 	bool wait(const TaskId& taskId,
 			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
 
+	// ── 分组限流 ──
+
+	/// @brief  向指定线程池动态注册分组限流
+	/// @param  affinity  目标线程池
+	/// @param  tag       分组标识
+	/// @param  limit     最大并发执行数
+	void registerGroupLimit(ThreadPoolAffinity affinity, const std::string& tag, size_t limit);
+
 	// ── task 完成回调 ──
 
 	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）

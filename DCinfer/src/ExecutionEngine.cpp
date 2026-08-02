@@ -322,6 +322,25 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 }
 
 // ════════════════════════════════════════════
+// 分组限流
+// ════════════════════════════════════════════
+
+void ExecutionEngine::registerGroupLimit(ThreadPoolAffinity affinity, const std::string& tag,
+										  size_t limit) {
+	switch (affinity) {
+	case ThreadPoolAffinity::Compute:
+		_computePool.registerGroupLimit(tag, limit);
+		break;
+	case ThreadPoolAffinity::Operator:
+		_operatorPool.registerGroupLimit(tag, limit);
+		break;
+	case ThreadPoolAffinity::System:
+		_systemPool.registerGroupLimit(tag, limit);
+		break;
+	}
+}
+
+// ════════════════════════════════════════════
 // 同步等待
 // ════════════════════════════════════════════
 

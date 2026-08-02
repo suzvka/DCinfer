@@ -65,6 +65,11 @@ public:
 	/// @brief  协程友好提交：co_await 等待任务在线程池中执行完成
 	PoolTicket submitAsync(const std::string& nodeTag, std::function<void()> task);
 
+	/// @brief  运行时注册分组限流（构造后追加，无需重建池）
+	/// @param  tag    分组标识（与 Node::tag 对应）
+	/// @param  limit  该分组最大并发执行数
+	void registerGroupLimit(const std::string& tag, size_t limit);
+
 	/// @brief  查询组当前活跃任务数
 	size_t activeCount(const std::string& groupTag) const;
 

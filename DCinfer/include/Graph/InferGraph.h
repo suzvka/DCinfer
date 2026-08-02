@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <vector>
@@ -94,6 +95,19 @@ public:
 	void bindOutput(const std::string& nodeName, const std::string& portName) {
 		_outputZone.bind(nodeName, portName);
 	}
+
+	// ── 子图声明 ──
+
+	/// @brief  声明子图：将一组节点编入同名分组，在执行时互斥（同时只有一个执行）。
+	///
+	/// 子图不改变图拓扑，仅通过线程池分组信号量实现串行约束。
+	/// 同组节点必须具有相同的 ThreadPoolAffinity（在同一线程池内互斥）。
+	///
+	/// @param  name       子图名（作为线程池分组 tag）
+	/// @param  nodeNames  属于该子图的节点名列表
+	/// @throws GraphException(NodeNotFound) 若任何节点不存在
+	/// @throws GraphException(MixedAffinity) 若节点分属不同线程池
+	void declareSubgraph(const std::string& name, std::initializer_list<std::string> nodeNames);
 
 	// ── 数据注入 ──
 
@@ -211,6 +225,10 @@ public:
 	///         子图内部用独立 CoroScheduler 执行，与父图隔离
 	/// @note   前提：已调用 bindInput + bindOutput 定义了图接口
 	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活
+	///
+	/// @note   性能提示：若仅需将一组节点约束为串行执行（共享单线程），
+	///         优先使用 declareSubgraph()——零额外线程开销、零调度器开销。
+	///         exportNode 适用于需要独立 InferGraph 实例的部署边界（如跨设备/跨进程）。
 	std::unique_ptr<Node> exportNode(const std::string& nodeName,
 									uint32_t maxHops = kDefaultMaxHops);
 
