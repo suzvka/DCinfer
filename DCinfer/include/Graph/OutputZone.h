@@ -27,6 +27,12 @@ struct OutputDeclaration {
 	size_t count = 1;
 };
 
+// ── 未满足声明：诊断用，携带当前已累计数量 ──
+struct UnsatisfiedDeclaration {
+	OutputDeclaration decl; ///< 原始声明
+	size_t current = 0;     ///< 当前已累计的产出次数（< decl.count）
+};
+
 // ── 输出绑定（序列化用）──
 struct OutputBinding {
 	std::string nodeName;
@@ -68,6 +74,10 @@ public:
 
 	/// @brief  静态检查所有声明是否满足（不累加，供 _onExhausted 使用）
 	bool checkAllSatisfied(const TaskId& taskId) const;
+
+	/// @brief  查询指定 task 中尚未满足的声明列表（诊断用）
+	/// @return 每个未满足声明及其当前累计次数；全部满足时返回空向量
+	std::vector<UnsatisfiedDeclaration> unsatisfiedDeclarations(const TaskId& taskId) const;
 
 	// ── Artifact 存储 ──
 
@@ -187,6 +197,29 @@ inline bool OutputZone::checkAllSatisfied(const TaskId& taskId) const {
 			return false;
 	}
 	return true;
+}
+
+inline std::vector<UnsatisfiedDeclaration> OutputZone::unsatisfiedDeclarations(const TaskId& taskId) const {
+	std::lock_guard lk(_mutex);
+	std::vector<UnsatisfiedDeclaration> result;
+
+	auto declIt = _declarations.find(taskId);
+	if (declIt == _declarations.end())
+		return result;
+
+	auto accIt = _accumulated.find(taskId);
+	for (const auto& decl : declIt->second) {
+		std::string key = _makeKey(decl.nodeName, decl.portName);
+		size_t current = 0;
+		if (accIt != _accumulated.end()) {
+			auto countIt = accIt->second.find(key);
+			if (countIt != accIt->second.end())
+				current = countIt->second;
+		}
+		if (current < decl.count)
+			result.push_back({decl, current});
+	}
+	return result;
 }
 
 inline void OutputZone::append(const TaskId& taskId, const std::string& nodeName,

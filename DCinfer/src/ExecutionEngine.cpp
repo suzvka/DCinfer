@@ -16,8 +16,8 @@ namespace DC {
 // ════════════════════════════════════════════
 
 ExecutionEngine::TaskGate::~TaskGate() {
-	if (!terminated.load(std::memory_order_acquire) && engine && output && graph && signals) {
-		engine->_exhaustedCheck(taskId, *output, *graph, *signals);
+	if (!terminated.load(std::memory_order_acquire) && engine && output && graph && signals && errors) {
+		engine->_exhaustedCheck(taskId, *output, *graph, *signals, *errors);
 	}
 }
 
@@ -95,6 +95,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	gate->output = &output;
 	gate->graph = &graph;
 	gate->signals = &signals;
+	gate->errors = &errors;
 	gate->taskId = taskId;
 
 	// 超时看门狗（std::jthread + stop_token，生命周期由 ExecutionEngine 管理）
@@ -112,9 +113,10 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 					return; // task 正常完成，_terminate 已请求停止
 
 				if (!gate->terminated.exchange(true, std::memory_order_acq_rel)) {
-					errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit",
-									   "task timed out (" + std::to_string(timeout.count())
-										   + "ms) without meeting output declarations");
+					std::string reason = "task timed out (" + std::to_string(timeout.count())
+										 + "ms) without meeting output declarations";
+					errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit", reason);
+					_diagnoseAbnormal(taskId, reason, output, graph, errors);
 					_terminate(taskId, graph, output, signals);
 				}
 			});
@@ -152,10 +154,11 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 										   SignalStore& signals, ErrorTracker& errors) {
 	// [检查点 0] TTL 耗尽：主动终止 task（不依赖 _onExhausted）
 	if (remainingHops == 0) {
-		errors.recordError(taskId, nodeName, "ExecutionEngine::_propagateFrom",
-						   "propagation hops exhausted (TTL=0) at node '" + nodeName
-							   + "': cycle or excessively deep graph detected");
+		std::string reason = "propagation hops exhausted (TTL=0) at node '" + nodeName
+							 + "': cycle or excessively deep graph detected";
+		errors.recordError(taskId, nodeName, "ExecutionEngine::_propagateFrom", reason);
 		gate->terminated.store(true, std::memory_order_release);
+		_diagnoseAbnormal(taskId, reason, output, graph, errors);
 		_terminate(taskId, graph, output, signals);
 		co_return;
 	}
@@ -214,8 +217,12 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		auto* dst = graph.node(edge.dstNode);
 		if (!dst)
 			continue;
-		if (dst->isBlocked(taskId))
+		if (dst->isBlocked(taskId)) {
+			// 记录被跳过的节点，供 _diagnoseAbnormal 在异常终止时报告
+			std::lock_guard lk(_blockedSkipsMutex);
+			_blockedSkips[taskId].insert(edge.dstNode);
 			continue;
+		}
 
 		Value data = src->getOutput(taskId, edge.srcPort);
 
@@ -299,13 +306,19 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	// ④ 清理该 task 的所有 task 级信号（防止泄漏）
 	signals.clearTask(taskId);
 
-	// ⑤ 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
+	// ⑤ 清理信号阻塞追踪记录
+	{
+		std::lock_guard lk(_blockedSkipsMutex);
+		_blockedSkips.erase(taskId);
+	}
+
+	// ⑥ 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
 	for (auto& [name, nodePtr] : graph.nodes()) {
 		if (nodePtr->hasTask(taskId))
 			nodePtr->terminateTask(taskId);
 	}
 
-	// ⑥ 通知同步等待者（所有清理已完成，数据应由回调预先捕获）
+	// ⑦ 通知同步等待者（所有清理已完成，数据应由回调预先捕获）
 	_completionCv.notify_all();
 }
 
@@ -314,7 +327,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 // ════════════════════════════════════════════
 
 void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
-									  GraphStore& graph, SignalStore& signals) {
+									  GraphStore& graph, SignalStore& signals, ErrorTracker& errors) {
 	// 已终止则跳过
 	if (_isTerminated(taskId)) {
 		return;
@@ -329,8 +342,51 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 		return;
 	}
 
-	// 声明未满足，数据可能残留在阻塞路径上（节点 isBlocked=true 导致边被跳过）——
-	// 这是正常工作流的一部分，不是异常。不报错、不终止，留给看门狗检测真正的死锁。
+	// 声明未满足：协程链已耗尽但输出声明未达成。
+	// 写入诊断警告，但不主动终止——留给看门狗（若已配置）处理真正的死锁。
+	// 若未配置看门狗（timeout=0），调用方需自行处理 wait() 超时。
+	_diagnoseAbnormal(taskId, "coroutine chain exhausted with unsatisfied output declarations",
+					  output, graph, errors);
+}
+
+// ════════════════════════════════════════════
+// 运行时诊断
+// ════════════════════════════════════════════
+
+void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string& reason,
+										OutputZone& output, GraphStore& graph, ErrorTracker& errors) {
+	// ① 报告未满足的输出声明
+	auto unsatisfied = output.unsatisfiedDeclarations(taskId);
+	for (const auto& u : unsatisfied) {
+		errors.recordWarning(taskId, u.decl.nodeName, "ExecutionEngine::_diagnoseAbnormal",
+							 "declared output '" + u.decl.nodeName + ":" + u.decl.portName
+								 + "' not satisfied (expected " + std::to_string(u.decl.count)
+								 + ", got " + std::to_string(u.current) + "); reason: " + reason);
+	}
+
+	// ② 报告传播过程中因信号阻塞而被跳过的节点
+	std::unordered_set<std::string> blocked;
+	{
+		std::lock_guard lk(_blockedSkipsMutex);
+		auto it = _blockedSkips.find(taskId);
+		if (it != _blockedSkips.end())
+			blocked = it->second; // 拷贝，不 move（_terminate 负责清理）
+	}
+	for (const auto& nodeName : blocked) {
+		errors.recordWarning(taskId, nodeName, "ExecutionEngine::_diagnoseAbnormal",
+							 "node was signal-blocked during propagation; "
+							 "data may have been prevented from reaching declared outputs");
+	}
+
+	// ③ 报告从未被到达的声明输出节点（无 task 级 IO 缓冲区）
+	for (const auto& u : unsatisfied) {
+		auto* node = graph.node(u.decl.nodeName);
+		if (node && !node->hasTask(taskId)) {
+			errors.recordWarning(taskId, u.decl.nodeName, "ExecutionEngine::_diagnoseAbnormal",
+								 "node was never reached during propagation "
+								 "(no task-level IO buffer was created)");
+		}
+	}
 }
 
 // ════════════════════════════════════════════
@@ -338,7 +394,7 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 // ════════════════════════════════════════════
 
 void ExecutionEngine::registerGroupLimit(ThreadPoolAffinity /*affinity*/, const std::string& tag,
-										  size_t limit) {
+										 size_t limit) {
 	// 语义升级：组信号量由三个线程池共享，注册一次全局生效（跨池互斥）
 	_sharedGroups->setLimit(tag, limit);
 }

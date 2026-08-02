@@ -104,6 +104,7 @@ private:
 		OutputZone* output = nullptr;
 		GraphStore* graph = nullptr;
 		SignalStore* signals = nullptr;
+		ErrorTracker* errors = nullptr; ///< 诊断用：耗尽检测时写入警告
 		TaskId taskId;
 
 		~TaskGate();
@@ -121,7 +122,15 @@ private:
 					GraphStore& graph, OutputZone& output, SignalStore& signals);
 	bool _isTerminated(const TaskId& taskId) const;
 	void _exhaustedCheck(const TaskId& taskId, OutputZone& output,
-						 GraphStore& graph, SignalStore& signals);
+						 GraphStore& graph, SignalStore& signals, ErrorTracker& errors);
+
+	// ── 运行时诊断 ──
+
+	/// @brief  异常终止前的诊断：将未满足声明、信号阻塞节点等信息写入 ErrorTracker。
+	///         必须在 _terminate 之前调用（_terminate 会清理 OutputZone 和 _blockedSkips）。
+	/// @param  reason  终止原因描述（如 "task timed out (5000ms)"）
+	void _diagnoseAbnormal(const TaskId& taskId, const std::string& reason,
+						   OutputZone& output, GraphStore& graph, ErrorTracker& errors);
 
 	// ── 线程池分发（消除重复的 affinity switch-case）──
 
@@ -144,6 +153,11 @@ private:
 
 	// 超时看门狗线程（per-task），在 _terminate 时 join
 	std::unordered_map<TaskId, std::jthread> _watchdogs;
+
+	// 信号阻塞追踪：记录每个 task 在传播过程中因信号阻塞而被跳过的节点名。
+	// 由 _propagateFrom 写入，_diagnoseAbnormal 读取，_terminate 清理。
+	std::unordered_map<TaskId, std::unordered_set<std::string>> _blockedSkips;
+	mutable std::mutex _blockedSkipsMutex;
 
 	TaskCompleteCallback _taskCompleteCb;
 	mutable std::mutex _cbMutex; // 保护 _taskCompleteCb 的跨线程读写
