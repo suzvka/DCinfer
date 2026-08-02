@@ -100,13 +100,13 @@ public:
 
 	/// @brief  声明子图：将一组节点编入同名分组，在执行时互斥（同时只有一个执行）。
 	///
-	/// 子图不改变图拓扑，仅通过线程池分组信号量实现串行约束。
-	/// 同组节点必须具有相同的 ThreadPoolAffinity（在同一线程池内互斥）。
+	/// 子图不改变图拓扑，仅通过跨池共享的线程池分组信号量实现串行约束。
+	/// 组内节点可属于不同线程池（混合 affinity）：同一 tag 的分组信号量
+	/// 由 Compute / Operator / System 三个线程池共享，全局互斥。
 	///
 	/// @param  name       子图名（作为线程池分组 tag）
 	/// @param  nodeNames  属于该子图的节点名列表
 	/// @throws GraphException(NodeNotFound) 若任何节点不存在
-	/// @throws GraphException(MixedAffinity) 若节点分属不同线程池
 	void declareSubgraph(const std::string& name, std::initializer_list<std::string> nodeNames);
 
 	// ── 数据注入 ──

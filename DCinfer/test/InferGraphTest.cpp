@@ -818,22 +818,156 @@ void testSubgraphDoesNotAffectOthers() {
 	END_TEST();
 }
 
-void testSubgraphRejectsMixedAffinity() {
-	TEST("subgraph rejects nodes with different affinities") {
+void testSubgraphAllowsMixedAffinity() {
+	TEST("subgraph allows mixed affinity: cross-pool nodes serialize via shared group semaphore") {
 		TestHarness harness;
 
-		harness.addNode(std::make_unique<Node>("Builtin", "op_node", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
-		harness.addNode(std::make_unique<Node>("Builtin", "sys_node", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::System));
+		ConcurrencyDetector detector;
 
-		bool rejected = false;
-		try {
-			harness.graph().declareSubgraph("bad_sg", {"op_node", "sys_node"});
-		} catch (const GraphException& e) {
-			rejected = (e.getErrorType() == GraphException::ErrorType::MixedAffinity);
-		}
-		CHECK(rejected, "mixed affinity subgraph should be rejected");
+		// 两个独立节点（无数据依赖），分属不同线程池（Compute / Operator）
+		harness.addNode(std::make_unique<Node>("Builtin", "sg_a", identitySchema(),
+			delayedRunFn(&detector, 30), ThreadPoolAffinity::Compute));
+		harness.addNode(std::make_unique<Node>("Builtin", "sg_b", identitySchema(),
+			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
+
+		// 混合 affinity 子图：不再抛异常，跨池共享信号量实现全局互斥
+		harness.graph().declareSubgraph("sg", {"sg_a", "sg_b"});
+
+		// 同时注入两个 task（不同池本可并行；互斥后必须串行）
+		harness.feedInput("t1", "sg_a", "x", makeFloatTensor(1.0f));
+		harness.feedInput("t2", "sg_b", "x", makeFloatTensor(2.0f));
+
+		harness.submit("t1", "sg_a", "y", 1, std::chrono::milliseconds(3000));
+		harness.submit("t2", "sg_b", "y", 1, std::chrono::milliseconds(3000));
+
+		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
+		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
+
+		// 核心断言：跨池互斥生效，最大并发度不超过 1
+		CHECK(detector.maxConcurrent.load() <= 1,
+			  "cross-pool subgraph nodes must not run concurrently (maxConcurrent="
+				  + std::to_string(detector.maxConcurrent.load()) + ")");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// GraphNode 状态代理：声明通路检测
+// ════════════════════════════════════════════
+
+void testGraphNodeBranchBlocking() {
+	TEST("GraphNode: branch blocked, alternate path satisfies declaration -> not blocked") {
+		// 内部图：入口 id_in → Broadcast(2) → {idA(信号阻塞), idB}，声明 idB.y
+		InferGraph sub;
+		sub.addNode(std::make_unique<Node>("Builtin", "id_in", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc",
+			Connector::broadcastSchema(2), Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+		bcNode->setConnector(true);
+		sub.addNode(std::move(bcNode));
+		sub.addNode(std::make_unique<Node>("Builtin", "idA", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+
+		sub.connect("id_in", "y", "bc", "in");
+		sub.connect("bc", "out_0", "idA", "x");
+		sub.connect("bc", "out_1", "idB", "x");
+
+		sub.bindInput("id_in", "x");
+		sub.bindOutput("idB", "y");
+
+		// idA 绑定信号并阻塞；idB 正常（旁路存在 → 子图不阻塞）
+		sub.node("idA")->bindSignal(sub.signalStore(), "enableA");
+		sub.setSignal("enableA", false);
+
+		auto gn = sub.exportNode("gn");
+		CHECK(!gn->isBlocked("t1"), "GraphNode should NOT be blocked when alternate path exists");
+
+		// 集成：父图 src → GraphNode，task 应经旁路正常完成
+		TestHarness parent;
+		parent.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+		parent.addNode(std::move(gn));
+		parent.wire("src", "y", "gn", "x");
+
+		parent.feedInput("t1", "src", "x", makeFloatTensor(42.0f));
+		parent.submit("t1", "gn", "y", 1, std::chrono::milliseconds(3000));
+		CHECK(parent.awaitCompletion("t1"), "t1 should complete via alternate path");
+		CHECK(parent.hasOutput("t1", "gn", "y"), "gn should have output");
+		auto r = parent.getOutputTensor("t1", "gn", "y");
+		CHECK(std::abs(r.item<float>() - 42.0f) < 1e-6f, "value should be 42.0");
+	}
+	END_TEST();
+
+	TEST("GraphNode: sole path blocked -> blocked; recovery after signal restore") {
+		InferGraph sub;
+		sub.addNode(std::make_unique<Node>("Builtin", "id_in", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc",
+			Connector::broadcastSchema(2), Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+		bcNode->setConnector(true);
+		sub.addNode(std::move(bcNode));
+		sub.addNode(std::make_unique<Node>("Builtin", "idA", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+
+		sub.connect("id_in", "y", "bc", "in");
+		sub.connect("bc", "out_0", "idA", "x");
+		sub.connect("bc", "out_1", "idB", "x");
+
+		sub.bindInput("id_in", "x");
+		sub.bindOutput("idB", "y");
+
+		// 两条分支全部阻塞（唯一通路切断）→ 子图边界应答阻塞
+		sub.node("idA")->bindSignal(sub.signalStore(), "enableA");
+		sub.node("idB")->bindSignal(sub.signalStore(), "enableB");
+		sub.setSignal("enableA", false);
+		sub.setSignal("enableB", false);
+
+		auto gn = sub.exportNode("gn");
+		CHECK(gn->isBlocked("t1"), "GraphNode should be blocked when no path to declaration exists");
+
+		// 集成：父级传播跳过边，task 不完成
+		TestHarness parent;
+		parent.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+		parent.addNode(std::move(gn));
+		parent.wire("src", "y", "gn", "x");
+
+		parent.feedInput("t1", "src", "x", makeFloatTensor(7.0f));
+		parent.submit("t1", "gn", "y", 1); // 无看门狗：阻塞期间 task 保持挂起
+		CHECK(!parent.awaitCompletion("t1", std::chrono::milliseconds(600)),
+			  "should NOT complete while path is blocked");
+		CHECK(!parent.hasOutput("t1", "gn", "y"), "blocked task should not produce output");
+
+		// 恢复信号：通路口径重新导通
+		sub.setSignal("enableB", true);
+		CHECK(!parent.node("gn")->isBlocked("t1"), "GraphNode should unblock after signal restore");
+
+		// 新 task：恢复后正常完成
+		parent.feedInput("t2", "src", "x", makeFloatTensor(7.0f));
+		parent.submit("t2", "gn", "y", 1, std::chrono::milliseconds(3000));
+		CHECK(parent.awaitCompletion("t2"), "t2 should complete after signal restore");
+		CHECK(parent.hasOutput("t2", "gn", "y"), "gn should have output for t2");
+		auto r = parent.getOutputTensor("t2", "gn", "y");
+		CHECK(std::abs(r.item<float>() - 7.0f) < 1e-6f, "value should be 7.0");
+	}
+	END_TEST();
+
+	TEST("GraphNode: declared node itself blocked -> blocked") {
+		InferGraph sub;
+		sub.addNode(std::make_unique<Node>("Builtin", "idC", identitySchema(), identityRunFn(),
+			ThreadPoolAffinity::Operator));
+		sub.bindInput("idC", "x");
+		sub.bindOutput("idC", "y");
+		sub.node("idC")->bindSignal(sub.signalStore(), "enableC");
+		sub.setSignal("enableC", false);
+
+		auto gn = sub.exportNode("gn");
+		CHECK(gn->isBlocked("t1"), "declared node blocked -> GraphNode blocked");
+
+		sub.setSignal("enableC", true);
+		CHECK(!gn->isBlocked("t1"), "signal restore -> GraphNode not blocked");
 	}
 	END_TEST();
 }
@@ -898,8 +1032,9 @@ int main() {
 		// 子图（分组互斥）测试
 		testSubgraphSerializesExecution();
 		testSubgraphDoesNotAffectOthers();
-		testSubgraphRejectsMixedAffinity();
+		testSubgraphAllowsMixedAffinity();
 		testSubgraphDataflowCorrect();
+		testGraphNodeBranchBlocking();
 
 		if (failures == 0) {
 			std::cout << "\nAll InferGraph tests passed!" << std::endl;

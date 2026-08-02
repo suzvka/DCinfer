@@ -114,6 +114,8 @@ bool Node::isBlocked() const {
 }
 
 bool Node::isBlocked(const TaskId& taskId) const {
+	if (_blockedOverride)
+		return _blockedOverride(taskId);
 	return _signal->isBlocked(taskId);
 }
 
@@ -168,6 +170,8 @@ size_t Node::taskCount() const {
 // ── 调度接口 ──
 
 bool Node::isReady(const TaskId& taskId) const {
+	if (_readyOverride)
+		return _readyOverride(taskId);
 	return _buffer->isReady(taskId, _meta.schema);
 }
 

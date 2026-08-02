@@ -50,10 +50,37 @@ private:
 	std::coroutine_handle<> _handle;
 };
 
+// ── 跨池共享的组信号量注册表 ──
+// 由 ExecutionEngine 持有并注入所有线程池：同一 tag 的信号量被多个池共享，
+// 从而实现跨池分组互斥（如混合 affinity 子图）。无该表或表中无 tag 时组不限流。
+struct GroupSemaphoreRegistry {
+	using Semaphore = std::counting_semaphore<>;
+
+	/// @brief  查找分组信号量；不存在返回 nullptr（该组不限流）
+	std::shared_ptr<Semaphore> find(const std::string& tag) {
+		std::lock_guard lk(_mutex);
+		auto it = _semaphores.find(tag);
+		return it != _semaphores.end() ? it->second : nullptr;
+	}
+
+	/// @brief  创建或替换分组信号量（limit 为新初始计数）
+	void setLimit(const std::string& tag, size_t limit) {
+		std::lock_guard lk(_mutex);
+		_semaphores[tag] = std::make_shared<Semaphore>(static_cast<std::ptrdiff_t>(limit));
+	}
+
+	mutable std::mutex _mutex;
+	std::unordered_map<std::string, std::shared_ptr<Semaphore>> _semaphores;
+};
+
 // ── 带分组信号量的线程池 ──
 class ThreadPool {
 public:
-	explicit ThreadPool(const PoolConfig& config = {});
+	/// @brief  构造线程池
+	/// @param  config        线程数 + 初始分组限流
+	/// @param  sharedGroups  跨池共享的组信号量注册表；nullptr 时自建（独立使用）
+	explicit ThreadPool(const PoolConfig& config = {},
+						std::shared_ptr<GroupSemaphoreRegistry> sharedGroups = nullptr);
 	~ThreadPool();
 
 	ThreadPool(const ThreadPool&) = delete;
@@ -108,9 +135,8 @@ private:
 
 	std::atomic<bool> _running{true};
 
-	// 分组信号量
-	std::mutex _groupMutex;
-	std::unordered_map<std::string, std::unique_ptr<std::counting_semaphore<>>> _groupSemaphores;
+	// 跨池共享的组信号量注册表（nullptr 时在构造内自建）
+	std::shared_ptr<GroupSemaphoreRegistry> _sharedGroups;
 	std::unique_ptr<std::counting_semaphore<>> _globalSemaphore;
 
 	// 分组活跃任务计数

@@ -1,4 +1,4 @@
-// GraphNode：InferGraph::exportNode 集成测试
+﻿// GraphNode：InferGraph::exportNode 集成测试
 // 验证子图嵌入为 Node 的完整生命周期
 
 #include <cmath>
@@ -447,7 +447,6 @@ void testWaitMechanism() {
 		graph.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
 
 		graph.feedInput("t1", "n1", "x", makeFloatTensor(99.0f));
-		graph.submit("t1", "n1", "y", 1);
 
 		// 通过回调在 _terminate 清理前捕获输出
 		auto mtx = std::make_shared<std::mutex>();
@@ -467,6 +466,7 @@ void testWaitMechanism() {
 			cv->notify_one();
 		});
 
+		// 回调先于 submit 设置：保证 _terminate 时回调必然就绪（避免时序竞态）
 		graph.submit("t1", "n1", "y", 1);
 
 		bool completed = graph.wait("t1", std::chrono::milliseconds(5000));
@@ -507,3 +507,5 @@ int main() {
 		return -1;
 	}
 }
+
+

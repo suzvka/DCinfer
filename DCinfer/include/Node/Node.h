@@ -175,6 +175,17 @@ public:
 	bool isBlocked() const;
 	bool isBlocked(const TaskId& taskId) const;
 
+	// ── 状态委托（组合节点：子图节点等）──
+
+	/// @brief  注册 task 级阻塞状态委托；注册后 isBlocked(taskId) 转发至此回调。
+	///         未注册时回退 SignalGate 逻辑。典型用途：exportNode 产物的
+	///         子图节点按内部"声明通路可达性"应答父级。
+	void setBlockedOverride(std::function<bool(const TaskId&)> fn) { _blockedOverride = std::move(fn); }
+
+	/// @brief  注册 task 级就绪状态委托；注册后 isReady(taskId) 转发至此回调。
+	///         未注册时回退 TaskBuffer 逻辑。
+	void setReadyOverride(std::function<bool(const TaskId&)> fn) { _readyOverride = std::move(fn); }
+
 	// ── 模型路径 ──
 	const std::string& modelPath() const { return _meta.modelPath; }
 	void setModelPath(std::string path) { _meta.modelPath = std::move(path); }
@@ -238,6 +249,10 @@ private:
 	std::unique_ptr<EngineAdapter> _engine;
 	RunFn _fn;
 	CompletionFn _onComplete;
+
+	// 状态委托回调（组合节点注册后覆盖默认 isBlocked/isReady 语义）
+	std::function<bool(const TaskId&)> _blockedOverride;
+	std::function<bool(const TaskId&)> _readyOverride;
 };
 
 // ── RunContext（方法定义在 Node.cpp，避免内联依赖组件完整类型）──

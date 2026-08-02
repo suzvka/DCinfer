@@ -26,16 +26,22 @@ ExecutionEngine::TaskGate::~TaskGate() {
 // ════════════════════════════════════════════
 
 ExecutionEngine::ExecutionEngine(size_t schedulerThreads)
-	: _ownedScheduler(std::make_unique<CoroScheduler>(schedulerThreads)),
-	  _scheduler(_ownedScheduler.get()),
-	  _computePool({}), _operatorPool({}), _systemPool({}) {}
+	: _sharedGroups(std::make_shared<GroupSemaphoreRegistry>()),
+	  _computePool({}, _sharedGroups), _operatorPool({}, _sharedGroups), _systemPool({}, _sharedGroups),
+	  _scheduler(nullptr),
+	  _ownedScheduler(std::make_unique<CoroScheduler>(schedulerThreads)) {
+	_scheduler = _ownedScheduler.get();
+}
 
 ExecutionEngine::ExecutionEngine(CoroScheduler& scheduler,
 								 const PoolConfig& computeCfg,
 								 const PoolConfig& operatorCfg,
 								 const PoolConfig& systemCfg)
-	: _scheduler(&scheduler),
-	  _computePool(computeCfg), _operatorPool(operatorCfg), _systemPool(systemCfg) {}
+	: _sharedGroups(std::make_shared<GroupSemaphoreRegistry>()),
+	  _computePool(computeCfg, _sharedGroups),
+	  _operatorPool(operatorCfg, _sharedGroups),
+	  _systemPool(systemCfg, _sharedGroups),
+	  _scheduler(&scheduler) {}
 
 // ════════════════════════════════════════════
 // 线程池分发
@@ -277,8 +283,14 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	_watchdogs.erase(taskId);
 
 	// ② 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
-	if (_taskCompleteCb) {
-		_taskCompleteCb(taskId);
+	//    锁内拷贝、锁外调用：避免回调重入死锁
+	TaskCompleteCallback cb;
+	{
+		std::lock_guard lk(_cbMutex);
+		cb = _taskCompleteCb;
+	}
+	if (cb) {
+		cb(taskId);
 	}
 
 	// ③ 清理输出区（同一 taskId 可安全重新提交）
@@ -325,19 +337,10 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 // 分组限流
 // ════════════════════════════════════════════
 
-void ExecutionEngine::registerGroupLimit(ThreadPoolAffinity affinity, const std::string& tag,
+void ExecutionEngine::registerGroupLimit(ThreadPoolAffinity /*affinity*/, const std::string& tag,
 										  size_t limit) {
-	switch (affinity) {
-	case ThreadPoolAffinity::Compute:
-		_computePool.registerGroupLimit(tag, limit);
-		break;
-	case ThreadPoolAffinity::Operator:
-		_operatorPool.registerGroupLimit(tag, limit);
-		break;
-	case ThreadPoolAffinity::System:
-		_systemPool.registerGroupLimit(tag, limit);
-		break;
-	}
+	// 语义升级：组信号量由三个线程池共享，注册一次全局生效（跨池互斥）
+	_sharedGroups->setLimit(tag, limit);
 }
 
 // ════════════════════════════════════════════

@@ -20,14 +20,20 @@ void PoolTicket::await_suspend(std::coroutine_handle<> h) {
 
 // ── ThreadPool ──
 
-ThreadPool::ThreadPool(const PoolConfig& config) : _config(config), _totalThreads(config.totalThreads) {
+ThreadPool::ThreadPool(const PoolConfig& config, std::shared_ptr<GroupSemaphoreRegistry> sharedGroups)
+	: _config(config), _totalThreads(config.totalThreads), _sharedGroups(std::move(sharedGroups)) {
 	if (!config.valid()) {
 		throw std::invalid_argument("ThreadPool: config.totalThreads must be > 0");
 	}
 
-	// 初始化组信号量
+	// 独立使用时自建共享表（默认构造 / 未注入场景）
+	if (!_sharedGroups) {
+		_sharedGroups = std::make_shared<GroupSemaphoreRegistry>();
+	}
+
+	// 初始化组信号量（写入共享表）
 	for (const auto& [tag, limit] : config.groupLimits) {
-		_groupSemaphores[tag] = std::make_unique<std::counting_semaphore<>>(static_cast<std::ptrdiff_t>(limit));
+		_sharedGroups->setLimit(tag, limit);
 	}
 
 	// 全局信号量
@@ -63,33 +69,23 @@ size_t ThreadPool::activeCount(const std::string& groupTag) const {
 }
 
 void ThreadPool::registerGroupLimit(const std::string& tag, size_t limit) {
-	std::lock_guard lk(_groupMutex);
-	_groupSemaphores[tag] = std::make_unique<std::counting_semaphore<>>(static_cast<std::ptrdiff_t>(limit));
+	// 语义升级：注册到跨池共享表，对共享该表的所有线程池同时生效
+	_sharedGroups->setLimit(tag, limit);
 }
 
 void ThreadPool::shutdown() {
 	_running = false;
 	_shuttingDown = true;
 
-	std::vector<std::coroutine_handle<>> pendingHandles;
 	{
 		std::lock_guard lk(_mutex);
-		// 收集所有等待中的协程句柄，以便在锁外 resume
-		while (!_taskQueue.empty()) {
-			auto& task = _taskQueue.front();
-			if (task.handle) {
-				pendingHandles.push_back(task.handle);
-			}
-			_taskQueue.pop();
-		}
+		// 丢弃所有等待中的任务（含 submitAsync 挂起的协程句柄）。
+		// 注意：不 resume 挂起协程——析构期间 ExecutionEngine 的状态成员
+		// （_terminatedTasks/_watchdogs 等）可能已销毁，恢复协程会访问悬空对象。
+		// 挂起的协程帧随之泄漏（进程退出时由 OS 回收），这是关闭期的安全取舍。
+		_taskQueue = {};
 	}
 	_cv.notify_all();
-
-	// 在锁外批量 resume，避免协程恢复后可能的死锁
-	for (auto h : pendingHandles) {
-		if (h)
-			h.resume();
-	}
 
 	for (auto& t : _workers) {
 		if (t.joinable())
@@ -102,22 +98,20 @@ bool ThreadPool::_tryAcquireGroup(const std::string& tag) {
 	if (tag.empty())
 		return true; // 无分组，不限流
 
-	std::lock_guard lk(_groupMutex);
-	auto it = _groupSemaphores.find(tag);
-	if (it == _groupSemaphores.end())
+	auto sem = _sharedGroups->find(tag);
+	if (!sem)
 		return true; // 未配置的组不限流
 
-	return it->second->try_acquire();
+	return sem->try_acquire();
 }
 
 void ThreadPool::_releaseGroup(const std::string& tag) {
 	if (tag.empty())
 		return;
 
-	std::lock_guard lk(_groupMutex);
-	auto it = _groupSemaphores.find(tag);
-	if (it != _groupSemaphores.end()) {
-		it->second->release();
+	auto sem = _sharedGroups->find(tag);
+	if (sem) {
+		sem->release();
 	}
 }
 

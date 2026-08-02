@@ -78,8 +78,8 @@ public:
 
 	// ── 分组限流 ──
 
-	/// @brief  向指定线程池动态注册分组限流
-	/// @param  affinity  目标线程池
+	/// @brief  注册分组限流（跨池全局生效，忽略 affinity 维度）
+	/// @param  affinity  忽略：组信号量由所有线程池共享，注册一次全局生效
 	/// @param  tag       分组标识
 	/// @param  limit     最大并发执行数
 	void registerGroupLimit(ThreadPoolAffinity affinity, const std::string& tag, size_t limit);
@@ -87,7 +87,11 @@ public:
 	// ── task 完成回调 ──
 
 	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）
-	void setTaskCompleteCallback(TaskCompleteCallback cb) { _taskCompleteCb = std::move(cb); }
+	///         线程安全：与 _terminate 的读取之间以互斥锁同步
+	void setTaskCompleteCallback(TaskCompleteCallback cb) {
+		std::lock_guard lk(_cbMutex);
+		_taskCompleteCb = std::move(cb);
+	}
 
 private:
 	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
@@ -130,13 +134,11 @@ private:
 									std::function<void()> task);
 
 	// ── 成员 ──
-	std::unique_ptr<CoroScheduler> _ownedScheduler;
-	CoroScheduler* _scheduler;
-
-	ThreadPool _computePool;
-	ThreadPool _operatorPool;
-	ThreadPool _systemPool;
-
+	// 声明顺序即析构顺序约束（关键！）：
+	//   状态成员最先声明 → 最后析构；调度器最后声明 → 最先析构。
+	// 析构顺序：_ownedScheduler(join 协程 worker) → 池(shutdown) → 共享表 → 状态。
+	// 保证 CoroScheduler worker 上的协程在 join 期间访问 _isTerminated/_watchdogs
+	// 等状态、以及向池提交任务时，所有对象均存活。
 	std::unordered_set<TaskId> _terminatedTasks;
 	mutable std::mutex _terminationMutex;
 
@@ -144,9 +146,20 @@ private:
 	std::unordered_map<TaskId, std::jthread> _watchdogs;
 
 	TaskCompleteCallback _taskCompleteCb;
+	mutable std::mutex _cbMutex; // 保护 _taskCompleteCb 的跨线程读写
 
 	mutable std::mutex _completionMutex;
 	mutable std::condition_variable _completionCv;
+
+	// 跨池共享的组信号量注册表（注入三个线程池，实现混合 affinity 分组互斥）
+	std::shared_ptr<GroupSemaphoreRegistry> _sharedGroups;
+
+	ThreadPool _computePool;
+	ThreadPool _operatorPool;
+	ThreadPool _systemPool;
+
+	CoroScheduler* _scheduler;
+	std::unique_ptr<CoroScheduler> _ownedScheduler;
 };
 
 } // namespace DC

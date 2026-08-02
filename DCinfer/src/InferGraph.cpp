@@ -1,6 +1,7 @@
 #include "InferGraph.h"
 #include "NodeException.h"
 #include "GraphException.h"
+#include "SignalProbe.h"
 
 namespace DC {
 
@@ -22,30 +23,20 @@ InferGraph::InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg,
 
 void InferGraph::declareSubgraph(const std::string& name,
 								  std::initializer_list<std::string> nodeNames) {
-	// 1. 验证所有节点存在且 affinity 一致
-	ThreadPoolAffinity commonAffinity{};
-	bool first = true;
+	// 1. 验证所有节点存在（affinity 可混合：组信号量跨池共享，全局互斥）
 	for (const auto& nname : nodeNames) {
 		auto* n = _store.node(nname);
 		if (!n)
 			throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::declareSubgraph",
 								 "node '" + nname + "' not found");
-		if (first) {
-			commonAffinity = n->affinity();
-			first = false;
-		} else if (n->affinity() != commonAffinity) {
-			throw GraphException(GraphException::ErrorType::MixedAffinity, "InferGraph::declareSubgraph",
-								 "node '" + nname + "' has different affinity from other nodes in subgraph '"
-									 + name + "'");
-		}
 	}
 
 	// 2. 设置所有节点的 tag 为子图名
 	for (const auto& nname : nodeNames)
 		_store.node(nname)->setTag(name);
 
-	// 3. 在对应线程池注册 groupLimit = 1
-	_engine.registerGroupLimit(commonAffinity, name, 1);
+	// 3. 注册跨池分组限流（共享信号量，对三个线程池同时生效）
+	_engine.registerGroupLimit(ThreadPoolAffinity::Compute, name, 1);
 }
 
 // ════════════════════════════════════════════
@@ -227,10 +218,19 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		return ctx.success();
 	};
 
-	return std::make_unique<Node>(
+	// 构造 GraphNode：注册状态委托（内部声明通路检测 → 资源中介语义）
+	auto graphNode = std::make_unique<Node>(
 		"GraphNode", nodeName, fullSchema,
 		std::move(runFn),
 		ThreadPoolAffinity::Compute);
+
+	// blockedOverride：内部无通路满足输出声明时，子图节点向父级应答阻塞。
+	// isReady 保持边界缓冲语义（父级数据齐即可进入执行）。
+	graphNode->setBlockedOverride([this](const Node::TaskId& tid) {
+		return !canSatisfyDeclarations(_store, _outputZone, tid);
+	});
+
+	return graphNode;
 }
 
 } // namespace DC
