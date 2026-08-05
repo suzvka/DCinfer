@@ -44,3 +44,19 @@ if (BUILD_TESTS)
         add_subdirectory(DCIr/test)
     endif()
 endif()
+
+# ── 引擎适配器（可选，按需启用各引擎）──
+option(BUILD_ENGINES "Build engine adapters" ON)
+if (BUILD_ENGINES)
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCEngines/CMakeLists.txt)
+        add_subdirectory(DCEngines)
+    endif()
+endif()
+
+# ── 示例（可选）──
+option(BUILD_EXAMPLES "Build examples" ON)
+if (BUILD_EXAMPLES)
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt)
+        add_subdirectory(examples)
+    endif()
+endif()

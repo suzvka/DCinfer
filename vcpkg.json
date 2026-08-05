@@ -3,5 +3,13 @@
     "nlohmann-json",
     "minizip",
     "zlib"
-  ]
+  ],
+  "features": {
+    "onnxruntime": {
+      "description": "ONNX Runtime engine adapter",
+      "dependencies": [
+        "onnxruntime"
+      ]
+    }
+  }
 }
