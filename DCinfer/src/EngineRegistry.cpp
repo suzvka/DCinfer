@@ -33,6 +33,7 @@ EngineRegistry& EngineRegistry::instance() {
 }
 
 bool EngineRegistry::registerEngine(const EngineDescriptor& desc) {
+	std::lock_guard lk(_mutex);
 	if (desc.engineType.empty()) {
 		return false;
 	}
@@ -47,16 +48,21 @@ bool EngineRegistry::registerEngine(const EngineDescriptor& desc) {
 
 std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, const std::string& nodeName,
 												 const void* engineConfig) const {
-	auto it = _engines.find(engineType);
-	if (it == _engines.end()) {
-		return nullptr;
+	// 锁内拷贝工厂，锁外调用（factory 是用户回调，可能重入注册表）
+	NodeFactory factory;
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engines.find(engineType);
+		if (it == _engines.end() || !it->second.factory) {
+			return nullptr;
+		}
+		factory = it->second.factory;
 	}
 
-	if (!it->second.factory) {
-		return nullptr;
-	}
-
-	return it->second.factory(nodeName, engineConfig);
+	NodeFactoryParams params;
+	params.nodeName = nodeName;
+	params.engineConfig = engineConfig;
+	return factory(params);
 }
 
 std::unique_ptr<Node> EngineRegistry::createNode(const std::string& nodeName, Node::Schema schema,
@@ -67,30 +73,39 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& nodeName, No
 
 std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, const std::string& nodeName,
 												 const std::string& modelPath) {
-	auto it = _engines.find(engineType);
-	if (it == _engines.end())
-		return nullptr;
-	if (!it->second.factory)
-		return nullptr;
-
-	// 获取或创建引擎实例（生命周期由 Registry 管理）
+	// 单路径：一次加载并缓存引擎实例 → 从实例推导 Schema → factory 构造节点
 	auto* engineInstance = getOrCreateEngine(engineType, modelPath);
 	if (!engineInstance)
 		return nullptr;
 
-	// 从模型推导 Schema（loadModel 与 createEngine 可独立实现）
-	Node::Schema schema;
-	if (it->second.loadModel && it->second.getInputPorts && it->second.getOutputPorts) {
-		auto handle = it->second.loadModel(modelPath);
-		if (handle) {
-			schema.inputs = it->second.getInputPorts(handle);
-			schema.outputs = it->second.getOutputPorts(handle);
-		}
+	// 锁内拷贝钩子与工厂，锁外调用（防重入死锁）
+	std::function<std::vector<Node::Port>(const EngineInstance&)> getInputs;
+	std::function<std::vector<Node::Port>(const EngineInstance&)> getOutputs;
+	NodeFactory factory;
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engines.find(engineType);
+		if (it == _engines.end() || !it->second.factory)
+			return nullptr;
+		factory = it->second.factory;
+		getInputs = it->second.getInputPorts;
+		getOutputs = it->second.getOutputPorts;
 	}
 
-	// 将 EngineInstance* 通过 engineConfig 传给工厂
-	// 使用 makeNodeFactoryWithEngine 注册的工厂会正确提取
-	auto node = it->second.factory(nodeName, engineInstance);
+	// 从实例推导 Schema（引擎未注册端口推导钩子时留空，由工厂兜底）
+	Node::Schema schema;
+	if (getInputs && getOutputs) {
+		schema.inputs = getInputs(*engineInstance);
+		schema.outputs = getOutputs(*engineInstance);
+	}
+
+	NodeFactoryParams params;
+	params.nodeName = nodeName;
+	params.engineConfig = engineInstance;
+	params.schema = std::move(schema);
+	params.modelPath = modelPath;
+
+	auto node = factory(params);
 	if (node)
 		node->setModelPath(modelPath);
 	return node;
@@ -104,26 +119,50 @@ std::string EngineRegistry::_makeEngineKey(const std::string& engineType, const 
 
 EngineInstance* EngineRegistry::getOrCreateEngine(const std::string& engineType, const std::string& modelPath) {
 	auto key = _makeEngineKey(engineType, modelPath);
-	auto it = _engineInstances.find(key);
-	if (it != _engineInstances.end()) {
-		return &it->second;
+
+	// 快速路径：已缓存直接返回
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engineInstances.find(key);
+		if (it != _engineInstances.end()) {
+			return &it->second;
+		}
 	}
 
-	auto engIt = _engines.find(engineType);
-	if (engIt == _engines.end())
-		return nullptr;
-	if (!engIt->second.createEngine)
-		return nullptr;
+	// 锁内拷贝 createEngine 钩子与所属描述符指针，锁外创建实例
+	std::function<EngineInstance(const std::string&)> createFn;
+	const EngineDescriptor* descPtr = nullptr;
+	{
+		std::lock_guard lk(_mutex);
+		auto engIt = _engines.find(engineType);
+		if (engIt == _engines.end() || !engIt->second.createEngine)
+			return nullptr;
+		createFn = engIt->second.createEngine;
+		descPtr = &engIt->second;
+	}
 
-	auto instance = engIt->second.createEngine(modelPath);
+	auto instance = createFn(modelPath);
 	if (!instance)
 		return nullptr;
 
-	auto [insertedIt, ok] = _engineInstances.emplace(std::move(key), std::move(instance));
-	return &insertedIt->second;
+	// 双重检查：并发下其他线程可能已插入
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engineInstances.find(key);
+		if (it != _engineInstances.end()) {
+			return &it->second;
+		}
+
+		auto [insertedIt, ok] = _engineInstances.emplace(std::move(key), std::move(instance));
+		// 注入所属描述符（权威值，覆盖构造时传入值）。
+		// _engines 注册后不擦除，节点地址稳定，指针可安全长存。
+		insertedIt->second.setDescriptor(descPtr);
+		return &insertedIt->second;
+	}
 }
 
 void EngineRegistry::releaseEngine(const std::string& engineType, const std::string& modelPath) {
+	std::lock_guard lk(_mutex);
 	auto key = _makeEngineKey(engineType, modelPath);
 	auto it = _engineInstances.find(key);
 	if (it != _engineInstances.end()) {
@@ -136,6 +175,7 @@ void EngineRegistry::releaseEngine(const std::string& engineType, const std::str
 }
 
 void EngineRegistry::releaseAllEngines() {
+	std::lock_guard lk(_mutex);
 	for (auto& [key, instance] : _engineInstances) {
 		auto* desc = instance.descriptor();
 		if (desc && desc->releaseEngine) {
@@ -146,19 +186,22 @@ void EngineRegistry::releaseAllEngines() {
 }
 
 const EngineDescriptor* EngineRegistry::find(const std::string& engineType) const {
+	std::lock_guard lk(_mutex);
 	auto it = _engines.find(engineType);
 	if (it == _engines.end()) {
 		return nullptr;
 	}
-
+	// 返回的指针指向 map 节点；_engines 注册后不擦除，地址稳定
 	return &it->second;
 }
 
 bool EngineRegistry::hasEngine(const std::string& engineType) const {
+	std::lock_guard lk(_mutex);
 	return _engines.contains(engineType);
 }
 
 std::vector<std::string> EngineRegistry::engineTypes() const {
+	std::lock_guard lk(_mutex);
 	std::vector<std::string> types;
 	types.reserve(_engines.size());
 	for (const auto& [type, desc] : _engines) {
@@ -172,8 +215,11 @@ std::vector<std::string> EngineRegistry::engineTypes() const {
 bool EngineRegistry::registerOperator(const std::string& operatorName, Node::Schema schema, Node::RunFn fn) {
 	if (operatorName.empty())
 		return false;
-	if (_engines.contains(operatorName))
-		return false;
+	{
+		std::lock_guard lk(_mutex);
+		if (_engines.contains(operatorName))
+			return false;
+	}
 
 	EngineDescriptor desc;
 	desc.engineType = operatorName;
@@ -181,21 +227,30 @@ bool EngineRegistry::registerOperator(const std::string& operatorName, Node::Sch
 
 	// 工厂：捕获 schema 和 fn，创建算子节点
 	desc.factory = [schema = std::move(schema),
-					fn = std::move(fn)](std::string name, const void* /*engineConfig*/) -> std::unique_ptr<Node> {
-		return std::make_unique<Node>("Builtin", std::move(name), schema, fn, ThreadPoolAffinity::Operator);
+					fn = std::move(fn)](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+		return std::make_unique<Node>("Builtin", p.nodeName, schema, fn, ThreadPoolAffinity::Operator);
 	};
 
+	std::lock_guard lk(_mutex);
 	_engines[operatorName] = std::move(desc);
 	return true;
 }
 
 std::unique_ptr<Node> EngineRegistry::createOperator(const std::string& operatorName,
 													 const std::string& nodeName) const {
-	auto it = _engines.find(operatorName);
-	if (it == _engines.end() || !it->second.factory) {
-		return nullptr;
+	NodeFactory factory;
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engines.find(operatorName);
+		if (it == _engines.end() || !it->second.factory) {
+			return nullptr;
+		}
+		factory = it->second.factory;
 	}
-	return it->second.factory(nodeName, nullptr);
+
+	NodeFactoryParams params;
+	params.nodeName = nodeName;
+	return factory(params);
 }
 
 } // namespace DC

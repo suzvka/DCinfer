@@ -97,8 +97,11 @@ static void runTests() {
 	{
 		bool cleanupCalled = false;
 		int destroyCount = 0;
+		int createCount = 0;
 
-		bool ok = reg.registerEnv("WithCleanup", [&destroyCount]() -> std::shared_ptr<void> {
+		bool ok = reg.registerEnv("WithCleanup",
+								  [&destroyCount, &createCount]() -> std::shared_ptr<void> {
+			++createCount;
 			return std::make_shared<MockEnv>(100, &destroyCount);
 		},
 								  [&cleanupCalled](void*) { cleanupCalled = true; });
@@ -117,12 +120,13 @@ static void runTests() {
 		if (destroyCount != 1)
 			throw std::runtime_error("released instance should have been destroyed");
 
-		// 释放后 getOrCreate 应重新创建
+		// 释放后 getOrCreate 应重新创建（以工厂调用计数验证；
+		// 不用指针地址比较——分配器可能复用已释放地址，比较不可靠）
 		auto* env2 = reg.getOrCreate("WithCleanup");
 		if (!env2)
 			throw std::runtime_error("getOrCreate after release should create new instance");
-		if (env2 == env)
-			throw std::runtime_error("getOrCreate after release should return different instance");
+		if (createCount != 2)
+			throw std::runtime_error("getOrCreate after release should create a new instance");
 
 		// 块结束前再次释放：注册表为全局单例，若残留实例，
 		// 其工厂/清理回调捕获的块内局部变量将悬垂，后续 releaseAll 会触发 UB

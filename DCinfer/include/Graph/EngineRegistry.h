@@ -5,37 +5,13 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace DC {
-
-// ── 类型擦除的模型句柄 ──
-// 封装引擎内部模型对象（Ort::Session* / nvinfer1::ICudaEngine* / …）
-// 基于 shared_ptr<void>，自动保留原始 deleter，引擎内部 static_cast 还原
-class ModelHandle {
-public:
-	ModelHandle() = default;
-
-	template <typename T>
-	explicit ModelHandle(std::shared_ptr<T> ptr) : _ptr(std::move(ptr)) {}
-
-	void* get() {
-		return _ptr.get();
-	}
-	const void* get() const {
-		return _ptr.get();
-	}
-
-	explicit operator bool() const {
-		return _ptr != nullptr;
-	}
-
-private:
-	std::shared_ptr<void> _ptr;
-};
 
 // ── 引擎实例：类型擦除的运行时引擎句柄 ──
 // 封装引擎运行时对象（Ort::Session / nvinfer1::ICudaEngine / 自定义对象）
@@ -45,7 +21,8 @@ public:
 	EngineInstance() = default;
 
 	template <typename T>
-	EngineInstance(std::shared_ptr<T> engine, const EngineDescriptor* desc) : _engine(std::move(engine)), _desc(desc) {}
+	EngineInstance(std::shared_ptr<T> engine, const EngineDescriptor* desc = nullptr)
+		: _engine(std::move(engine)), _desc(desc) {}
 
 	void* get() {
 		return _engine.get();
@@ -56,6 +33,13 @@ public:
 
 	const EngineDescriptor* descriptor() const {
 		return _desc;
+	}
+
+	/// @brief 设置所属引擎描述符。
+	/// 框架在实例缓存（getOrCreateEngine）时注入，为权威值，
+	/// 覆盖构造时传入的描述符——适配器无需自行查找所属描述符。
+	void setDescriptor(const EngineDescriptor* desc) {
+		_desc = desc;
 	}
 
 	explicit operator bool() const {
@@ -73,30 +57,23 @@ struct EngineDescriptor {
 	TensorConverter converter;
 	NodeFactory factory;
 
-	// ── 可选：模型级钩子 ──
+	// ── 模型加载与实例创建（单一入口，不分离）──
 
-	/// 从路径加载模型，返回类型擦除的模型句柄
-	/// 对于 Builtin 引擎，此钩子为 nullptr
-	std::function<ModelHandle(const std::string& path)> loadModel;
-
-	/// 从已加载的模型句柄获取输入端口列表
-	/// 用于自动推导 Schema，消除用户手动声明
-	std::function<std::vector<Node::Port>(ModelHandle)> getInputPorts;
-
-	/// 从已加载的模型句柄获取输出端口列表
-	std::function<std::vector<Node::Port>(ModelHandle)> getOutputPorts;
-
-	// ── 可选：运行时钩子 ──
-
-	/// 从模型路径创建引擎实例（含运行时资源分配）
-	/// 系统以 modelPath 为 key 缓存实例，用户可在钩子内自行决定复用策略
+	/// 从模型路径创建引擎实例（含模型加载与运行时资源分配）
+	/// 系统以 modelPath 为 key 缓存实例，适配器在钩子内决定复用策略
 	std::function<EngineInstance(const std::string& modelPath)> createEngine;
+
+	/// 从引擎实例推导输入端口列表，用于自动推导 Schema（可空，工厂自行兜底）
+	std::function<std::vector<Node::Port>(const EngineInstance&)> getInputPorts;
+
+	/// 从引擎实例推导输出端口列表，用于自动推导 Schema（可空，工厂自行兜底）
+	std::function<std::vector<Node::Port>(const EngineInstance&)> getOutputPorts;
+
+	// ── 运行时钩子 ──
 
 	/// RunFn 返回后、输出收集前调用，确保异步计算已完成
 	/// engine 指针为 EngineInstance::get() 返回的原生指针
 	std::function<void(void* engine)> synchronize;
-
-	// ── 运行时优化钩子 ──
 
 	/// 每次 RunFn 调用前执行，用于推理前准备（I/O 绑定、warmup、动态 shape 设置等）
 	/// engine 为 EngineInstance::get() 返回的原生指针
@@ -131,7 +108,7 @@ public:
 	std::unique_ptr<Node> createNode(const std::string& nodeName, Node::Schema schema, Node::RunFn fn) const;
 
 	// ── 接口 3：从已注册引擎 + 模型路径创建节点 ──
-	// 自动调用 getOrCreateEngine → getInputPorts → getOutputPorts → 构建 Schema
+	// 自动调用 getOrCreateEngine（一次加载并缓存实例）→ 从实例推导 Schema → 构建节点
 	// 节点持有 EngineInstance 的非拥有引用，引擎生命周期由 Registry 管理
 	std::unique_ptr<Node> createNode(const std::string& engineType, const std::string& nodeName,
 									 const std::string& modelPath);
@@ -170,6 +147,9 @@ private:
 
 	static std::string _makeEngineKey(const std::string& engineType, const std::string& modelPath);
 
+	// 容器访问互斥：注册表支持并发建图（多个线程同时 getOrCreateEngine/createNode）
+	// 注意：用户回调（factory / createEngine / 端口推导）一律在锁外调用，防重入死锁
+	mutable std::mutex _mutex;
 	std::unordered_map<std::string, EngineDescriptor> _engines;
 	std::unordered_map<std::string, EngineInstance> _engineInstances;
 };
@@ -179,8 +159,8 @@ private:
 template <typename F>
 NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn) {
 	return [engineType = std::move(engineType), schema = std::move(schema),
-			fn = std::forward<F>(fn)](std::string name, const void* /*engineConfig*/) -> std::unique_ptr<Node> {
-		return std::make_unique<Node>(engineType, std::move(name), schema, fn, ThreadPoolAffinity::Compute);
+			fn = std::forward<F>(fn)](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+		return std::make_unique<Node>(engineType, p.nodeName, schema, fn, ThreadPoolAffinity::Compute);
 	};
 }
 
@@ -188,10 +168,10 @@ NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn)
 template <typename C, typename F>
 NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn) {
 	return [engineType = std::move(engineType), schema = std::move(schema),
-			fn = std::forward<F>(fn)](std::string name, const void* engineConfig) -> std::unique_ptr<Node> {
-		C config = engineConfig ? *static_cast<const C*>(engineConfig) : C{};
+			fn = std::forward<F>(fn)](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+		C config = p.engineConfig ? *static_cast<const C*>(p.engineConfig) : C{};
 		return std::make_unique<Node>(
-			engineType, std::move(name), schema,
+			engineType, p.nodeName, schema,
 			[fn, config = std::move(config)](Node::RunContext& ctx) -> Node::Result { return fn(ctx, config); },
 			ThreadPoolAffinity::Compute);
 	};
@@ -204,9 +184,9 @@ NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn)
 template <typename F>
 NodeFactory makeNodeFactoryWithEngine(std::string engineType, Node::Schema schema, F&& fn) {
 	return [engineType = std::move(engineType), schema = std::move(schema),
-			fn = std::forward<F>(fn)](std::string name, const void* engineConfig) -> std::unique_ptr<Node> {
-		auto* engineInstance = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(engineConfig));
-		auto node = std::make_unique<Node>(engineType, std::move(name), schema, fn,
+			fn = std::forward<F>(fn)](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+		auto* engineInstance = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(p.engineConfig));
+		auto node = std::make_unique<Node>(engineType, p.nodeName, schema, fn,
 									  ThreadPoolAffinity::Compute);
 		if (engineInstance)
 			node->bindEngine(engineInstance, engineInstance->descriptor());

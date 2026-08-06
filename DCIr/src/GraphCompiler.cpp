@@ -8,10 +8,22 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 
 namespace DC::Ir {
+
+// ════════════════════════════════════════════
+// 端口 shape 的类型与 -1 语义
+// ════════════════════════════════════════════
+// Node::Port::shape 的类型是 Tensor::Shape = std::vector<int64_t>
+// （DCinfer/include/Tensor/Tensor.hpp），本身即可表达 ONNX 动态维度 -1，
+// 序列化/反序列化直接以 int64_t 直通即可保证 roundtrip 稳定。
+// 注意：TensorData::Shape（TensorData.h）= std::vector<size_t> 无法表达
+// -1，若以含 -1 的 schema shape 构造实际 TensorData，维度会隐式转换为
+// size_t::max 且形状乘积溢出——这是核心库运行期数据路径的已知限制
+// （见 GraphCompiler.h 头注释），不在 DCIr 侧解决。
 
 // ════════════════════════════════════════════
 // 辅助：affinity 字符串转换
@@ -44,7 +56,8 @@ nlohmann::json GraphCompiler::portToJson(const Node::Port& port) {
 	j["typeSize"] = static_cast<int64_t>(port.typeSize);
 	nlohmann::json shapeArr = nlohmann::json::array();
 	for (auto dim : port.shape) {
-		shapeArr.push_back(static_cast<int64_t>(dim));
+		// Tensor::Shape = vector<int64_t>：动态维度 -1 原样写入 JSON，roundtrip 稳定
+		shapeArr.push_back(dim);
 	}
 	j["shape"] = std::move(shapeArr);
 	j["required"] = port.required;
@@ -57,10 +70,40 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	p.type = TensorMeta::stringToType(j.at("tensorType").get<std::string>());
 	p.typeSize = static_cast<size_t>(j.at("typeSize").get<int64_t>());
 	for (auto& dim : j.at("shape")) {
-		p.shape.push_back(static_cast<size_t>(dim.get<int64_t>()));
+		// 直接以 int64_t 保留（含 -1 动态维度）。
+		// 修复前此处 static_cast<size_t> 会把 JSON -1 转为 0xFFFFFFFFFFFFFFFF，
+		// 与序列化端 int64_t 直写不对称，roundtrip 后内存 shape 变为巨大值。
+		p.shape.push_back(dim.get<int64_t>());
 	}
 	p.required = j.value("required", true);
 	return p;
+}
+
+// ════════════════════════════════════════════
+// 辅助：节点元信息（modelPath / tag）
+// ════════════════════════════════════════════
+
+/// @brief 从 JSON 节点读取 modelPath，相对路径拼接 baseDir
+/// @return 无 modelPath 字段时返回 nullopt（调用方据此分支）
+static std::optional<std::string> resolveModelPath(const nlohmann::json& j, const std::filesystem::path& baseDir) {
+	if (!j.contains("modelPath")) return std::nullopt;
+	std::string mp = j["modelPath"].get<std::string>();
+	std::filesystem::path mpPath(mp);
+	if (mpPath.is_relative()) {
+		mpPath = baseDir / mpPath;
+		mp = mpPath.string();
+	}
+	return mp;
+}
+
+/// @brief 将 JSON 中的 tag / modelPath 应用到已创建节点（Builtin / 引擎 / 骨架三分支共用）
+static void applyNodeMeta(DC::Node& node, const nlohmann::json& j, const std::filesystem::path& baseDir) {
+	if (auto mp = resolveModelPath(j, baseDir)) {
+		node.setModelPath(std::move(*mp));
+	}
+	if (j.contains("tag")) {
+		node.setTag(j["tag"].get<std::string>());
+	}
 }
 
 // ════════════════════════════════════════════
@@ -324,38 +367,49 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			auto node = std::make_unique<DC::Node>(
 				type, name, std::move(schema), nullptr,
 				stringToAffinity(j.value("affinity", "Operator")));
-			if (j.contains("tag")) {
-				node->setTag(j["tag"].get<std::string>());
-			}
-			if (j.contains("modelPath")) {
-				std::string mp = j["modelPath"].get<std::string>();
-				std::filesystem::path mpPath(mp);
-				if (mpPath.is_relative()) {
-					mpPath = baseDir / mpPath;
-					mp = mpPath.string();
-				}
-				node->setModelPath(std::move(mp));
-			}
+			applyNodeMeta(*node, j, baseDir);
 			graph.addNode(std::move(node));
 		} else if (reg.hasEngine(type)) {
-			// 引擎节点
-			std::string modelPath;
-			if (j.contains("modelPath")) {
-				modelPath = j["modelPath"].get<std::string>();
-				// 相对路径拼接 baseDir
-				std::filesystem::path mp(modelPath);
-				if (mp.is_relative()) {
-					mp = baseDir / mp;
-					modelPath = mp.string();
-				}
-			}
-			auto node = reg.createNode(type, name, modelPath);
-			if (node) {
-				if (j.contains("tag")) {
-					node->setTag(j["tag"].get<std::string>());
-				}
+			// 引擎节点。语义约定见 GraphCompiler.h：
+			// - createNode(engineType, name, modelPath) 一次加载并缓存引擎实例，
+			//   节点 Schema 从实例推导（getInputPorts/getOutputPorts），
+			//   JSON 中携带的 inputs/outputs 被推导结果覆盖。
+			// - JSON 无 modelPath 时不以 "" 为缓存 key 调用 createNode：空路径会
+			//   触发引擎加载不存在的模型文件（如 ORT Session 构造抛异常），
+			//   中断整个图编译。此处回退为骨架节点（与未注册类型一致），
+			//   保留 JSON schema，保证图结构完整可序列化。
+			auto mp = resolveModelPath(j, baseDir);
+			if (!mp) {
+				std::cerr << "GraphCompiler: warning — engine node '" << name
+					<< "' (type '" << type << "') has no modelPath, "
+					<< "falling back to skeleton (RunFn=nullptr); JSON schema preserved" << std::endl;
+				auto node = std::make_unique<DC::Node>(
+					type, name, std::move(schema), nullptr,
+					stringToAffinity(j.value("affinity", "Operator")));
+				applyNodeMeta(*node, j, baseDir);
 				graph.addNode(std::move(node));
+				continue;
 			}
+			auto node = reg.createNode(type, name, *mp);
+			if (!node) {
+				// createNode 返回 nullptr：模型缺失 / 引擎未注册 createEngine。
+				// 节点被静默跳过会导致图不完整，必须显式诊断（含节点名、类型、modelPath）。
+				std::cerr << "GraphCompiler: error — failed to create engine node '" << name
+					<< "' (type '" << type << "', modelPath '" << *mp << "'): "
+					<< "engine instance creation failed (model missing or engine has no createEngine); "
+					<< "node is skipped, graph may be incomplete" << std::endl;
+				continue;
+			}
+			// Schema 空检查：引擎未注册 getInputPorts/getOutputPorts 时框架传空 schema
+			// （JSON schema 已被引擎推导覆盖，见 GraphCompiler.h 头注释）
+			if (node->schema().inputs.empty() && node->schema().outputs.empty()) {
+				std::cerr << "GraphCompiler: warning — engine node '" << name
+					<< "' (type '" << type << "') has empty schema: "
+					<< "engine did not provide getInputPorts/getOutputPorts; "
+					<< "JSON schema was overridden by engine-derived schema (which is empty)" << std::endl;
+			}
+			applyNodeMeta(*node, j, baseDir);
+			graph.addNode(std::move(node));
 		} else {
 			// 未注册类型：创建骨架节点（RunFn 留空）
 			std::cerr << "GraphCompiler: warning — unregistered engine type '" << type
@@ -363,18 +417,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			auto node = std::make_unique<DC::Node>(
 				type, name, std::move(schema), nullptr,
 				stringToAffinity(j.value("affinity", "Operator")));
-			if (j.contains("modelPath")) {
-				std::string mp = j["modelPath"].get<std::string>();
-				std::filesystem::path mpPath(mp);
-				if (mpPath.is_relative()) {
-					mpPath = baseDir / mpPath;
-					mp = mpPath.string();
-				}
-				node->setModelPath(std::move(mp));
-			}
-			if (j.contains("tag")) {
-				node->setTag(j["tag"].get<std::string>());
-			}
+			applyNodeMeta(*node, j, baseDir);
 			graph.addNode(std::move(node));
 		}
 	}
@@ -445,6 +488,18 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 
 		// 4. 引擎已加载模型，清理临时文件
 		//    （逐个删除 models/ 下的文件，最后删除临时目录）
+		// ⚠ 与引擎实例缓存的生命周期交互（详见 GraphCompiler.h 头注释）：
+		//    - 实例缓存键为「engineType + 解压后的临时绝对路径」，引擎实例
+		//      （如 Ort::Session）在 createEngine 时已完成模型加载，驻留内存，
+		//      删除临时文件不影响已加载实例的运行。
+		//    - 但缓存键指向的文件路径此后永久失效：重复编译同一 .dcg 会解压
+		//      到新的临时目录（键不同），产生新的实例缓存条目，旧条目成为
+		//      永不命中的孤儿，直到 releaseAllEngines() 才释放。
+		//    - 因此重复编译需注意：要么保持实例缓存不清空（图可继续运行），
+		//      要么定期 releaseAllEngines() 清理孤儿条目后重新编译
+		//      （重新编译会重新解压，加载不会因旧文件删除而失败）。
+		//    - 惰性加载引擎（createEngine 不读模型、Run 时才读）将因临时文件
+		//      已删除而在运行期失败，不受本约束保护。
 		std::error_code ec;
 		for (auto& entry : std::filesystem::recursive_directory_iterator(archive->tempDir(), ec)) {
 			if (entry.is_regular_file()) {

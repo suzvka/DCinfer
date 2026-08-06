@@ -1,6 +1,8 @@
 // EngineRegistry 单元测试：注册、创建、转换钩子
+#include <atomic>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 #include "EngineRegistry.h"
 #include "Node.h"
@@ -35,6 +37,57 @@ static Tensor mockToDC(const void* native) {
 	Tensor result(Tensor::TensorType::Float, sizeof(float));
 	result = t->item<float>();
 	return result;
+}
+
+// ── Mock 模型引擎：验证 createNode(modelPath) 单路径 ──
+// createEngine 计数验证"一次加载 + 缓存"，端口推导与 schema 传递验证"框架驱动"
+
+struct MockSession {
+	std::string modelPath;
+};
+
+static std::atomic<int> mockEngineCreateCount{0};
+static std::atomic<int> mockFactorySchemaSeen{0};
+
+static Node::Result mockModelRunImpl(Node::RunContext& ctx) {
+	(void)ctx;
+	return ctx.success();
+}
+
+static void registerMockModelEngine(EngineRegistry& reg, const std::string& type) {
+	EngineDescriptor desc;
+	desc.engineType = type;
+	desc.converter = {mockToNative, mockToDC};
+
+	desc.createEngine = [](const std::string& path) -> EngineInstance {
+		++mockEngineCreateCount;
+		return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
+	};
+
+	// 从实例推导端口：两个 Float 标量端口
+	desc.getInputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
+		if (!inst.get())
+			return {};
+		return {{"in", Tensor::TensorType::Float, sizeof(float), {}, true}};
+	};
+	desc.getOutputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
+		if (!inst.get())
+			return {};
+		return {{"out", Tensor::TensorType::Float, sizeof(float), {}, true}};
+	};
+
+	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+		if (!p.schema.inputs.empty())
+			++mockFactorySchemaSeen;
+		auto* instance = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(p.engineConfig));
+		auto node = std::make_unique<Node>("MockModel", p.nodeName, p.schema, mockModelRunImpl,
+										   ThreadPoolAffinity::Operator);
+		if (instance)
+			node->bindEngine(instance, instance->descriptor());
+		return node;
+	};
+
+	reg.registerEngine(desc);
 }
 
 static void runTests() {
@@ -171,6 +224,63 @@ static void runTests() {
 			throw std::runtime_error("empty engineType should be rejected");
 	}
 	std::cout << "Test 9 passed: empty engineType rejected" << std::endl;
+
+	// ── Test 10: createNode(modelPath) 单路径：一次加载 + schema 传递 + 缓存命中 ──
+	{
+		mockEngineCreateCount = 0;
+		mockFactorySchemaSeen = 0;
+		registerMockModelEngine(reg, "MockModel");
+
+		// 首次建图：加载一次，schema 由框架从实例推导并传入 factory
+		auto node1 = reg.createNode("MockModel", "n1", std::string("models/a.onnx"));
+		if (!node1)
+			throw std::runtime_error("createNode(modelPath) returned null");
+		if (node1->schema().inputs.size() != 1 || node1->schema().outputs.size() != 1)
+			throw std::runtime_error("factory should receive framework-derived schema");
+		if (node1->modelPath() != "models/a.onnx")
+			throw std::runtime_error("modelPath not propagated to node");
+		if (mockEngineCreateCount != 1)
+			throw std::runtime_error("model should be loaded exactly once");
+		if (mockFactorySchemaSeen != 1)
+			throw std::runtime_error("factory should receive non-empty schema");
+
+		// 同 modelPath 缓存命中：不重新加载
+		auto node2 = reg.createNode("MockModel", "n2", std::string("models/a.onnx"));
+		if (!node2)
+			throw std::runtime_error("second createNode(modelPath) returned null");
+		if (mockEngineCreateCount != 1)
+			throw std::runtime_error("same modelPath should reuse cached instance");
+
+		// 不同 modelPath 创建新实例
+		auto node3 = reg.createNode("MockModel", "n3", std::string("models/b.onnx"));
+		if (!node3)
+			throw std::runtime_error("third createNode(modelPath) returned null");
+		if (mockEngineCreateCount != 2)
+			throw std::runtime_error("different modelPath should create new instance");
+	}
+	std::cout << "Test 10 passed: createNode(modelPath) single-load + schema passing + cache" << std::endl;
+
+	// ── Test 11: 并发 getOrCreateEngine：加锁 + 双重检查只创建一个实例 ──
+	{
+		mockEngineCreateCount = 0;
+		constexpr int kThreads = 8;
+		std::atomic<int> got{0};
+		std::vector<std::thread> threads;
+		for (int i = 0; i < kThreads; ++i) {
+			threads.emplace_back([&] {
+				auto* inst = reg.getOrCreateEngine("MockModel", "models/concurrent.onnx");
+				if (inst && inst->get())
+					++got;
+			});
+		}
+		for (auto& t : threads)
+			t.join();
+		if (got != kThreads)
+			throw std::runtime_error("all threads should obtain the instance");
+		if (mockEngineCreateCount != 1)
+			throw std::runtime_error("concurrent getOrCreateEngine should create instance once");
+	}
+	std::cout << "Test 11 passed: concurrent getOrCreateEngine creates once" << std::endl;
 
 	std::cout << "\nAll EngineRegistry tests passed!" << std::endl;
 }

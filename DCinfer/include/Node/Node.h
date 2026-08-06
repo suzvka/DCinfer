@@ -30,8 +30,6 @@ struct TensorConverter {
 	std::function<Tensor(const void*)> toDC;
 };
 
-using NodeFactory = std::function<std::unique_ptr<class Node>(std::string nodeName, const void* engineConfig)>;
-
 struct EngineDescriptor;
 class EngineInstance;
 class SignalStore;
@@ -111,6 +109,22 @@ private:
 	static const NodePort* find(const std::vector<NodePort>& ports, const std::string& name);
 	static bool hasUniqueNames(const std::vector<NodePort>& ports);
 };
+
+/// @brief 节点工厂参数：框架在 createNode 时收集并传入工厂。
+///
+/// - engineConfig：createNode(engineType, name, engineConfig) 透传的配置指针；
+///   createNode(engineType, name, modelPath) 路径下为 EngineInstance*（框架已创建并缓存）。
+/// - schema：框架从 EngineInstance 推导（需引擎注册 getInputPorts/getOutputPorts）；
+///   可为空，工厂可自行推导或使用内置 Schema 兜底。
+/// - modelPath：createNode(engineType, name, modelPath) 路径下非空。
+struct NodeFactoryParams {
+	std::string nodeName;
+	const void* engineConfig = nullptr; ///< EngineInstance* 或任意配置
+	NodeSchema schema;                  ///< 框架推导的端口 Schema（可为空）
+	std::string modelPath;              ///< 模型路径（modelPath 路径下非空）
+};
+
+using NodeFactory = std::function<std::unique_ptr<class Node>(const NodeFactoryParams&)>;
 
 /// @brief 节点执行结果状态。
 enum class NodeStatus {
