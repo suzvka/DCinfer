@@ -32,6 +32,9 @@ struct OnnxOptions {
 /// - 张量转换经 TensorConverter 契约：DC::Tensor ↔ Ort::Value
 /// - 未知 ONNX 元素类型（FLOAT16/BFLOAT16/STRING 等）显式降级为 Void 并告警
 /// - 算子内线程数与 SessionOptions 自定义（EP 选择）通过 OnnxOptions 配置
+/// - 编译期默认 EP：构建选项 DCINFER_ORT_EP（CPU/CUDA/TENSORRT/OPENVINO）
+///   决定默认追加的 ExecutionProvider，用户无需写代码；
+///   sessionCustomizer 仍可在默认 EP 之后追加或覆盖
 ///
 /// @param reg 目标注册表，默认为全局单例 EngineRegistry::instance()
 /// @param opts 注册级配置（线程数 / SessionOptions 自定义器）

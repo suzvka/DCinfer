@@ -5,10 +5,43 @@
     "zlib"
   ],
   "features": {
-    "onnxruntime": {
-      "description": "ONNX Runtime engine adapter",
+    "ort-cpu": {
+      "description": "ONNX Runtime engine adapter (CPU EP)",
       "dependencies": [
         "onnxruntime"
+      ]
+    },
+    "ort-cuda": {
+      "description": "ONNX Runtime engine adapter (CUDA EP)",
+      "dependencies": [
+        {
+          "name": "onnxruntime",
+          "features": [
+            "cuda"
+          ]
+        }
+      ]
+    },
+    "ort-tensorrt": {
+      "description": "ONNX Runtime engine adapter (TensorRT EP)",
+      "dependencies": [
+        {
+          "name": "onnxruntime",
+          "features": [
+            "tensorrt"
+          ]
+        }
+      ]
+    },
+    "ort-openvino": {
+      "description": "ONNX Runtime engine adapter (OpenVINO EP)",
+      "dependencies": [
+        {
+          "name": "onnxruntime",
+          "features": [
+            "openvino"
+          ]
+        }
       ]
     }
   }

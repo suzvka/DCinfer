@@ -10,6 +10,9 @@
 /out/
 /artifacts/
 
+# Ad-hoc verification build directories (temporary, e.g. build-verify-cpu)
+/build-verify-*/
+
 # CMake generated files and directories
 CMakeFiles/
 CMakeCache.txt

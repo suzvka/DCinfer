@@ -163,10 +163,28 @@ cd DCinfer
 git submodule update --init --recursive
 
 cmake -B build -S . \
-  -DCMAKE_TOOLCHAIN_FILE=external/vcpkg/scripts/buildsystems/vcpkg.cmake
+  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
 
 cmake --build build --config Release
 ```
+
+### ONNX Runtime 引擎（可选）
+
+ONNX Runtime 适配器默认不构建、不安装依赖。需要时通过 `BUILD_ENGINE_ONNXRUNTIME` + `DCINFER_ORT_EP` 两个选项选择 ExecutionProvider，vcpkg 依赖会自动注入（无需手动修改 vcpkg.json）：
+
+```bash
+# CPU EP（最简）
+cmake -B build-ort-cpu -S . \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
+  -DBUILD_ENGINE_ONNXRUNTIME=ON -DDCINFER_ORT_EP=CPU
+
+# CUDA EP（需本机 CUDA Toolkit + cuDNN，x64 动态库 triplet，构建耗时较长）
+cmake -B build-ort-cuda -S . \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
+  -DBUILD_ENGINE_ONNXRUNTIME=ON -DDCINFER_ORT_EP=CUDA
+```
+
+可用 EP：`CPU` / `CUDA` / `TENSORRT` / `OPENVINO`。运行时默认追加所选 EP，节点侧零代码；仍可通过 `OnnxOptions::sessionCustomizer` 追加或覆盖。Windows 上也可直接使用预设：`cmake --preset msvc-ort-cpu` 或 `cmake --preset msvc-ort-cuda`。
 
 ### Run Tests
 

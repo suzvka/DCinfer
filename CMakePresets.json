@@ -94,6 +94,44 @@
         "CMAKE_CXX_STANDARD": "20",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
+    },
+    {
+      "name": "msvc-ort-cpu",
+      "displayName": "MSVC x64 ONNX Runtime CPU (Release)",
+      "description": "MSVC x64 + ONNX Runtime CPU EP (Release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/msvc-ort-cpu",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
+        "BUILD_ENGINE_ONNXRUNTIME": "ON",
+        "DCINFER_ORT_EP": "CPU"
+      }
+    },
+    {
+      "name": "msvc-ort-cuda",
+      "displayName": "MSVC x64 ONNX Runtime CUDA (Release)",
+      "description": "MSVC x64 + ONNX Runtime CUDA EP (Release) — 需本机 CUDA/cuDNN 环境，构建耗时较长",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/msvc-ort-cuda",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
+        "BUILD_ENGINE_ONNXRUNTIME": "ON",
+        "DCINFER_ORT_EP": "CUDA"
+      }
     }
   ]
 }

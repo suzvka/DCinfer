@@ -295,8 +295,24 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 	desc.createEngine = [opts](const std::string& modelPath) -> EngineInstance {
 		Ort::SessionOptions sessionOpts;
 		sessionOpts.SetIntraOpNumThreads(opts.intraOpThreads); // 与 DCinfer 图级并行模型一致
+
+		// ── 编译期默认 EP：由构建选项 DCINFER_ORT_EP 决定（用户零代码启用）──
+		// 先于 sessionCustomizer 追加，确保默认 EP 在 ORT EP 列表中优先
+#ifdef DCINFER_ORT_ENABLE_CUDA
+		OrtCUDAProviderOptions cudaOpts{};
+		sessionOpts.AppendExecutionProvider_CUDA(cudaOpts);
+#endif
+#ifdef DCINFER_ORT_ENABLE_TENSORRT
+		OrtTensorRTProviderOptions trtOpts{};
+		sessionOpts.AppendExecutionProvider_TensorRT(trtOpts);
+#endif
+#ifdef DCINFER_ORT_ENABLE_OPENVINO
+		OrtOpenVINOProviderOptions ovoOpts{};
+		sessionOpts.AppendExecutionProvider_OpenVINO(ovoOpts);
+#endif
+
 		if (opts.sessionCustomizer)
-			opts.sessionCustomizer(&sessionOpts); // 追加 EP（CUDA/DML 等）或调整 SessionOptions
+			opts.sessionCustomizer(&sessionOpts); // 追加额外 EP 或调整 SessionOptions
 
 		auto session = std::make_shared<Ort::Session>(sharedEnv(), toNativePath(modelPath).c_str(), sessionOpts);
 		return EngineInstance(std::move(session));
