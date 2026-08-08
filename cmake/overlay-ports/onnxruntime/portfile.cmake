@@ -11,12 +11,10 @@ vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO microsoft/onnxruntime
     REF "v${VERSION}"
-    SHA512 373c51575ada457b8aead5d195a5f3eba62fb747b6370a2a9889fff875c40ea30af8fd49104d58cc86f79247410e829086b0979f37ca8635c6dd34960e9cc424
+    SHA512 31ee13a8b89f2bfd0c58086258c15b11218a675e577d287d94acc20723b0ca0110458bfaf268d3e9140fe86e9a0fe3f89abbc2d6d347f8ea65624fc0716f14c1
     PATCHES
-        fix-cmake.patch # .framework install, external library workarounds(abseil-cpp, eigen3)
-        fix-cmake-cuda.patch
-        fix-missing-cstdint.patch
-        fix-cmake-mlas.patch
+        fix-cmake.patch # .framework install, re2 wasm override
+        fix-cmake-cuda.patch # vcpkg deps: cuDNN / cudnn-frontend / nvidia-cutlass + MSVC /bigobj
 )
 
 find_program(PROTOC NAMES protoc PATHS "${CURRENT_HOST_INSTALLED_DIR}/tools/protobuf" REQUIRED NO_DEFAULT_PATH NO_CMAKE_PATH)
@@ -66,8 +64,10 @@ vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
         framework onnxruntime_BUILD_APPLE_FRAMEWORK
         framework onnxruntime_BUILD_OBJC
         nccl      onnxruntime_USE_NCCL
-    INVERTED_FEATURES
-        cuda      onnxruntime_USE_MEMORY_EFFICIENT_ATTENTION
+    # 注：1.23.2 时代的 INVERTED_FEATURES（cuda → USE_MEMORY_EFFICIENT_ATTENTION=OFF）
+    # 已移除——1.28 中 MEA 随 CUDA 默认开启，且 attention.cc 无条件引用
+    # kCutlassSafeMaskFilterValue（定义在 USE_MEMORY_EFFICIENT_ATTENTION 守卫内），
+    # 关闭 MEA 会导致 C2039 编译失败。
 )
 
 if("cuda" IN_LIST FEATURES)
@@ -75,13 +75,11 @@ if("cuda" IN_LIST FEATURES)
     list(APPEND FEATURE_OPTIONS
         "-DCMAKE_CUDA_COMPILER=${NVCC}"
         "-DCUDAToolkit_ROOT=${cuda_toolkit_root}"
-        # "-DCMAKE_CUDA_ARCHITECTURES=native"
-        # too much warnings about attribute
-        # NOTE: -std=c++17 必须与 host 侧 --compiler-options=/std:c++17 配对。
-        # nvcc 前端（cudafe++）默认方言与 host 不一致时，解析 MSVC 14.51+
-        # 的 xtr1common（_Is_any_of_v 折叠表达式）会崩溃
-        # (internal error: form_constant, cudafe++ died with 0xC0000409)。
-        "-DCMAKE_CUDA_FLAGS=-std=c++17 -Xcudafe --diag_suppress=2803 -Wno-deprecated-gpu-targets -Xcompiler=/Zc:preprocessor -Xcompiler=/wd4996 --compiler-options=/std:c++17 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
+        # 注：1.23.2 时代的 -std=c++17 / --compiler-options=/std:c++17 方言 workaround 已移除——
+        # ORT 1.25+ 源码构建强制 C++20（onnxruntime_language_standard_versions.cmake），
+        # 且上游已内置 CUDA 13.3 cudafe++ regression workaround（ort_cuda133_patch_cccl_header）
+        # 与 VS 2026 / CUDA 13.3 Windows 构建修复（#29042, #29266）。
+        "-DCMAKE_CUDA_FLAGS=-Xcudafe --diag_suppress=2803 -Xcompiler=/Zc:preprocessor -Xcompiler=/wd4996 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
         "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} /Zc:preprocessor /wd4996 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
     )
 endif()
@@ -100,63 +98,11 @@ endif()
 
 string(COMPARE EQUAL "${VCPKG_LIBRARY_LINKAGE}" "dynamic" BUILD_SHARED)
 
-# CUDA 13.x：FasterTransformer MoE (ft_moe) 内核与新版 CUDA 工具链/absl 组合编译失败（host pass 模板解析错误），
-# 暂时排除 ft_moe 模块与 MoE 算子实现（不影响其他 CUDA 算子，运行时仅 MoE 算子不可用）
-# 注意：vcpkg_replace_string 的 REPLACE 必须写成单个字符串参数（CMake 不拼接相邻字符串字面量），
-# 否则只有第一行生效，生成残缺的 CMakeLists 语法（Parse error: Function missing ending ")"）。
-vcpkg_replace_string("${SOURCE_PATH}/cmake/onnxruntime_providers_cuda.cmake"
-    "    list(APPEND onnxruntime_providers_cuda_src \${onnxruntime_cuda_contrib_ops_cc_srcs} \${onnxruntime_cuda_contrib_ops_cu_srcs})"
-    [=[
-    list(REMOVE_ITEM onnxruntime_cuda_contrib_ops_cu_srcs
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_kernel.cu"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_gemm_kernels_bf16_bf16.cu"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_gemm_kernels_bf16_uint4.cu"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_gemm_kernels_bf16_uint8.cu"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_gemm_kernels_fp16_fp16.cu"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_gemm_kernels_fp16_uint4.cu"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_gemm_kernels_fp16_uint8.cu"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/moe_gemm_kernels_fp32_fp32.cu"
-    )
-    list(REMOVE_ITEM onnxruntime_cuda_contrib_ops_cc_srcs
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/ft_moe/cutlass_heuristic.cc"
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/moe/moe.cc"
-        # moe_quantization.cc 引用 ft_moe 内核（CutlassMoeFCRunner 等），一并排除避免链接失败
-        "${ONNXRUNTIME_ROOT}/contrib_ops/cuda/quantization/moe_quantization.cc"
-    )
-    list(APPEND onnxruntime_providers_cuda_src ${onnxruntime_cuda_contrib_ops_cc_srcs} ${onnxruntime_cuda_contrib_ops_cu_srcs})
-    ]=]
-)
-
-# cuda_contrib_kernels.cc 是自动生成的算子注册表，仍引用 MoE/QMoE 类（定义在已排除的 moe.cc 中），
-# 移除其 class 前向声明与 BuildKernelCreateInfo 注册行，避免 LNK2001 链接失败
-vcpkg_replace_string("${SOURCE_PATH}/onnxruntime/contrib_ops/cuda/cuda_contrib_kernels.cc"
-    [=[
-class CUDA_MS_OP_TYPED_CLASS_NAME(1, float, MoE);
-class CUDA_MS_OP_TYPED_CLASS_NAME(1, MLFloat16, MoE);
-class CUDA_MS_OP_TYPED_CLASS_NAME(1, BFloat16, MoE);
-class CUDA_MS_OP_TYPED_CLASS_NAME(1, BFloat16, QMoE);
-class CUDA_MS_OP_TYPED_CLASS_NAME(1, MLFloat16, QMoE);
-]=]
-    ""
-)
-vcpkg_replace_string("${SOURCE_PATH}/onnxruntime/contrib_ops/cuda/cuda_contrib_kernels.cc"
-    [=[
-      BuildKernelCreateInfo<CUDA_MS_OP_TYPED_CLASS_NAME(1, float, MoE)>,
-      BuildKernelCreateInfo<CUDA_MS_OP_TYPED_CLASS_NAME(1, MLFloat16, MoE)>,
-      BuildKernelCreateInfo<CUDA_MS_OP_TYPED_CLASS_NAME(1, BFloat16, MoE)>,
-      BuildKernelCreateInfo<CUDA_MS_OP_TYPED_CLASS_NAME(1, BFloat16, QMoE)>,
-      BuildKernelCreateInfo<CUDA_MS_OP_TYPED_CLASS_NAME(1, MLFloat16, QMoE)>,
-]=]
-    ""
-)
-
-# MSVC 14.51（VS 2026）：模板显式实例化的按值指针形参会剥离顶层 const（符号 PEAPEBX），
-# 而调用侧隐式实例化保留顶层 const（符号 QEAPEBX），导致 concat_impl.cu 与 concat.cc
-# 链接符号不一致（LNK2019）。显式实例化补写 const 使两侧符号一致。
-vcpkg_replace_string("${SOURCE_PATH}/onnxruntime/core/providers/cuda/tensor/concat_impl.cu"
-    "                                                      void* output_data, const void** input_data,"
-    "                                                      void* output_data, const void** const input_data,"
-)
+# 注：1.23.2 时代的三处源码 workaround 已随升级到 1.28.0 移除——
+# 1) ft_moe/MoE 排除：1.28 的 MoE 实现已重写（moe.cc + qmoe_kernels.cu，ft_moe 已删除），
+#    上游 CUDA 13 CI 正常编译，MoE/QMoE 算子恢复可用；
+# 2) cuda_contrib_kernels.cc MoE 注册行清理：随 1) 一并移除；
+# 3) concat_impl.cu 顶层 const 补写：上游已修复（显式实例化现为 const void** const）。
 
 # see tools/ci_build/build.py
 vcpkg_cmake_configure(
@@ -181,6 +127,10 @@ vcpkg_cmake_configure(
         -Donnxruntime_ENABLE_LAZY_TENSOR=OFF
         -Donnxruntime_DISABLE_RTTI=OFF
         -Donnxruntime_DISABLE_ABSEIL=OFF
+        # 内存保护：本机 16GB RAM。nvcc 默认 --threads 4 与 ninja 并行度相乘
+        # 会耗尽内存（CUTLASS/attention 重模板 TU 单进程峰值数 GB），
+        # 固定为 1；并行度由 VCPKG_MAX_CONCURRENCY=4（见 cmake/vcpkg-toolchain.cmake）统一控制
+        -Donnxruntime_NVCC_THREADS=1
         # 目标 GPU：RTX 4070 (sm_89)；CUDA 13 已移除 sm_60 等旧架构，ORT 默认列表含 60 会配置失败
         "-DCMAKE_CUDA_ARCHITECTURES=89-real"
         # some other customizations ...
