@@ -10,10 +10,6 @@ target_link_libraries(DCinfer PUBLIC Threads::Threads)
 
 # ── GCC 特化处理 ──
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    # GCC 10~13 的 <coroutine> 需要显式启用编译期支持（GCC 14+ 内置）
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14.0")
-        target_compile_options(DCinfer PUBLIC -fcoroutines)
-    endif()
 
     # GCC 的 <semaphore> / std::counting_semaphore 内部使用 64 位原子操作，
     # 在某些平台/架构上必须显式链接 libatomic 才能解析符号。

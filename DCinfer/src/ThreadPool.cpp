@@ -5,19 +5,6 @@
 
 namespace DC {
 
-// ── PoolTicket ──
-
-PoolTicket::PoolTicket(ThreadPool& pool, std::string tag, std::function<void()> task)
-	: _pool(&pool), _tag(std::move(tag)), _task(std::move(task)) {}
-
-void PoolTicket::await_suspend(std::coroutine_handle<> h) {
-	_handle = h;
-
-	std::lock_guard lk(_pool->_mutex);
-	_pool->_taskQueue.push(ThreadPool::PendingTask{std::move(_task), h, _tag});
-	_pool->_cv.notify_one();
-}
-
 // ── ThreadPool ──
 
 ThreadPool::ThreadPool(const PoolConfig& config, std::shared_ptr<GroupSemaphoreRegistry> sharedGroups)
@@ -52,12 +39,8 @@ ThreadPool::~ThreadPool() {
 
 void ThreadPool::submit(const std::string& nodeTag, std::function<void()> task) {
 	std::lock_guard lk(_mutex);
-	_taskQueue.push(ThreadPool::PendingTask{std::move(task), {}, nodeTag});
+	_taskQueue.push(ThreadPool::PendingTask{std::move(task), nodeTag});
 	_cv.notify_one();
-}
-
-PoolTicket ThreadPool::submitAsync(const std::string& nodeTag, std::function<void()> task) {
-	return PoolTicket(*this, nodeTag, std::move(task));
 }
 
 size_t ThreadPool::activeCount(const std::string& groupTag) const {
@@ -75,14 +58,10 @@ void ThreadPool::registerGroupLimit(const std::string& tag, size_t limit) {
 
 void ThreadPool::shutdown() {
 	_running = false;
-	_shuttingDown = true;
 
 	{
 		std::lock_guard lk(_mutex);
-		// 丢弃所有等待中的任务（含 submitAsync 挂起的协程句柄）。
-		// 注意：不 resume 挂起协程——析构期间 ExecutionEngine 的状态成员
-		// （_terminatedTasks/_watchdogs 等）可能已销毁，恢复协程会访问悬空对象。
-		// 挂起的协程帧随之泄漏（进程退出时由 OS 回收），这是关闭期的安全取舍。
+		// 丢弃所有等待中的任务
 		_taskQueue = {};
 	}
 	_cv.notify_all();
@@ -174,18 +153,10 @@ void ThreadPool::_workerLoop() {
 		_globalSemaphore->release();
 		_releaseGroup(pending.groupTag);
 
-		// 通知等待的协程
+		// 通知其他工作线程可能有新槽位
 		{
 			std::lock_guard lk(_mutex);
-			_cv.notify_one(); // 通知其他工作线程可能有新槽位
-		}
-
-		// resume 协程句柄
-		if (pending.handle) {
-			pending.handle.resume();
-			if (pending.handle.done()) {
-				pending.handle.destroy();
-			}
+			_cv.notify_one();
 		}
 	}
 }

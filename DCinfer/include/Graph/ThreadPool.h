@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <coroutine>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -27,28 +26,6 @@ struct PoolConfig {
 
 // ── 前向声明 ──
 class ThreadPool;
-
-// ── PoolTicket：co_await-able 线程池提交句柄 ──
-// co_await pool.submitAsync(tag, task) 挂起协程，
-// 在线程池中执行 task 完成后 resume
-struct PoolTicket {
-	bool await_ready() const noexcept {
-		return false;
-	}
-	void await_suspend(std::coroutine_handle<> h);
-	/// @brief 恢复后检查是否因 shutdown 被取消
-	/// @note 实现在 ThreadPool 完整定义之后，避免访问未完整类型
-	void await_resume() const;
-
-private:
-	friend class ThreadPool;
-	PoolTicket(ThreadPool& pool, std::string tag, std::function<void()> task);
-
-	ThreadPool* _pool;
-	std::string _tag;
-	std::function<void()> _task;
-	std::coroutine_handle<> _handle;
-};
 
 // ── 跨池共享的组信号量注册表 ──
 // 由 ExecutionEngine 持有并注入所有线程池：同一 tag 的信号量被多个池共享，
@@ -86,11 +63,8 @@ public:
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool& operator=(const ThreadPool&) = delete;
 
-	/// @brief  传统 fire-and-forget 提交
+	/// @brief  fire-and-forget 提交
 	void submit(const std::string& nodeTag, std::function<void()> task);
-
-	/// @brief  协程友好提交：co_await 等待任务在线程池中执行完成
-	PoolTicket submitAsync(const std::string& nodeTag, std::function<void()> task);
 
 	/// @brief  运行时注册分组限流（构造后追加，无需重建池）
 	/// @param  tag    分组标识（与 Node::tag 对应）
@@ -100,7 +74,7 @@ public:
 	/// @brief  查询组当前活跃任务数
 	size_t activeCount(const std::string& groupTag) const;
 
-	/// @brief  优雅关闭（取消所有等待中的协程并 resume 句柄）
+	/// @brief  优雅关闭（丢弃队列中未执行的任务）
 	void shutdown();
 
 	size_t totalThreads() const {
@@ -112,7 +86,6 @@ private:
 
 	struct PendingTask {
 		std::function<void()> task;
-		std::coroutine_handle<> handle; // 非空 = 需要 resume 的协程句柄
 		std::string groupTag;
 	};
 
@@ -142,17 +115,6 @@ private:
 	// 分组活跃任务计数
 	std::unordered_map<std::string, std::unique_ptr<std::atomic<size_t>>> _groupActiveCount;
 	std::mutex _activeCountMutex;
-
-	// 关闭标记：通知所有 awaiting 协程任务被取消
-	std::atomic<bool> _shuttingDown{false};
 };
-
-// ── PoolTicket::await_resume 需访问 ThreadPool 私有成员，
-// 定义必须在 ThreadPool 完整定义之后 ──
-inline void PoolTicket::await_resume() const {
-	if (_pool && _pool->_shuttingDown.load(std::memory_order_acquire)) {
-		// 任务因 shutdown 被取消，调用方可按需检测
-	}
-}
 
 } // namespace DC

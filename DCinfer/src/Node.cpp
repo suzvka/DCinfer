@@ -2,7 +2,6 @@
 #include "Node/internal/SignalGate.h"
 #include "Node/internal/TaskBuffer.h"
 #include "Node/internal/SlotWorkspace.h"
-#include "Node/internal/CoroutineBridge.h"
 #include "Node/internal/EngineAdapter.h"
 #include "Node/internal/ExecutionPipeline.h"
 #include "EngineRegistry.h"
@@ -81,7 +80,6 @@ Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
 
 	_buffer = std::make_unique<TaskBuffer>();
 	_workspace = std::make_unique<SlotWorkspace>(_meta.schema);
-	_bridge = std::make_unique<CoroutineBridge>();
 	_signal = std::make_unique<SignalGate>();
 	_engine = std::make_unique<EngineAdapter>(nullptr, nullptr);
 }
@@ -155,12 +153,10 @@ bool Node::hasTask(const TaskId& taskId) const {
 
 void Node::clearTask(const TaskId& taskId) {
 	_buffer->clearTask(taskId);
-	_bridge->clearCompleted(taskId);
 }
 
 void Node::terminateTask(const TaskId& taskId) {
 	_buffer->clearTask(taskId);
-	_bridge->terminateTask(taskId);
 }
 
 size_t Node::taskCount() const {
@@ -175,7 +171,7 @@ bool Node::isReady(const TaskId& taskId) const {
 	return _buffer->isReady(taskId, _meta.schema);
 }
 
-void Node::tryExecute(const TaskId& taskId) {
+NodeResult Node::tryExecute(const TaskId& taskId) {
 	if (!_buffer->isReady(taskId, _meta.schema)) {
 		throw NodeException(NodeException::ErrorType::NotReady, "Node::tryExecute",
 							"task '" + taskId + "' is not ready");
@@ -188,10 +184,11 @@ void Node::tryExecute(const TaskId& taskId) {
 
 	_workspace->setCurrentTask(taskId);
 
+	NodeResult result;
 	try {
-		ExecutionPipeline::execute(taskId, *_buffer, *_workspace, *_engine,
-								   _fn, _meta.schema, *_bridge, _onComplete,
-								   _meta.type, _meta.name);
+		result = ExecutionPipeline::execute(taskId, *_buffer, *_workspace, *_engine,
+											_fn, _meta.schema, _onComplete,
+											_meta.type, _meta.name);
 	} catch (...) {
 		_workspace->clearCurrentTask();
 		_workspace->release();
@@ -200,6 +197,7 @@ void Node::tryExecute(const TaskId& taskId) {
 
 	_workspace->clearCurrentTask();
 	_workspace->release();
+	return result;
 }
 
 std::optional<Node::TaskId> Node::currentTaskId() const {
@@ -255,12 +253,6 @@ const std::unordered_map<std::string, TensorSlot>& Node::inputSlots() const {
 
 const std::unordered_map<std::string, TensorSlot>& Node::outputSlots() const {
 	return _workspace->outputSlots();
-}
-
-// ── 协程支持 ──
-
-NodeCompletion Node::whenComplete(const TaskId& taskId) {
-	return _bridge->whenComplete(taskId, *_buffer, _meta.schema);
 }
 
 // ── RunContext 方法实现 ──
@@ -326,57 +318,5 @@ const std::string& Node::RunContext::name() const {
 Node::RunContext::RunContext(SlotWorkspace& workspace, EngineAdapter& engine,
 							 const Node::Schema& schema, const std::string& type, const std::string& name)
 	: _workspace(workspace), _engine(engine), _schema(schema), _type(type), _name(name) {}
-
-// ── NodeCompletion 实现 ──
-
-bool NodeCompletion::await_ready() const {
-	if (!buffer || !schema)
-		return false;
-	for (const auto& port : schema->outputs) {
-		if (buffer->hasOutput(taskId, port.name))
-			return true;
-	}
-	return false;
-}
-
-void NodeCompletion::await_suspend(std::coroutine_handle<> h) {
-	handle = h;
-
-	if (!bridge) {
-		h.resume();
-		return;
-	}
-
-	std::lock_guard lk(bridge->_mutex);
-
-	if (bridge->_completedTasks.contains(taskId)) {
-		h.resume();
-		return;
-	}
-
-	bridge->_waiters[taskId].push_back(h);
-}
-
-Node::Result NodeCompletion::await_resume() const {
-	if (!buffer || !schema) {
-		Node::Result r;
-		r.status = Node::Status::ExecutionFailed;
-		r.message = "NodeCompletion: missing buffer or schema";
-		return r;
-	}
-
-	for (const auto& port : schema->outputs) {
-		if (buffer->hasOutput(taskId, port.name)) {
-			Node::Result r;
-			r.status = Node::Status::Ok;
-			return r;
-		}
-	}
-
-	Node::Result r;
-	r.status = Node::Status::ExecutionFailed;
-	r.message = "NodeCompletion: task '" + taskId + "' completed without outputs";
-	return r;
-}
 
 } // namespace DC

@@ -2,7 +2,6 @@
 #include "Node/internal/TaskBuffer.h"
 #include "Node/internal/SlotWorkspace.h"
 #include "Node/internal/EngineAdapter.h"
-#include "Node/internal/CoroutineBridge.h"
 #include "Node.h"
 
 namespace DC {
@@ -14,7 +13,6 @@ NodeResult ExecutionPipeline::execute(
 	EngineAdapter& engine,
 	const RunFn& fn,
 	const NodeSchema& schema,
-	CoroutineBridge& bridge,
 	const CompletionFn& onComplete,
 	const std::string& nodeType,
 	const std::string& nodeName) {
@@ -71,18 +69,14 @@ NodeResult ExecutionPipeline::execute(
 		// ⑥ 清理输入缓冲（输出缓冲保留，供调用方拉取）
 		buffer.eraseInputs(taskId);
 
-		// ⑥½ 通知等待协程
-		bridge.notifyWaiters(taskId);
-
 		// ⑦ 调用回调
 		if (onComplete) {
 			onComplete(taskId, result);
 		}
 	} catch (const std::exception& e) {
-		// 加载阶段或执行阶段抛出未捕获异常，必须通知等待者
+		// 加载阶段或执行阶段抛出未捕获异常，必须通知完成回调
 		result.status = NodeStatus::ExecutionFailed;
 		result.message = e.what();
-		bridge.notifyWaiters(taskId);
 		if (onComplete) {
 			onComplete(taskId, result);
 		}

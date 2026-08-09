@@ -38,17 +38,12 @@ public:
 	/// @brief  默认最大跳数（TTL），防止循环无限传播
 	static constexpr uint32_t kDefaultMaxHops = ExecutionEngine::kDefaultMaxHops;
 
-	/// @brief  默认构造
-	///         自动创建内部协程调度器和默认线程池
-	InferGraph();
-
-	/// @brief  构造推理图（传入外部协程调度器，用于异步 submit 模式）
-	/// @param  scheduler     协程调度器（非拥有引用，外部管理生命周期）
+	/// @brief  构造推理图（默认线程池配置；可通过参数自定义三层线程池）
 	/// @param  computeCfg    计算线程池配置
 	/// @param  operatorCfg   算子线程池配置
 	/// @param  systemCfg     系统线程池配置（连接器、数据搬运等基础设施）
-	InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg = {}, const PoolConfig& operatorCfg = {},
-			   const PoolConfig& systemCfg = {});
+	explicit InferGraph(const PoolConfig& computeCfg = {}, const PoolConfig& operatorCfg = {},
+						const PoolConfig& systemCfg = {});
 	~InferGraph() = default;
 
 	InferGraph(const InferGraph&) = delete;

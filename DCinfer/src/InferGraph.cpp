@@ -9,13 +9,10 @@ namespace DC {
 // 构造
 // ════════════════════════════════════════════
 
-InferGraph::InferGraph()
-	: _signalStore(std::make_shared<SignalStore>()), _engine(2) {}
-
-InferGraph::InferGraph(CoroScheduler& scheduler, const PoolConfig& computeCfg,
+InferGraph::InferGraph(const PoolConfig& computeCfg,
 					   const PoolConfig& operatorCfg, const PoolConfig& systemCfg)
 	: _signalStore(std::make_shared<SignalStore>()),
-	  _engine(scheduler, computeCfg, operatorCfg, systemCfg) {}
+	  _engine(computeCfg, operatorCfg, systemCfg) {}
 
 // ════════════════════════════════════════════
 // 子图声明

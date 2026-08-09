@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Node.h"
-#include "CoroScheduler.h"
 #include "ThreadPool.h"
 
 #include <atomic>
@@ -23,16 +22,20 @@ class OutputZone;
 class SignalStore;
 class ErrorTracker;
 
-/// @brief 推理图执行引擎：协程驱动的数据流传播与调度。
+/// @brief 推理图执行引擎：事件驱动的数据流传播与调度。
 ///
 /// 从 InferGraph 提取的独立组件，负责：
 /// - 异步提交 task（submit）
-/// - 协程驱动的节点间数据传播（_propagateFrom）
+/// - 节点完成事件驱动的数据传播（_propagateFrom / _submitNodeRun）
 /// - task 生命周期管理（_terminate / _isTerminated）
 /// - 超时看门狗与耗尽检测
 /// - 同步等待（wait）
 ///
 /// 不持有图拓扑、输出区、信号仓库、错误收集器——均通过参数化依赖注入。
+///
+/// 调度模型：无协程、无独立调度器线程。节点执行与数据传播打包为
+/// 一个任务 lambda 提交到对应线程池，池线程执行完节点后就地传播输出，
+/// 下游就绪则继续提交——数据沿图自上游向下游自然"冒泡"。
 class ExecutionEngine {
 public:
 	using TaskId = std::string;
@@ -41,19 +44,13 @@ public:
 	/// @brief  默认最大跳数（TTL），防止循环无限传播
 	static constexpr uint32_t kDefaultMaxHops = 10000;
 
-	/// @brief  默认构造：自动创建内部协程调度器和默认线程池
-	/// @param  schedulerThreads  协程调度器线程数
-	explicit ExecutionEngine(size_t schedulerThreads = 2);
-
-	/// @brief  构造引擎（传入外部协程调度器）
-	/// @param  scheduler     协程调度器（非拥有引用，外部管理生命周期）
+	/// @brief  构造引擎：自动创建三个线程池（Compute / Operator / System）
 	/// @param  computeCfg    计算线程池配置
 	/// @param  operatorCfg   算子线程池配置
 	/// @param  systemCfg     系统线程池配置
-	ExecutionEngine(CoroScheduler& scheduler,
-					const PoolConfig& computeCfg = {},
-					const PoolConfig& operatorCfg = {},
-					const PoolConfig& systemCfg = {});
+	explicit ExecutionEngine(const PoolConfig& computeCfg = {},
+							const PoolConfig& operatorCfg = {},
+							const PoolConfig& systemCfg = {});
 
 	~ExecutionEngine() = default;
 
@@ -96,8 +93,9 @@ public:
 private:
 	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
 	//
-	// 每个活跃协程 + 超时看门狗各持有一份 shared_ptr<TaskGate>。
-	// 当最后一个持有者析构时，若 task 未被终止，则触发 _onExhausted。
+	// 每个飞行中的任务 lambda（含后续传播链）与超时看门狗各持有一份
+	// shared_ptr<TaskGate>。当最后一个持有者析构时，若 task 未被终止，
+	// 则触发 _exhaustedCheck。
 	struct TaskGate {
 		std::atomic<bool> terminated{false};
 		ExecutionEngine* engine = nullptr;
@@ -110,12 +108,21 @@ private:
 		~TaskGate();
 	};
 
-	// ── 协程数据传播 ──
-	Task<void> _propagateFrom(std::string nodeName, TaskId taskId,
-							  std::shared_ptr<TaskGate> gate,
-							  uint32_t remainingHops,
-							  GraphStore& graph, OutputZone& output,
-							  SignalStore& signals, ErrorTracker& errors);
+	// ── 事件驱动数据传播 ──
+
+	/// @brief  提交一个节点执行任务（tryExecute + 成功后就地传播）
+	/// @note   由 submit 入口与传播下游共用；任务在节点 affinity 对应线程池执行
+	void _submitNodeRun(Node* node, const std::string& nodeName, const TaskId& taskId,
+						std::shared_ptr<TaskGate> gate, uint32_t remainingHops,
+						GraphStore& graph, OutputZone& output,
+						SignalStore& signals, ErrorTracker& errors);
+
+	/// @brief  传播节点输出到下游（调用前提：节点已由 _submitNodeRun 执行成功）
+	void _propagateFrom(std::string nodeName, TaskId taskId,
+						std::shared_ptr<TaskGate> gate,
+						uint32_t remainingHops,
+						GraphStore& graph, OutputZone& output,
+						SignalStore& signals, ErrorTracker& errors);
 
 	// ── 终止辅助 ──
 	void _terminate(const TaskId& taskId,
@@ -138,15 +145,11 @@ private:
 	void _dispatchToPool(ThreadPoolAffinity affinity, const std::string& tag,
 						 std::function<void()> task);
 
-	/// @brief  协程友好提交：co_await 等待任务在线程池中执行完成
-	PoolTicket _dispatchToPoolAsync(ThreadPoolAffinity affinity, const std::string& tag,
-									std::function<void()> task);
-
 	// ── 成员 ──
 	// 声明顺序即析构顺序约束（关键！）：
-	//   状态成员最先声明 → 最后析构；调度器最后声明 → 最先析构。
-	// 析构顺序：_ownedScheduler(join 协程 worker) → 池(shutdown) → 共享表 → 状态。
-	// 保证 CoroScheduler worker 上的协程在 join 期间访问 _isTerminated/_watchdogs
+	//   状态成员最先声明 → 最后析构；线程池最后声明 → 最先析构。
+	// 析构顺序：池(shutdown/join worker) → 共享表 → 状态。
+	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated/_watchdogs
 	// 等状态、以及向池提交任务时，所有对象均存活。
 	std::unordered_set<TaskId> _terminatedTasks;
 	mutable std::mutex _terminationMutex;
@@ -171,9 +174,6 @@ private:
 	ThreadPool _computePool;
 	ThreadPool _operatorPool;
 	ThreadPool _systemPool;
-
-	CoroScheduler* _scheduler;
-	std::unique_ptr<CoroScheduler> _ownedScheduler;
 };
 
 } // namespace DC

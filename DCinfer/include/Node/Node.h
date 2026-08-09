@@ -20,8 +20,6 @@
 #include "Value.h"
 #include "NodeException.h"
 
-#include <coroutine>
-
 namespace DC {
 
 /// @brief 张量转换钩子：DC::Tensor ↔ 引擎原生张量。
@@ -37,7 +35,6 @@ class SignalStore;
 // ── 内部组件前向声明 ──
 class TaskBuffer;
 class SlotWorkspace;
-class CoroutineBridge;
 class SignalGate;
 class EngineAdapter;
 
@@ -46,8 +43,6 @@ enum class ThreadPoolAffinity {
 	Operator,
 	System,
 };
-
-struct NodeCompletion;
 
 // ── 提取为顶层类型的 Node 嵌套类型（消除循环依赖）──
 
@@ -222,12 +217,15 @@ public:
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
 	std::unordered_map<std::string, Tensor> collectOutputTensors(const TaskId& taskId);
 
-	// ── 协程支持 ──
-	NodeCompletion whenComplete(const TaskId& taskId);
-
 	// ── 调度接口 ──
+	/// @brief  就绪判定：所有必选输入已就绪（或存在默认值/形状锚定）
 	bool isReady(const TaskId& taskId) const;
-	void tryExecute(const TaskId& taskId);
+
+	/// @brief  执行节点流水线（就绪判定 + 槽位互斥 + 7 步执行）
+	/// @return 执行结果（失败不抛出，通过 NodeResult 返回）
+	/// @throws NodeException(NotReady)     任务未就绪
+	/// @throws NodeException(Reentrant)    节点正被另一任务占用
+	NodeResult tryExecute(const TaskId& taskId);
 	std::optional<TaskId> currentTaskId() const;
 
 	// ── 任务生命周期 ──
@@ -242,7 +240,6 @@ public:
 
 private:
 	friend class RunContext;
-	friend struct NodeCompletion;
 
 	struct NodeMeta {
 		std::string type;
@@ -258,7 +255,6 @@ private:
 	NodeMeta _meta;
 	std::unique_ptr<TaskBuffer> _buffer;
 	std::unique_ptr<SlotWorkspace> _workspace;
-	std::unique_ptr<CoroutineBridge> _bridge;
 	std::unique_ptr<SignalGate> _signal;
 	std::unique_ptr<EngineAdapter> _engine;
 	RunFn _fn;
@@ -298,26 +294,6 @@ private:
 	const Node::Schema& _schema;
 	std::string _type;
 	std::string _name;
-};
-
-// ── NodeCompletion ──
-struct NodeCompletion {
-	bool await_ready() const;
-	void await_suspend(std::coroutine_handle<> h);
-	Node::Result await_resume() const;
-
-private:
-	friend class Node;
-	friend class CoroutineBridge;
-	NodeCompletion(TaskBuffer* buffer, CoroutineBridge* bridge,
-				   const Node::TaskId& taskId, const Node::Schema* schema)
-		: buffer(buffer), bridge(bridge), taskId(taskId), schema(schema) {}
-
-	TaskBuffer* buffer = nullptr;
-	CoroutineBridge* bridge = nullptr;
-	Node::TaskId taskId;
-	const Node::Schema* schema = nullptr;
-	std::coroutine_handle<> handle;
 };
 
 // ── NodeBuilder：流式 API ──

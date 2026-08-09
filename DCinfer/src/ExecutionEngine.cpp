@@ -25,23 +25,13 @@ ExecutionEngine::TaskGate::~TaskGate() {
 // 构造
 // ════════════════════════════════════════════
 
-ExecutionEngine::ExecutionEngine(size_t schedulerThreads)
-	: _sharedGroups(std::make_shared<GroupSemaphoreRegistry>()),
-	  _computePool({}, _sharedGroups), _operatorPool({}, _sharedGroups), _systemPool({}, _sharedGroups),
-	  _scheduler(nullptr),
-	  _ownedScheduler(std::make_unique<CoroScheduler>(schedulerThreads)) {
-	_scheduler = _ownedScheduler.get();
-}
-
-ExecutionEngine::ExecutionEngine(CoroScheduler& scheduler,
-								 const PoolConfig& computeCfg,
+ExecutionEngine::ExecutionEngine(const PoolConfig& computeCfg,
 								 const PoolConfig& operatorCfg,
 								 const PoolConfig& systemCfg)
 	: _sharedGroups(std::make_shared<GroupSemaphoreRegistry>()),
 	  _computePool(computeCfg, _sharedGroups),
 	  _operatorPool(operatorCfg, _sharedGroups),
-	  _systemPool(systemCfg, _sharedGroups),
-	  _scheduler(&scheduler) {}
+	  _systemPool(systemCfg, _sharedGroups) {}
 
 // ════════════════════════════════════════════
 // 线程池分发
@@ -62,21 +52,47 @@ void ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity, const std::st
 	}
 }
 
-PoolTicket ExecutionEngine::_dispatchToPoolAsync(ThreadPoolAffinity affinity, const std::string& tag,
-												 std::function<void()> task) {
-	switch (affinity) {
-	case ThreadPoolAffinity::Compute:
-		return _computePool.submitAsync(tag, std::move(task));
-	case ThreadPoolAffinity::Operator:
-		return _operatorPool.submitAsync(tag, std::move(task));
-	case ThreadPoolAffinity::System:
-		return _systemPool.submitAsync(tag, std::move(task));
-	}
-	return _systemPool.submitAsync(tag, std::move(task));
+void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, const TaskId& taskId,
+									 std::shared_ptr<TaskGate> gate, uint32_t remainingHops,
+									 GraphStore& graph, OutputZone& output,
+									 SignalStore& signals, ErrorTracker& errors) {
+	// 捕获裸指针：图拓扑的存活期必须覆盖全部飞行中的任务（与 gate 相同约束）
+	_dispatchToPool(node->affinity(), node->tag(),
+					[this, node, nodeName, taskId, gate, remainingHops,
+					 &graph, &output, &signals, &errors] {
+		NodeResult result;
+		try {
+			result = node->tryExecute(taskId);
+		} catch (const NodeException& e) {
+			// 就绪判定竞态（NotReady/Reentrant）：记录错误，跳过传播
+			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
+							   "NodeException in tryExecute: " + std::string(e.what()));
+			return;
+		}
+
+		// 完成判定与原节点完成事件语义一致：只要产生了任何输出即视为成功传播。
+		// 部分输出场景（如 Routing 连接器仅路由到一个输出口）允许继续传播；
+		// 完全无输出的节点记录错误并跳过传播。
+		bool hasAnyOutput = false;
+		for (const auto& p : node->schema().outputs) {
+			if (node->hasOutput(taskId, p.name)) {
+				hasAnyOutput = true;
+				break;
+			}
+		}
+		if (!hasAnyOutput) {
+			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
+							   "Node execution failed: " + result.message);
+			return; // 失败不传播
+		}
+
+		// 节点执行成功 → 就地传播输出到下游（池线程内，与调度点同上下文）
+		_propagateFrom(nodeName, taskId, gate, remainingHops, graph, output, signals, errors);
+	});
 }
 
 // ════════════════════════════════════════════
-// 异步提交：协程驱动的数据传播
+// 异步提交：事件驱动的数据传播
 // ════════════════════════════════════════════
 
 void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds timeout,
@@ -122,37 +138,30 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 			});
 	}
 
-	// 扫描全图，对所有已就绪的节点创建传播协程
+	// 扫描全图，对所有已就绪的节点提交执行任务（执行完成后再传播下游）
 	for (const auto& [nodeName, nodePtr] : graph.nodes()) {
 		if (!nodePtr->isReady(taskId))
 			continue;
 
-		// 根据 affinity 将入口节点提交到对应线程池
-		_dispatchToPool(nodePtr->affinity(), nodePtr->tag(),
-						[nodePtr = nodePtr.get(), taskId] {
-			try {
-				nodePtr->tryExecute(taskId);
-			} catch (const NodeException& e) {
-				// 线程池中无法直接调用 recordError，错误通过协程链中 whenComplete 的 result 传播
-			}
-		});
-
-		// 创建协程：等待节点完成后自动传播数据到下游
-		_scheduler->spawnTask(
-			_propagateFrom(nodeName, taskId, gate, maxHops, graph, output, signals, errors));
+		// 入口节点：执行 + 完成后就地传播（_submitNodeRun 内部处理）
+		_submitNodeRun(nodePtr.get(), nodeName, taskId, gate, maxHops,
+					   graph, output, signals, errors);
 	}
 }
 
 // ════════════════════════════════════════════
-// 协程数据传播核心
+// 事件驱动数据传播核心
 // ════════════════════════════════════════════
 
-Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
-										   std::shared_ptr<TaskGate> gate,
-										   uint32_t remainingHops,
-										   GraphStore& graph, OutputZone& output,
-										   SignalStore& signals, ErrorTracker& errors) {
-	// [检查点 0] TTL 耗尽：主动终止 task（不依赖 _onExhausted）
+void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
+									 std::shared_ptr<TaskGate> gate,
+									 uint32_t remainingHops,
+									 GraphStore& graph, OutputZone& output,
+									 SignalStore& signals, ErrorTracker& errors) {
+	// 调用前提：节点已由 _submitNodeRun 执行成功（失败路径已记录错误并跳过传播），
+	// 输出已写入 TaskBuffer 输出槽位，本函数在池线程内就地执行。
+
+	// [检查点 0] TTL 耗尽：主动终止 task（不依赖 _exhaustedCheck）
 	if (remainingHops == 0) {
 		std::string reason = "propagation hops exhausted (TTL=0) at node '" + nodeName
 							 + "': cycle or excessively deep graph detected";
@@ -160,25 +169,17 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		gate->terminated.store(true, std::memory_order_release);
 		_diagnoseAbnormal(taskId, reason, output, graph, errors);
 		_terminate(taskId, graph, output, signals);
-		co_return;
+		return;
 	}
 
 	// [检查点 1] 入口：若 task 已终止，直接返回
 	if (_isTerminated(taskId)) {
-		co_return;
+		return;
 	}
 
 	auto* src = graph.node(nodeName);
 	if (!src)
-		co_return;
-
-	// co_await 挂起当前协程，等待该节点执行完成
-	auto result = co_await src->whenComplete(taskId);
-	if (!result.ok()) {
-		errors.recordError(taskId, nodeName, "ExecutionEngine::_propagateFrom",
-						   "Node execution failed: " + result.message);
-		co_return; // 失败则不传播
-	}
+		return;
 
 	// [检查点 2] 节点完成 → 三步流水线：打卡 → OutputZone 搬运 → 边搬运
 	//
@@ -189,7 +190,7 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		if (output.accumulateAndCheck(nodeName, outPort.name, taskId)) {
 			gate->terminated.store(true, std::memory_order_release);
 			_terminate(taskId, graph, output, signals);
-			co_return;
+			return;
 		}
 	}
 
@@ -228,7 +229,7 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 
 		// [检查点 3] 写入下游前再确认一次未被终止
 		if (_isTerminated(taskId))
-			co_return;
+			return;
 
 		try {
 			dst->setInput(taskId, edge.dstPort, std::move(data));
@@ -239,29 +240,10 @@ Task<void> ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 			continue;
 		}
 
-		// 下游就绪 → 按 affinity 提交到相应线程池
+		// 下游就绪 → 提交执行 + 完成后继续传播（数据冒泡）
 		if (dst->isReady(taskId)) {
-			auto dstNode = edge.dstNode;
-			co_await _dispatchToPoolAsync(dst->affinity(), dst->tag(),
-				[this, dst, taskId, dstNode, &errors] {
-					try {
-						dst->tryExecute(taskId);
-					} catch (const NodeException& e) {
-						errors.recordError(taskId, dstNode,
-										   "ExecutionEngine::_propagateFrom",
-										   "NodeException in tryExecute: "
-											   + std::string(e.what()));
-					}
-				});
-
-			// [检查点 1b] 提交完确认未被终止再 spawn 下游
-			if (_isTerminated(taskId))
-				co_return;
-
-			// 创建下游传播协程（非阻塞：fire-and-forget spawn）
-			_scheduler->spawnTask(
-				_propagateFrom(edge.dstNode, taskId, gate, remainingHops - 1,
-							   graph, output, signals, errors));
+			_submitNodeRun(dst, edge.dstNode, taskId, gate, remainingHops - 1,
+						   graph, output, signals, errors);
 		}
 	}
 }
