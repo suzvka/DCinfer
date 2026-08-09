@@ -39,6 +39,9 @@ static Tensor::TensorType onnxTypeToTensorType(ONNXTensorElementDataType type) {
 	switch (type) {
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:   return Tensor::TensorType::Float;
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:  return Tensor::TensorType::Float;
+	// FP16 挂 Float 族（typeSize=2）：数据黑盒传递，DC 侧不解释数值，
+	// 反向映射 Float+2 → FLOAT16（见 tensorTypeToOnnxType）
+	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return Tensor::TensorType::Float;
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
@@ -49,8 +52,9 @@ static Tensor::TensorType onnxTypeToTensorType(ONNXTensorElementDataType type) {
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:  return Tensor::TensorType::Uint;
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:    return Tensor::TensorType::Bool;
 	default:
-		// FLOAT16/BFLOAT16/STRING/UNDEFINED 等：DC 类型系统无对应族，
-		// 显式降级并告警，避免静默错误（下游经端口类型 Void + typeSize 感知）
+		// BFLOAT16/STRING/UNDEFINED 等：DC 类型系统无对应族。BFLOAT16 与 FLOAT16
+		// 同为 2 字节，挂 Float 族会使反向映射歧义，故保持显式降级并告警，
+		// 避免静默错误（下游经端口类型 Void + typeSize 感知）
 		std::cerr << "[OnnxRuntime] warning: ONNX element type " << static_cast<int>(type)
 				  << " has no DC::TensorType mapping; port mapped to Void" << std::endl;
 		return Tensor::TensorType::Void;
@@ -82,6 +86,7 @@ static bool tensorTypeToOnnxType(Tensor::TensorType type, size_t typeSize,
 								 ONNXTensorElementDataType& out) {
 	switch (type) {
 	case Tensor::TensorType::Float:
+		if (typeSize == 2) { out = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16; return true; }
 		if (typeSize == 4) { out = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;  return true; }
 		if (typeSize == 8) { out = ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE; return true; }
 		return false;

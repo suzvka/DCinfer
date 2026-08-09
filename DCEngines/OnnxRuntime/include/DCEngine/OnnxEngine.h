@@ -30,7 +30,8 @@ struct OnnxOptions {
 /// - createNode(engineType, name, modelPath) 自动从模型创建并缓存引擎实例，
 ///   并从实例推导输入/输出端口 Schema（模型仅加载一次）
 /// - 张量转换经 TensorConverter 契约：DC::Tensor ↔ Ort::Value
-/// - 未知 ONNX 元素类型（FLOAT16/BFLOAT16/STRING 等）显式降级为 Void 并告警
+/// - FP16（FLOAT16）挂 Float 类型族（typeSize=2，数据黑盒传递不解释数值）；
+///   BFLOAT16/STRING 等仍显式降级为 Void 并告警
 /// - 算子内线程数与 SessionOptions 自定义（EP 选择）通过 OnnxOptions 配置
 /// - 编译期默认 EP：构建选项 DCINFER_ORT_EP（CPU/CUDA/TENSORRT/OPENVINO）
 ///   决定默认追加的 ExecutionProvider，用户无需写代码；

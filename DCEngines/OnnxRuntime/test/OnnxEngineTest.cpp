@@ -169,6 +169,20 @@ DC::Tensor makeFloatTensor(const float (&values)[4]) {
 	return DC::Tensor::Create<float>({1, 4}, std::move(block));
 }
 
+// fp32 → fp16 位模式（测试值均为 fp16 精确可表示，截断转换即得精确结果）
+static uint16_t fp32ToFp16Bits(float value) {
+	uint32_t bits = 0;
+	std::memcpy(&bits, &value, sizeof(bits));
+	const uint32_t sign = (bits >> 16) & 0x8000u;
+	const int32_t exp = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+	const uint32_t mant = (bits >> 13) & 0x3FFu;
+	if (exp >= 0x1F)
+		return static_cast<uint16_t>(sign | 0x7C00u); // ±Inf
+	if (exp <= 0)
+		return static_cast<uint16_t>(sign);           // 0 / subnormal（测试值不涉及）
+	return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | mant);
+}
+
 int fail(const std::string& msg) {
 	std::cerr << "[FAIL] " << msg << std::endl;
 	return 1;
@@ -298,7 +312,7 @@ int main() {
 		}
 		std::cout << "[PASS] converter round-trip: DC::Tensor <-> Ort::Value" << std::endl;
 
-		// ── 7. FP16 模型：未知元素类型显式降级为 Void（含告警输出）──
+		// ── 7. FP16 模型：挂 Float 族（typeSize=2）+ 真实推理；BF16 仍降级 Void ──
 		{
 			auto fp16Path = generateAddModel("dcinfer_test_add_fp16.onnx", 10, {1, 4});
 			if (fp16Path.empty())
@@ -307,13 +321,63 @@ int main() {
 			if (!node)
 				return fail("FP16 createNode returned null");
 			const auto& fp16Schema = node->schema();
-			if (fp16Schema.inputs.empty() || fp16Schema.inputs[0].type != DC::Tensor::TensorType::Void)
-				return fail("FP16 port should be explicitly mapped to Void");
+			if (fp16Schema.inputs.empty() || fp16Schema.inputs[0].type != DC::Tensor::TensorType::Float)
+				return fail("FP16 port should map to Float family");
 			if (fp16Schema.inputs[0].typeSize != 2)
 				return fail("FP16 port typeSize should be 2");
+
+			// FP16 真实推理：X + Y = Z（fp16 位模式，数据黑盒传递）
+			DC::TestHarness harness;
+			harness.addNode(std::move(node));
+			harness.bindOutput("onnx_fp16", "Z");
+			const float xData[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+			const float yData[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+			auto makeFp16 = [](const float (&vals)[4]) {
+				DC::Tensor::DataBlock block(4 * sizeof(uint16_t));
+				uint16_t tmp[4];
+				for (size_t i = 0; i < 4; ++i)
+					tmp[i] = fp32ToFp16Bits(vals[i]);
+				std::memcpy(block.data(), tmp, sizeof(tmp));
+				return DC::Tensor(DC::Tensor::TensorType::Float, sizeof(uint16_t), {1, 4}, std::move(block));
+			};
+			harness.feedInput("task_fp16", "onnx_fp16", "X", makeFp16(xData));
+			harness.feedInput("task_fp16", "onnx_fp16", "Y", makeFp16(yData));
+			harness.submit("task_fp16", "onnx_fp16", "Z");
+			if (!harness.awaitCompletion("task_fp16"))
+				return fail("FP16 task timed out or failed");
+			if (harness.hasErrors()) {
+				for (const auto& err : harness.taskErrors("task_fp16"))
+					std::cerr << "  " << err.nodeName << ": " << err.message << std::endl;
+				return fail("FP16 task completed with errors");
+			}
+			auto result = harness.getOutputTensor("task_fp16", "onnx_fp16", "Z");
+			if (result.type() != DC::Tensor::TensorType::Float || result.typeSize() != 2)
+				return fail("FP16 output should be Float typeSize=2");
+			auto zData = result.data<uint16_t>();
+			const float expected[4] = {11.0f, 22.0f, 33.0f, 44.0f};
+			if (zData.size() != 4)
+				return fail("FP16 expected 4 output elements, got " + std::to_string(zData.size()));
+			for (size_t i = 0; i < 4; ++i) {
+				if (zData[i] != fp32ToFp16Bits(expected[i]))
+					return fail("FP16 output[" + std::to_string(i) + "] bits mismatch");
+			}
 			std::filesystem::remove(fp16Path);
+
+			// BF16：与 FP16 同为 2 字节，反向映射歧义，保持显式降级 Void
+			auto bf16Path = generateAddModel("dcinfer_test_add_bf16.onnx", 16, {1, 4});
+			if (bf16Path.empty())
+				return fail("BF16 model generation failed");
+			auto bf16Node = reg.createNode("OnnxRuntime", "onnx_bf16", bf16Path);
+			if (!bf16Node)
+				return fail("BF16 createNode returned null");
+			const auto& bf16Schema = bf16Node->schema();
+			if (bf16Schema.inputs.empty() || bf16Schema.inputs[0].type != DC::Tensor::TensorType::Void)
+				return fail("BF16 port should be explicitly mapped to Void");
+			if (bf16Schema.inputs[0].typeSize != 2)
+				return fail("BF16 port typeSize should be 2");
+			std::filesystem::remove(bf16Path);
 		}
-		std::cout << "[PASS] FP16 model: port explicitly mapped to Void with warning" << std::endl;
+		std::cout << "[PASS] FP16 model: Float family (typeSize=2), inference verified; BF16 still Void" << std::endl;
 
 		// ── 8. 动态 shape 模型（dim=-1）：推导保留 -1 且实际执行通过 ──
 		{
