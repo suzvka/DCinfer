@@ -120,45 +120,31 @@ std::string EngineRegistry::_makeEngineKey(const std::string& engineType, const 
 EngineInstance* EngineRegistry::getOrCreateEngine(const std::string& engineType, const std::string& modelPath) {
 	auto key = _makeEngineKey(engineType, modelPath);
 
-	// 快速路径：已缓存直接返回
-	{
-		std::lock_guard lk(_mutex);
-		auto it = _engineInstances.find(key);
-		if (it != _engineInstances.end()) {
-			return &it->second;
-		}
+	// 全程持锁：查缓存 → 创建 → 插入原子完成，保证同一 key 的引擎实例只创建一次。
+	// （锁外创建存在 check-then-act 竞态窗口，并发线程会各自重复创建实例。）
+	// 注意：createEngine 钩子在锁内执行，钩子内不得反向调用本 registry 的方法
+	// （_mutex 非递归，否则死锁）。引擎创建按 modelPath 缓存、低频发生，锁内创建开销可接受。
+	std::lock_guard lk(_mutex);
+
+	// 已缓存直接返回
+	auto it = _engineInstances.find(key);
+	if (it != _engineInstances.end()) {
+		return &it->second;
 	}
 
-	// 锁内拷贝 createEngine 钩子与所属描述符指针，锁外创建实例
-	std::function<EngineInstance(const std::string&)> createFn;
-	const EngineDescriptor* descPtr = nullptr;
-	{
-		std::lock_guard lk(_mutex);
-		auto engIt = _engines.find(engineType);
-		if (engIt == _engines.end() || !engIt->second.createEngine)
-			return nullptr;
-		createFn = engIt->second.createEngine;
-		descPtr = &engIt->second;
-	}
+	auto engIt = _engines.find(engineType);
+	if (engIt == _engines.end() || !engIt->second.createEngine)
+		return nullptr;
 
-	auto instance = createFn(modelPath);
+	auto instance = engIt->second.createEngine(modelPath);
 	if (!instance)
 		return nullptr;
 
-	// 双重检查：并发下其他线程可能已插入
-	{
-		std::lock_guard lk(_mutex);
-		auto it = _engineInstances.find(key);
-		if (it != _engineInstances.end()) {
-			return &it->second;
-		}
-
-		auto [insertedIt, ok] = _engineInstances.emplace(std::move(key), std::move(instance));
-		// 注入所属描述符（权威值，覆盖构造时传入值）。
-		// _engines 注册后不擦除，节点地址稳定，指针可安全长存。
-		insertedIt->second.setDescriptor(descPtr);
-		return &insertedIt->second;
-	}
+	auto [insertedIt, ok] = _engineInstances.emplace(std::move(key), std::move(instance));
+	// 注入所属描述符（权威值，覆盖构造时传入值）。
+	// _engines 注册后不擦除，节点地址稳定，指针可安全长存。
+	insertedIt->second.setDescriptor(&engIt->second);
+	return &insertedIt->second;
 }
 
 void EngineRegistry::releaseEngine(const std::string& engineType, const std::string& modelPath) {

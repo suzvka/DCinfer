@@ -105,7 +105,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 								 + "'. Call declareOutput() before submit().");
 	}
 
-	// 创建任务门控：协程链与看门狗共享，最后一个持有者析构时触发耗尽检测
+	// 创建任务门控：任务 lambda 链与看门狗共享，最后一个持有者析构时触发耗尽检测
 	auto gate = std::make_shared<TaskGate>();
 	gate->engine = this;
 	gate->output = &output;
@@ -324,10 +324,10 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 		return;
 	}
 
-	// 声明未满足：协程链已耗尽但输出声明未达成。
+	// 声明未满足：传播链已耗尽但输出声明未达成。
 	// 写入诊断警告，但不主动终止——留给看门狗（若已配置）处理真正的死锁。
 	// 若未配置看门狗（timeout=0），调用方需自行处理 wait() 超时。
-	_diagnoseAbnormal(taskId, "coroutine chain exhausted with unsatisfied output declarations",
+	_diagnoseAbnormal(taskId, "propagation chain exhausted with unsatisfied output declarations",
 					  output, graph, errors);
 }
 

@@ -21,7 +21,7 @@ namespace DC {
 //
 // InferGraph 是用户唯一接触的 Facade，内部委托给：
 //   - GraphStore      图拓扑存储
-//   - ExecutionEngine 执行调度与协程传播
+//   - ExecutionEngine 执行调度与事件驱动数据传播
 //   - OutputZone      输出聚合
 //   - ErrorTracker    错误收集
 //   - SignalStore     信号仓库
@@ -49,7 +49,7 @@ public:
 	InferGraph(const InferGraph&) = delete;
 	InferGraph& operator=(const InferGraph&) = delete;
 
-	// 移动语义禁止：ExecutionEngine 持有活跃线程和协程状态，
+	// 移动语义禁止：ExecutionEngine 持有活跃线程池状态，
 	// 移动会导致 TaskGate 中裸指针（graph/output/signals）悬空。
 	InferGraph(InferGraph&&) = delete;
 	InferGraph& operator=(InferGraph&&) = delete;
@@ -217,12 +217,12 @@ public:
 	}
 
 	/// @brief  导出为可嵌入父图的包装 Node
-	///         子图内部用独立 CoroScheduler 执行，与父图隔离
+	///         子图复用本图的 ExecutionEngine（三层线程池）执行，与父图隔离
 	/// @note   前提：已调用 bindInput + bindOutput 定义了图接口
 	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活
 	///
 	/// @note   性能提示：若仅需将一组节点约束为串行执行（共享单线程），
-	///         优先使用 declareSubgraph()——零额外线程开销、零调度器开销。
+	///         优先使用 declareSubgraph()——零额外线程开销、零调度开销。
 	///         exportNode 适用于需要独立 InferGraph 实例的部署边界（如跨设备/跨进程）。
 	std::unique_ptr<Node> exportNode(const std::string& nodeName,
 									uint32_t maxHops = kDefaultMaxHops);
@@ -230,7 +230,7 @@ public:
 private:
 	// ── 内部组件（声明顺序决定析构顺序）──
 	// ExecutionEngine 必须最后声明 → 最先析构：
-	//   其 CoroScheduler shutdown 期间 TaskGate 析构函数需访问下方成员。
+	//   其线程池 shutdown 期间 TaskGate 析构函数需访问下方成员。
 	std::shared_ptr<SignalStore> _signalStore;
 	ErrorTracker    _errors;
 	OutputZone      _outputZone;
