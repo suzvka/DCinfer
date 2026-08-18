@@ -1,5 +1,6 @@
 #include "SignalStore.h"
 
+#include <mutex>
 #include <shared_mutex>
 
 namespace DC {
