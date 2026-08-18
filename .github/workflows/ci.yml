@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Windows / MSVC (Release)
+  # ──────────────────────────────────────────────
+  msvc-release:
+    name: Windows MSVC Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Configure (MSVC Release)
+        shell: pwsh
+        run: |
+          cmake --preset msvc-release
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build/msvc-release --config Release
+
+      - name: Test
+        shell: pwsh
+        run: |
+          ctest --test-dir build/msvc-release -C Release --output-on-failure
+
+  # ──────────────────────────────────────────────
+  # Linux / GCC (Release)
+  # ──────────────────────────────────────────────
+  gcc-release:
+    name: Linux GCC Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++ pkg-config
+
+      - name: Configure (GCC Release)
+        run: |
+          cmake --preset gcc-release
+
+      - name: Build
+        run: |
+          cmake --build build/gcc-release --config Release
+
+      - name: Test
+        run: |
+          ctest --test-dir build/gcc-release -C Release --output-on-failure
+
+  # ──────────────────────────────────────────────
+  # Linux / Clang (Release) — bonus cross-compiler check
+  # ──────────────────────────────────────────────
+  clang-release:
+    name: Linux Clang Release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang pkg-config
+
+      - name: Configure (Clang Release)
+        run: |
+          cmake --preset clang-release
+
+      - name: Build
+        run: |
+          cmake --build build/clang-release --config Release
+
+      - name: Test
+        run: |
+          ctest --test-dir build/clang-release -C Release --output-on-failure
