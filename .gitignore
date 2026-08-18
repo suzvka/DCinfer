@@ -22,7 +22,8 @@ Makefile
 CTestTestfile.cmake
 Testing/
 
-# 项目自维护的 vcpkg overlay ports（必须纳入版本控制，供协作者构建）
+# 项目自维护的 vcpkg toolchain 与 overlay ports（必须纳入版本控制，供协作者构建）
+!cmake/vcpkg-toolchain.cmake
 !cmake/overlay-ports/
 !cmake/overlay-ports/**
 
