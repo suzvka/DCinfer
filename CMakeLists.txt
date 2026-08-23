@@ -45,6 +45,15 @@ if (BUILD_TESTS)
     endif()
 endif()
 
+# ── DCNet：网络适配器算子集合（契约内置、协议外置，见 DCNet/DESIGN.md）──
+# 置于 BUILD_TESTS 之后：enable_testing() 先行，DCNet/test 的 add_test 才能注册
+option(BUILD_DCNET "Build DCNet network adapters" ON)
+if (BUILD_DCNET)
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCNet/CMakeLists.txt)
+        add_subdirectory(DCNet)
+    endif()
+endif()
+
 # ── 引擎适配器（可选，按需启用各引擎）──
 option(BUILD_ENGINES "Build engine adapters" ON)
 if (BUILD_ENGINES)

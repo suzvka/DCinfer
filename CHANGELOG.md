@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **DCNet（网络适配器算子集合，新增顶层模块，`BUILD_DCNET` 默认 ON）**
+  - 对接契约：`DcNetTransport`（传输抽象）/ `DcNetCodec`（协议映射）/
+    `NetEndpoint`（端点配置）/ `NetError`（归一化中间结构）——契约内置、协议外置
+  - 错误归一化：网络错误 / HTTP 状态 / 远端错误报文 → 本地标准报错
+    （`NodeStatus` + 消息前缀 + `retryable`），纯函数映射表可单测
+  - 本地形状规则：网络算子端口 Schema 本地声明（复用 `NodePort`，含 -1 动态维与锚定）
+  - 内置适配器 `DCNet.Http`：WinHTTP transport（零新增依赖）+ 张量 JSON codec
+    （`{"dtype","shape","data(base64)"}`）+ OpenAI 兼容 chat codec
+  - `DcNetSync` 核心 async→sync 桥（ADR-6：默认不派生线程，异步 SDK 由 transport 内部承载）
+  - 注册入口：`registerDcNetAdapter`（通用）/ `registerDcNetHttp`（便捷）
+  - 测试：`NetErrorTest`（映射表）/ `NetAdapterTest`（契约 + FakeTransport）/
+    `HttpTransportTest`（MockServer 真实 HTTP：传输往返、404/500/拒连归一化、张量与 chat 端到端）
+  - 设计文档：`DCNet/DESIGN.md`（ADR-1~6 决策记录 + 完整契约规格）
+
+- **文档**
+  - README 新增 "网络适配器算子（DCNet）" 章节（定位、契约哲学、最小用法）
+  - DCinfer-test 外部消费验证：`net_smoke`（外部开发者自定义 transport/codec）与
+    `net_mnist`（网络化 MNIST 端到端，预测 7）
+
 ## [0.1.0] - 2026-08-19
 
 ### Added

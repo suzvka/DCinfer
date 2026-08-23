@@ -56,6 +56,34 @@ DCinfer 将"节点做什么"与"用什么引擎执行"解耦。`EngineRegistry` 
 
 节点通过引擎名称引用后端——替换引擎无需修改管线结构。
 
+### 网络适配器算子（DCNet）
+
+DCNet 是网络适配器算子集合：把远端推理服务（云端 API、局域网 GPU worker、私有服务）
+以统一形态接入图运行时，形态与 ONNX 适配器一致（`EngineDescriptor` 家族）。两个关键设计：
+
+- **形状规则在本地声明**：网络算子端口 Schema（类型/形状/锚定/默认值）本地配置，
+  不依赖远端提供元数据；
+- **错误归一化**：网络错误（超时/断连）与远端错误报文统一映射为本地标准报错
+  （`Node::Result` + `NodeStatus` + `ErrorTracker`），图级语义与本地引擎节点一致。
+
+架构：**契约内置、协议外置**——核心定义 `DcNetTransport` / `DcNetCodec` / `NetError`
+对接契约；随库提供内置适配器 `DCNet.Http`（WinHTTP transport + 张量 JSON codec +
+OpenAI 兼容 chat codec）；第三方协议由开发者实现 transport + codec 接入（"双向翻译器"
+心智模型，对方零改动）。设计文档见 [`DCNet/DESIGN.md`](DCNet/DESIGN.md)。
+
+```cpp
+// 最小用法：张量级远端推理节点
+#include "DCNet/DcNetHttp.h"
+
+DC::Net::registerDcNetHttp(DC::EngineRegistry::instance(), DC::Net::makeTensorJsonCodec());
+auto node = DC::EngineRegistry::instance().createNode(
+    "DCNet.Http", "remote", "http://192.168.1.10:8080/v1");   // modelPath = 远端端点
+```
+
+构建：`BUILD_DCNET`（默认 ON，仅依赖核心库 + nlohmann-json；Windows 端 HTTP 用 WinHTTP
+零新增依赖）。端到端示例见 [DCinfer-test](https://github.com/suzvka/DCinfer-test)
+（`net_mnist`：网络化 MNIST，本地预处理 → DCNet.Http → 远端 ORT 推理 → 预测 7）。
+
 ### 零依赖核心
 
 DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准库。DCIr 序列化模块依赖 nlohmann-json、minizip、zlib（通过 vcpkg 管理），核心库本身不引入任何外部依赖。
