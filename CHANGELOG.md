@@ -5,28 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-24
+
+### Changed
+
+- **DCNet 重构为张量网络传输框架**（原"网络适配器算子集合"，见 `DCNet/DESIGN.md`）
+  - 职责收缩：传输（`NetTransport_Http`，WinHTTP）+ 张量 JSON 数据格式
+    （数值 base64 / **Data 文本 UTF-8 直传**，新增 `makeTextJsonCodec`）
+    + 错误归一化（`NetError`）+ 对接契约（`NetTransport` / `NetCodec` /
+    `NetEndpoint` / `NetSync`）；协议级适配器不再内置
+  - 默认 engineType 改名：`"DCNet.Http"` → `"DCNet.Tensor"`（破坏性变更）
+  - `MockServer` 升为公开测试基础设施（`DCNet/include/DCNet/MockServer.h`，
+    DCNet 与 DCEngines 适配器测试共用）
+
+- **构建默认值翻转：核心默认纯净**
+  - `BUILD_ENGINE_BUILTIN` / `BUILD_ENGINE_OPENAI` / `BUILD_DCNET` 默认改为 OFF——
+    全新配置只构建核心库 + DCIr + 核心测试，引擎适配器与网络框架按需启用
+  - 新增 `core-only` CMake 预设（`cmake --preset core-only`）；README 新增
+    "仅使用核心（Core-only）"章节（含 git sparse-checkout 只取核心目录指引）
+  - 修复 `CMakePresets.json` 编码损坏（中文 description 乱码，重写为规范要求
+    的 UTF-8）
 
 ### Added
 
-- **DCNet（网络适配器算子集合，新增顶层模块，`BUILD_DCNET` 默认 ON）**
-  - 对接契约：`DcNetTransport`（传输抽象）/ `DcNetCodec`（协议映射）/
-    `NetEndpoint`（端点配置）/ `NetError`（归一化中间结构）——契约内置、协议外置
-  - 错误归一化：网络错误 / HTTP 状态 / 远端错误报文 → 本地标准报错
-    （`NodeStatus` + 消息前缀 + `retryable`），纯函数映射表可单测
-  - 本地形状规则：网络算子端口 Schema 本地声明（复用 `NodePort`，含 -1 动态维与锚定）
-  - 内置适配器 `DCNet.Http`：WinHTTP transport（零新增依赖）+ 张量 JSON codec
-    （`{"dtype","shape","data(base64)"}`）+ OpenAI 兼容 chat codec
-  - `DcNetSync` 核心 async→sync 桥（ADR-6：默认不派生线程，异步 SDK 由 transport 内部承载）
-  - 注册入口：`registerDcNetAdapter`（通用）/ `registerDcNetHttp`（便捷）
-  - 测试：`NetErrorTest`（映射表）/ `NetAdapterTest`（契约 + FakeTransport）/
-    `HttpTransportTest`（MockServer 真实 HTTP：传输往返、404/500/拒连归一化、张量与 chat 端到端）
-  - 设计文档：`DCNet/DESIGN.md`（ADR-1~6 决策记录 + 完整契约规格）
+- **`DCEngines/OpenAI`：OpenAI 兼容远端服务引擎适配器（新模块）**
+  - `DC::OpenAI::registerOpenAiEngine` / `OpenAiOptions`（engineType `"OpenAI"`），
+    与 OnnxRuntime 对称并列（本地模型后端 vs 远端 LLM 服务）
+  - chat codec 自 DCNet 迁移：`/v1/chat/completions`，端口
+    prompt/system/params（Data，可选）→ response（Data）
+  - 基于 DCNet 传输框架：HttpTransport + `NetCodec` 契约 + `NetError` 归一化
+  - `OpenAiEngineTest`：chat 端到端（model/messages/stream/参数覆盖断言）
+    + 远端 500 归一化（MockHttpServer，真实 HTTP）
+  - 构建：`BUILD_ENGINE_OPENAI`（默认 OFF，依赖 `BUILD_DCNET`）
+  - 文档：`DCEngines/OpenAI/README.md`
 
-- **文档**
-  - README 新增 "网络适配器算子（DCNet）" 章节（定位、契约哲学、最小用法）
-  - DCinfer-test 外部消费验证：`net_smoke`（外部开发者自定义 transport/codec）与
-    `net_mnist`（网络化 MNIST 端到端，预测 7）
+### Removed
+
+- `DCNet` 的 `makeChatCodec` / `"DCNet.HttpChat"` engineType（迁移至
+  `DCEngines/OpenAI` 后退役）
+- `DCNet/src/NetCodec_Chat.cpp`（迁移后删除）
 
 ## [0.1.0] - 2026-08-19
 
@@ -90,4 +107,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single example**: Only `01_hello_graph` is provided. More complex scenarios (multi-branch, cyclic, cloud offload) are documented but not exemplified.
 - **No Python bindings**: C++ only; no language bindings or scripting interface.
 
+[0.2.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.2.0
 [0.1.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.1.0
