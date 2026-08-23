@@ -1,12 +1,12 @@
 # DCNet 设计文档
 
-> 网络适配器算子集合：把远端推理服务（云端 API、局域网 GPU worker、私有服务）
-> 以统一形态接入 DCinfer 图运行时。形态与 ONNX 适配器一致（EngineDescriptor 家族），
-> 差异在于：**形状规则在本地声明**（而非从模型文件推导），**网络/远端错误归一化**
-> 为本地标准报错模式。
+> 张量网络传输框架：为远端推理服务（云端 API、局域网 GPU worker、私有服务）
+> 提供统一的**传输 + 张量数据格式 + 错误归一化 + 对接契约**，让远端节点以与
+> 本地引擎一致的方式接入 DCinfer 图运行时（EngineDescriptor 家族）。
+> 协议级适配器（如 OpenAI 兼容）位于 `DCEngines`，基于本框架契约实现。
 >
-> 状态：**M0–M2 已实现**（对接契约 + NetError 归一化 + 内置适配器 DCNet.Http，
-> 仓库内 13/13 测试通过，外部消费方 DCinfer-test 端到端验收通过）。
+> 状态：**M0–M2 已实现**（对接契约 + NetError 归一化 + HTTP 传输 + 张量/文本
+> JSON 格式；协议适配器 `DCEngines/OpenAI` 已随框架交付）。
 > 本文档仍为权威约定，实现与文档不一致处以实现为准并回改文档。
 
 ---
@@ -15,14 +15,15 @@
 
 ### 1.1 定位
 
-DCNet 是一组**网络适配器算子**，与 `DCEngines/OnnxRuntime` 适配器同构：
+DCNet 是**张量网络传输框架**，与 `DCEngines` 的本地引擎适配器互补：
 
-| 维度 | ONNX 适配器 | DCNet 适配器 |
+| 维度 | 本地引擎适配器（DCEngines） | DCNet 框架（+ 其上协议适配器） |
 |---|---|---|
-| Schema 来源 | 模型文件推导（`getPortsFromSession`） | **本地声明**：`getInputPorts/getOutputPorts` 返回静态端口表 |
+| Schema 来源 | 模型文件推导（如 `getPortsFromSession`） | **本地声明**：`getInputPorts/getOutputPorts` 返回静态端口表 |
 | 实例键 | `engineType + modelPath`（模型文件路径） | 同一机制，modelPath 语义重载为**远端端点**（URL / host:port） |
-| 错误来源 | 本地 ORT 异常 | 网络错误 + 远端报文，经**归一化层**映射到本地标准 |
+| 错误来源 | 本地引擎异常 | 网络错误 + 远端报文，经**归一化层**映射到本地标准 |
 | 部署形态 | 进程内加载模型 | 进程外服务，经网络通信 |
+| 协议语义 | 引擎实现自带 | **框架不带**：具体协议（如 OpenAI 兼容）由 `DCEngines` 适配器实现 |
 
 ### 1.2 两条硬性要求（来自定位）
 
@@ -235,25 +236,27 @@ static Node::Schema chatSchema() {
 
 ---
 
-## 4. 三层结构
+## 4. 模块结构（框架 + 适配器）
 
 ```
 ┌─ DCNet 核心（内置，稳定契约）─────────────────────────────┐
-│  · 端口 Schema 声明辅助（本地形状规则）                    │
+│  · 契约接口：NetTransport / NetCodec / NetEndpoint / NetSync │
+│  · 数据格式：张量 JSON（数值 base64 / Data 文本 UTF-8）    │
 │  · NetError 归一化（远端报文 → 本地标准报错）              │
-│  · 契约接口：DcNetTransport / DcNetCodec / NetEndpoint     │
-├─ 随库内置适配器（免开发，覆盖常见场景）───────────────────┤
-│  · DCNet.Http    OpenAI 兼容 /v1/chat/completions、/v1/embeddings │
-│  · DCNet.Native  可选原生二进制协议（仅 DCinfer↔DCinfer）  │
-├─ 开发者自定义适配器（对接第三方私有协议）─────────────────┤
-│  · 实现 NetTransport + NetCodec → registerDcNetAdapter     │
+│  · 端口 Schema 声明辅助（本地形状规则）                    │
+├─ 内置传输实现（传输层，与协议无关）───────────────────────┤
+│  · NetTransport_Http   HTTP/1.1（WinHTTP，keep-alive）     │
+├─ 协议级适配器（DCEngines，具体后端）──────────────────────┤
+│  · DCEngine::OpenAI    OpenAI 兼容 /v1/chat/completions    │
+│  · 开发者自定义：实现 NetTransport + NetCodec → registerDcNetAdapter │
 └────────────────────────────────────────────────────────────┘
 ```
 
-| 协议 | 何时用 | 代价 |
+| 层 | 何时用 | 代价 |
 |---|---|---|
-| `DCNet.Http`（内置） | 对方是任何 OpenAI 兼容服务 | 文本级 Data 端口，无 tensor 保真 |
-| `DCNet.Native`（可选内置） | 远端也跑 DCinfer SDK | 双方接受我们的 wire format + 版本协商 |
+| `DCNet.Tensor`（HTTP 传输 + 张量/文本格式） | 对方是任意"张量进/张量出"的远端服务 | 对方须接受我们的 JSON 报文格式 |
+| `DCEngine::OpenAI`（协议适配器，DCEngines） | 对方是 OpenAI 兼容服务 | 文本级 Data 端口，无 tensor 保真 |
+| `DCNet.Native`（展望 M3） | 远端也跑 DCinfer SDK | 双方接受我们的 wire format + 版本协商 |
 | 自定义适配器 | 对方是私有协议 / 云 API | 我们写几百行适配，对方零改动 |
 
 关键判断：**"对方不是 DCinfer"从来不是问题——对接责任始终在我们这一侧，且每个
@@ -264,7 +267,7 @@ static Node::Schema chatSchema() {
 
 ## 5. 与 EngineDescriptor 的衔接
 
-每个协议族注册一个 engineType（如 `"DCNet.Http"`），组装 `EngineDescriptor`：
+每个协议族注册一个 engineType（如 `"DCNet.Tensor"` / `"OpenAI"`），组装 `EngineDescriptor`：
 
 | 钩子 | 实现 |
 |---|---|
@@ -354,22 +357,32 @@ DCNet/
 │   ├── NetCodec.h                 # 协议映射接口（§3.2，含 requestPath/schema 声明）
 │   ├── NetSync.h                  # 核心 async→sync 桥（§3.5）
 │   ├── NetTransport_Http.h        # 内置 HTTP transport（WinHTTP，§9 方案 B）★已实现
-│   ├── DcNetHttp.h                # DCNet.Http 注册 + 内置 codec 工厂（§4）★已实现
+│   ├── NetCodec_Tensor.h          # 内置数据格式工厂：张量/文本 JSON codec ★已实现
+│   ├── DcNetHttp.h                # registerDcNetHttp 接线（HTTP 传输 + 任意 codec）★已实现
+│   ├── MockServer.h               # 测试基础设施：极简 mock HTTP 服务（WinSock）★已实现
 │   └── NetPort.h                  # 本地形状规则声明辅助（§3.4，规划中；当前直接用 NodePort）
 ├── src/
 │   ├── NetAdapter.cpp             # 组装 EngineDescriptor（§5）
 │   ├── NetError.cpp               # 归一化映射表（纯函数）
 │   ├── NetTransport_Http.cpp      # HTTP 后端（WinHTTP；POSIX 后端见展望）★已实现
-│   ├── NetCodec_Tensor.cpp        # 张量 JSON codec（DCNet v1 线上格式）★已实现
-│   ├── NetCodec_Chat.cpp          # OpenAI 兼容 chat codec ★已实现
+│   ├── NetCodec_Tensor.cpp        # 张量 JSON codec（数值 base64 + Data 文本直传）★已实现
 │   ├── DcNetHttp.cpp              # registerDcNetHttp 接线 ★已实现
 │   ├── NetBase64.h                # 内部 base64 工具（仅头）★已实现
 │   └── NetTransport_Native.cpp    # DCNet.Native 二进制帧后端（可选，M3）
 └── test/
-    ├── MockServer.h               # 最小 mock 远端 HTTP 服务（WinSock）★已实现
     ├── NetErrorTest.cpp           # 映射表纯单测
     ├── NetAdapterTest.cpp         # 契约实现测试（FakeTransport，不依赖真实远端）
-    └── HttpTransportTest.cpp      # 真实 HTTP：传输/归一化/张量/chat 端到端 ★已实现
+    └── HttpTransportTest.cpp      # 真实 HTTP：传输/归一化/张量/文本端到端 ★已实现
+```
+
+协议级适配器（基于 DCNet 契约开发，位于 DCEngines）：
+
+```
+DCEngines/OpenAI/
+├── include/DCEngine/OpenAiEngine.h   # registerOpenAiEngine / OpenAiOptions
+├── src/OpenAiEngine.cpp              # OpenAI 兼容 chat codec（NetCodec 契约）+ 注册接线
+├── test/OpenAiEngineTest.cpp         # chat 端到端（MockHttpServer，复用 DCNet 测试设施）★已实现
+└── CMakeLists.txt                    # 静态库 DCEngine_OpenAI（DCEngine::OpenAI）
 ```
 
 ---
@@ -391,7 +404,7 @@ DCNet/
 **CMake 接线**（根 `CMakeLists.txt` 仿 `BUILD_IR` 块追加）：
 
 ```cmake
-# DCNet：网络适配器算子集合
+# DCNet：张量网络传输框架
 option(BUILD_DCNET "Build DCNet network adapters" ON)
 if (BUILD_DCNET)
     if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCNet/CMakeLists.txt)
@@ -421,28 +434,33 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 **外部消费注意事项（已由 DCinfer-test 实测，2026 回馈）**：
 
 - vcpkg manifest 模式只安装清单声明的包：外部 `add_subdirectory` 消费方必须在
-  自己的 `vcpkg.json` 声明 `nlohmann-json`（DCNet 的 `find_package` 依赖），
-  否则配置失败；
+  自己的 `vcpkg.json` 声明 `nlohmann-json`（DCNet 及 DCEngine::OpenAI 的
+  `find_package` 依赖），否则配置失败；
 - 不消费 DCNet 的零依赖消费方（如 DCinfer-test 的 `smoke/`）应显式
-  `set(BUILD_DCNET OFF CACHE BOOL "" FORCE)`，避免拉入 nlohmann-json；
-- 外部引用目标：`DCNet::DCNet`（静态库 alias，同构建树可用）；
+  `set(BUILD_DCNET OFF CACHE BOOL "" FORCE)`，避免拉入 nlohmann-json
+  （`BUILD_ENGINE_OPENAI=ON` 会随 `DCNet::DCNet` 缺失自动跳过并告警）；
+- 外部引用目标：`DCNet::DCNet`（静态库 alias，同构建树可用）；协议适配器
+  `DCEngine::OpenAI`（DCEngines/OpenAI，依赖 `DCNet::DCNet`）；
 - 外部开发者接入"对方服务"的完整最小范例见 `DCinfer-test/src/net_smoke.cpp`
-  （自定义 transport + codec → `registerDcNetAdapter` → `createNode` 组图）。
+  （自定义 transport + codec → `registerDcNetAdapter` → `createNode` 组图）；
+  直接对接 OpenAI 兼容服务用 `DCEngine::OpenAI` 的 `registerOpenAiEngine`
+  （原 `makeChatCodec` / `"DCNet.HttpChat"` 已于 2026-08 迁移，见 §11 M2.5）。
 
 ---
 
 ## 10. 测试策略（不依赖真实远端）
 
-1. **MockServer**：最小 mock 远端（C++ 内嵌 HTTP 服务或 Python `http.server`），
-   实现 `/v1/models` 与 `/v1/chat/completions` 的 OpenAI 兼容面，可注入错误响应
-   （5xx / 错误体 / 畸形报文 / 超时）；
+1. **MockServer**：`DCNet/include/DCNet/MockServer.h`（C++ 内嵌极简 HTTP 服务，
+   WinSock，DCNet 与 DCEngines 适配器测试共用），实现 `/v1/infer` 与
+   `/v1/chat/completions` 面，可注入错误响应（5xx / 错误体 / 畸形报文 / 超时）；
 2. **单元测试**：
    - `NetErrorTest`：映射表纯单测（每类网络错误 / HTTP 状态 / 远端错误体 → 期望的
      category / retryable / localStatus / 消息前缀）；
-   - 端口 Schema：文本 Tensor 编解码往返；形状规则校验（含 -1 动态维、anchored）；
-   - 契约实现：MockServer + transport + codec → RunFn 输出断言；
+   - 端口 Schema：文本/数值 Tensor 编解码往返；形状规则校验（含 -1 动态维、anchored）；
+   - 契约实现：MockServer + transport + codec → RunFn 输出断言
+     （`HttpTransportTest` 张量/文本端到端；`OpenAiEngineTest` chat 端到端）；
 3. **集成测试（可选，需真实环境）**：连真实 OpenAI 兼容服务验证端到端
-   prompt → response，标记可选，不在默认 CI 中。
+   prompt → response（`DCEngines/OpenAI`），标记可选，不在默认 CI 中。
 
 ---
 
@@ -452,7 +470,8 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 |---|---|---|---|
 | M0 | 模块骨架 + CMake 接线 + NetError 归一化映射表 + 纯单测 | 可编译静态库，映射表测试通过（零依赖） | ✅ 完成 |
 | M1 | 契约接口（NetTransport/NetCodec/NetEndpoint）+ 契约测试 | 接口冻结；FakeTransport 契约测试 + 外部消费方 net_smoke | ✅ 完成 |
-| M2 | `DCNet.Http` 首个适配器（WinHTTP transport + 张量/chat codec + 归一化） | 契约第一个真实实现；MockServer + HttpTransportTest；net_mnist 端到端验收（预测 7） | ✅ 完成 |
+| M2 | `DCNet.Tensor` 传输框架首发（WinHTTP transport + 张量/文本 JSON 格式 + 归一化） | 契约第一个真实实现；MockServer + HttpTransportTest；net_mnist 端到端验收（预测 7） | ✅ 完成 |
+| M2.5 | 协议适配器外置：OpenAI 兼容 chat codec 迁至 DCEngines（DCNet 收缩为张量传输框架） | `DCEngine::OpenAI` + OpenAiEngineTest；`makeChatCodec` / `"DCNet.HttpChat"` 退役 | ✅ 完成（2026-08） |
 | M3 | `DCNet.Native` 可选协议 + 重连策略（onError）+ POSIX transport | 示例 + CI 接线 | 待办 |
 
 实际工作量：M0–M2 约 1100 行 C++（含测试），外加外部消费方 net_smoke/net_mnist 约 500 行。
@@ -492,6 +511,8 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 - `registerOperator`（无状态轻量路径）：`DCinfer/include/Graph/EngineRegistry.h` L135-143
 - `ErrorTracker` 诊断通道：`DCinfer/include/Graph/ErrorTracker.h`
 - 文本 Data 端口约定（typeSize 不校验）：FreeToken `DCEngines/FreeToken/DESIGN.md` §7
-- ONNX 适配器形态参照：`DCEngines/OnnxRuntime/src/OnnxEngine.cpp`
+- 本地引擎适配器形态参照：`DCEngines/OnnxRuntime/src/OnnxEngine.cpp`
+- 协议级适配器（基于 DCNet 契约）参照：`DCEngines/OpenAI/src/OpenAiEngine.cpp`
+- 内置数据格式工厂（张量/文本 codec）：`DCNet/include/DCNet/NetCodec_Tensor.h`
 - 形状 -1 动态维序列化直通：`DCIr/include/Ir/GraphCompiler.h`
 - 依赖现状（nlohmann-json 已内置）：`vcpkg.json`

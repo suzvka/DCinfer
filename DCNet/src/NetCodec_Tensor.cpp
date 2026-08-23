@@ -1,7 +1,8 @@
-// 张量 JSON codec：DCNet v1 线上格式（DESIGN.md §4 内置适配器）
-//   {"dtype":"float32","shape":[1,1,28,28],"data":"<base64>"}
+// 张量 JSON codec：DCNet v1 线上格式（DESIGN.md §4 内置数据格式）
+//   数值：{"dtype":"float32","shape":[1,1,28,28],"data":"<base64>"}
+//   文本：{"dtype":"text","shape":[N],"data":"<utf-8>"}
 
-#include "DCNet/DcNetHttp.h"
+#include "DCNet/NetCodec_Tensor.h"
 #include "DCNet/NetError.h"
 #include "DCNet/NetTransport.h"
 #include "Tensor.hpp"
@@ -20,6 +21,7 @@ namespace DC::Net {
 
 namespace {
 
+// dtype 字符串 ↔ Tensor 类型映射（数值 base64；Data 文本 UTF-8 直传）
 std::string dtypeToString(Tensor::TensorType type, size_t typeSize) {
 	switch (type) {
 	case Tensor::TensorType::Float:
@@ -30,6 +32,8 @@ std::string dtypeToString(Tensor::TensorType type, size_t typeSize) {
 		return typeSize == 1 ? "uint8" : (typeSize == 2 ? "uint16" : (typeSize == 8 ? "uint64" : "uint32"));
 	case Tensor::TensorType::Bool:
 		return "bool";
+	case Tensor::TensorType::Data:
+		return "text";
 	default:
 		return "unknown";
 	}
@@ -48,11 +52,50 @@ bool dtypeFromString(const std::string& s, Tensor::TensorType& type, size_t& typ
 	if (s == "uint32")  { type = Tensor::TensorType::Uint;  typeSize = 4; return true; }
 	if (s == "uint64")  { type = Tensor::TensorType::Uint;  typeSize = 8; return true; }
 	if (s == "bool")    { type = Tensor::TensorType::Bool;  typeSize = 1; return true; }
+	if (s == "text")    { type = Tensor::TensorType::Data;  typeSize = 1; return true; }
 	return false;
+}
+
+/// Tensor → JSON（Data 文本 UTF-8 直传；数值 base64）
+nlohmann::json encodeTensor(const Tensor& t) {
+	nlohmann::json j;
+	j["dtype"] = dtypeToString(t.type(), t.typeSize());
+	j["shape"] = t.shape();
+	auto bytes = t.bytes();
+	if (t.type() == Tensor::TensorType::Data) {
+		j["data"] = std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+	} else {
+		j["data"] = detail::base64Encode(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+	}
+	return j;
+}
+
+/// JSON → Tensor（支持 "text" 与全部数值 dtype）
+Tensor decodeTensor(const nlohmann::json& j) {
+	Tensor::TensorType type = Tensor::TensorType::Void;
+	size_t typeSize = 0;
+	const std::string dtype = j.value("dtype", "unknown");
+	if (!dtypeFromString(dtype, type, typeSize))
+		throw std::runtime_error("tensor codec: unknown dtype '" + dtype + "'");
+	Tensor::Shape shape = j.value("shape", Tensor::Shape{});
+	if (type == Tensor::TensorType::Data) {
+		const std::string text = j.value("data", "");
+		Tensor::DataBlock block(text.size());
+		if (!text.empty())
+			std::memcpy(block.data(), text.data(), text.size());
+		return Tensor(type, typeSize, std::move(shape), std::move(block));
+	}
+	const std::string b64 = j.value("data", "");
+	const std::string bytes = detail::base64Decode(b64);
+	Tensor::DataBlock block(bytes.size());
+	if (!bytes.empty())
+		std::memcpy(block.data(), bytes.data(), bytes.size());
+	return Tensor(type, typeSize, std::move(shape), std::move(block));
 }
 
 } // namespace
 
+/// 数值张量端口（in "data" Float → out "result" Float）
 class TensorJsonCodec : public DcNetCodec {
 public:
 	Node::Schema schema() const override {
@@ -69,34 +112,47 @@ public:
 		const auto* t = v.as<Tensor>();
 		if (!t)
 			return {};
-		nlohmann::json j;
-		j["dtype"] = dtypeToString(t->type(), t->typeSize());
-		j["shape"] = t->shape();
-		auto bytes = t->bytes();
-		j["data"] = detail::base64Encode(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
-		return j.dump();
+		return encodeTensor(*t).dump();
 	}
 
 	void decodeResponse(Payload& payload, Node::RunContext& ctx) override {
 		const auto j = nlohmann::json::parse(payload);
-		Tensor::TensorType type = Tensor::TensorType::Void;
-		size_t typeSize = 0;
-		const std::string dtype = j.value("dtype", "unknown");
-		if (!dtypeFromString(dtype, type, typeSize))
-			throw std::runtime_error("tensor codec: unknown dtype '" + dtype + "'");
-		Tensor::Shape shape = j.value("shape", Tensor::Shape{});
-		const std::string b64 = j.value("data", "");
-		const std::string bytes = detail::base64Decode(b64);
-		Tensor::DataBlock block(bytes.size());
-		if (!bytes.empty())
-			std::memcpy(block.data(), bytes.data(), bytes.size());
-		ctx.output("result",
-				   Value(std::make_unique<Tensor>(type, typeSize, std::move(shape), std::move(block))));
+		ctx.output("result", Value(std::make_unique<Tensor>(decodeTensor(j))));
+	}
+};
+
+/// Data 文本端口（in "text" Data → out "result" Data）
+class TextJsonCodec : public DcNetCodec {
+public:
+	Node::Schema schema() const override {
+		Node::Schema s;
+		s.inputs = {NodePort::in<std::vector<char>>("text")};
+		s.outputs = {NodePort::out<std::vector<char>>("result")};
+		return s;
+	}
+
+	std::string requestPath() const override { return "/infer"; }
+
+	Payload encodeRequest(const Node::RunContext& ctx) override {
+		const auto& v = ctx.peek("text");
+		const auto* t = v.as<Tensor>();
+		if (!t)
+			return {};
+		return encodeTensor(*t).dump();
+	}
+
+	void decodeResponse(Payload& payload, Node::RunContext& ctx) override {
+		const auto j = nlohmann::json::parse(payload);
+		ctx.output("result", Value(std::make_unique<Tensor>(decodeTensor(j))));
 	}
 };
 
 std::shared_ptr<DcNetCodec> makeTensorJsonCodec() {
 	return std::make_shared<TensorJsonCodec>();
+}
+
+std::shared_ptr<DcNetCodec> makeTextJsonCodec() {
+	return std::make_shared<TextJsonCodec>();
 }
 
 } // namespace DC::Net

@@ -1,9 +1,15 @@
-// OpenAI 兼容 chat codec：POST {basePath}/chat/completions
+// OpenAI 兼容远端引擎适配器：POST {basePath}/chat/completions
 // 端口：prompt/system/params（Data）→ response（Data）
+//
+// 基于 DCNet 传输框架（HttpTransport + NetCodec 契约 + NetError 归一化），
+// 自 NetCodec_Chat.cpp 迁移（2026-08，DCNet 收缩为张量传输框架后
+// 协议级适配器归 DCEngines，与 OnnxRuntime 对称并列）。
 
-#include "DCNet/DcNetHttp.h"
-#include "DCNet/NetError.h"
-#include "DCNet/NetTransport.h"
+#include "DCEngine/OpenAiEngine.h"
+
+#include "DCNet/NetAdapter.h"
+#include "DCNet/NetTransport_Http.h"
+#include "Node.h"
 #include "Tensor.hpp"
 
 #include <nlohmann/json.hpp>
@@ -11,8 +17,9 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 
-namespace DC::Net {
+namespace DC::OpenAI {
 
 namespace {
 
@@ -40,9 +47,8 @@ NodePort optionalDataPort(const std::string& name) {
 	return p;
 }
 
-} // namespace
-
-class ChatCodec : public DcNetCodec {
+/// OpenAI 兼容 chat codec（DCNet NetCodec 契约实现，双向翻译器）。
+class ChatCodec : public DC::Net::DcNetCodec {
 public:
 	explicit ChatCodec(std::string model) : _model(std::move(model)) {}
 
@@ -59,7 +65,7 @@ public:
 
 	std::string requestPath() const override { return "/chat/completions"; }
 
-	Payload encodeRequest(const Node::RunContext& ctx) override {
+	DC::Net::Payload encodeRequest(const Node::RunContext& ctx) override {
 		nlohmann::json j;
 		j["model"] = _model;
 
@@ -92,7 +98,7 @@ public:
 		return j.dump();
 	}
 
-	void decodeResponse(Payload& payload, Node::RunContext& ctx) override {
+	void decodeResponse(DC::Net::Payload& payload, Node::RunContext& ctx) override {
 		const auto j = nlohmann::json::parse(payload);
 		std::string content;
 		if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty() &&
@@ -106,8 +112,16 @@ private:
 	std::string _model;
 };
 
-std::shared_ptr<DcNetCodec> makeChatCodec(std::string model) {
-	return std::make_shared<ChatCodec>(std::move(model));
+} // namespace
+
+void registerOpenAiEngine(EngineRegistry& reg, const OpenAiOptions& opts) {
+	auto codec = std::make_shared<ChatCodec>(opts.model);
+	DC::Net::DcNetAdapterDesc desc;
+	desc.engineType = opts.engineType;
+	desc.schema = codec->schema(); // 本地静态形状规则（不依赖远端）
+	desc.codec = std::move(codec);
+	desc.transportFactory = [] { return std::make_shared<DC::Net::HttpTransport>(); };
+	DC::Net::registerDcNetAdapter(reg, std::move(desc));
 }
 
-} // namespace DC::Net
+} // namespace DC::OpenAI

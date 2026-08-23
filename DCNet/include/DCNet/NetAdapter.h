@@ -17,7 +17,7 @@ namespace DC::Net {
 /// schema 声明本地形状规则（§3.4）；对方 SDK / 协议均为实现细节，
 /// 对运行时零暴露。
 struct DcNetAdapterDesc {
-	/// 注册的 engineType（如 "DCNet.Http"）。
+	/// 注册的 engineType（如 "DCNet.Tensor"）。
 	std::string engineType;
 
 	/// 本地形状规则（静态端口表，不依赖远端推导）。
@@ -38,7 +38,7 @@ struct DcNetAdapterDesc {
 /// 注册后：
 /// @code
 ///   auto node = EngineRegistry::instance().createNode(
-///       "DCNet.Http", "llm", "http://192.168.1.10:8080/v1");   // modelPath = 端点
+///       "DCNet.Tensor", "llm", "http://192.168.1.10:8080/v1");   // modelPath = 端点
 /// @endcode
 ///
 /// 特性：

@@ -4,7 +4,7 @@
     {
       "name": "gcc-debug",
       "displayName": "GCC Linux Debug",
-      "description": "Linux GCC + Ninja (Debug) �?需�?GCC �?11",
+      "description": "Linux GCC + Ninja (Debug)（需 GCC ≥ 11）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/gcc-debug",
       "condition": {
@@ -22,7 +22,7 @@
     {
       "name": "gcc-release",
       "displayName": "GCC Linux Release",
-      "description": "Linux GCC + Ninja (Release) �?需�?GCC �?11",
+      "description": "Linux GCC + Ninja (Release)（需 GCC ≥ 11）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/gcc-release",
       "condition": {
@@ -40,7 +40,7 @@
     {
       "name": "clang-debug",
       "displayName": "Clang Debug",
-      "description": "Clang + Ninja (Debug) �?跨平台，需�?Clang �?14",
+      "description": "Clang + Ninja (Debug)（跨平台，需 Clang ≥ 14）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-debug",
       "cacheVariables": {
@@ -53,7 +53,7 @@
     {
       "name": "clang-release",
       "displayName": "Clang Release",
-      "description": "Clang + Ninja (Release) �?跨平台，需�?Clang �?14",
+      "description": "Clang + Ninja (Release)（跨平台，需 Clang ≥ 14）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-release",
       "cacheVariables": {
@@ -122,7 +122,7 @@
     {
       "name": "msvc-ort-cuda",
       "displayName": "MSVC x64 ONNX Runtime CUDA (Release)",
-      "description": "MSVC x64 + ONNX Runtime CUDA EP (Release) �?需本机 CUDA/cuDNN 环境，构建耗时较长",
+      "description": "MSVC x64 + ONNX Runtime CUDA EP (Release)（需本机 CUDA/cuDNN 环境，构建耗时较长）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/msvc-ort-cuda",
       "condition": {
@@ -137,6 +137,19 @@
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
         "BUILD_ENGINE_ONNXRUNTIME": "ON",
         "DCINFER_ORT_EP": "CUDA"
+      }
+    },
+    {
+      "name": "core-only",
+      "displayName": "Core only (library, no engines)",
+      "description": "只构建 DCinfer 核心库 + DCIr；不构建任何引擎适配器 / DCNet / 测试 / 示例（跨平台，使用默认生成器）",
+      "binaryDir": "${sourceDir}/build/core-only",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
+        "BUILD_ENGINES": "OFF",
+        "BUILD_DCNET": "OFF",
+        "BUILD_TESTS": "OFF",
+        "BUILD_EXAMPLES": "OFF"
       }
     }
   ]

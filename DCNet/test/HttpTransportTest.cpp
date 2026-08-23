@@ -1,17 +1,19 @@
-// HttpTransport + DCNet.Http 集成测试（MockHttpServer 假远端，真实 HTTP 传输）
+// HttpTransport + DCNet.Tensor 集成测试（MockHttpServer 假远端，真实 HTTP 传输）
 //
 // 覆盖（DESIGN.md §6）：
 //   - 传输层：成功 2xx / 404 / 500 / 连接拒绝 / 超时 → NetError 归一化
-//   - 端到端：DCNet.Http 节点（张量 JSON codec）走真实 HTTP 往返 + 张量还原
-//   - 端到端：OpenAI chat codec 走 /chat/completions 往返
+//   - 端到端：DCNet.Tensor 节点（张量 JSON codec，数值）真实 HTTP 往返 + 张量还原
+//   - 端到端：DCNet.Tensor 节点（张量 JSON codec，Data 文本）真实 HTTP 往返 + 文本还原
+// 注：OpenAI chat 端到端已随适配器迁至 DCEngines/OpenAI（OpenAiEngineTest）。
 
 #include "DCNet/DcNetHttp.h"
+#include "DCNet/NetCodec_Tensor.h"
 #include "DCNet/NetError.h"
 #include "DCNet/NetTransport_Http.h"
 #include "Node.h"
 #include "Tensor.hpp"
 
-#include "MockServer.h"
+#include "DCNet/MockServer.h"
 #include "NetBase64.h"
 
 #include <nlohmann/json.hpp>
@@ -178,7 +180,7 @@ TEST(connectionRefusedNormalized) {
 // WinHttpReceiveResponse 仍会等到首字节）；传输级超时语义属 OS 行为，
 // 此处不设超时测试——Timeout 分类/映射已由 NetErrorTest 纯单测覆盖。
 
-// ── 端到端：DCNet.Http 节点 + 张量 JSON codec（真实 HTTP 往返）──
+// ── 端到端：DCNet.Tensor 节点 + 张量 JSON codec（真实 HTTP 往返）──
 
 TEST(endToEndTensorOverHttp) {
 	MockHttpServer server;
@@ -209,9 +211,9 @@ TEST(endToEndTensorOverHttp) {
 	auto& reg = EngineRegistry::instance();
 	registerDcNetHttp(reg, makeTensorJsonCodec());
 
-	auto node = reg.createNode("DCNet.Http", "tensorNode",
+	auto node = reg.createNode("DCNet.Tensor", "tensorNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
-	CHECK(node != nullptr, "DCNet.Http node should be created");
+	CHECK(node != nullptr, "DCNet.Tensor node should be created");
 	CHECK(node->schema().inputs[0].name == "data" && node->schema().outputs[0].name == "result",
 		  "local shape rules from tensor codec");
 
@@ -226,37 +228,46 @@ TEST(endToEndTensorOverHttp) {
 	CHECK(vals.size() == 2 && vals[0] == 1.0f && vals[1] == 2.0f, "decoded tensor values");
 }
 
-// ── 端到端：OpenAI chat codec ──
+// ── 端到端：DCNet.Tensor 节点 + Data 文本 codec（真实 HTTP 往返）──
 
-TEST(endToEndChatOverHttp) {
+TEST(endToEndTextOverHttp) {
 	MockHttpServer server;
 	server.start([&](const std::string& path, const std::string& body, int& status) {
-		if (path != "/v1/chat/completions") {
+		if (path != "/v1/infer") {
 			status = 404;
-			return R"({"error":"not found"})";
+			return std::string(R"({"error":"not found"})");
 		}
+		// 解码请求文本，验证 UTF-8 直传，原样回显（模拟远端推理）
 		const auto j = nlohmann::json::parse(body);
-		CHECK(j["model"] == "mnist-bot", "server sees model");
-		CHECK(j["messages"].back()["content"] == "hello", "server sees prompt");
+		CHECK(j["dtype"] == "text", "server sees text dtype");
+		CHECK(j["data"] == "hello", "server sees utf-8 text (not base64)");
 		status = 200;
-		return R"({"choices":[{"message":{"role":"assistant","content":"hi there"}}]})";
+		nlohmann::json r;
+		r["dtype"] = "text";
+		r["shape"] = std::vector<int64_t>{8}; // "hi there" 长度
+		r["data"] = "hi there";
+		return r.dump();
 	});
 
 	auto& reg = EngineRegistry::instance();
-	registerDcNetHttp(reg, makeChatCodec("mnist-bot"), {}, "DCNet.HttpChat");
+	// 与 tensor 测试同进程：显式区分 engineType，避免注册表"保留首次"冲突
+	registerDcNetHttp(reg, makeTextJsonCodec(), {}, "DCNet.Text");
 
-	auto node = reg.createNode("DCNet.HttpChat", "chatNode",
+	auto node = reg.createNode("DCNet.Text", "textNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
-	CHECK(node != nullptr, "DCNet.Http chat node should be created");
+	CHECK(node != nullptr, "DCNet.Text text node should be created");
+	CHECK(node->schema().inputs[0].name == "text" && node->schema().outputs[0].name == "result",
+		  "local shape rules from text codec");
 
-	node->setInput("t1", "prompt", makeTextTensor("hello"));
+	node->setInput("t1", "text", makeTextTensor("hello"));
 	auto result = node->tryExecute("t1");
-	CHECK(result.ok(), "chat roundtrip should succeed");
-	CHECK(node->hasOutput("t1", "response"), "response output should exist");
-	auto out = node->getOutputTensor("t1", "response");
+	CHECK(result.ok(), "text roundtrip should succeed");
+	CHECK(node->hasOutput("t1", "result"), "result output should exist");
+	auto out = node->getOutputTensor("t1", "result");
+	CHECK(out.type() == Tensor::TensorType::Data && out.typeSize() == 1, "decoded tensor type/size");
 	auto bytes = out.bytes();
 	CHECK(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == "hi there",
-		  "chat response content");
+		  "decoded text content");
 }
 
 int main() {
@@ -265,7 +276,7 @@ int main() {
 	test_status500Normalized();
 	test_connectionRefusedNormalized();
 	test_endToEndTensorOverHttp();
-	test_endToEndChatOverHttp();
+	test_endToEndTextOverHttp();
 	std::printf("HttpTransportTest: %d checks, %d failures\n", g_checks.load(), g_failures.load());
 	return g_failures == 0 ? 0 : 1;
 }

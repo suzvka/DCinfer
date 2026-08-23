@@ -56,20 +56,22 @@ DCinfer 将"节点做什么"与"用什么引擎执行"解耦。`EngineRegistry` 
 
 节点通过引擎名称引用后端——替换引擎无需修改管线结构。
 
-### 网络适配器算子（DCNet）
+### 网络传输框架（DCNet）
 
-DCNet 是网络适配器算子集合：把远端推理服务（云端 API、局域网 GPU worker、私有服务）
-以统一形态接入图运行时，形态与 ONNX 适配器一致（`EngineDescriptor` 家族）。两个关键设计：
+DCNet 是**张量网络传输框架**：为远端推理服务（云端 API、局域网 GPU worker、私有服务）
+提供统一的传输 + 张量数据格式 + 错误归一化 + 对接契约，让远端节点以与本地引擎一致的
+方式接入图运行时（`EngineDescriptor` 家族）。两个关键设计：
 
 - **形状规则在本地声明**：网络算子端口 Schema（类型/形状/锚定/默认值）本地配置，
   不依赖远端提供元数据；
 - **错误归一化**：网络错误（超时/断连）与远端错误报文统一映射为本地标准报错
   （`Node::Result` + `NodeStatus` + `ErrorTracker`），图级语义与本地引擎节点一致。
 
-架构：**契约内置、协议外置**——核心定义 `DcNetTransport` / `DcNetCodec` / `NetError`
-对接契约；随库提供内置适配器 `DCNet.Http`（WinHTTP transport + 张量 JSON codec +
-OpenAI 兼容 chat codec）；第三方协议由开发者实现 transport + codec 接入（"双向翻译器"
-心智模型，对方零改动）。设计文档见 [`DCNet/DESIGN.md`](DCNet/DESIGN.md)。
+架构：**契约内置、协议外置**——框架定义 `DcNetTransport` / `DcNetCodec` / `NetError`
+对接契约；内置 HTTP 传输（WinHTTP）与张量 JSON 格式（数值 base64 / Data 文本 UTF-8）；
+**协议级适配器位于 `DCEngines`**（如 `OpenAI` 兼容适配器，见 [`DCEngines/OpenAI`](DCEngines/OpenAI/README.md)）；
+第三方协议由开发者实现 transport + codec 接入（"双向翻译器"心智模型，对方零改动）。
+设计文档见 [`DCNet/DESIGN.md`](DCNet/DESIGN.md)。
 
 ```cpp
 // 最小用法：张量级远端推理节点
@@ -77,12 +79,12 @@ OpenAI 兼容 chat codec）；第三方协议由开发者实现 transport + code
 
 DC::Net::registerDcNetHttp(DC::EngineRegistry::instance(), DC::Net::makeTensorJsonCodec());
 auto node = DC::EngineRegistry::instance().createNode(
-    "DCNet.Http", "remote", "http://192.168.1.10:8080/v1");   // modelPath = 远端端点
+    "DCNet.Tensor", "remote", "http://192.168.1.10:8080/v1");   // modelPath = 远端端点
 ```
 
-构建：`BUILD_DCNET`（默认 ON，仅依赖核心库 + nlohmann-json；Windows 端 HTTP 用 WinHTTP
-零新增依赖）。端到端示例见 [DCinfer-test](https://github.com/suzvka/DCinfer-test)
-（`net_mnist`：网络化 MNIST，本地预处理 → DCNet.Http → 远端 ORT 推理 → 预测 7）。
+构建：`BUILD_DCNET`（默认 OFF，按需启用；依赖核心库 + nlohmann-json；Windows 端 HTTP
+用 WinHTTP 零新增依赖）。端到端示例见 [DCinfer-test](https://github.com/suzvka/DCinfer-test)
+（`net_mnist`：网络化 MNIST，本地预处理 → DCNet.Tensor → 远端 ORT 推理 → 预测 7）。
 
 ### 零依赖核心
 
@@ -195,6 +197,35 @@ cmake -B build -S . \
 
 cmake --build build --config Release
 ```
+
+默认只构建核心库（`DCinfer`）+ DCIr + 核心测试；引擎适配器（Builtin / OnnxRuntime /
+OpenAI）与网络框架 DCNet **全部默认 OFF**，按需启用。
+
+### 仅使用核心（Core-only）
+
+DCinfer 核心库零外部依赖，不反向依赖任何引擎适配器。只想要核心、自行注册自定义引擎
+的用户，无需构建任何引擎/网络框架：
+
+```bash
+# 方式一：预设（推荐）——只构建核心库 + DCIr，无引擎/DCNet/测试/示例
+cmake --preset core-only
+cmake --build build/core-only --config Release
+
+# 方式二：手动开关（等价）
+cmake -B build -S . \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
+  -DBUILD_ENGINES=OFF -DBUILD_DCNET=OFF -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF
+```
+
+仅需源码的下载层面，可用 git sparse-checkout 只取核心目录：
+
+```bash
+git sparse-checkout init --cone
+git sparse-checkout set DCinfer DCIr cmake vcpkg.json CMakeLists.txt
+```
+
+核心之上注册自有引擎：实现 `EngineDescriptor` 钩子 → `EngineRegistry::registerEngine()`
+（详见 `DCinfer/include/Graph/EngineRegistry.h`），图级语义与内置引擎完全一致。
 
 ### ONNX Runtime 引擎（可选）
 
