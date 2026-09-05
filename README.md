@@ -1,14 +1,10 @@
 # DCinfer
 
-[![C++ Standard](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-*A policy-driven runtime for hybrid AI inference.*  
-*面向端云协同 AI 的策略驱动推理运行时。*
+*面向端云协同 AI 的数据驱动推理运行时。*
 
-DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在 **本地、云端、PC、局域网设备以及不同推理引擎** 之间自由放置模型节点，同时把网络、调度、数据传输、引擎生命周期和执行细节隔离在 Runtime 层。
-
-DCinfer 不是推理引擎，而是输出区驱动的循环推理管线。它不试图替代 ONNX Runtime、TensorRT、Core ML 或其它模型执行后端。核心价值是：**让开发者自由决定模型在哪里运行，并尽可能不关心底层执行环境的复杂度。**
+DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在 **本地、云端、PC、局域网设备**间，以**不同推理引擎** 自由放置模型节点，同时把网络、调度、数据传输、引擎生命周期和执行细节隔离在运行时。
 
 ---
 
@@ -19,20 +15,16 @@ DCinfer 不是推理引擎，而是输出区驱动的循环推理管线。它不
 传统 DAG 框架将推理管线约束为线性或树形结构——这在多模型、多分支场景下很快会成为瓶颈。DCinfer 采用 **节点 + 端口 + Connector** 的抽象：节点通过类型化端口声明输入输出 Schema，Connector 负责节点间的数据路由。
 
 得益于此模型，你可以轻松构建：
-
 - **多分支管线**：单输出同时驱动多个下游节点并行推理
 - **汇聚模式**：多个上游输出合并注入同一节点
 - **成环拓扑**：支持反馈回路，用于迭代优化、强化学习或流式场景
 - **动态路由**：Connector 支持 `Broadcast`（1→N 广播）和 `Routing`（1→N 条件分发），根据运行时条件决定数据流向
 
-你不必被框架的拓扑假设限制——按问题本身的需求设计推理管线。
-
 ### 原生并发执行
 
 DCinfer 采用**数据驱动执行模型**：节点在所有输入就绪后自动触发，下游节点由上游数据到达事件自动唤醒，无需手动编排执行顺序。独立分支间可乱序并发执行，天然利用多核与异构硬件。
 
-内置三层线程池隔离不同类型的负载：
-
+内置三种亲和预设，隔离不同类型的负载：
 - **Compute Pool**：专用于模型推理（GPU / NPU 密集型），避免推理任务被 CPU 计算抢占
 - **Operator Pool**：承担 CPU 预处理、后处理、特征工程等算子
 - **System Pool**：处理 I/O、网络传输和系统维护任务
@@ -56,135 +48,11 @@ DCinfer 将"节点做什么"与"用什么引擎执行"解耦。`EngineRegistry` 
 
 节点通过引擎名称引用后端——替换引擎无需修改管线结构。
 
-### 网络传输框架（DCNet）
-
-DCNet 是**张量网络传输框架**：为远端推理服务（云端 API、局域网 GPU worker、私有服务）
-提供统一的传输 + 张量数据格式 + 错误归一化 + 对接契约，让远端节点以与本地引擎一致的
-方式接入图运行时（`EngineDescriptor` 家族）。两个关键设计：
-
-- **形状规则在本地声明**：网络算子端口 Schema（类型/形状/锚定/默认值）本地配置，
-  不依赖远端提供元数据；
-- **错误归一化**：网络错误（超时/断连）与远端错误报文统一映射为本地标准报错
-  （`Node::Result` + `NodeStatus` + `ErrorTracker`），图级语义与本地引擎节点一致。
-
-架构：**契约内置、协议外置**——框架定义 `DcNetTransport` / `DcNetCodec` / `NetError`
-对接契约；内置 HTTP 传输（WinHTTP）与张量 JSON 格式（数值 base64 / Data 文本 UTF-8）；
-**协议级适配器位于 `DCEngines`**（如 `OpenAI` 兼容适配器，见 [`DCEngines/OpenAI`](DCEngines/OpenAI/README.md)）；
-第三方协议由开发者实现 transport + codec 接入（"双向翻译器"心智模型，对方零改动）。
-设计文档见 [`DCNet/DESIGN.md`](DCNet/DESIGN.md)。
-
-```cpp
-// 最小用法：张量级远端推理节点
-#include "DCNet/DcNetHttp.h"
-
-DC::Net::registerDcNetHttp(DC::EngineRegistry::instance(), DC::Net::makeTensorJsonCodec());
-auto node = DC::EngineRegistry::instance().createNode(
-    "DCNet.Tensor", "remote", "http://192.168.1.10:8080/v1");   // modelPath = 远端端点
-```
-
-构建：`BUILD_DCNET`（默认 OFF，按需启用；依赖核心库 + nlohmann-json；Windows 端 HTTP
-用 WinHTTP 零新增依赖）。端到端示例见 [DCinfer-test](https://github.com/suzvka/DCinfer-test)
-（`net_mnist`：网络化 MNIST，本地预处理 → DCNet.Tensor → 远端 ORT 推理 → 预测 7）。
-
 ### 零依赖核心
 
 DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准库。DCIr 序列化模块依赖 nlohmann-json、minizip、zlib（通过 vcpkg 管理），核心库本身不引入任何外部依赖。
 
-这意味着：
-
-- **快速编译**——无需构建庞大的依赖树
-- **轻松集成**——一个 `add_subdirectory` 即可加入任何 CMake 项目
-- **最小二进制体积**——只为实际使用的功能付费
-
----
-
-## Example Use Cases
-
-### Hybrid Local + Cloud Inference
-
-```mermaid
-graph TB
-    A[User Input] --> B[Local Private Encoder]
-    B --> C[Cloud LLM]
-    C --> D[Local Safety / Policy Filter]
-    D --> E[Final Output]
-```
-
-适合：
-
-* 用户私有模型不上传
-* 云端提供大模型能力
-* 本地执行审计、过滤、偏好控制
-
-### PC Client + Cloud Runtime
-
-```mermaid
-graph TB
-    subgraph Local["Local PC Worker"]
-        A1[embedding]
-        A2[rerank]
-        A3[image preprocessing]
-    end
-    subgraph Cloud["Cloud Worker"]
-        B1[large language model]
-        B2[heavy vision model]
-    end
-```
-
-适合：
-
-* AI PC 客户端
-* 降低云端成本
-* 利用用户本地 GPU / NPU
-* 根据设备性能动态调整推理分布
-
-### LAN Heterogeneous Inference
-
-```mermaid
-graph TB
-    A[Phone Camera] --> B[LAN PC GPU Worker]
-    B --> C[NAS Vector Store]
-    C --> D[Cloud Fallback]
-```
-
-适合：
-
-* 私有局域网 AI
-* 工业视觉
-* 家庭 / 企业边缘推理
-* 多设备协作
-
-### Multi-Model Pipeline
-
-```mermaid
-graph TB
-    A[Preprocess] --> B[Detector]
-    B --> C[Classifier]
-    C --> D[Reranker]
-    D --> E[Postprocess]
-```
-
-适合：
-
-* 多模型串联
-* 多分支推理
-* 自定义前后处理
-* 高并发 pipeline
-
----
-
-## Quick Start
-
-### Requirements
-
-| Item                  | Detail              |
-| --------------------- | ------------------- |
-| C++ 标准              | C++20               |
-| CMake                 | >= 3.17             |
-| 依赖管理               | vcpkg (vendored)    |
-| 第三方依赖             | 无 (core library)   |
-
-### Build
+## 开始使用
 
 ```bash
 cd DCinfer
@@ -227,25 +95,7 @@ git sparse-checkout set DCinfer DCIr cmake vcpkg.json CMakeLists.txt
 核心之上注册自有引擎：实现 `EngineDescriptor` 钩子 → `EngineRegistry::registerEngine()`
 （详见 `DCinfer/include/Graph/EngineRegistry.h`），图级语义与内置引擎完全一致。
 
-### ONNX Runtime 引擎（可选）
-
-ONNX Runtime 适配器默认不构建、不安装依赖。需要时通过 `BUILD_ENGINE_ONNXRUNTIME` + `DCINFER_ORT_EP` 两个选项选择 ExecutionProvider，vcpkg 依赖会自动注入（无需手动修改 vcpkg.json）：
-
-```bash
-# CPU EP（最简）
-cmake -B build-ort-cpu -S . \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
-  -DBUILD_ENGINE_ONNXRUNTIME=ON -DDCINFER_ORT_EP=CPU
-
-# CUDA EP（需本机 CUDA Toolkit + cuDNN，x64 动态库 triplet，构建耗时较长）
-cmake -B build-ort-cuda -S . \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
-  -DBUILD_ENGINE_ONNXRUNTIME=ON -DDCINFER_ORT_EP=CUDA
-```
-
-可用 EP：`CPU` / `CUDA` / `TENSORRT` / `OPENVINO`。运行时默认追加所选 EP，节点侧零代码；仍可通过 `OnnxOptions::sessionCustomizer` 追加或覆盖。Windows 上也可直接使用预设：`cmake --preset msvc-ort-cpu` 或 `cmake --preset msvc-ort-cuda`。
-
-### Run Tests
+### 运行测试
 
 ```bash
 ctest --test-dir build -C Release

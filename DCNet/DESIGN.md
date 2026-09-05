@@ -245,7 +245,7 @@ static Node::Schema chatSchema() {
 │  · NetError 归一化（远端报文 → 本地标准报错）              │
 │  · 端口 Schema 声明辅助（本地形状规则）                    │
 ├─ 内置传输实现（传输层，与协议无关）───────────────────────┤
-│  · NetTransport_Http   HTTP/1.1（WinHTTP，keep-alive）     │
+│  · NetTransport_Http   HTTP/1.1（POCO，跨平台，keep-alive） │
 ├─ 协议级适配器（DCEngines，具体后端）──────────────────────┤
 │  · DCEngine::OpenAI    OpenAI 兼容 /v1/chat/completions    │
 │  · 开发者自定义：实现 NetTransport + NetCodec → registerDcNetAdapter │
@@ -356,15 +356,15 @@ DCNet/
 │   ├── NetTransport.h             # 传输抽象接口（§3.1）
 │   ├── NetCodec.h                 # 协议映射接口（§3.2，含 requestPath/schema 声明）
 │   ├── NetSync.h                  # 核心 async→sync 桥（§3.5）
-│   ├── NetTransport_Http.h        # 内置 HTTP transport（WinHTTP，§9 方案 B）★已实现
+│   ├── NetTransport_Http.h        # 内置 HTTP transport（POCO，跨平台，§9 方案 C）★已实现
 │   ├── NetCodec_Tensor.h          # 内置数据格式工厂：张量/文本 JSON codec ★已实现
 │   ├── DcNetHttp.h                # registerDcNetHttp 接线（HTTP 传输 + 任意 codec）★已实现
-│   ├── MockServer.h               # 测试基础设施：极简 mock HTTP 服务（WinSock）★已实现
+│   ├── MockServer.h               # 测试基础设施：极简 mock HTTP 服务（POCO，跨平台）★已实现
 │   └── NetPort.h                  # 本地形状规则声明辅助（§3.4，规划中；当前直接用 NodePort）
 ├── src/
 │   ├── NetAdapter.cpp             # 组装 EngineDescriptor（§5）
 │   ├── NetError.cpp               # 归一化映射表（纯函数）
-│   ├── NetTransport_Http.cpp      # HTTP 后端（WinHTTP；POSIX 后端见展望）★已实现
+│   ├── NetTransport_Http.cpp      # HTTP 后端（POCO；单一实现覆盖 Windows/POSIX）★已实现
 │   ├── NetCodec_Tensor.cpp        # 张量 JSON codec（数值 base64 + Data 文本直传）★已实现
 │   ├── DcNetHttp.cpp              # registerDcNetHttp 接线 ★已实现
 │   ├── NetBase64.h                # 内部 base64 工具（仅头）★已实现
@@ -390,16 +390,29 @@ DCEngines/OpenAI/
 ## 9. 依赖与构建接线
 
 **依赖现状（已核实 vcpkg.json）**：`nlohmann-json` 已在核心依赖树中——JSON 编解码
-零新增依赖。
+零新增；`poco[netssl]`（M2.6 起）承载 HTTP/TLS 传输与测试 MockServer。
 
-**HTTP 客户端**（已决策：首发方案 B，WinHTTP）：
+**HTTP 客户端**（已决策：方案 C，POCO，跨平台）：
 
 - **A（备选）**：vcpkg feature（如 `dcnet`）→ `libcurl`。跨平台、线程安全、成熟稳定；
-  CMake 侧 `find_package(CURL)`。代价：一个 feature 依赖。适合后续 POSIX 支持。
-- **B（已实现，Windows 首发）**：`NetTransport_Http` 用 WinHTTP 实现——零新增依赖、
-  会话/连接句柄复用（keep-alive）、本地地址绕过系统代理（`<local>` 绕过表）。
-  已知边界：WinHTTP 的 `dwReceiveTimeout` 不覆盖响应头等待（服务端延迟响应时
-  仍会等到首字节），传输级超时语义属 OS 行为，映射表由 NetError 单测覆盖。
+  CMake 侧 `find_package(CURL)`。代价：一个 feature 依赖。
+- **B（已退役，Windows 首发 2026-08）**：`NetTransport_Http` 曾用 WinHTTP 实现
+  （零新增依赖，keep-alive、本地地址绕代理）。已知边界：`dwReceiveTimeout` 不覆盖
+  响应头等待；仅 Windows。随 POCO 迁移（M2.6）退役。
+- **C（已实现，2026-09）**：`NetTransport_Http` 用 POCO 实现（vcpkg `poco[netssl]`）
+  ——Windows/Linux/macOS 单一实现；`Poco::URI` 解析端点、
+  `HTTPClientSession`/`HTTPSClientSession`（keep-alive、独立 connect/send/receive
+  超时，不再有方案 B 的响应头等待盲区）；connect() 增加 TCP 就绪探测（方案 B 连接
+  惰性建立，拒连/DNS 失败延到首次 send；POCO 版把失败提前到 createEngine 配置期
+  报告，落实契约 §3.1“就绪探测”语义）。
+  MockServer 同步迁至 POCO `ServerSocket`（原 WinSock），测试设施跨平台。
+  TLS 双轨：Windows 经项目 overlay triplet（`cmake/triplets/x64-windows.cmake` 的
+  `POCO_ENABLE_NETSSL_WIN`）用 **NetSSL_Win/SChannel**（系统 TLS，免 OpenSSL
+  构建链），POSIX 用 **NetSSL/OpenSSL**（overlay port `cmake/overlay-ports/poco`）；
+  两者 `HTTPSClientSession` API 一致，业务代码零条件编译。证书校验策略
+  （默认上下文，严格校验）见 §12 安全展望。
+  已知平台差异：POCO/Windows 的 WSAPoll 不上报 connect 失败，带超时探测下
+  拒绝连接表现为 Timeout（仍为可重试 ExecutionFailed）；POSIX 报 Unreachable。
 
 **CMake 接线**（根 `CMakeLists.txt` 仿 `BUILD_IR` 块追加）：
 
@@ -434,8 +447,8 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 **外部消费注意事项（已由 DCinfer-test 实测，2026 回馈）**：
 
 - vcpkg manifest 模式只安装清单声明的包：外部 `add_subdirectory` 消费方必须在
-  自己的 `vcpkg.json` 声明 `nlohmann-json`（DCNet 及 DCEngine::OpenAI 的
-  `find_package` 依赖），否则配置失败；
+  自己的 `vcpkg.json` 声明 `nlohmann-json` 与 `poco[netssl]`（DCNet 及
+  DCEngine::OpenAI 的 `find_package` 依赖），否则配置失败；
 - 不消费 DCNet 的零依赖消费方（如 DCinfer-test 的 `smoke/`）应显式
   `set(BUILD_DCNET OFF CACHE BOOL "" FORCE)`，避免拉入 nlohmann-json
   （`BUILD_ENGINE_OPENAI=ON` 会随 `DCNet::DCNet` 缺失自动跳过并告警）；
@@ -451,7 +464,7 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 ## 10. 测试策略（不依赖真实远端）
 
 1. **MockServer**：`DCNet/include/DCNet/MockServer.h`（C++ 内嵌极简 HTTP 服务，
-   WinSock，DCNet 与 DCEngines 适配器测试共用），实现 `/v1/infer` 与
+   POCO，跨平台；DCNet 与 DCEngines 适配器测试共用），实现 `/v1/infer` 与
    `/v1/chat/completions` 面，可注入错误响应（5xx / 错误体 / 畸形报文 / 超时）；
 2. **单元测试**：
    - `NetErrorTest`：映射表纯单测（每类网络错误 / HTTP 状态 / 远端错误体 → 期望的
@@ -472,7 +485,8 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 | M1 | 契约接口（NetTransport/NetCodec/NetEndpoint）+ 契约测试 | 接口冻结；FakeTransport 契约测试 + 外部消费方 net_smoke | ✅ 完成 |
 | M2 | `DCNet.Tensor` 传输框架首发（WinHTTP transport + 张量/文本 JSON 格式 + 归一化） | 契约第一个真实实现；MockServer + HttpTransportTest；net_mnist 端到端验收（预测 7） | ✅ 完成 |
 | M2.5 | 协议适配器外置：OpenAI 兼容 chat codec 迁至 DCEngines（DCNet 收缩为张量传输框架） | `DCEngine::OpenAI` + OpenAiEngineTest；`makeChatCodec` / `"DCNet.HttpChat"` 退役 | ✅ 完成（2026-08） |
-| M3 | `DCNet.Native` 可选协议 + 重连策略（onError）+ POSIX transport | 示例 + CI 接线 | 待办 |
+| M2.6 | 传输层 POCO 化：`NetTransport_Http` + MockServer 迁至 POCO（vcpkg `poco[netssl]`），移除 WinHTTP/WinSock | 单一实现覆盖 Windows/POSIX；connect() 就绪探测；HTTPS 经 NetSSL | ✅ 完成（2026-09） |
+| M3 | `DCNet.Native` 可选协议 + 重连策略（onError） | 示例 + CI 接线 | 待办 |
 
 实际工作量：M0–M2 约 1100 行 C++（含测试），外加外部消费方 net_smoke/net_mnist 约 500 行。
 

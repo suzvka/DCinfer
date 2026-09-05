@@ -16,6 +16,8 @@
 #include "DCNet/MockServer.h"
 #include "NetBase64.h"
 
+#include <Poco/Net/ServerSocket.h>
+#include <Poco/Net/SocketAddress.h>
 #include <nlohmann/json.hpp>
 
 #include <atomic>
@@ -149,20 +151,11 @@ TEST(connectionRefusedNormalized) {
 	// 取一个已关闭端口：绑定后立即关闭
 	int deadPort = -1;
 	{
-		WSADATA wsa;
-		WSAStartup(MAKEWORD(2, 2), &wsa);
-		SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-		sockaddr_in a{};
-		a.sin_family = AF_INET;
-		a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-		a.sin_port = 0;
-		bind(s, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-		sockaddr_in b{};
-		int len = sizeof(b);
-		getsockname(s, reinterpret_cast<sockaddr*>(&b), &len);
-		deadPort = ntohs(b.sin_port);
-		closesocket(s);
-		WSACleanup();
+		Poco::Net::ServerSocket s;
+		s.bind(Poco::Net::SocketAddress("127.0.0.1", 0));
+		s.listen();
+		deadPort = static_cast<int>(s.address().port());
+		s.close();
 	}
 
 	HttpTransport t;
@@ -172,13 +165,20 @@ TEST(connectionRefusedNormalized) {
 	CHECK(!err.ok(), "connection refused → failure");
 	CHECK(err.retryable, "unreachable retryable");
 	CHECK(err.localStatus == Node::Status::ExecutionFailed, "refused → ExecutionFailed");
+#ifdef _WIN32
+	// POCO/Windows：WSAPoll 不上报 connect 失败，带超时探测下拒绝连接表现为
+	// Timeout（仍为可重试 ExecutionFailed）；POSIX 报 ConnectionRefused → unreachable。
+	const bool unreachableOrTimeout = err.localMessage.rfind("net:unreachable", 0) == 0 ||
+									 err.localMessage.rfind("net:timeout", 0) == 0;
+	CHECK(unreachableOrTimeout, "refused → unreachable|timeout");
+#else
 	CHECK_MSG_PREFIX(err.localMessage, "net:unreachable");
+#endif
 	t.close();
 }
 
-// 注：WinHTTP 的 dwReceiveTimeout 不覆盖响应头等待（服务端延迟响应时
-// WinHttpReceiveResponse 仍会等到首字节）；传输级超时语义属 OS 行为，
-// 此处不设超时测试——Timeout 分类/映射已由 NetErrorTest 纯单测覆盖。
+// 注：POCO 传输级超时（connect/send/receive 独立设置）已覆盖响应头等待；
+// Timeout 分类/映射已由 NetErrorTest 纯单测覆盖，此处不设服务端延迟超时用例。
 
 // ── 端到端：DCNet.Tensor 节点 + 张量 JSON codec（真实 HTTP 往返）──
 

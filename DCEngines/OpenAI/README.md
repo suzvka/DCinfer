@@ -2,7 +2,7 @@
 
 > 把任何 OpenAI 兼容服务（vLLM / TGI / llama.cpp server / 云 API）以统一形态
 > 接入 DCinfer 图运行时。基于 [DCNet](../../DCNet/DESIGN.md) 张量网络传输框架：
-> HttpTransport（WinHTTP）+ chat codec（`DC::Net::DcNetCodec` 契约实现）+
+> HttpTransport（POCO，跨平台）+ chat codec（`DC::Net::DcNetCodec` 契约实现）+
 > NetError 归一化。与 OnnxRuntime（本地模型后端）对称并列，同属
 > EngineDescriptor 家族。
 

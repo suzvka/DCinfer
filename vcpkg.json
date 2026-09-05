@@ -2,7 +2,13 @@
   "dependencies": [
     "nlohmann-json",
     "minizip",
-    "zlib"
+    "zlib",
+    {
+      "name": "poco",
+      "features": [
+        "netssl"
+      ]
+    }
   ],
   "features": {
     "ort-cpu": {

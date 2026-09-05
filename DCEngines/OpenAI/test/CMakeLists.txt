@@ -16,9 +16,6 @@ foreach(test_src IN LISTS TEST_SOURCES)
     # Each test source is expected to be a standalone test with its own main.
     add_executable(${test_name} ${test_src})
     target_link_libraries(${test_name} PRIVATE DCEngine::OpenAI)
-    # MockHttpServer（WinSock）仅 Windows
-    if (WIN32)
-        target_link_libraries(${test_name} PRIVATE ws2_32)
-    endif()
+    # MockHttpServer（POCO）依赖经 DCNet::DCNet → DCEngine::OpenAI 传递
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
 endforeach()

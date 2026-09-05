@@ -1,37 +1,50 @@
 #include "DCNet/NetTransport_Http.h"
 
-#ifdef _WIN32
+#include <Poco/Exception.h>
+#include <Poco/Net/HTTPClientSession.h>
+#include <Poco/Net/HTTPRequest.h>
+#include <Poco/Net/HTTPResponse.h>
+#include <Poco/Net/HTTPSClientSession.h>
+#include <Poco/Net/NetException.h>
+#include <Poco/Net/SSLException.h>
+#include <Poco/Net/SocketAddress.h>
+#include <Poco/Net/StreamSocket.h>
+#include <Poco/StreamCopier.h>
+#include <Poco/Timespan.h>
+#include <Poco/URI.h>
 
-#include <windows.h>
-#include <winhttp.h>
-
-#include <string>
+#include <chrono>
+#include <istream>
+#include <memory>
+#include <ostream>
+#include <utility>
 
 namespace DC::Net {
 
 namespace {
 
-NetTransportError mapWinHttpError(DWORD err) {
-	switch (err) {
-	case ERROR_WINHTTP_TIMEOUT:
+/// POCO 异常 → 传输层错误原语（子类优先，SSLException 覆盖全部 TLS 系异常）。
+NetTransportError classifyPocoException(const Poco::Exception& e) {
+	if (dynamic_cast<const Poco::TimeoutException*>(&e))
 		return NetTransportError::Timeout;
-	case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+	if (dynamic_cast<const Poco::Net::DNSException*>(&e))
 		return NetTransportError::DnsFailed;
-	case ERROR_WINHTTP_CANNOT_CONNECT:
-	case ERROR_WINHTTP_CONNECTION_ERROR:
+	if (dynamic_cast<const Poco::Net::ConnectionRefusedException*>(&e))
 		return NetTransportError::ConnectionRefused;
-	case ERROR_WINHTTP_SECURE_FAILURE:
+	if (dynamic_cast<const Poco::Net::ConnectionResetException*>(&e))
+		return NetTransportError::Reset;
+	if (dynamic_cast<const Poco::Net::SSLException*>(&e))
 		return NetTransportError::TlsFailed;
-	default:
-		return NetTransportError::Other;
-	}
+	return NetTransportError::Other;
 }
 
-std::wstring toWide(const std::string& s) {
-	return std::wstring(s.begin(), s.end());
+Poco::Timespan toTimespan(const std::chrono::milliseconds& ms) {
+	return Poco::Timespan(0, std::chrono::duration_cast<std::chrono::microseconds>(ms).count());
 }
 
 } // namespace
+
+HttpTransport::HttpTransport() = default;
 
 HttpTransport::~HttpTransport() {
 	close();
@@ -41,185 +54,171 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 	close();
 	_ep = ep;
 
-	// 解析端点 URL → host/port/basePath（WinHttpCrackUrl 处理默认端口与 IPv6）
-	const std::wstring url = toWide(ep.endpoint());
-	URL_COMPONENTS comp{};
-	comp.dwStructSize = sizeof(comp);
-	comp.dwHostNameLength = (DWORD)-1;
-	comp.dwUrlPathLength = (DWORD)-1;
-	comp.dwExtraInfoLength = (DWORD)-1;
-	if (!WinHttpCrackUrl(url.c_str(), 0, 0, &comp)) {
+	// 解析端点 URL → scheme/host/port/basePath（Poco::URI 处理默认端口与 IPv6）
+	Poco::URI uri;
+	try {
+		uri = Poco::URI(ep.endpoint());
+	} catch (const Poco::Exception& e) {
 		_failed = true;
-		return normalizeTransportError(NetTransportError::Other,
-									   "WinHttpCrackUrl failed on '" + ep.endpoint() + "'");
+		_connectError = normalizeTransportError(NetTransportError::Other,
+												"bad endpoint '" + ep.endpoint() + "': " + e.displayText());
+		return _connectError;
+	}
+	_useTls = (uri.getScheme() == "https");
+	_basePath = uri.getPath();
+
+	// TCP 就绪探测（契约 §3.1：connect 即就绪探测，拒连/DNS 失败在 createEngine 配置期报告）
+	try {
+		Poco::Net::SocketAddress addr(uri.getHost(), static_cast<Poco::UInt16>(uri.getPort()));
+		Poco::Net::StreamSocket probe;
+		probe.connect(addr, toTimespan(ep.connectTimeout));
+		probe.close();
+	} catch (const Poco::Exception& e) {
+		_failed = true;
+		_connectError = normalizeTransportError(classifyPocoException(e),
+												"probe " + ep.endpoint() + " failed: " + e.displayText());
+		return _connectError;
 	}
 
-	const std::wstring host(comp.lpszHostName, comp.dwHostNameLength);
-	const std::wstring path(comp.lpszUrlPath, comp.dwUrlPathLength);
-	const bool useTls = (comp.nScheme == INTERNET_SCHEME_HTTPS);
-
-	// 会话：本地地址绕过系统代理（测试与局域网直连）
-	_session = WinHttpOpen(L"DCinfer-DCNet/0.1", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-						   WINHTTP_NO_PROXY_NAME, L"<local>", 0);
-	if (!_session) {
+	// 会话：HTTP 或 HTTPS（HTTPSClientSession 使用默认客户端 TLS 上下文）
+	try {
+		const std::string host = uri.getHost();
+		const Poco::UInt16 port = static_cast<Poco::UInt16>(uri.getPort());
+		std::unique_ptr<Poco::Net::HTTPClientSession> session;
+		if (_useTls)
+			session = std::make_unique<Poco::Net::HTTPSClientSession>(host, port);
+		else
+			session = std::make_unique<Poco::Net::HTTPClientSession>(host, port);
+		session->setKeepAlive(true);
+		session->setConnectTimeout(toTimespan(ep.connectTimeout));
+		session->setSendTimeout(toTimespan(ep.requestTimeout));
+		session->setReceiveTimeout(toTimespan(ep.requestTimeout));
+		_session = std::move(session);
+	} catch (const Poco::Exception& e) {
 		_failed = true;
-		return normalizeTransportError(mapWinHttpError(GetLastError()), "WinHttpOpen failed");
+		_connectError = normalizeTransportError(classifyPocoException(e),
+												"session " + ep.endpoint() + " failed: " + e.displayText());
+		return _connectError;
 	}
 
-	WinHttpSetTimeouts(_session,                       // 会话句柄
-					   (int)ep.connectTimeout.count(), // 解析
-					   (int)ep.connectTimeout.count(), // 连接
-					   (int)ep.requestTimeout.count(), // 发送
-					   (int)ep.requestTimeout.count());// 接收
-
-	_connect = WinHttpConnect(_session, host.c_str(), comp.nPort, 0);
-	if (!_connect) {
-		_failed = true;
-		return normalizeTransportError(mapWinHttpError(GetLastError()), "WinHttpConnect failed");
-	}
-
-	// 记忆 basePath（不含 requestPath，后者由 send 时拼接）
-	const size_t q = path.find_first_of(L"?");
-	_basePath = path.substr(0, q);
-	_useTls = useTls;
 	_failed = false;
 	return {};
 }
 
 NetError HttpTransport::send(const Payload& payload) {
-	if (_failed || !_session || !_connect)
-		return normalizeTransportError(NetTransportError::Other, "not connected");
+	if (!_session || _failed)
+		return _connectError.ok() ? normalizeTransportError(NetTransportError::Other, "not connected")
+								  : _connectError;
 
-	// 完整路径 = basePath + requestPath（requestPath 自带前导 '/' 时避免双斜杠）
-	std::wstring path = _basePath;
-	if (!_ep.requestPath.empty()) {
-		std::wstring rp = toWide(_ep.requestPath);
-		if (!rp.empty() && rp[0] == L'/') {
-			if (!path.empty() && path.back() == L'/')
-				path.pop_back();
-			path += rp;
-		} else {
-			if (path.empty() || path.back() != L'/')
-				path += L'/';
-			path += rp;
+	try {
+		// 完整路径 = basePath + requestPath（requestPath 自带前导 '/' 时避免双斜杠）
+		std::string path = _basePath;
+		if (!_ep.requestPath.empty()) {
+			const std::string& rp = _ep.requestPath;
+			if (rp[0] == '/') {
+				if (!path.empty() && path.back() == '/')
+					path.pop_back();
+				path += rp;
+			} else {
+				if (path.empty() || path.back() != '/')
+					path += '/';
+				path += rp;
+			}
 		}
-	}
+		if (path.empty())
+			path = "/";
 
-	_request = WinHttpOpenRequest(_connect, L"POST", path.c_str(), NULL, WINHTTP_NO_REFERER,
-								  WINHTTP_DEFAULT_ACCEPT_TYPES, _useTls ? WINHTTP_FLAG_SECURE : 0);
-	if (!_request) {
-		_failed = true;
-		return normalizeTransportError(mapWinHttpError(GetLastError()), "WinHttpOpenRequest failed");
-	}
+		// 请求头：Content-Type / Authorization（Bearer 由调用方填全）/ 附加头
+		Poco::Net::HTTPRequest req(Poco::Net::HTTPRequest::HTTP_POST, path,
+								   Poco::Net::HTTPMessage::HTTP_1_1);
+		req.setContentType(_ep.contentType);
+		if (!_ep.authToken.empty())
+			req.set("Authorization", _ep.authToken);
+		for (const auto& h : _ep.headers) {
+			const auto colon = h.find(':');
+			if (colon == std::string::npos)
+				continue;
+			req.set(h.substr(0, colon), h.substr(colon + 1));
+		}
+		req.setContentLength(static_cast<int>(payload.size()));
 
-	// 请求头：Content-Type / Authorization（Bearer 由调用方填全）/ 附加头
-	std::wstring headers = L"Content-Type: " + toWide(_ep.contentType) + L"\r\n";
-	if (!_ep.authToken.empty())
-		headers += L"Authorization: " + toWide(_ep.authToken) + L"\r\n";
-	for (const auto& h : _ep.headers)
-		headers += toWide(h) + L"\r\n";
-
-	const BOOL sent = WinHttpSendRequest(
-		_request, headers.c_str(), (DWORD)headers.size(),
-		payload.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(payload.data()),
-		(DWORD)payload.size(), (DWORD)payload.size(), 0);
-	if (!sent) {
-		const DWORD err = GetLastError();
-		closeRequest();
-		if (err == ERROR_WINHTTP_OPERATION_CANCELLED || err == ERROR_WINHTTP_CONNECTION_ERROR)
+		std::ostream& os = _session->sendRequest(req);
+		if (!payload.empty())
+			os.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+		if (!os) {
+			abortResponse();
 			_failed = true;
-		return normalizeTransportError(mapWinHttpError(err), "WinHttpSendRequest failed");
-	}
+			return normalizeTransportError(NetTransportError::Reset, "send request body failed");
+		}
 
-	if (!WinHttpReceiveResponse(_request, NULL)) {
-		const DWORD err = GetLastError();
-		closeRequest();
+		// 状态码：2xx → None（体由 recv 读取）；非 2xx → 读错误体并归一化
+		Poco::Net::HTTPResponse res;
+		std::istream& rs = _session->receiveResponse(res);
+		_response = &rs;
+		const int status = res.getStatus();
+		if (status >= 400) {
+			const Payload body = readBody();
+			_response = nullptr;
+			return normalizeHttpResponse(status, body);
+		}
+		return {};
+	} catch (const Poco::Exception& e) {
+		abortResponse();
 		_failed = true;
-		return normalizeTransportError(mapWinHttpError(err), "WinHttpReceiveResponse failed");
+		return normalizeTransportError(classifyPocoException(e), e.displayText());
+	} catch (const std::exception& e) {
+		abortResponse();
+		_failed = true;
+		return normalizeTransportError(NetTransportError::Other, e.what());
 	}
-
-	// 状态码：2xx → None（体由 recv 读取）；非 2xx → 读错误体并归一化
-	DWORD status = 0;
-	DWORD statusSize = sizeof(status);
-	if (!WinHttpQueryHeaders(_request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-							 WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX)) {
-		const DWORD err = GetLastError();
-		closeRequest();
-		return normalizeTransportError(mapWinHttpError(err), "WinHttpQueryHeaders failed");
-	}
-	if (status >= 400) {
-		Payload body = readBody();
-		closeRequest();
-		return normalizeHttpResponse((int)status, body);
-	}
-	return {};
 }
 
 NetError HttpTransport::recv(Payload& out) {
-	if (_failed || !_request)
+	if (!_response)
 		return normalizeTransportError(NetTransportError::Other, "no pending response");
 	out = readBody();
-	closeRequest();
+	_response = nullptr;
 	return {};
 }
 
 bool HttpTransport::alive() const {
-	return !_failed && _session && _connect;
+	return !_failed && _session != nullptr;
 }
 
 void HttpTransport::close() {
-	closeRequest();
-	if (_connect) {
-		WinHttpCloseHandle(_connect);
-		_connect = nullptr;
-	}
-	if (_session) {
-		WinHttpCloseHandle(_session);
-		_session = nullptr;
-	}
+	dropSession();
 	_failed = false;
+	_connectError = {};
 }
 
 Payload HttpTransport::readBody() {
 	Payload out;
-	if (!_request)
+	if (!_response)
 		return out;
-	for (;;) {
-		DWORD available = 0;
-		if (!WinHttpQueryDataAvailable(_request, &available) || available == 0)
-			break;
-		const size_t old = out.size();
-		out.resize(old + available);
-		DWORD read = 0;
-		if (!WinHttpReadData(_request, out.data() + old, available, &read))
-			break;
-		out.resize(old + read);
-		if (read < available)
-			break;
-	}
+	Poco::StreamCopier::copyToString(*_response, out);
 	return out;
 }
 
-void HttpTransport::closeRequest() {
-	if (_request) {
-		WinHttpCloseHandle(_request);
-		_request = nullptr;
+void HttpTransport::abortResponse() {
+	// 响应状态未知（异常路径）：丢弃挂起响应并关闭底层连接
+	_response = nullptr;
+	if (_session) {
+		try {
+			_session->abort(); // 关闭底层 socket，下次 send 重连（残留报文不致污染后续响应）
+		} catch (...) {
+		}
+	}
+}
+
+void HttpTransport::dropSession() {
+	_response = nullptr;
+	if (_session) {
+		try {
+			_session->abort();
+		} catch (...) {
+		}
+		_session = nullptr;
 	}
 }
 
 } // namespace DC::Net
-
-#else // 非 Windows：空实现（POSIX 后端见 DESIGN.md §9 展望）
-
-namespace DC::Net {
-
-HttpTransport::~HttpTransport() = default;
-NetError HttpTransport::connect(const NetEndpoint&) { return normalizeTransportError(NetTransportError::Other, "HttpTransport: not implemented on this platform"); }
-NetError HttpTransport::send(const Payload&) { return normalizeTransportError(NetTransportError::Other, "HttpTransport: not implemented on this platform"); }
-NetError HttpTransport::recv(Payload&) { return normalizeTransportError(NetTransportError::Other, "HttpTransport: not implemented on this platform"); }
-bool HttpTransport::alive() const { return false; }
-void HttpTransport::close() {}
-
-} // namespace DC::Net
-
-#endif

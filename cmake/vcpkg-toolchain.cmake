@@ -18,7 +18,12 @@ set(VCPKG_MANIFEST_NO_DEFAULT_FEATURES ON)
 # onnx / onnxruntime 的 CUDA 构建适配（MSVC 14.51 + CUDA 13.3 兼容性修复、
 # ONNX_DISABLE_STATIC_REGISTRATION、ft_moe 排除等）存放在项目自己的
 # cmake/overlay-ports/ 下，vcpkg 将优先使用 overlay 覆盖同名内置 port。
+# poco：Windows 用 NetSSL_Win(SChannel)，详见 overlay-ports/poco/vcpkg.json。
 set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_LIST_DIR}/overlay-ports")
+
+# ── 项目定制 triplet（overlay，不污染 external/vcpkg submodule）──
+# x64-windows 追加 POCO_ENABLE_NETSSL_WIN（见 cmake/triplets/x64-windows.cmake）。
+set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_LIST_DIR}/triplets")
 
 # ── 构建并发上限（内存保护）──
 # vcpkg 默认按逻辑处理器数开 ninja 并行（16 线程机上为 -j17），与 nvcc 内部

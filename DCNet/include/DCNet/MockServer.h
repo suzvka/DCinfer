@@ -1,15 +1,19 @@
 #pragma once
 
-// 极简 HTTP/1.1 测试服务（WinSock）：DCNet 传输测试及 DCEngines 协议适配器
-// 测试共用的 Mock 远端（经 DCNet::DCNet 传递包含）。
+// 极简 HTTP/1.1 测试服务（POCO）：DCNet 传输测试及 DCEngines 协议适配器
+// 测试共用的 Mock 远端（经 DCNet::DCNet 传递包含）。跨平台（Poco::Net）。
 // 单线程顺序处理；POST 请求体 → handler(path, body) → 响应体。
-// 非 Windows 平台不提供实现（相关测试在 WIN32 下编译）。
+
+#include <Poco/Net/ServerSocket.h>
+#include <Poco/Net/SocketAddress.h>
+#include <Poco/Net/StreamSocket.h>
+#include <Poco/Timespan.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <string>
 #include <thread>
-#include <vector>
 
 class MockHttpServer {
 public:
@@ -20,81 +24,61 @@ public:
 	~MockHttpServer() { stop(); }
 
 	/// 绑定 127.0.0.1:0（随机端口）并启动监听线程；返回实际端口，失败返回 -1。
-	int start(Handler handler);
+	int start(Handler handler) {
+		try {
+			_socket.bind(Poco::Net::SocketAddress("127.0.0.1", 0), false);
+			_socket.listen();
+			_port = static_cast<int>(_socket.address().port());
+		} catch (const std::exception&) {
+			return -1;
+		}
+		_stop = false;
+		_thread = std::thread([this, handler = std::move(handler)]() mutable { run(std::move(handler)); });
+		return _port;
+	}
 
 	/// 停止监听并等待处理线程退出。
-	void stop();
+	void stop() {
+		_stop = true;
+		if (_thread.joinable()) {
+			try {
+				_socket.close(); // 中断 accept（轮询循环在 50ms 内感知 _stop）
+			} catch (...) {
+			}
+			_thread.join();
+		}
+	}
 
 	int port() const { return _port; }
 
 private:
-	void run(Handler handler);
-
-	int _port = -1;
-	std::atomic<bool> _stop{false};
-	std::thread _thread;
-	void* _listen = nullptr; // SOCKET
-};
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
-#include <cstdlib>
-
-inline int MockHttpServer::start(Handler handler) {
-	WSADATA wsa;
-	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-		return -1;
-
-	SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (s == INVALID_SOCKET)
-		return -1;
-	sockaddr_in addr{};
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	addr.sin_port = 0; // 随机端口
-	if (bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-		closesocket(s);
-		return -1;
+	void run(Handler handler) {
+		for (;;) {
+			if (_stop)
+				break;
+			// 轮询而非阻塞 accept：stop 时 close+join 跨平台安全（POSIX close 不唤醒阻塞 accept）
+			if (!_socket.poll(Poco::Timespan(0, 50 * 1000), Poco::Net::Socket::SELECT_READ))
+				continue;
+			Poco::Net::StreamSocket c;
+			try {
+				c = _socket.acceptConnection();
+			} catch (...) {
+				break; // socket 已关闭（stop）
+			}
+			serve(c, handler);
+		}
+		try {
+			_socket.close();
+		} catch (...) {
+		}
 	}
-	sockaddr_in bound{};
-	int len = sizeof(bound);
-	getsockname(s, reinterpret_cast<sockaddr*>(&bound), &len);
-	_port = ntohs(bound.sin_port);
-	if (listen(s, 8) == SOCKET_ERROR) {
-		closesocket(s);
-		return -1;
-	}
-	_listen = reinterpret_cast<void*>(s);
-	_stop = false;
-	_thread = std::thread([this, handler = std::move(handler)]() mutable { run(std::move(handler)); });
-	return _port;
-}
 
-inline void MockHttpServer::stop() {
-	_stop = true;
-	if (_listen) {
-		closesocket(reinterpret_cast<SOCKET>(_listen)); // 中断 accept
-		_listen = nullptr;
-	}
-	if (_thread.joinable())
-		_thread.join();
-	WSACleanup();
-}
-
-inline void MockHttpServer::run(Handler handler) {
-	const SOCKET listen = reinterpret_cast<SOCKET>(_listen);
-	for (;;) {
-		const SOCKET c = accept(listen, nullptr, nullptr);
-		if (_stop || c == INVALID_SOCKET)
-			break;
-
+	void serve(Poco::Net::StreamSocket& c, Handler& handler) {
 		// 读取请求（头部 + body）
 		std::string req;
 		char buf[4096];
 		int n;
-		while ((n = recv(c, buf, sizeof(buf), 0)) > 0) {
+		while ((n = c.receiveBytes(buf, sizeof(buf))) > 0) {
 			req.append(buf, static_cast<size_t>(n));
 			if (req.find("\r\n\r\n") != std::string::npos)
 				break;
@@ -123,7 +107,7 @@ inline void MockHttpServer::run(Handler handler) {
 		const size_t headerEnd = req.find("\r\n\r\n");
 		std::string body = (headerEnd == std::string::npos) ? std::string() : req.substr(headerEnd + 4);
 		while (body.size() < bodyLen) {
-			n = recv(c, buf, sizeof(buf), 0);
+			n = c.receiveBytes(buf, sizeof(buf));
 			if (n <= 0)
 				break;
 			body.append(buf, static_cast<size_t>(n));
@@ -144,9 +128,12 @@ inline void MockHttpServer::run(Handler handler) {
 			"Content-Type: application/json\r\n"
 			"Content-Length: " + std::to_string(respBody.size()) + "\r\n"
 			"Connection: close\r\n\r\n" + respBody;
-		send(c, resp.data(), static_cast<int>(resp.size()), 0);
-		closesocket(c);
+		c.sendBytes(resp.data(), static_cast<int>(resp.size()));
+		c.close();
 	}
-	closesocket(listen);
-}
-#endif // _WIN32
+
+	int _port = -1;
+	std::atomic<bool> _stop{false};
+	std::thread _thread;
+	Poco::Net::ServerSocket _socket;
+};
