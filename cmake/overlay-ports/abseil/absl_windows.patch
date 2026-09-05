@@ -42,3 +42,4 @@ index 3effc441..c339e269 100644
  
    // Attempts to find `key` in the table; if it isn't found, returns an iterator
    // where the value can be inserted into, with the control byte already set to
+ 

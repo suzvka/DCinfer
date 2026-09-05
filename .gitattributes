@@ -4,6 +4,14 @@
 * text=auto
 
 ###############################################################################
+# vcpkg overlay patch 文件必须保持 LF：
+# core.autocrlf=true 会在 checkout 时把 *.patch 转成 CRLF，
+# 导致 `git apply` 报 "corrupt patch"（空上下文行的前导空格被行尾清洗吃掉）。
+###############################################################################
+*.patch text eol=lf
+*.diff  text eol=lf
+
+###############################################################################
 # Set default behavior for command prompt diff.
 #
 # This is need for earlier builds of msysgit that does not have it on by

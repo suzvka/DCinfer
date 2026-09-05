@@ -13,7 +13,7 @@ index 1234567..abcdefg 100644
        "absl::MakeSpan() or make the array an std::array. To hash the array "
 @@ -1265,7 +1265,7 @@ class ABSL_DLL MixingHashState : public HashStateBase<MixingHashState> {
    }
-
+ 
   private:
 -  friend class MixingHashState::HashStateBase;
 +  friend class HashStateBase<MixingHashState>;
@@ -37,11 +37,11 @@ index 1234567..abcdefg 100644
 @@ -368,7 +369,7 @@ class HashState : public hash_internal::HashStateBase<HashState> {
   private:
    HashState() = default;
-
+ 
 -  friend class HashState::HashStateBase;
 +  friend class hash_internal::HashStateBase<HashState>;
    friend struct hash_internal::CombineRaw;
-
+ 
    template <typename T>
 diff --git a/absl/container/internal/raw_hash_set.h b/absl/container/internal/raw_hash_set.h
 index 1234567..abcdefg 100644
@@ -56,3 +56,4 @@ index 1234567..abcdefg 100644
    seed += uint16_t{0xad53};
    return seed;
  }
+ 
