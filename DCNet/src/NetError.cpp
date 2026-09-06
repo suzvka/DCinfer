@@ -92,6 +92,46 @@ NetError finalize(NetError e) {
 	return e;
 }
 
+// ── 入站 wire 逆向映射（M-server 变体 A；DESIGN.md §6.1）──
+// 逆向表与 categoryForHttpStatus / finalize 正向表逐行对偶：
+//   Ok              → 200（2xx 直接成功）
+//   InvalidInput    → 400（RemoteRejected → InvalidInput）
+//   SchemaMismatch  → 422（预留行：本地当前不产出该值，对端归一化仍为
+//                     InvalidInput，与本地形状违例现行行为一致；本地改产后
+//                     需按提案 §5 备注扩表）
+//   ExecutionFailed → 500（RemoteServer → ExecutionFailed）
+//   InternalError   → 500（解析限度：对端归一化为 ExecutionFailed）
+int wireHttpStatusFor(Node::Status status) {
+	switch (status) {
+	case Node::Status::Ok:
+		return 200;
+	case Node::Status::InvalidInput:
+		return 400;
+	case Node::Status::SchemaMismatch:
+		return 422;
+	case Node::Status::ExecutionFailed:
+	case Node::Status::InternalError:
+		return 500;
+	}
+	return 500;
+}
+
+const char* wireCodeFor(Node::Status status) {
+	switch (status) {
+	case Node::Status::Ok:
+		return "ok";
+	case Node::Status::InvalidInput:
+		return "invalid_input";
+	case Node::Status::SchemaMismatch:
+		return "schema_mismatch";
+	case Node::Status::ExecutionFailed:
+		return "execution_failed";
+	case Node::Status::InternalError:
+		return "internal_error";
+	}
+	return "internal_error";
+}
+
 NetError normalizeTransportError(NetTransportError err, std::string detail) {
 	NetError e;
 	switch (err) {

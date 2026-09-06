@@ -16,6 +16,8 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <utility>
 
 namespace DC::Net {
 
@@ -153,6 +155,37 @@ std::shared_ptr<DcNetCodec> makeTensorJsonCodec() {
 
 std::shared_ptr<DcNetCodec> makeTextJsonCodec() {
 	return std::make_shared<TextJsonCodec>();
+}
+
+// ── 服务端镜像 codec（M-server 变体 A；DESIGN.md §3.6）──
+
+/// 单张量进出的服务端 codec：与出站 tensor/text codec 共用同一 v1 报文格式。
+class TensorJsonServerCodec final : public DcNetServerCodec {
+public:
+	TensorJsonServerCodec(std::string inputPort, std::string outputPort)
+		: _inputPort(std::move(inputPort)), _outputPort(std::move(outputPort)) {}
+
+	std::unordered_map<std::string, Tensor> decodeRequest(const Payload& request) override {
+		const auto j = nlohmann::json::parse(request); // 解析失败 → 异常 → 监听器 415
+		return {{_inputPort, decodeTensor(j)}};        // 未知 dtype → 异常 → 415
+	}
+
+	Payload encodeResponse(const std::unordered_map<std::string, Tensor>& outputs) override {
+		const auto it = outputs.find(_outputPort);
+		if (it == outputs.end())
+			throw std::runtime_error("tensor server codec: output port '" + _outputPort + "' missing");
+		return encodeTensor(it->second).dump();
+	}
+
+	std::string requestPath() const override { return "/infer"; }
+
+private:
+	std::string _inputPort;
+	std::string _outputPort;
+};
+
+std::shared_ptr<DcNetServerCodec> makeTensorJsonServerCodec(std::string inputPort, std::string outputPort) {
+	return std::make_shared<TensorJsonServerCodec>(std::move(inputPort), std::move(outputPort));
 }
 
 } // namespace DC::Net

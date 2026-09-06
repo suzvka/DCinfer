@@ -71,4 +71,18 @@ NetError normalizeHttpResponse(int status, const std::string& body);
 /// 核心统一出口；上述入口函数内部均已调用。
 NetError finalize(NetError e);
 
+// ── 入站 wire 逆向映射（M-server 变体 A；DESIGN.md §6.1）──
+
+/// @brief 服务端 wire 应答状态：本地执行结果状态 → HTTP 状态码。
+/// 核心统一维护（ADR-4），使对端 normalizeHttpResponse 归一化结果等于本地
+/// status（提案验收标准 1）。已知解析限度：非鉴权 InternalError 无忠实 wire
+/// 表示，按提案 §5「本地执行失败 → 5xx」应答（对端归一化为 ExecutionFailed）。
+/// 鉴权 401/403、过载 429、wire 级垃圾报文 415 不经本映射——它们无本地
+/// 对应物，由监听/装配层直接应答（提案 §5 表）。
+int wireHttpStatusFor(Node::Status status);
+
+/// @brief 服务端 wire 应答错误体 code（诊断细化）。
+/// 未知 code 不影响对端归类（按状态码兜底），仅细化消息前缀 remote:<code>。
+const char* wireCodeFor(Node::Status status);
+
 } // namespace DC::Net

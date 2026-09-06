@@ -176,6 +176,66 @@ TEST(defaultIsSuccess) {
 	CHECK(e.ok(), "default NetError should be success");
 }
 
+// ── 入站类：服务端 wire 逆向映射（M-server / DESIGN.md §6.1）──
+
+TEST(wireStatusMapping) {
+	CHECK(DC::Net::wireHttpStatusFor(Status::Ok) == 200, "Ok → 200");
+	CHECK(DC::Net::wireHttpStatusFor(Status::InvalidInput) == 400, "InvalidInput → 400");
+	CHECK(DC::Net::wireHttpStatusFor(Status::SchemaMismatch) == 422, "SchemaMismatch → 422");
+	CHECK(DC::Net::wireHttpStatusFor(Status::ExecutionFailed) == 500, "ExecutionFailed → 500");
+	CHECK(DC::Net::wireHttpStatusFor(Status::InternalError) == 500, "InternalError → 500");
+}
+
+TEST(wireCodeFor) {
+	CHECK(std::string(DC::Net::wireCodeFor(Status::Ok)) == "ok", "code ok");
+	CHECK(std::string(DC::Net::wireCodeFor(Status::InvalidInput)) == "invalid_input", "code invalid_input");
+	CHECK(std::string(DC::Net::wireCodeFor(Status::SchemaMismatch)) == "schema_mismatch", "code schema_mismatch");
+	CHECK(std::string(DC::Net::wireCodeFor(Status::ExecutionFailed)) == "execution_failed", "code execution_failed");
+	CHECK(std::string(DC::Net::wireCodeFor(Status::InternalError)) == "internal_error", "code internal_error");
+}
+
+TEST(wireRoundTripParity) {
+	// 验收标准 1（提案 §9）：对端 normalizeHttpResponse 归一化结果 == 本地 status。
+	// 请求体携带推荐 code（未知 code 不影响归类，按状态码兜底）。
+	using DC::Net::normalizeHttpResponse;
+	using DC::Net::wireHttpStatusFor;
+
+	CHECK(normalizeHttpResponse(wireHttpStatusFor(Status::Ok), "{}").ok(), "Ok → 2xx 直接成功");
+
+	{
+		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::InvalidInput),
+											 R"({"error":{"code":"invalid_input","message":"x"}})");
+		CHECK(e.localStatus == Status::InvalidInput, "400+invalid_input → InvalidInput（与本地一致）");
+	}
+	{
+		// SchemaMismatch 预留行：本地当前不产出该值（Node.h L125-131 预留；R3 已核），
+		// 对端按 422 归一化为 InvalidInput —— 与本地形状违例的现行行为一致；
+		// 本地改产后需按提案 §5 备注扩表维持一致。
+		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::SchemaMismatch),
+											 R"({"error":{"code":"schema_mismatch","message":"x"}})");
+		CHECK(e.localStatus == Status::InvalidInput, "422+schema_mismatch → InvalidInput（预留行）");
+	}
+	{
+		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::ExecutionFailed),
+											 R"({"error":{"code":"execution_failed","message":"x"}})");
+		CHECK(e.localStatus == Status::ExecutionFailed, "500+execution_failed → ExecutionFailed（与本地一致）");
+	}
+	{
+		// 解析限度（DESIGN.md §6.1 备注）：非鉴权 InternalError 无忠实 wire 表示，
+		// 按提案 §5「本地执行失败 → 5xx」应答，对端归一化为 ExecutionFailed。
+		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::InternalError),
+											 R"({"error":{"code":"internal_error","message":"x"}})");
+		CHECK(e.localStatus == Status::ExecutionFailed, "500+internal_error → ExecutionFailed（解析限度）");
+	}
+	// 无本地对应物的闸门类（提案 §5 表，由监听/装配层直接应答）：
+	CHECK(normalizeHttpResponse(401, R"({"error":{"code":"unauthorized"}})").localStatus == Status::InternalError,
+		  "401 → RemoteAuth → InternalError（remote:auth）");
+	CHECK(normalizeHttpResponse(429, R"({"error":{"code":"overloaded"}})").localStatus == Status::ExecutionFailed,
+		  "429 → RemoteRateLimited → ExecutionFailed（retryable）");
+	CHECK(normalizeHttpResponse(415, R"({"error":{"code":"malformed_frame"}})").localStatus == Status::InternalError,
+		  "415（未列举状态） → RemoteMalformed → InternalError（remote:malformed）");
+}
+
 int main() {
 	test_transportTimeout();
 	test_transportUnreachable();
@@ -190,6 +250,9 @@ int main() {
 	test_remoteBodyMalformed();
 	test_httpResponseCombo();
 	test_defaultIsSuccess();
+	test_wireStatusMapping();
+	test_wireCodeFor();
+	test_wireRoundTripParity();
 	std::printf("NetErrorTest: %d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }
