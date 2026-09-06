@@ -1,7 +1,7 @@
 // HTTP/1.1 监听器（POCO ServerSocket；MockServer 的对外契约演进，DESIGN.md §3.6）
 //
-// 闸门顺序（提案 §5）：accept → 读请求 → 过载 429 → 方法 405 → 鉴权 401 →
-// 路径 404 → 业务 handler → 应答。连接中途断开无应答（§5 aborted 行）。
+// 闸门顺序（DESIGN.md §6.1）：accept → 读请求 → 过载 429 → 方法 405 → 鉴权 401 →
+// 路径 404 → 业务 handler → 应答。连接中途断开无应答（对端自行归一化超时）。
 // 过载计数在请求完整读入后进行——出站 connect 的 TCP 就绪探测连接（读即断）
 // 不入计，避免误限流。
 // v1 边界：仅 Content-Length 请求体（不支持 chunked）；逐请求应答后关闭连接。
@@ -148,7 +148,7 @@ private:
 			} catch (const Poco::Exception&) {
 				if (_stopped)
 					break; // socket 已关闭（stop）
-				// 单连接异常不终止监听（FR-5：不得崩溃）
+				// 单连接异常不终止监听（不得崩溃）
 			} catch (...) {
 				if (_stopped)
 					break;
@@ -171,7 +171,7 @@ private:
 				return;
 			}
 
-			// 过载闸门（FR-5）：请求已完整读入后计数（探测连接不入计），超出在途
+			// 过载闸门（DESIGN.md §3.6）：请求已完整读入后计数（探测连接不入计），超出在途
 			// 上限立即 wire 429——不排队、不静默丢弃
 			if (_inFlight.fetch_add(1, std::memory_order_acq_rel) + 1 >
 				static_cast<std::size_t>(_endpoint.maxInFlight)) {
@@ -200,14 +200,14 @@ private:
 			try {
 				resp = _handler(req.path, req.body);
 			} catch (const std::exception& e) {
-				// handler 异常不得逃逸出服务线程（FR-5：不得崩溃），兜底 5xx
+				// handler 异常不得逃逸出服务线程（不得崩溃），兜底 5xx
 				resp = WireResponse{500, detail::wireErrorBody("server_error", std::string("handler exception: ") + e.what())};
 			} catch (...) {
 				resp = WireResponse{500, detail::wireErrorBody("server_error", "unknown handler exception")};
 			}
 			respond(conn, resp);
 		} catch (...) {
-			// 连接中途断开 / 请求中止：无应答（提案 §5 aborted 行），线程静默退出
+			// 连接中途断开 / 请求中止：无应答（对端自行归一化超时），线程静默退出
 		}
 	}
 
@@ -280,7 +280,7 @@ private:
 
 	bool authorized(const RawRequest& req) const {
 		if (_endpoint.authToken.empty())
-			return true; // 未配置鉴权 → 闸门放行（FR-6 P1 可选）
+			return true; // 未配置鉴权 → 闸门放行（鉴权可选）
 		const auto it = req.headers.find("authorization");
 		if (it == req.headers.end())
 			return false;

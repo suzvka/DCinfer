@@ -12,17 +12,18 @@ namespace DC::Net {
 /// @brief 服务端协议映射（DcNetCodec 的镜像；DESIGN.md §3.6）。
 ///
 /// 载荷格式复用出站 codec（v1：张量 JSON，数值 base64 / Data 文本 UTF-8），
-/// 不另造格式（提案 FR-2）。错误归一化不属 codec 职责：
+/// 不另造格式。错误归一化不属 codec 职责：
 /// decodeRequest 抛异常视为 wire 级垃圾报文（监听器回 415，对端归一化
-/// RemoteMalformed → InternalError）；本地执行失败经 wireStatusFor 逆向映射。
+/// RemoteMalformed → InternalError，见 DESIGN.md §6.1）；本地执行失败经
+/// wireStatusFor 逆向映射。
 ///
-/// [C2] 裁决：不暴露 Node::RunContext——服务端一请求一节点实例，codec 以
-/// 「端口名 ↔ 张量」为界，实例级隔离由装配层保证（DESIGN.md ADR-7）。
+/// 不暴露 Node::RunContext（ADR-7）：服务端一请求一节点实例，codec 以
+/// 「端口名 ↔ 张量」为界，实例级隔离由装配层保证。
 struct DcNetServerCodec {
 	virtual ~DcNetServerCodec() = default;
 
 	/// @brief 对方请求报文 → 本地输入端口张量映射（端口名 → 张量）。
-	/// 抛异常 = 报文不可解析（wire 级损坏，非图级输入错误；提案 §5 拆行）。
+	/// 抛异常 = 报文不可解析（wire 级损坏，非图级输入错误；见 DESIGN.md §6.1）。
 	virtual std::unordered_map<std::string, Tensor> decodeRequest(const Payload& request) = 0;
 
 	/// @brief 本地输出端口张量映射 → 对方响应报文。

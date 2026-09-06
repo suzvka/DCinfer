@@ -20,9 +20,9 @@ using RequestHandler = std::function<WireResponse(const std::string& path, const
 
 /// @brief 监听端生命周期（DcNetTransport 的服务端镜像；DESIGN.md §3.6）。
 ///
-/// [C1] 裁决：bind 为配置期出口——失败抛 NodeException（对齐 createEngine
+/// bind 为配置期出口（ADR-7）：失败抛 NodeException（对齐 createEngine
 /// 先例与 DESIGN.md §6「配置/编译期」约定）；start 后的运行期错误不抛出，
-/// 以 wire 状态应答（5xx / 429）并保持监听存活（FR-5：不得崩溃或静默丢弃）。
+/// 以 wire 状态应答（5xx / 429）并保持监听存活——不得崩溃或静默丢弃请求。
 /// ADR-6(3)：实现内部自持 I/O 线程 / accept 循环，对上层呈现同步契约。
 struct DcNetListener {
 	virtual ~DcNetListener() = default;
@@ -46,7 +46,7 @@ struct DcNetListener {
 
 /// @brief HTTP/1.1 监听器（POCO ServerSocket，跨平台；MockServer 的对外契约演进）。
 /// v1 边界：仅 Content-Length 请求体（不支持 chunked）；逐请求应答后关闭连接；
-/// 服务端证书 / TLS 监听随 mTLS 需求另行设计（FR-6 分级）。
+/// 服务端证书 / TLS 监听随 mTLS 需求另行设计。
 std::unique_ptr<DcNetListener> makeHttpListener();
 
 } // namespace DC::Net

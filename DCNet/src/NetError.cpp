@@ -92,13 +92,13 @@ NetError finalize(NetError e) {
 	return e;
 }
 
-// ── 入站 wire 逆向映射（M-server 变体 A；DESIGN.md §6.1）──
+// ── 入站 wire 逆向映射（M-server；DESIGN.md §6.1）──
 // 逆向表与 categoryForHttpStatus / finalize 正向表逐行对偶：
 //   Ok              → 200（2xx 直接成功）
 //   InvalidInput    → 400（RemoteRejected → InvalidInput）
 //   SchemaMismatch  → 422（预留行：本地当前不产出该值，对端归一化仍为
 //                     InvalidInput，与本地形状违例现行行为一致；本地改产后
-//                     需按提案 §5 备注扩表）
+//                     按需扩表，DESIGN.md §6.1 备注）
 //   ExecutionFailed → 500（RemoteServer → ExecutionFailed）
 //   InternalError   → 500（解析限度：对端归一化为 ExecutionFailed）
 int wireHttpStatusFor(Node::Status status) {

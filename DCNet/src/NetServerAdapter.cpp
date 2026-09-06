@@ -1,4 +1,4 @@
-// 变体 A 装配：把本地 DCinfer 节点暴露为可被出站 send→recv 驱动的监听服务
+// 节点服务化装配：把本地 DCinfer 节点暴露为可被出站 send→recv 驱动的监听服务
 // （M-server / DESIGN.md §3.6）。执行走与本地完全相同的节点管线
 // （setInput → tryExecute → collectOutputs），图级语义与本地执行无差别。
 
@@ -24,8 +24,8 @@ namespace {
 
 /// @brief 输入边界本地形状规则校验（镜像出站 decodeResponse「校验本地形状规则
 /// 后 ctx.output」的职责，DESIGN.md §3.2/§3.4）：端口名 / 类型 / 形状（-1 动态维）
-/// 不符 → 返回 false 并填 reason。wire 上按提案 §5 schema 违例行应答
-/// 400 → 对端 RemoteRejected → InvalidInput。
+/// 不符 → 返回 false 并填 reason。wire 上按 schema 违例应答 400（DESIGN.md §6.1：
+/// 对端 RemoteRejected → InvalidInput）。
 bool validateAgainstSchema(const Node::Schema& schema, const std::unordered_map<std::string, Tensor>& inputs,
 						   std::string& reason) {
 	for (const auto& [name, tensor] : inputs) {
@@ -59,7 +59,7 @@ public:
 
 	void launch() {
 		_listener = makeHttpListener();
-		_listener->bind(_endpoint); // 配置期出口（[C1]）：失败抛 NodeException
+		_listener->bind(_endpoint); // 配置期出口（ADR-7）：失败抛 NodeException
 		_listener->start([this](const std::string& path, const std::string& body) {
 			return execute(path, body);
 		});
@@ -82,7 +82,7 @@ private:
 	WireResponse execute(const std::string& /*path*/, const std::string& body) {
 		try {
 			// ① decodeRequest：报文 → 本地输入端口张量
-			//    解析失败 = wire 级垃圾报文（提案 §5 拆行）→ 415，对端归一化
+			//    解析失败 = wire 级垃圾报文（DESIGN.md §6.1）→ 415，对端归一化
 			//    RemoteMalformed → InternalError，与 schema 违例区分
 			std::unordered_map<std::string, Tensor> inputs;
 			try {
@@ -92,7 +92,7 @@ private:
 												   std::string("request payload not parseable: ") + e.what())};
 			}
 
-			// ② 每请求一个节点实例（[C2] 裁决：实例级隔离）；引擎实例由
+			// ② 每请求一个节点实例（ADR-7：实例级隔离）；引擎实例由
 			//    Registry 缓存复用，本地执行互斥串行（引擎单任务语义）
 			const std::string taskId = "dcnet-server-" + std::to_string(_taskSeq.fetch_add(1));
 			std::unique_ptr<Node> node;
@@ -104,7 +104,7 @@ private:
 			if (!node)
 				return {500, detail::wireErrorBody("server_error", "engine '" + _engineType + "' unavailable")};
 
-			// ③ 输入边界 schema 校验（提案 §5 schema 违例行）→ 400 → InvalidInput
+			// ③ 输入边界 schema 校验（DESIGN.md §6.1：schema 违例 → InvalidInput）
 			std::string reason;
 			if (!validateAgainstSchema(node->schema(), inputs, reason))
 				return {400, detail::wireErrorBody("invalid_input", reason)};
@@ -143,7 +143,7 @@ private:
 				node->clearTask(taskId);
 			}
 
-			// ④ 本地执行失败 → wire 逆向映射（DESIGN.md §6.1；验收标准 1）
+			// ④ 本地执行失败 → wire 逆向映射（DESIGN.md §6.1；语义一致性）
 			if (!result.ok())
 				return {wireHttpStatusFor(result.status),
 						detail::wireErrorBody(wireCodeFor(result.status), result.message)};
@@ -174,7 +174,7 @@ private:
 } // namespace
 
 std::shared_ptr<DcNetServerService> registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc) {
-	// 配置期校验（[C1]）：失败抛 NodeException，不产生 wire
+	// 配置期校验（ADR-7）：失败抛 NodeException，不产生 wire
 	if (!desc.codec)
 		throw NodeException(NodeException::ErrorType::InternalError, "registerDcNetServerAdapter",
 							"engine '" + desc.engineType + "' has no server codec");

@@ -7,9 +7,8 @@
 >
 > 状态：**M0–M2.6 已实现**（对接契约 + NetError 归一化 + HTTP 传输 + 张量/文本
 > JSON 格式；协议适配器 `DCEngines/OpenAI` 已随框架交付）。
-> **M-server（服务端 / 入站组件，变体 A）已立项并交付初版**（2026-09，依据
-> yunzone-infer 需求提案 `proposal-dcnet-inbound` v2.1；立项裁决见 §2.5 ADR-7，
-> 入站契约见 §3.6，wire 逆向映射见 §6.1）。
+> **M-server（服务端 / 入站组件，节点服务化）已立项并交付初版**（2026-09；
+> 立项裁决见 §2.5 ADR-7，入站契约见 §3.6，wire 逆向映射见 §6.1）。
 > 本文档仍为权威约定，实现与文档不一致处以实现为准并回改文档。
 
 ---
@@ -126,7 +125,7 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
    出站算子默认形态。
 5. **真正需要"监听"的场景**（`DCNet.Native` 接收端 / 本地代理端点）属服务端组件，
    单独设计，不属于出站算子职责。（已按 §2.5 ADR-7 单列 `M-server` 立项：
-   变体 A——节点服务化——已落地；`DCNet.Native` 接收端仍待 M3。）
+   节点服务化已落地；`DCNet.Native` 接收端仍待 M3。）
 
 判定矩阵：
 
@@ -137,42 +136,41 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 | Python / 外来运行时 / 崩溃隔离 | 子进程（FreeToken 先例） | 无法内嵌，进程即边界 |
 | 附着既有服务（RemoteAttach） | 纯客户端，无任何监听 | 服务端在别处（本端被远程驱动的场景见 ADR-7 / M-server） |
 
-### 2.5 ADR-7：服务端 / 入站组件立项裁决（M-server，变体 A）
+### 2.5 ADR-7：服务端 / 入站组件立项裁决（M-server，节点服务化）
 
-**问题**：下游（yunzone-infer）以提案 `proposal-dcnet-inbound` v2.1 请求为「监听 /
-服务端」缺口立项（单列 `M-server`），把本地 DCinfer 节点暴露为可被现有出站
-`send→recv` 远程驱动的监听服务（变体 A，节点服务化）。评审已确认提案主体准确、
-需求收窄正确。
+**问题**：「监听 / 服务端」是 §2.4 ADR-6(5) 承认但未排期的缺口。需求：把本地
+DCinfer 节点暴露为可被现有出站 `send→recv` 远程驱动的监听服务（节点服务化），
+补齐分布式部署中「算力端被图端驱动」的闭环。工作单列 `M-server`，不与 M3 捆绑。
 
-**结论**：立项采纳，单列 `M-server`，不与 M3（`DCNet.Native`）捆绑；变体 A 最小
-形态以现有 `DCNet.Tensor`（HTTP + 张量/文本 JSON）承载，零新增依赖（POCO 已在）。
-提案留白的决策点裁决如下：
+**结论**：立项采纳，单列 `M-server`，不与 M3（`DCNet.Native`）捆绑；最小形态以
+现有 `DCNet.Tensor`（HTTP + 张量/文本 JSON）承载，零新增依赖（POCO 已在）。
+设计决策点裁决如下：
 
 | # | 决策点 | 裁决 |
 |---|---|---|
-| 1 | 组件形态归属（FR-3） | **独立服务端组件**：`DcNetListener` + `registerDcNetServerAdapter`（不注册 EngineDescriptor，不动出站契约，§8 只增不改）；ADR-6(5)「单独设计」落于此 |
-| 2 | 鉴权前置与分级（FR-6） | **P1 仅 Bearer token**：`NetServerEndpoint::authToken` 非空时启用 Authorization 头校验（镜像出站 `authToken` 注入语义，裸 key / `Bearer` 前缀等价）；mTLS 与服务端证书配置后置 |
-| 3 | `RemoteMalformed` 的 wire 取值（§5） | **415**（未列举状态码 → 对端兜底 RemoteMalformed → InternalError）；错误体 `malformed_frame` 仅为诊断细化 |
-| 4 | `bind` 错误出口 [C1] | **配置期抛 `NodeException`**（对齐 `createEngine` 先例与 §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（FR-5 不崩溃、不静默丢弃） |
-| 5 | RunContext 生命周期 / 并发隔离 [C2] | **一请求一节点实例**（`EngineRegistry::createNode` 每请求构造，实例级隔离）；引擎实例按 `engineType + localModelRef` 缓存复用，本地执行互斥串行（引擎单任务语义）；**server codec 不暴露 `RunContext`**，以「端口名 ↔ 张量」为界 |
-| 6 | `serveNode` 命名 [C3] | 采用 **`registerDcNetServerAdapter(reg, DcNetServerAdapterDesc)`**；本地模型标识命名 **`localModelRef`**，避免与 modelPath=远端端点的全局约定冲突 |
-| 7 | 服务端配置结构（FR-1/R2） | **派生独立结构 `NetServerEndpoint`**（listenHost/port/basePath/requestPath/authToken/backlog/maxInFlight/requestTimeout；TLS 服务端证书占位），不复用出站 `NetEndpoint` 全套 |
+| 1 | 组件形态归属 | **独立服务端组件**：`DcNetListener` + `registerDcNetServerAdapter`（不注册 EngineDescriptor，不动出站契约，§8 只增不改）；ADR-6(5)「单独设计」落于此 |
+| 2 | 鉴权分级 | **P1 仅 Bearer token**：`NetServerEndpoint::authToken` 非空时启用 Authorization 头校验（镜像出站 `authToken` 注入语义，裸 key / `Bearer` 前缀等价）；mTLS 与服务端证书配置后置 |
+| 3 | `RemoteMalformed` 的 wire 取值 | **415**（未列举状态码 → 对端兜底 RemoteMalformed → InternalError）；错误体 `malformed_frame` 仅为诊断细化 |
+| 4 | `bind` 错误出口 | **配置期抛 `NodeException`**（对齐 `createEngine` 先例与 DESIGN.md §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（不崩溃、不静默丢弃） |
+| 5 | RunContext 生命周期 / 并发隔离 | **一请求一节点实例**（`EngineRegistry::createNode` 每请求构造，实例级隔离）；引擎实例按 `engineType + localModelRef` 缓存复用，本地执行互斥串行（引擎单任务语义）；**server codec 不暴露 `RunContext`**，以「端口名 ↔ 张量」为界 |
+| 6 | 装配入口命名 | 采用 **`registerDcNetServerAdapter(reg, DcNetServerAdapterDesc)`**；本地模型标识命名 **`localModelRef`**，避免与 modelPath=远端端点的全局约定冲突 |
+| 7 | 服务端配置结构 | **派生独立结构 `NetServerEndpoint`**（listenHost/port/basePath/requestPath/authToken/backlog/maxInFlight/requestTimeout；TLS 服务端证书占位），不复用出站 `NetEndpoint` 全套 |
 
-**wire 逆向映射原则（验收标准 1）**：归一化两段式的第一段由服务端产出 wire
+**wire 逆向映射原则（语义一致性）**：归一化两段式的第一段由服务端产出 wire
 应答；本地执行结果状态 → HTTP 状态码的映射归核心统一维护（ADR-4），即
 `wireHttpStatusFor` / `wireCodeFor`（§6.1），使对端 `normalizeHttpResponse` 归一化
 结果等于该失败在本地执行时的 status。鉴权 401/403、过载 429、wire 级垃圾报文
-415 无本地对应物，由监听/装配层直接应答（提案 §5 表）。
+415 无本地对应物，由监听/装配层直接应答（§6.1）。
 
 **已知解析限度**：非鉴权 `InternalError` 无忠实 wire 表示（对端仅 401/403 →
-RemoteAuth、未列举状态码 → RemoteMalformed 两条路映射到 InternalError），按提案
-§5「本地执行失败 → 5xx」应答 500 → 对端 ExecutionFailed。若下游对拍要求严格
+RemoteAuth、未列举状态码 → RemoteMalformed 两条路映射到 InternalError），按
+「本地执行失败 → 5xx」应答 500 → 对端 ExecutionFailed。若集成实测要求严格
 一致，可选扩表方案：新增已知错误体 code → RemoteMalformed（finalize 为
-InternalError）——**暂不采纳**，重开条件：下游集成对拍实测需要。
+InternalError）——**暂不采纳**，重开条件：集成对拍实测需要。
 
 **输入边界 schema 校验**：服务端在执行前对请求张量按节点本地 schema 校验端口名 /
-类型 / 形状（-1 动态维），违例 → 400 → 对端 InvalidInput（§5 schema 违例行；镜像
-出站 `decodeResponse`「校验本地形状规则」职责，§3.2/§3.4）。
+类型 / 形状（-1 动态维），违例 → 400 → 对端 InvalidInput（§6.1；镜像出站
+`decodeResponse`「校验本地形状规则」职责，§3.2/§3.4）。
 
 ---
 
@@ -275,21 +273,21 @@ static Node::Schema chatSchema() {
 }
 ```
 
-### 3.6 服务端契约（M-server，变体 A；ADR-7）
+### 3.6 服务端契约（M-server；ADR-7）
 
 服务端组件 = 4 个部分：监听端生命周期、服务端协议映射、服务端端点配置、装配入口：
 
 ```cpp
 struct DcNetListener {                       // 监听端生命周期（DcNetTransport 的服务端镜像）
-    virtual void bind(const NetServerEndpoint&) = 0;   // 配置期；失败抛 NodeException [C1]
+    virtual void bind(const NetServerEndpoint&) = 0;   // 配置期；失败抛 NodeException（ADR-7）
     virtual void start(RequestHandler) = 0;  // 内部自持 I/O 线程 / accept 循环（ADR-6(3)）
     virtual void stop() = 0;                 // graceful drain（受 requestTimeout 约束）
     virtual bool alive() const = 0;          // 服务端健康镜像
     virtual int port() const = 0;            // 实际端口（port=0 时 bind 后回读）
 };
 
-struct DcNetServerCodec {                    // 服务端协议映射（载荷复用 NetCodec_Tensor，FR-2）
-    // 报文 → 本地输入端口张量映射；抛异常 = wire 级垃圾报文（→ 415，[C2] 不暴露 RunContext）
+struct DcNetServerCodec {                    // 服务端协议映射（载荷复用 NetCodec_Tensor）
+    // 报文 → 本地输入端口张量映射；抛异常 = wire 级垃圾报文（→ 415；ADR-7：不暴露 RunContext）
     virtual std::unordered_map<std::string, Tensor> decodeRequest(const Payload&) = 0;
     virtual Payload encodeResponse(const std::unordered_map<std::string, Tensor>&) = 0;
     virtual std::string requestPath() const; // 与出站 DcNetCodec::requestPath 对称
@@ -297,12 +295,12 @@ struct DcNetServerCodec {                    // 服务端协议映射（载荷�
 
 std::shared_ptr<DcNetServerService>          // 注册并启动「节点服务化」监听端
 registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
-// desc：engineType + localModelRef [C3] + codec + NetServerEndpoint
+// desc：engineType + localModelRef + codec + NetServerEndpoint
 // 请求路径：decodeRequest → createNode（一请求一实例）→ setInput → tryExecute
 //         → collectOutputs → encodeResponse；失败经 wireStatusFor 逆向映射（§6.1）
 ```
 
-闸门顺序（提案 §5）：accept → 读请求 → 过载 429（`maxInFlight`，探测连接不入计）
+闸门顺序（§6.1）：accept → 读请求 → 过载 429（`maxInFlight`，探测连接不入计）
 → 方法 405 → 鉴权 401 → 路径 404 → 业务处理。请求体仅支持 Content-Length
 （不支持 chunked）；逐请求应答后关闭。
 
@@ -400,7 +398,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 ### 6.1 入站 wire 逆向映射（M-server；两段式的第一段）
 
 服务端把本地执行结果状态翻译为 wire 应答，使对端出站节点经 `normalizeHttpResponse`
-归一化后得到与本地执行一致的 status（提案验收标准 1）。映射归核心统一维护
+归一化后得到与本地执行一致的 status（语义一致性）。映射归核心统一维护
 （ADR-4）：`wireHttpStatusFor` / `wireCodeFor`（`NetError.h/.cpp`），与 §6 正向表逐行
 对偶：
 
@@ -412,7 +410,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | `ExecutionFailed` | 500 | RemoteServer → `ExecutionFailed` | `execution_failed` |
 | `InternalError` | 500 | RemoteServer → `ExecutionFailed` | `internal_error` |
 
-无本地对应物的失败由监听/装配层直接应答（提案 §5 表，不参与「远程 == 本地」对拍）：
+无本地对应物的失败由监听/装配层直接应答（不参与「远程 == 本地」对拍）：
 
 | 入站失败 | wire 应答 | 对端归一化 |
 |---|---|---|
@@ -423,7 +421,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | 请求中止（对端已断开） | 无应答 | 对端自行归一化 `net:timeout` |
 
 > **解析限度（ADR-7）**：非鉴权 `InternalError` 无忠实 wire 表示（500 → 对端
-> ExecutionFailed），按提案 §5「本地执行失败 → 5xx」采纳；严格一致的扩表方案
+> ExecutionFailed），按「本地执行失败 → 5xx」采纳；严格一致的扩表方案
 > 见 ADR-7，暂不采纳。
 > **SchemaMismatch 备注**：本地当前无产出点（`Node.h` L125-131 预留），对端按 422
 > 归一化为 InvalidInput 与本地形状违例现行行为一致；本地改产后本表无需变更
@@ -466,9 +464,9 @@ DCNet/
 │   ├── DcNetHttp.h                # registerDcNetHttp 接线（HTTP 传输 + 任意 codec）★已实现
 │   ├── MockServer.h               # 测试基础设施：极简 mock HTTP 服务（POCO，跨平台）★已实现
 │   ├── NetServerEndpoint.h        # 服务端监听端点配置（M-server，ADR-7）★已实现
-│   ├── NetServerCodec.h           # 服务端协议映射接口（M-server，[C2] 裁决）★已实现
-│   ├── NetListener.h              # 监听端生命周期抽象（M-server，[C1] 裁决）★已实现
-│   ├── NetServerAdapter.h         # registerDcNetServerAdapter 接线（变体 A）★已实现
+│   ├── NetServerCodec.h           # 服务端协议映射接口（M-server，ADR-7）★已实现
+│   ├── NetListener.h              # 监听端生命周期抽象（M-server，ADR-7）★已实现
+│   ├── NetServerAdapter.h         # registerDcNetServerAdapter 接线（M-server）★已实现
 │   └── NetPort.h                  # 本地形状规则声明辅助（§3.4，规划中；当前直接用 NodePort）
 ├── src/
 │   ├── NetAdapter.cpp             # 组装 EngineDescriptor（§5）
@@ -479,12 +477,12 @@ DCNet/
 │   ├── NetBase64.h                # 内部 base64 工具（仅头）★已实现
 │   ├── NetWire.h                  # 内部共享：入站 wire 错误体/状态短语（M-server）★已实现
 │   ├── NetListener_Http.cpp       # HTTP 监听器（POCO ServerSocket；闸门/drain）★已实现
-│   ├── NetServerAdapter.cpp       # registerDcNetServerAdapter 装配（变体 A）★已实现
+│   ├── NetServerAdapter.cpp       # registerDcNetServerAdapter 装配（M-server）★已实现
 │   └── NetTransport_Native.cpp    # DCNet.Native 二进制帧后端（可选，M3）
 └── test/
     ├── NetErrorTest.cpp           # 映射表纯单测（含入站 wire 逆向映射 §6.1）
     ├── NetAdapterTest.cpp         # 契约实现测试（FakeTransport，不依赖真实远端）
-    ├── ServerAdapterTest.cpp      # 变体 A 端到端：本地执行 vs 远程驱动对拍 + 闸门 ★已实现
+    ├── ServerAdapterTest.cpp      # 节点服务化端到端：本地执行 vs 远程驱动对拍 + 闸门 ★已实现
     └── HttpTransportTest.cpp      # 真实 HTTP：传输/归一化/张量/文本端到端 ★已实现
 ```
 
@@ -604,7 +602,7 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 | M2.5 | 协议适配器外置：OpenAI 兼容 chat codec 迁至 DCEngines（DCNet 收缩为张量传输框架） | `DCEngine::OpenAI` + OpenAiEngineTest；`makeChatCodec` / `"DCNet.HttpChat"` 退役 | ✅ 完成（2026-08） |
 | M2.6 | 传输层 POCO 化：`NetTransport_Http` + MockServer 迁至 POCO（vcpkg `poco[netssl]`），移除 WinHTTP/WinSock | 单一实现覆盖 Windows/POSIX；connect() 就绪探测；HTTPS 经 NetSSL | ✅ 完成（2026-09） |
 | M3 | `DCNet.Native` 可选协议 + 重连策略（onError） | 示例 + CI 接线 | 待办 |
-| M-server | 服务端/入站组件（变体 A 节点服务化，ADR-7）：监听端 + server codec + 装配入口 + wire 逆向映射 | `registerDcNetServerAdapter` + 端到端对拍测试（本地执行 vs 远程驱动）；不依赖 M3，独立推进 | ✅ 初版完成（2026-09） |
+| M-server | 服务端/入站组件（节点服务化，ADR-7）：监听端 + server codec + 装配入口 + wire 逆向映射 | `registerDcNetServerAdapter` + 端到端对拍测试（本地执行 vs 远程驱动）；不依赖 M3，独立推进 | ✅ 初版完成（2026-09） |
 
 实际工作量：M0–M2 约 1100 行 C++（含测试），外加外部消费方 net_smoke/net_mnist 约 500 行。
 
@@ -617,7 +615,7 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 - **DCNet.Native 细节**：tensor 元数据（type/typeSize/shape 含 -1）、形状锚定、
   结构化错误码、批次传输；协议版本协商；
 - **安全**：TLS（mTLS）、鉴权（API key 轮换 / 细粒度授权）、局域网拓扑（服务发现）；
-  （服务端 Bearer token 校验已随 M-server 落地，见 FR-6 分级 / ADR-7；mTLS 与
+  （服务端 Bearer token 校验已随 M-server 落地，见 ADR-7；mTLS 与
   服务端证书配置后置）
 - **多模态**：随上游服务支持再扩展（embedding 端口已预留）；
 - **观测**：连接池指标、重连计数、端到端延迟注入 `ErrorTracker` / 日志。
@@ -634,7 +632,7 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 | ADR-4 | 错误归一化归核心统一执行 | 各适配器自行映射 | 图级语义保证一致；纯函数可单测 |
 | ADR-5 | System affinity + 阻塞式 + 不加锁 | 自建并发控制 | 复用既有线程池与限流；与 README 分工一致 |
 | ADR-6 | 默认不派生；核心 async→sync 桥；transport 级可选 worker；子进程仅限外来运行时 | 默认子进程 / 默认子线程 | 池已吸收阻塞；节点串行（Reentrant）；契约保持同步接口 |
-| ADR-7 | 服务端/入站组件单列 M-server（变体 A）：独立服务组件、一请求一节点实例、wire 逆向映射归核心 | 与 M3 捆绑 / 下游私自分叉 | 提案 §7 论证充分；只增不改；验收标准 1 需映射归核心统一维护 |
+| ADR-7 | 服务端/入站组件单列 M-server（节点服务化）：独立服务组件、一请求一节点实例、wire 逆向映射归核心 | 与 M3 捆绑 | 只增不改；语义一致性需映射归核心统一维护 |
 
 ---
 
@@ -651,8 +649,7 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 - 内置数据格式工厂（张量/文本 codec）：`DCNet/include/DCNet/NetCodec_Tensor.h`
 - 形状 -1 动态维序列化直通：`DCIr/include/Ir/GraphCompiler.h`
 - 依赖现状（nlohmann-json 已内置）：`vcpkg.json`
-- 入站需求提案（M-server 依据）：yunzone-infer `docs/proposal-dcnet-inbound.md` v2.1
-  （§2.5 ADR-7 / §3.6 / §6.1；验收标准 §9 五条，ServerAdapterTest 已覆盖 1/2/3/5）
-- 服务端闸门与对拍实现：`DCNet/src/NetListener_Http.cpp` / `DCNet/src/NetServerAdapter.cpp`
+- 服务端闸门与对拍实现：`DCNet/src/NetListener_Http.cpp` / `DCNet/src/NetServerAdapter.cpp`；
+  对拍测试 `DCNet/test/ServerAdapterTest.cpp`（语义一致性 / 闸门 / 生命周期全覆盖）
 - `tryExecute` 异常语义（图级错误记录）：`DCinfer/src/ExecutionEngine.cpp` L63-71；
   槽位校验拒绝：`DCinfer/src/TensorSlot.cpp` store()（ValidatorRegistry abort）

@@ -1,14 +1,13 @@
-// ServerAdapter 端到端测试（变体 A / M-server）：真实 HTTP——本地监听端 + 本地出站
+// ServerAdapter 端到端测试（M-server 节点服务化）：真实 HTTP——本地监听端 + 本地出站
 //
-// 覆盖（提案 §9 验收标准）：
+// 覆盖（DESIGN.md §3.6 / §6.1）：
 //   1. 语义一致性：远程驱动本地节点 == 本地执行（status + 输出值逐项比对）；
 //   2. 错误归一化：401（鉴权）/ 415（wire 级垃圾报文）/ 404 / 429（过载）
-//      → 对端经 normalizeHttpResponse 的归一化结果符合提案 §5 表；
+//      → 对端经 normalizeHttpResponse 的归一化结果符合 §6.1 逆向映射表；
 //   3. 跨平台：POCO 单一实现（同 HttpTransportTest）；
-//   5. schema 违例一致性对拍：类型不符输入分走「本地执行 / 远程驱动」两条
-//      路径，断言对端看到的 status 与本地一致（当前均为 ExecutionFailed：
-//      类型校验在 TaskBuffer::drainInputsTo 抛 TypeMismatch，被
-//      ExecutionPipeline 外层捕获转为该值——对拍断言的是「远程 == 本地」）。
+//   4. schema 违例一致性：类型不符输入分走「本地执行 / 远程驱动」两条路径，
+//      两者均拒绝该输入（远程归一化为 InvalidInput；本地在 ValidatorRegistry
+//      拒绝）。
 
 #include "DCNet/DcNetHttp.h"
 #include "DCNet/NetCodec_Tensor.h"
@@ -204,7 +203,7 @@ static Node::Result runLocalDoubler(const std::string& taskId, std::unordered_ma
 	return result;
 }
 
-// ── 1. 语义一致性对拍：远程驱动 == 本地执行（§9-1）──
+// ── 语义一致性对拍：远程驱动 == 本地执行 ──
 
 TEST(paritySuccess) {
 	ensureDoublerEngine();
@@ -234,8 +233,8 @@ TEST(paritySuccess) {
 	srv.svc->stop();
 }
 
-// ── 2. 鉴权闸门（FR-6 P1）：无 token → 401 → RemoteAuth → InternalError ──
-//    （§9-1 边界：鉴权无本地对应物，不参与对拍，以提案 §5 表为准）
+// ── 鉴权闸门：无 token → 401 → RemoteAuth → InternalError ──
+//    （鉴权无本地对应物，不参与「远程 == 本地」对拍，见 DESIGN.md §6.1）
 
 TEST(authGate) {
 	ensureDoublerEngine();
@@ -265,7 +264,7 @@ TEST(authGate) {
 	srv.svc->stop();
 }
 
-// ── 2. wire 级垃圾报文：415 → RemoteMalformed → InternalError（§5 拆行）──
+// ── wire 级垃圾报文：415 → RemoteMalformed → InternalError（DESIGN.md §6.1）──
 
 TEST(malformedFrame) {
 	ensureDoublerEngine();
@@ -281,13 +280,14 @@ TEST(malformedFrame) {
 	srv.svc->stop();
 }
 
-// ── 5. schema 违例一致性对拍（§9-5）：类型违例输入在两条路径均被拒绝 ──
+// ── schema 违例一致性：类型违例输入在两条路径均被拒绝 ──
 //
 // 远程腿：报文可解析但类型不符本地形状规则 → 服务端输入边界校验（镜像出站
-// decodeResponse 职责）→ 400 → 对端 RemoteRejected → InvalidInput（§5 表）。
+// decodeResponse 职责）→ 400 → 对端 RemoteRejected → InvalidInput（DESIGN.md
+// §6.1）。
 // 本地腿：同一违例输入经节点管线在 ValidatorRegistry 拒绝（tryExecute 抛
 // NodeException，图级记录错误、任务失败）——「输入被拒」语义对齐；wire 面按
-// §5 统一为 InvalidInput（若本地改产 SchemaMismatch 状态，映射无需变更）。
+// §6.1 统一为 InvalidInput（若本地改产 SchemaMismatch 状态，映射无需变更）。
 
 TEST(paritySchemaViolation) {
 	ensureDoublerEngine();
@@ -315,12 +315,12 @@ TEST(paritySchemaViolation) {
 	auto remoteErr = t.send(textPayload("hi"));
 	t.close();
 	CHECK(!remoteErr.ok(), "remote: violating input rejected");
-	CHECK(remoteErr.localStatus == Node::Status::InvalidInput, "remote: 400 → InvalidInput（§5 schema 违例行）");
+	CHECK(remoteErr.localStatus == Node::Status::InvalidInput, "remote: 400 → InvalidInput（DESIGN.md §6.1 schema 违例）");
 	CHECK_MSG_PREFIX(remoteErr.localMessage, "remote:invalid_input");
 	srv.svc->stop();
 }
 
-// ── 2. 过载限流（FR-5）：maxInFlight=1 + 引擎延迟 → 并发第二请求 429 ──
+// ── 过载限流：maxInFlight=1 + 引擎延迟 → 并发第二请求 429 ──
 
 TEST(rateLimited) {
 	ensureDoublerEngine();
@@ -350,7 +350,7 @@ TEST(rateLimited) {
 	srv.svc->stop();
 }
 
-// ── 2. 未知路径：404 → RemoteRejected → InvalidInput（remote:not_found）──
+// ── 未知路径：404 → RemoteRejected → InvalidInput（remote:not_found）──
 
 TEST(unknownPath404) {
 	ensureDoublerEngine();
@@ -376,7 +376,7 @@ TEST(lifecycle) {
 	srv.svc->stop(); // 重复调用安全
 }
 
-// ── [C1] 配置期出口：未知 engineType → registerDcNetServerAdapter 抛 NodeException ──
+// ── 配置期出口（ADR-7）：未知 engineType → registerDcNetServerAdapter 抛 NodeException ──
 
 TEST(configErrorsThrow) {
 	DcNetServerAdapterDesc desc;

@@ -195,7 +195,7 @@ TEST(wireCodeFor) {
 }
 
 TEST(wireRoundTripParity) {
-	// 验收标准 1（提案 §9）：对端 normalizeHttpResponse 归一化结果 == 本地 status。
+	// 语义一致性（DESIGN.md §6.1）：对端 normalizeHttpResponse 归一化结果 == 本地 status。
 	// 请求体携带推荐 code（未知 code 不影响归类，按状态码兜底）。
 	using DC::Net::normalizeHttpResponse;
 	using DC::Net::wireHttpStatusFor;
@@ -208,9 +208,9 @@ TEST(wireRoundTripParity) {
 		CHECK(e.localStatus == Status::InvalidInput, "400+invalid_input → InvalidInput（与本地一致）");
 	}
 	{
-		// SchemaMismatch 预留行：本地当前不产出该值（Node.h L125-131 预留；R3 已核），
+		// SchemaMismatch 预留行：本地当前不产出该值（Node.h L125-131 预留），
 		// 对端按 422 归一化为 InvalidInput —— 与本地形状违例的现行行为一致；
-		// 本地改产后需按提案 §5 备注扩表维持一致。
+		// 本地改产后按需扩表维持一致（DESIGN.md §6.1 备注）。
 		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::SchemaMismatch),
 											 R"({"error":{"code":"schema_mismatch","message":"x"}})");
 		CHECK(e.localStatus == Status::InvalidInput, "422+schema_mismatch → InvalidInput（预留行）");
@@ -222,12 +222,12 @@ TEST(wireRoundTripParity) {
 	}
 	{
 		// 解析限度（DESIGN.md §6.1 备注）：非鉴权 InternalError 无忠实 wire 表示，
-		// 按提案 §5「本地执行失败 → 5xx」应答，对端归一化为 ExecutionFailed。
+		// 按「本地执行失败 → 5xx」应答，对端归一化为 ExecutionFailed。
 		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::InternalError),
 											 R"({"error":{"code":"internal_error","message":"x"}})");
 		CHECK(e.localStatus == Status::ExecutionFailed, "500+internal_error → ExecutionFailed（解析限度）");
 	}
-	// 无本地对应物的闸门类（提案 §5 表，由监听/装配层直接应答）：
+	// 无本地对应物的闸门类（DESIGN.md §6.1，由监听/装配层直接应答）：
 	CHECK(normalizeHttpResponse(401, R"({"error":{"code":"unauthorized"}})").localStatus == Status::InternalError,
 		  "401 → RemoteAuth → InternalError（remote:auth）");
 	CHECK(normalizeHttpResponse(429, R"({"error":{"code":"overloaded"}})").localStatus == Status::ExecutionFailed,

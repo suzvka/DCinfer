@@ -157,7 +157,7 @@ std::shared_ptr<DcNetCodec> makeTextJsonCodec() {
 	return std::make_shared<TextJsonCodec>();
 }
 
-// ── 服务端镜像 codec（M-server 变体 A；DESIGN.md §3.6）──
+// ── 服务端镜像 codec（M-server；DESIGN.md §3.6）──
 
 /// 单张量进出的服务端 codec：与出站 tensor/text codec 共用同一 v1 报文格式。
 class TensorJsonServerCodec final : public DcNetServerCodec {
