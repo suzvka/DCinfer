@@ -13,6 +13,7 @@
 #include <thread>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace DC {
 
@@ -148,13 +149,24 @@ private:
 	// ── 成员 ──
 	// 声明顺序即析构顺序约束（关键！）：
 	//   状态成员最先声明 → 最后析构；线程池最后声明 → 最先析构。
-	// 析构顺序：池(shutdown/join worker) → 共享表 → 状态。
+	// 析构顺序：池(shutdown/join worker) → 共享表 → 状态 → 在飞看门狗(join) → 退役看门狗(join)。
 	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated/_watchdogs
 	// 等状态、以及向池提交任务时，所有对象均存活。
 	std::unordered_set<TaskId> _terminatedTasks;
 	mutable std::mutex _terminationMutex;
 
-	// 超时看门狗线程（per-task），在 _terminate 时 join
+	// 看门狗退役列表：超时路径中，看门狗线程会在 _terminate 内尝试回收自身，
+	// 在自身线程 join 自身将抛 resource_deadlock_would_occur，并因自 noexcept
+	// 析构逃逸触发 std::terminate——此类 jthread 移入此列表，由引擎析构统一
+	// join（彼时看门狗 lambda 早已返回，join 立即完成）。
+	// 声明顺序约束：必须先于 _watchdogs——析构时先回收在飞看门狗（其
+	// _terminate 可能仍向本列表移交自身），最后才回收本列表。
+	std::vector<std::jthread> _retiredWatchdogs;
+
+	// 超时看门狗线程（per-task），在 _terminate 时回收。
+	// _watchdogsMutex 保护注册/回收：submit（提交方线程）与 _terminate
+	//（看门狗线程、池 worker 线程）对该 map 的访问无其他同步。
+	std::mutex _watchdogsMutex;
 	std::unordered_map<TaskId, std::jthread> _watchdogs;
 
 	// 信号阻塞追踪：记录每个 task 在传播过程中因信号阻塞而被跳过的节点名。

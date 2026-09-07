@@ -715,6 +715,46 @@ void testTaskScopedSignalWithPartialBlock() {
 	END_TEST();
 }
 
+// ── 看门狗超时（回归）──
+// 曾因看门狗线程在 _terminate 中 erase 自身 jthread（自 join → noexcept
+// 析构内抛 resource_deadlock_would_occur）触发 std::terminate 使进程崩溃。
+// 信号阻塞使输出声明永远无法满足，强制走看门狗超时路径。
+void testWatchdogTimeoutTerminates() {
+	TEST("watchdog timeout: blocked task terminated, no process crash") {
+		TestHarness harness;
+
+		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+
+		harness.wire("id_a", "y", "id_b", "x");
+
+		// id_b 被信号阻塞 → 声明永远无法满足 → 看门狗超时必然触发
+		harness.node("id_b")->bindSignal(harness.signalStore(), "enable_b");
+		harness.setSignal("enable_b", false);
+
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
+
+		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(200));
+		CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
+			  "watchdog should terminate the task and notify waiters");
+
+		// 看门狗应记录超时错误（recordError 的第二个参数是 nodeName）
+		auto errors = harness.taskErrors("t1");
+		bool hasWatchdogError = false;
+		for (auto& e : errors) {
+			if (e.nodeName == "<watchdog>" || e.message.find("task timed out") != std::string::npos) {
+				hasWatchdogError = true;
+				break;
+			}
+		}
+		CHECK(hasWatchdogError, "watchdog timeout error should be recorded");
+
+		// 被阻塞节点不应产出
+		CHECK(!harness.hasOutput("t1", "id_b", "y"), "blocked node should not produce output");
+	}
+	END_TEST();
+}
+
 // ════════════════════════════════════════════
 // 子图（分组互斥）测试
 // ════════════════════════════════════════════
@@ -1028,6 +1068,9 @@ int main() {
 		testTaskScopedSignalBlocksOnlyTargetTask();
 		testTaskSignalCleanupOnTerminate();
 		testTaskScopedSignalWithPartialBlock();
+
+		// 看门狗超时（回归：曾因看门狗线程自 join 触发 std::terminate）
+		testWatchdogTimeoutTerminates();
 
 		// 子图（分组互斥）测试
 		testSubgraphSerializesExecution();

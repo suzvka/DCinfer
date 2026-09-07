@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 外部消费方注意：vcpkg manifest 需新增声明 `poco[netssl]`；Windows 下随项目
   wrapper toolchain 自动启用 SChannel 实现（见 `DCNet/DESIGN.md` §9）
 
+### Fixed
+
+- **ThreadPool 分组限流空转**：队列非空但分组信号量不可用时，工作线程原会忙等
+  自旋（wait 谓词恒真，占核 100%）；改为限时休眠（2ms 兜底轮询覆盖跨池释放，
+  同池释放由完成后 `notify_all` 即时唤醒）
+- **ExecutionEngine 看门狗自 join 崩溃**：超时路径在看门狗自身线程内 erase 并
+  join 自身 `jthread`，抛 `resource_deadlock_would_occur` 并因自 noexcept 析构
+  逃逸触发 `std::terminate`；现移交退役列表由引擎析构统一 join
+- **`_watchdogs` 数据竞争**：`submit` 注册与 `_terminate` 回收（看门狗线程、
+  池 worker、提交方线程）并发访问无同步；新增独立互斥锁，join 一律移出锁外
+- 新增看门狗超时回归测试（`InferGraphTest`；旧实现下该测试将使进程崩溃）
+
 ## [0.2.0] - 2026-08-24
 
 ### Changed

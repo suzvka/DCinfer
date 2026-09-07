@@ -117,7 +117,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	// 超时看门狗（std::jthread + stop_token，生命周期由 ExecutionEngine 管理）
 	if (timeout.count() > 0) {
 		auto deadline = std::chrono::steady_clock::now() + timeout;
-		_watchdogs[taskId] = std::jthread(
+		auto watchdog = std::jthread(
 			[this, taskId, timeout, deadline, gate, &graph, &output, &signals, &errors](
 				std::stop_token stoken) {
 				// 轮询 sleep，支持 stop_token 提前取消
@@ -136,6 +136,20 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 					_terminate(taskId, graph, output, signals);
 				}
 			});
+
+		// 注册到看门狗表：_watchdogs 无其他同步，须与 _terminate 的回收、
+		// 并发 submit 互斥。同 taskId 重复提交时，旧看门狗移出后在锁外
+		// 回收，避免在锁内 join。
+		std::jthread replaced;
+		{
+			std::lock_guard lk(_watchdogsMutex);
+			if (auto it = _watchdogs.find(taskId); it != _watchdogs.end()) {
+				replaced = std::move(it->second);
+				_watchdogs.erase(it);
+			}
+			_watchdogs.emplace(taskId, std::move(watchdog));
+		}
+		// replaced（若存在）在此析构：request_stop + join，位于锁外
 	}
 
 	// 扫描全图，对所有已就绪的节点提交执行任务（执行完成后再传播下游）
@@ -267,9 +281,27 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 			return;
 	}
 
-	// ① 取消并 join 超时看门狗（若存在）
-	//    erase 触发 std::jthread 析构 → request_stop() → join()
-	_watchdogs.erase(taskId);
+	// ① 取消并回收超时看门狗（若存在）
+	//    持锁移出、锁外回收：与 submit 的注册及并发 _terminate 互斥，
+	//    join 不在锁内，避免阻塞其他线程的注册/回收。
+	//    若调用线程正是该看门狗自身（超时路径），join 自身将抛
+	//    resource_deadlock_would_occur，并因自 noexcept 析构逃逸触发
+	//    std::terminate——此时移交退役列表，由引擎析构统一 join。
+	std::jthread finished;
+	{
+		std::lock_guard lk(_watchdogsMutex);
+		if (auto it = _watchdogs.find(taskId); it != _watchdogs.end()) {
+			if (it->second.get_id() == std::this_thread::get_id())
+				_retiredWatchdogs.push_back(std::move(it->second));
+			else
+				finished = std::move(it->second);
+			_watchdogs.erase(it);
+		}
+	}
+	if (finished.joinable()) {
+		finished.request_stop();
+		finished.join();
+	}
 
 	// ② 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
 	//    锁内拷贝、锁外调用：避免回调重入死锁

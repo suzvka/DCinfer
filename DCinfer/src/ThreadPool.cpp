@@ -1,7 +1,17 @@
 #include "ThreadPool.h"
 
+#include <chrono>
 #include <iostream>
 #include <stdexcept>
+
+namespace {
+
+// 分组限流下的轮询间隔：队列非空但分组信号量均不可用时，工作线程以该间隔
+// 休眠重试（同池释放经 notify_all 即时唤醒；跨池共享信号量的释放无法通知
+// 本池条件变量，依赖此轮询兜底）
+constexpr std::chrono::milliseconds kThrottledRetryInterval{2};
+
+} // namespace
 
 namespace DC {
 
@@ -130,8 +140,13 @@ void ThreadPool::_workerLoop() {
 				_taskQueue.push(std::move(temp));
 			}
 
-			if (!found)
-				continue;
+			if (!found) {
+				// 队列非空但所有任务的分组信号量均不可用：wait 谓词恒真，
+				// 直接 continue 会退化为忙等空转（占核自旋）。转为限时休眠，
+				// 避免烧核；同池释放由 notify_all 即时唤醒，跨池释放依赖该轮询兜底。
+				_cv.wait_for(lk, kThrottledRetryInterval);
+				continue; // 退避后重新扫描队列；不得落入执行路径（pending 仍为空）
+			}
 		}
 
 		// 递增活跃计数
@@ -153,10 +168,11 @@ void ThreadPool::_workerLoop() {
 		_globalSemaphore->release();
 		_releaseGroup(pending.groupTag);
 
-		// 通知其他工作线程可能有新槽位
+		// 通知所有工作线程：释放的组/全局槽位可能解锁任意等待者
+		//（notify_one 可能唤醒无法使用该槽位的线程，槽位将滞留至轮询周期才被发现）
 		{
 			std::lock_guard lk(_mutex);
-			_cv.notify_one();
+			_cv.notify_all();
 		}
 	}
 }
