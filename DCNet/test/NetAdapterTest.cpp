@@ -103,6 +103,7 @@ struct FakeTransport : DcNetTransport, std::enable_shared_from_this<FakeTranspor
 		out = response;
 		return recvResult;
 	}
+	const NetEndpoint& endpoint() const override { return lastEndpoint; }
 	bool alive() const override { return true; }
 	void close() override {}
 };

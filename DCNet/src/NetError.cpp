@@ -79,7 +79,7 @@ NetError finalize(NetError e) {
 		e.localMessage = "remote:server_error";
 		break;
 	case NetErrorCategory::RemoteMalformed:
-		e.localStatus = Node::Status::InternalError;
+		e.localStatus = Node::Status::RemoteMalformed;
 		e.localMessage = "remote:malformed";
 		break;
 	case NetErrorCategory::Other:

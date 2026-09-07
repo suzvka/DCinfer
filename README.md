@@ -54,36 +54,77 @@ DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准�
 
 ## 开始使用
 
+### 10 分钟上手（hello_graph 示例）
+
 ```bash
 cd DCinfer
 
 # 初始化 submodule（首次克隆后必须执行）
 git submodule update --init --recursive
 
-cmake -B build -S . \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
+# 配置：核心库 + DCIr + Builtin 引擎 + 示例（一条命令，无需额外依赖）
+cmake -B build -S . -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
+  -DBUILD_ENGINE_BUILTIN=ON
 
-cmake --build build --config Release
+# 构建
+cmake --build build
+
+# 运行示例（Ninja 单配置输出在 build/bin/；MSVC 多配置为 build/bin/Release/）
+./build/bin/hello_graph
 ```
 
-默认只构建核心库（`DCinfer`）+ DCIr + 核心测试；引擎适配器（Builtin / OnnxRuntime /
-OpenAI）与网络框架 DCNet **全部默认 OFF**，按需启用。
+预期输出：
+
+```text
+3.0 + 4.0 = 7
+```
+
+示例代码（[examples/01_hello_graph](examples/01_hello_graph/main.cpp)）展示标准任务生命周期：
+
+```cpp
+graph.bindInput("adder", "a");            // 标记图级输入端口
+graph.bindOutput("pass", "y");            // 标记图级输出端口
+graph.feedBoundInput("task1", "a", ...);  // 按绑定名注入（无需重复节点名）
+graph.submitBound("task1");               // 以 bindOutput 绑定作为输出声明
+if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
+    auto result = graph.getOutputTensor("task1", "pass", "y");  // wait 后取结果
+}
+```
+
+输出在任务终止后仍有效（无需注册回调即可读取）；复用已终止的 taskId 合法；
+活动任务重复提交会抛出明确错误；支持 `cancel()` / `taskStatus()` / `releaseTask()`。
+
+### 默认构建内容
+
+不带任何 `-D` 开关的默认配置只构建核心库（`DCinfer`）+ DCIr + 核心测试；
+引擎适配器（Builtin / OnnxRuntime / OpenAI）与网络框架 DCNet **全部默认 OFF**，按需启用。
+启用/停用情况在配置结束时以 **configure summary** 汇总输出。
 
 ### 仅使用核心（Core-only）
 
-DCinfer 核心库零外部依赖，不反向依赖任何引擎适配器。只想要核心、自行注册自定义引擎
-的用户，无需构建任何引擎/网络框架：
+DCinfer 核心库零外部依赖，不反向依赖任何引擎适配器。**不启用任何模块时，
+不会安装任何 vcpkg 依赖**（模块依赖已按 feature 分层）：
 
 ```bash
-# 方式一：预设（推荐）——只构建核心库 + DCIr，无引擎/DCNet/测试/示例
+# 方式一：预设（推荐）——只构建核心库，零 vcpkg 依赖（无 DCIr/引擎/DCNet/测试/示例）
 cmake --preset core-only
 cmake --build build/core-only --config Release
 
-# 方式二：手动开关（等价）
+# 方式二：需要 JSON / .dcg 序列化 —— core-ir 预设（仅安装 nlohmann-json/minizip/zlib）
+cmake --preset core-ir
+cmake --build build/core-ir --config Release
+
+# 方式三：手动开关（等价于 core-only）
 cmake -B build -S . \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
-  -DBUILD_ENGINES=OFF -DBUILD_DCNET=OFF -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF
+  -DDCINFER_BUILD_IR=OFF -DDCINFER_BUILD_ENGINES=OFF -DDCINFER_BUILD_DCNET=OFF \
+  -DDCINFER_BUILD_TESTS=OFF -DDCINFER_BUILD_EXAMPLES=OFF
 ```
+
+模块依赖分层（`vcpkg.json` feature）：`ir` → DCIr（nlohmann-json/minizip/zlib）、
+`net` → DCNet（nlohmann-json + poco[netssl]）、`ort-*` → ONNX Runtime 适配器
+（由 `DCINFER_ORT_EP` 自动注入）。构建选项已迁移至 `DCINFER_BUILD_*` 命名空间
+（旧 `BUILD_*` 名仍被识别，避免宿主工程经 `add_subdirectory()` 引入时冲突）。
 
 仅需源码的下载层面，可用 git sparse-checkout 只取核心目录：
 

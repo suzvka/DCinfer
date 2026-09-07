@@ -15,6 +15,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstring>
+#include <cctype>
 #include <memory>
 #include <string>
 #include <utility>
@@ -84,27 +85,43 @@ public:
 		j["messages"] = messages;
 		j["stream"] = false;
 
-		// params 端口（可选）：请求级采样参数 JSON，逐请求覆盖
+		// params 端口（可选）：请求级采样参数 JSON，逐请求覆盖。
+		// 非法 JSON / 非对象 → DcCodecInputError（标准 RunFn 映射为 InvalidInput），
+		// 与"未提供 params"（空 Tensor，静默跳过）严格区分。
 		const auto& paramsVal = ctx.peek("params");
 		if (const auto* t = paramsVal.as<Tensor>(); t) {
-			try {
-				const auto overrides = nlohmann::json::parse(textOf(*t));
+			const std::string text = textOf(*t);
+			if (!text.empty()) {
+				nlohmann::json overrides;
+				try {
+					overrides = nlohmann::json::parse(text);
+				} catch (const std::exception& e) {
+					throw DC::Net::DcCodecInputError(std::string("params is not valid JSON: ") + e.what());
+				}
+				if (!overrides.is_object())
+					throw DC::Net::DcCodecInputError("params must be a JSON object");
 				for (auto it = overrides.begin(); it != overrides.end(); ++it)
 					j[it.key()] = it.value();
-			} catch (const std::exception&) {
-				// 非法 params：忽略，使用默认采样参数
 			}
 		}
 		return j.dump();
 	}
 
 	void decodeResponse(DC::Net::Payload& payload, Node::RunContext& ctx) override {
-		const auto j = nlohmann::json::parse(payload);
-		std::string content;
-		if (j.contains("choices") && j["choices"].is_array() && !j["choices"].empty() &&
-			j["choices"][0].contains("message") && j["choices"][0]["message"].contains("content") &&
-			j["choices"][0]["message"]["content"].is_string())
-			content = j["choices"][0]["message"]["content"].get<std::string>();
+		// 结构异常 → DcCodecRemoteError（标准 RunFn 映射为 RemoteMalformed）；
+		// content 为合法空字符串（""）时正常成功返回，与字段缺失严格区分。
+		nlohmann::json j;
+		try {
+			j = nlohmann::json::parse(payload);
+		} catch (const std::exception& e) {
+			throw DC::Net::DcCodecRemoteError(std::string("response is not valid JSON: ") + e.what());
+		}
+		if (!(j.contains("choices") && j["choices"].is_array() && !j["choices"].empty() &&
+			  j["choices"][0].contains("message") && j["choices"][0]["message"].contains("content") &&
+			  j["choices"][0]["message"]["content"].is_string()))
+			throw DC::Net::DcCodecRemoteError(
+				"response missing choices[0].message.content (string); protocol drift or non-chat endpoint?");
+		const auto content = j["choices"][0]["message"]["content"].get<std::string>();
 		ctx.output("response", Value(std::make_unique<Tensor>(makeText(content))));
 	}
 
@@ -121,6 +138,29 @@ void registerOpenAiEngine(EngineRegistry& reg, const OpenAiOptions& opts) {
 	desc.schema = codec->schema(); // 本地静态形状规则（不依赖远端）
 	desc.codec = std::move(codec);
 	desc.transportFactory = [] { return std::make_shared<DC::Net::HttpTransport>(); };
+
+	// 鉴权：tokenProvider 优先（注册时求值一次）；裸 key 自动补 Bearer 前缀。
+	// OpenAI 兼容协议的标准鉴权形如 "Authorization: Bearer <key>"；
+	// 需自定义鉴权头时用 opts.headers 显式给出。
+	std::string token = opts.authToken;
+	if (opts.tokenProvider) {
+		auto provided = opts.tokenProvider();
+		if (!provided.empty())
+			token = std::move(provided);
+	}
+	if (!token.empty()) {
+		const std::string lowerPrefix = [&] {
+			std::string p = token.substr(0, 7);
+			for (auto& c : p)
+				c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			return p;
+		}();
+		desc.authToken = (lowerPrefix == "bearer ") ? token : "Bearer " + token;
+	}
+	desc.headers = opts.headers;
+	desc.connectTimeout = opts.connectTimeout;
+	desc.requestTimeout = opts.requestTimeout;
+	desc.maxRetries = opts.maxRetries;
 	DC::Net::registerDcNetAdapter(reg, std::move(desc));
 }
 

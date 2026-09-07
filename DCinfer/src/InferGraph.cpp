@@ -63,6 +63,41 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 	feedInput(taskId, nodeName, portName, Value(std::make_unique<Tensor>(std::move(data))));
 }
 
+void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portName, Value data) {
+	std::string nodeName;
+	size_t matches = 0;
+	for (const auto& b : _store.inputBindings()) {
+		if (b.portName != portName)
+			continue;
+		if (++matches == 1)
+			nodeName = b.nodeName;
+	}
+	if (matches == 0)
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedBoundInput",
+							 "no bound input port named '" + portName
+								 + "' (call bindInput(nodeName, portName) first)");
+	if (matches > 1)
+		throw GraphException(GraphException::ErrorType::FeedFailed, "InferGraph::feedBoundInput",
+							 "bound input port '" + portName
+								 + "' is ambiguous across nodes; use feedInput(taskId, nodeName, ...) instead");
+	feedInput(taskId, nodeName, portName, std::move(data));
+}
+
+void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portName, Tensor data) {
+	feedBoundInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
+}
+
+void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds timeout,
+							 uint32_t maxHops) {
+	std::vector<OutputDeclaration> declarations;
+	for (const auto& ob : _outputZone.bindings())
+		declarations.push_back({ob.nodeName, ob.portName, 1});
+	if (declarations.empty())
+		throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submitBound",
+							 "no bound output ports; call bindOutput(nodeName, portName) first");
+	submit(taskId, std::move(declarations), timeout, maxHops);
+}
+
 // ════════════════════════════════════════════
 // 结果获取
 // ════════════════════════════════════════════
@@ -113,6 +148,36 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	if (!n)
 		return false;
 	return n->hasOutput(taskId, portName);
+}
+
+// ════════════════════════════════════════════
+// task 生命周期：状态 / 结构化等待 / 资源回收
+// ════════════════════════════════════════════
+
+TaskStatus InferGraph::taskStatus(const TaskId& taskId) const {
+	auto st = _engine.status(taskId);
+	if (st == TaskStatus::Succeeded) {
+		// 正常终止但存在 Error 级诊断 → 归一化为 Failed（部分节点执行失败）
+		for (const auto& e : _errors.taskErrors(taskId)) {
+			if (e.level == DiagnosticLevel::Error)
+				return TaskStatus::Failed;
+		}
+	}
+	return st;
+}
+
+TaskResult InferGraph::waitForResult(const TaskId& taskId, std::chrono::milliseconds timeout) {
+	_engine.wait(taskId, timeout);
+	TaskResult result;
+	result.status = taskStatus(taskId);
+	result.errors = _errors.taskErrors(taskId);
+	return result;
+}
+
+void InferGraph::releaseTask(const TaskId& taskId) {
+	_engine.releaseTask(taskId);     // 仅终止态可释放（活动任务拒绝）
+	_outputZone.clearTask(taskId);   // 释放结果 artifact
+	_errors.clearTask(taskId);       // 释放诊断记录
 }
 
 // ════════════════════════════════════════════

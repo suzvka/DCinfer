@@ -1,16 +1,27 @@
 {
-  "dependencies": [
-    "nlohmann-json",
-    "minizip",
-    "zlib",
-    {
-      "name": "poco",
-      "features": [
-        "netssl"
-      ]
-    }
-  ],
+  "$comment": "依赖分层：基础 dependencies 为空，所有依赖按 feature 显式选择。\nVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON（cmake/vcpkg-toolchain.cmake）下，\ncore-only（不启用任何 feature）零 vcpkg 安装；\nir → DCIr（nlohmann-json/minizip/zlib）；net → DCNet（poco[netssl]）；\nort-* → ONNX Runtime 引擎适配器（经 DCINFER_ORT_EP 自动注入）。",
+  "dependencies": [],
   "features": {
+    "ir": {
+      "description": "DCIr graph compiler (JSON / .dcg serialization)",
+      "dependencies": [
+        "nlohmann-json",
+        "minizip",
+        "zlib"
+      ]
+    },
+    "net": {
+      "description": "DCNet network framework (POCO HTTP/TLS transport)",
+      "dependencies": [
+        "nlohmann-json",
+        {
+          "name": "poco",
+          "features": [
+            "netssl"
+          ]
+        }
+      ]
+    },
     "ort-cpu": {
       "description": "ONNX Runtime engine adapter (CPU EP)",
       "dependencies": [

@@ -33,6 +33,7 @@ public:
 	NetError connect(const NetEndpoint&) override;
 	NetError send(const Payload&) override;
 	NetError recv(Payload&) override;
+	const NetEndpoint& endpoint() const override { return _ep; }
 	bool alive() const override;
 	void close() override;
 

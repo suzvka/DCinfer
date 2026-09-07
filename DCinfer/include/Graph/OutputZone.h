@@ -93,6 +93,13 @@ public:
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName,
 				   const std::string& portName) const;
 
+	/// @brief  查询指定 task 的全部输出声明（终止时从节点缓冲抢救最终结果用）
+	std::vector<OutputDeclaration> declarationsOf(const TaskId& taskId) const {
+		std::lock_guard lk(_mutex);
+		auto it = _declarations.find(taskId);
+		return it != _declarations.end() ? it->second : std::vector<OutputDeclaration>{};
+	}
+
 	// ── Task 清理 ──
 
 	/// @brief  清理指定 task 的所有声明、累加器、artifact

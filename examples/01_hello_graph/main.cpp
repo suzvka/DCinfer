@@ -14,7 +14,6 @@
 #include "DCEngine/BuiltinOps.h"
 
 #include <iostream>
-#include <optional>
 
 int main() {
 	// ── 1. 注册内置 CPU 算子 ──
@@ -34,47 +33,38 @@ int main() {
 	graph.wire("adder", "sum", "pass", "x");
 
 	// 标记图级输入输出端口
+	// 注：connect() 禁止两个业务节点直连（数据必须经 Connector 中转），
+	// wire() 则自动插入广播连接器——这是两者唯一的语义差异。
 	graph.bindInput("adder", "a");
 	graph.bindInput("adder", "b");
 	graph.bindOutput("pass", "y");
 
-	// ── 4. 注入数据 ──
+	// ── 4. 注入数据（按绑定端口名，无需重复提供节点名）──
 	auto tensorA = DC::Tensor::Create<float>();
 	tensorA = 3.0f;
 	auto tensorB = DC::Tensor::Create<float>();
 	tensorB = 4.0f;
 
-	graph.feedInput("task1", "adder", "a", std::move(tensorA));
-	graph.feedInput("task1", "adder", "b", std::move(tensorB));
+	graph.feedBoundInput("task1", "a", std::move(tensorA));
+	graph.feedBoundInput("task1", "b", std::move(tensorB));
 
-	// ── 5. 声明输出并异步提交 ──
-	// 注意：task 完成时输出缓冲区会被清理，必须在完成回调中捕获结果
-	std::optional<DC::Tensor> captured;
-	graph.setTaskCompleteCallback([&graph, &captured](const DC::InferGraph::TaskId& taskId) {
-		if (graph.hasOutput(taskId, "pass", "y")) {
-			auto val = graph.getOutput(taskId, "pass", "y");
-			if (auto* t = val.as<DC::Tensor>())
-				captured = std::move(*t);
-		}
-	});
-	graph.submit("task1", "pass", "y");
+	// ── 5. 提交（以全部 bindOutput 绑定作为输出声明，无需重复声明）──
+	// 结果在任务终止后仍保留，无需注册回调即可在 wait 之后读取。
+	graph.submitBound("task1");
 
-	// ── 6. 等待完成 ──
-	if (!graph.wait("task1")) {
-		std::cerr << "Error: task timed out" << std::endl;
-		for (const auto& err : graph.taskErrors("task1"))
-			std::cerr << "  " << err.nodeName << ": " << err.message << std::endl;
-		return 1;
-	}
-	if (!captured) {
-		std::cerr << "Error: no output captured" << std::endl;
-		for (const auto& err : graph.taskErrors("task1"))
+	// ── 6. 等待完成并获取结构化结果 ──
+	auto result = graph.waitForResult("task1");
+	if (result.status != DC::TaskStatus::Succeeded) {
+		std::cerr << "Error: task ended with status " << static_cast<int>(result.status)
+				  << std::endl;
+		for (const auto& err : result.errors)
 			std::cerr << "  " << err.nodeName << ": " << err.message << std::endl;
 		return 1;
 	}
 
-	// ── 7. 获取结果 ──
-	std::cout << "3.0 + 4.0 = " << captured->item<float>() << std::endl;
+	// ── 7. 获取结果（wait 返回后仍然有效）──
+	auto output = graph.getOutputTensor("task1", "pass", "y");
+	std::cout << "3.0 + 4.0 = " << output.item<float>() << std::endl;
 
 	return 0;
 }

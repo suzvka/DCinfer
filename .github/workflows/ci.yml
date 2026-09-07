@@ -12,6 +12,115 @@ concurrency:
 
 jobs:
   # ──────────────────────────────────────────────
+  # Core-only（README core-only 预设：零 vcpkg 依赖）
+  # ──────────────────────────────────────────────
+  core-only:
+    name: Core only (no vcpkg)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++ pkg-config
+
+      - name: Configure (core-only preset)
+        run: cmake --preset core-only
+
+      - name: Verify no vcpkg install happens
+        run: |
+          if [ -d build/core-only/vcpkg_installed ]; then
+            echo "::error::core-only must not install vcpkg dependencies"
+            exit 1
+          fi
+
+      - name: Build
+        run: cmake --build build/core-only -j
+
+  # ──────────────────────────────────────────────
+  # README 首个上手路径（可运行文档）：Builtin + hello_graph
+  # 逐字执行 README「10 分钟上手」的配置/构建命令，并校验预期输出
+  # ──────────────────────────────────────────────
+  readme-hello-graph:
+    name: README quick start (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Setup MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # ↓↓ 与 README「10 分钟上手」保持逐字一致（README 修改必须同步此处）↓↓
+      - name: Configure (README command)
+        run: >
+          cmake -B build -S . -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
+          -DBUILD_ENGINE_BUILTIN=ON
+
+      - name: Build (README command)
+        run: cmake --build build
+
+      - name: Run hello_graph (expect "3.0 + 4.0 = 7")
+        shell: pwsh
+        run: |
+          $out = & ./build/bin/hello_graph
+          $out | Write-Host
+          if (-not ($out -join "`n").Contains("3.0 + 4.0 = 7")) {
+            Write-Host "::error::hello_graph output mismatch"
+            exit 1
+          }
+
+      - name: Core tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  # ──────────────────────────────────────────────
+  # DCNet + OpenAI mock（网络框架与远端适配器，MockHttpServer 真实 HTTP）
+  # 时间敏感测试以 --repeat until-fail 加严（Flaky 守护）
+  # ──────────────────────────────────────────────
+  dcnet-openai:
+    name: DCNet + OpenAI mock
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++ pkg-config
+
+      - name: Configure
+        run: >
+          cmake -B build -S . -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
+          -DBUILD_DCNET=ON
+          -DBUILD_ENGINE_BUILTIN=ON
+          -DBUILD_ENGINE_OPENAI=ON
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test (full suite)
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Time-sensitive tests x3 (until-fail)
+        run: ctest --test-dir build -C Release -R "InferGraphTest|GraphNodeTest" --repeat until-fail:3 --output-on-failure
+
+  # ──────────────────────────────────────────────
   # Windows / MSVC (Release)
   # ──────────────────────────────────────────────
   msvc-release:

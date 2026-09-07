@@ -4,9 +4,22 @@
 #include "NetError.h"
 #include "Node.h"
 
+#include <stdexcept>
 #include <string>
 
 namespace DC::Net {
+
+/// @brief codec 输入非法异常：encode 阶段抛出，由标准 RunFn 映射为 InvalidInput。
+///         （如请求级参数 JSON 不可解析 / 类型不符）
+struct DcCodecInputError : std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
+
+/// @brief codec 远端响应异常：decode 阶段抛出，由标准 RunFn 映射为 RemoteMalformed。
+///         （如响应非 JSON、缺 choices[0].message.content 等关键字段）
+struct DcCodecRemoteError : std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
 
 /// @brief 协议映射（DESIGN.md §3.2）：本地端口 ↔ 对方报文。
 ///

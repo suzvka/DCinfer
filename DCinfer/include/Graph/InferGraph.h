@@ -7,6 +7,7 @@
 #include "SignalStore.h"
 #include "ErrorTracker.h"
 #include "GraphException.h"
+#include "TaskStatus.h"
 
 #include <chrono>
 #include <functional>
@@ -114,22 +115,39 @@ public:
 	/// @brief  便捷接口：直接传入 DC::Tensor
 	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
 
+	/// @brief  便捷注入：按 bindInput 声明的端口名定位，无需重复提供节点名。
+	/// @throws GraphException(NodeNotFound) 无此绑定端口（需先 bindInput）
+	/// @throws GraphException(FeedFailed)   绑定名跨节点歧义，或底层注入失败
+	void feedBoundInput(const TaskId& taskId, const std::string& portName, Value data);
+
+	/// @brief  便捷注入：DC::Tensor 重载
+	void feedBoundInput(const TaskId& taskId, const std::string& portName, Tensor data);
+
 	// ── 执行驱动 ──
 
 	/// @brief  异步启动整张图的计算。输出声明直接作为 submit 参数，消除 temporal coupling。
-	/// @param declarations  期望产出：{nodeName, portName, count} 列表
+	/// @param  declarations  期望产出：{nodeName, portName, count} 列表
+	/// @throws GraphException(DuplicateTask) 若同 taskId 任务仍在执行
+	/// @note   复用已终止的 taskId 合法：上一轮的声明/结果/诊断随之清理。
+	///         输出在 task 终止后仍保留，供 wait → getOutput 取用。
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
+		_ensureSubmittable(taskId);
+		_errors.clearTask(taskId);      // 上一轮诊断不残留（影响 taskStatus 归一化）
+		_outputZone.clearTask(taskId);  // 复用同 ID：清掉上一轮声明/累加/结果
 		_outputZone.declare(taskId, std::move(declarations));
 		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
 	}
 
-	/// @brief  单输出便捷重载
+	/// @brief  单输出便捷重载（生命周期语义同上）
 	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 				size_t count = 1,
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
+		_ensureSubmittable(taskId);
+		_errors.clearTask(taskId);
+		_outputZone.clearTask(taskId);
 		_outputZone.declare(taskId, nodeName, portName, count);
 		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
 	}
@@ -137,6 +155,8 @@ public:
 	// ── 结果获取 ──
 
 	/// @brief  获取输出区中指定端口的结果（消费式取出）
+	/// @note   结果在 task 终止（wait 返回）后仍然有效，直至下一次同 ID submit
+	///         或 releaseTask()——支持 submit → wait → getOutput 的同步用法
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	Value getOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
@@ -146,6 +166,37 @@ public:
 
 	/// @brief  检查输出区中是否有结果
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
+
+	/// @brief  便捷提交：以全部 bindOutput 绑定作为输出声明（各 count=1）。
+	///         已 bindOutput 的端口无需在 submit 时重复声明。
+	/// @throws GraphException(NoDeclaration) 未 bindOutput 任何端口
+	void submitBound(const TaskId& taskId,
+					 std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
+					 uint32_t maxHops = kDefaultMaxHops);
+
+	// ── task 生命周期（状态 / 取消 / 结构化等待 / 资源回收）──
+
+	/// @brief  查询 task 当前状态
+	/// @return Unknown=从未提交；Running=执行中；Succeeded/TimedOut/Cancelled=已终止；
+	///         Succeeded 但存在 Error 级诊断时归一化为 Failed（部分节点执行失败）
+	TaskStatus taskStatus(const TaskId& taskId) const;
+
+	/// @brief  请求取消活动中的 task（幂等；未知或已终止返回 false）。
+	///         协作式取消：在飞节点执行不被中断，传播链即刻停止，
+	///         wait()/waitForResult() 被唤醒，状态置 Cancelled。
+	bool cancel(const TaskId& taskId) { return _engine.cancel(taskId); }
+
+	/// @brief  同步等待 task 终止并返回结构化结果（状态 + 诊断记录）
+	/// @param  timeout 等待超时（超时未终止时 status 为 Running，调用方可据此区分
+	///         "仍在运行"与各类终止态）
+	/// @note   输出数据在终止后仍由 OutputZone 持有，经 getOutput/getOutputTensor 取出
+	TaskResult waitForResult(const TaskId& taskId,
+							 std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+
+	/// @brief  释放已终止 task 的全部资源（状态表条目、OutputZone 结果、诊断记录）
+	/// @note   此后 taskStatus 返回 Unknown、hasOutput 返回 false；
+	///         活动 task 不可释放；"大量短任务"场景建议在消费结果后调用以防内存增长
+	void releaseTask(const TaskId& taskId);
 
 	// ── 查询 ──
 
@@ -210,7 +261,8 @@ public:
 
 	// ── 同步等待与图导出 ──
 
-	/// @brief  同步等待 task 完成（内部阻塞，供 exportNode / 外部同步使用）
+	/// @brief  同步等待 task 终止（返回后可经 getOutput/getOutputTensor 读取结果）
+	/// @return true 在超时内终止，false 超时（任务仍在运行，未被取消）
 	bool wait(const TaskId& taskId,
 			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
 		return _engine.wait(taskId, timeout);
@@ -228,6 +280,13 @@ public:
 									uint32_t maxHops = kDefaultMaxHops);
 
 private:
+	/// @brief  提交前置校验：活动 task 拒绝重复提交（engine.submit 内部还有权威校验）
+	void _ensureSubmittable(const TaskId& taskId) const {
+		if (_engine.status(taskId) == TaskStatus::Running)
+			throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::submit",
+								 "task '" + taskId + "' is still running; duplicate submit rejected");
+	}
+
 	// ── 内部组件（声明顺序决定析构顺序）──
 	// ExecutionEngine 必须最后声明 → 最先析构：
 	//   其线程池 shutdown 期间 TaskGate 析构函数需访问下方成员。

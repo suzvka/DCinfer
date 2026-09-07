@@ -5,9 +5,11 @@
 #include "NetEndpoint.h"
 #include "NetTransport.h"
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace DC::Net {
 
@@ -31,6 +33,15 @@ struct DcNetAdapterDesc {
 
 	/// 可选：自定义 RunFn；为空时走标准编排（encode → send → recv → decode）。
 	Node::RunFn runFn;
+
+	// ── 端点级覆盖项（modelPath 解析后覆盖同名字段）──
+	// 鉴权 / 附加头 / 超时 / 重试无法从 URL 表达，注册级统一注入。
+	// 敏感信息约束：authToken 不写入日志与错误信息。
+	std::string authToken;                      ///< 非空时覆盖 Authorization 头（"Bearer xxx" 或裸 key）
+	std::vector<std::string> headers;           ///< 非空时覆盖附加头列表（"Name: value"）
+	std::chrono::milliseconds connectTimeout{0}; ///< count>0 时覆盖（默认 5s）
+	std::chrono::milliseconds requestTimeout{0}; ///< count>0 时覆盖（默认 30s）
+	int maxRetries = 0;                          ///< >0 时覆盖：传输级失败重试次数（默认 0）
 };
 
 /// @brief 注册一个网络适配器到引擎注册表。

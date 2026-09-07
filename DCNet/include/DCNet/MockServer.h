@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -50,6 +51,13 @@ public:
 	}
 
 	int port() const { return _port; }
+
+	/// 最近一次请求的原始头部（\r\n 分隔；测试断言 Authorization 等鉴权头用）。
+	/// 单线程顺序处理 + tryExecute 同步等待，读取时机天然在响应返回后。
+	std::string lastRequestHeaders() const {
+		std::lock_guard lk(_hdrMutex);
+		return _lastHeaders;
+	}
 
 private:
 	void run(Handler handler) {
@@ -105,6 +113,10 @@ private:
 				bodyLen = static_cast<size_t>(std::atoll(req.c_str() + pos + 15));
 		}
 		const size_t headerEnd = req.find("\r\n\r\n");
+		{
+			std::lock_guard lk(_hdrMutex);
+			_lastHeaders = (headerEnd == std::string::npos) ? std::string() : req.substr(0, headerEnd);
+		}
 		std::string body = (headerEnd == std::string::npos) ? std::string() : req.substr(headerEnd + 4);
 		while (body.size() < bodyLen) {
 			n = c.receiveBytes(buf, sizeof(buf));
@@ -136,4 +148,7 @@ private:
 	std::atomic<bool> _stop{false};
 	std::thread _thread;
 	Poco::Net::ServerSocket _socket;
+
+	mutable std::mutex _hdrMutex;
+	std::string _lastHeaders;
 };

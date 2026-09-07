@@ -127,6 +127,7 @@ enum class NodeStatus {
 	InvalidInput,
 	SchemaMismatch,
 	ExecutionFailed,
+	RemoteMalformed, ///< 远端响应结构异常（非 JSON / 缺关键字段）
 	InternalError
 };
 

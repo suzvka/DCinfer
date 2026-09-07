@@ -16,6 +16,7 @@ public:
 		PortNotFound,        ///< 连线时端口在目标节点 Schema 中不存在
 		DirectConnect,       ///< 两个非 Connector 节点直连被拒
 		NoDeclaration,       ///< submit 时未声明输出期望
+		DuplicateTask,       ///< 同一 taskId 的活动任务被重复提交
 		FeedFailed,          ///< feedInput 时调用 Node::setInput 失败
 		ExecutionFailed,     ///< 线程池中 Node::tryExecute 抛出 NodeException
 		PropagateFailed,     ///< 数据传播链中写下游输入失败
@@ -56,6 +57,9 @@ private:
 			break;
 		case ErrorType::NoDeclaration:
 			errorStr = "No Output Declaration";
+			break;
+		case ErrorType::DuplicateTask:
+			errorStr = "Duplicate Task";
 			break;
 		case ErrorType::FeedFailed:
 			errorStr = "Feed Failed";

@@ -264,7 +264,7 @@ TEST(authGate) {
 	srv.svc->stop();
 }
 
-// ── wire 级垃圾报文：415 → RemoteMalformed → InternalError（DESIGN.md §6.1）──
+// ── wire 级垃圾报文：415 → RemoteMalformed → RemoteMalformed（DESIGN.md §6.1）──
 
 TEST(malformedFrame) {
 	ensureDoublerEngine();
@@ -274,7 +274,7 @@ TEST(malformedFrame) {
 	// 非 2xx 错误由 send() 返回（含状态行接收）；recv 仅读 2xx 响应体
 	auto err = t.send("this is not json at all");
 	CHECK(!err.ok(), "malformed frame should fail");
-	CHECK(err.localStatus == Node::Status::InternalError, "415 → RemoteMalformed → InternalError");
+	CHECK(err.localStatus == Node::Status::RemoteMalformed, "415 → RemoteMalformed → RemoteMalformed");
 	CHECK_MSG_PREFIX(err.localMessage, "remote:malformed");
 	t.close();
 	srv.svc->stop();

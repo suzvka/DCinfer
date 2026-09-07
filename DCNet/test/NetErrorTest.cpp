@@ -142,7 +142,7 @@ TEST(remoteBodyMalformed) {
 	auto e = DC::Net::normalizeRemoteBody("this is not json at all");
 	CHECK(e.category == NetErrorCategory::RemoteMalformed, "non-json → RemoteMalformed");
 	CHECK(!e.retryable, "malformed not retryable");
-	CHECK(e.localStatus == Status::InternalError, "malformed → InternalError");
+	CHECK(e.localStatus == Status::RemoteMalformed, "malformed → RemoteMalformed");
 	CHECK_MSG_PREFIX(e.localMessage, "remote:malformed");
 }
 
@@ -232,8 +232,8 @@ TEST(wireRoundTripParity) {
 		  "401 → RemoteAuth → InternalError（remote:auth）");
 	CHECK(normalizeHttpResponse(429, R"({"error":{"code":"overloaded"}})").localStatus == Status::ExecutionFailed,
 		  "429 → RemoteRateLimited → ExecutionFailed（retryable）");
-	CHECK(normalizeHttpResponse(415, R"({"error":{"code":"malformed_frame"}})").localStatus == Status::InternalError,
-		  "415（未列举状态） → RemoteMalformed → InternalError（remote:malformed）");
+	CHECK(normalizeHttpResponse(415, R"({"error":{"code":"malformed_frame"}})").localStatus == Status::RemoteMalformed,
+		  "415（未列举状态） → RemoteMalformed → RemoteMalformed（remote:malformed）");
 }
 
 int main() {

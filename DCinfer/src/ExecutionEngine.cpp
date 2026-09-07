@@ -70,6 +70,11 @@ void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, co
 			return;
 		}
 
+		// 任务已终止（超时/取消/同 ID 复用竞态）→ 丢弃本轮结果，不传播。
+		// gate 级检查而非 taskId 级：复用后旧任务的 lambda 不得污染新任务。
+		if (gate->terminated.load(std::memory_order_acquire))
+			return;
+
 		// 完成判定与原节点完成事件语义一致：只要产生了任何输出即视为成功传播。
 		// 部分输出场景（如 Routing 连接器仅路由到一个输出口）允许继续传播；
 		// 完全无输出的节点记录错误并跳过传播。
@@ -105,7 +110,22 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 								 + "'. Call declareOutput() before submit().");
 	}
 
-	// 创建任务门控：任务 lambda 链与看门狗共享，最后一个持有者析构时触发耗尽检测
+	// 校验与登记：同一 taskId 活动期间禁止重复提交；已终止的 ID 允许复用
+	//（清除上一轮终止状态，wait() 谓词与传播拦截随新任务重新生效）
+	{
+		std::lock_guard lk(_terminationMutex);
+		auto it = _taskStates.find(taskId);
+		if (it != _taskStates.end()) {
+			if (it->second == TaskStatus::Running)
+				throw GraphException(GraphException::ErrorType::DuplicateTask, "ExecutionEngine::submit",
+									 "task '" + taskId + "' is still running; duplicate submit rejected");
+			_taskStates.erase(it);
+		}
+		_taskStates.emplace(taskId, TaskStatus::Running);
+	}
+
+	// 创建任务门控：任务 lambda 链、看门狗与 cancel() 共享；
+	// 注册到活动表供 cancel() 定位，_terminate 时移除
 	auto gate = std::make_shared<TaskGate>();
 	gate->engine = this;
 	gate->output = &output;
@@ -113,6 +133,10 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	gate->signals = &signals;
 	gate->errors = &errors;
 	gate->taskId = taskId;
+	{
+		std::lock_guard lk(_activeGatesMutex);
+		_activeGates[taskId] = gate;
+	}
 
 	// 超时看门狗（std::jthread + stop_token，生命周期由 ExecutionEngine 管理）
 	if (timeout.count() > 0) {
@@ -133,7 +157,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 										 + "ms) without meeting output declarations";
 					errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit", reason);
 					_diagnoseAbnormal(taskId, reason, output, graph, errors);
-					_terminate(taskId, graph, output, signals);
+					_terminate(taskId, graph, output, signals, TaskStatus::TimedOut);
 				}
 			});
 
@@ -182,12 +206,13 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		errors.recordError(taskId, nodeName, "ExecutionEngine::_propagateFrom", reason);
 		gate->terminated.store(true, std::memory_order_release);
 		_diagnoseAbnormal(taskId, reason, output, graph, errors);
-		_terminate(taskId, graph, output, signals);
+		_terminate(taskId, graph, output, signals, TaskStatus::Failed);
 		return;
 	}
 
-	// [检查点 1] 入口：若 task 已终止，直接返回
-	if (_isTerminated(taskId)) {
+	// [检查点 1] 入口：若本轮任务已终止（超时/取消/同 ID 复用竞态），直接返回。
+	// gate 级检查而非 taskId 级 _isTerminated：复用后旧 lambda 不得继续传播。
+	if (gate->terminated.load(std::memory_order_acquire)) {
 		return;
 	}
 
@@ -201,9 +226,12 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 	for (const auto& outPort : src->schema().outputs) {
 		if (!src->hasOutput(taskId, outPort.name))
 			continue;
+		// 终止复查：打卡写入前再确认本轮未被终止（取消/超时可能在检查点 1 之后触发）
+		if (gate->terminated.load(std::memory_order_acquire))
+			return;
 		if (output.accumulateAndCheck(nodeName, outPort.name, taskId)) {
 			gate->terminated.store(true, std::memory_order_release);
-			_terminate(taskId, graph, output, signals);
+			_terminate(taskId, graph, output, signals, TaskStatus::Succeeded);
 			return;
 		}
 	}
@@ -241,8 +269,8 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 
 		Value data = src->getOutput(taskId, edge.srcPort);
 
-		// [检查点 3] 写入下游前再确认一次未被终止
-		if (_isTerminated(taskId))
+		// [检查点 3] 写入下游前再确认一次本轮未被终止（gate 级，同 ID 复用安全）
+		if (gate->terminated.load(std::memory_order_acquire))
 			return;
 
 		try {
@@ -268,17 +296,20 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 
 bool ExecutionEngine::_isTerminated(const TaskId& taskId) const {
 	std::lock_guard lk(_terminationMutex);
-	return _terminatedTasks.contains(taskId);
+	auto it = _taskStates.find(taskId);
+	return it != _taskStates.end() && it->second != TaskStatus::Running;
 }
 
 void ExecutionEngine::_terminate(const TaskId& taskId,
 								 GraphStore& graph, OutputZone& output,
-								 SignalStore& signals) {
+								 SignalStore& signals, TaskStatus terminalStatus) {
 	{
 		std::lock_guard lk(_terminationMutex);
-		// 防止重复终止
-		if (!_terminatedTasks.insert(taskId).second)
+		// 防止重复终止（幂等）：仅 Running → 终态迁移一次有效
+		auto it = _taskStates.find(taskId);
+		if (it == _taskStates.end() || it->second != TaskStatus::Running)
 			return;
+		it->second = terminalStatus;
 	}
 
 	// ① 取消并回收超时看门狗（若存在）
@@ -314,8 +345,8 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		cb(taskId);
 	}
 
-	// ③ 清理输出区（同一 taskId 可安全重新提交）
-	output.clearTask(taskId);
+	// ③（生命周期变更）不再清理 OutputZone：结果保留至下一次同 ID submit
+	//    或 releaseTask() —— 支持 submit → wait → getOutput 的同步取结果用法
 
 	// ④ 清理该 task 的所有 task 级信号（防止泄漏）
 	signals.clearTask(taskId);
@@ -326,13 +357,31 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		_blockedSkips.erase(taskId);
 	}
 
-	// ⑥ 遍历所有节点，清理此 taskId 的 IO 缓冲区并通知等待者
+	// ⑥ 抢救结果 + 清理节点缓冲：
+	//    终止路径在打卡满足后直接返回，声明端口的数据仍留在节点缓冲。
+	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → getOutput 可取，
+	//    含看门狗/取消路径的部分结果），再清理缓冲。回调在②已先行触发，
+	//    其消费过的端口 hasOutput=false 自然跳过。
 	for (auto& [name, nodePtr] : graph.nodes()) {
-		if (nodePtr->hasTask(taskId))
-			nodePtr->terminateTask(taskId);
+		if (!nodePtr->hasTask(taskId))
+			continue;
+		for (const auto& decl : output.declarationsOf(taskId)) {
+			if (decl.nodeName != name)
+				continue;
+			if (!nodePtr->hasOutput(taskId, decl.portName))
+				continue;
+			Value data = nodePtr->getOutput(taskId, decl.portName);
+			output.append(taskId, decl.nodeName, decl.portName, std::move(data),
+						  {decl.nodeName, decl.portName, taskId});
+		}
+		nodePtr->terminateTask(taskId);
 	}
 
-	// ⑦ 通知同步等待者（所有清理已完成，数据应由回调预先捕获）
+	// ⑦ 移除活动门控并通知同步等待者（结果仍保留，供 wait 后 getOutput 取用）
+	{
+		std::lock_guard lk(_activeGatesMutex);
+		_activeGates.erase(taskId);
+	}
 	_completionCv.notify_all();
 }
 
@@ -422,6 +471,40 @@ bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeo
 	return _completionCv.wait_for(lk, timeout, [this, &taskId] {
 		return _isTerminated(taskId);
 	});
+}
+
+// ════════════════════════════════════════════
+// task 状态与取消
+// ════════════════════════════════════════════
+
+TaskStatus ExecutionEngine::status(const TaskId& taskId) const {
+	std::lock_guard lk(_terminationMutex);
+	auto it = _taskStates.find(taskId);
+	return it != _taskStates.end() ? it->second : TaskStatus::Unknown;
+}
+
+bool ExecutionEngine::cancel(const TaskId& taskId) {
+	std::shared_ptr<TaskGate> gate;
+	{
+		std::lock_guard lk(_activeGatesMutex);
+		if (auto it = _activeGates.find(taskId); it != _activeGates.end())
+			gate = it->second;
+	}
+	if (!gate)
+		return false; // 未知或已终止（幂等）
+	if (gate->terminated.exchange(true, std::memory_order_acq_rel))
+		return false; // 已被正常路径/看门狗终止
+	// 传播链在下个检查点停止；缓冲与信号由 _terminate 照常清理
+	_terminate(taskId, *gate->graph, *gate->output, *gate->signals, TaskStatus::Cancelled);
+	return true;
+}
+
+void ExecutionEngine::releaseTask(const TaskId& taskId) {
+	std::lock_guard lk(_terminationMutex);
+	auto it = _taskStates.find(taskId);
+	if (it == _taskStates.end() || it->second == TaskStatus::Running)
+		return; // 未知或活动任务不可释放
+	_taskStates.erase(it);
 }
 
 } // namespace DC

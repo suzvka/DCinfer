@@ -8,6 +8,11 @@ add_library(DCIr::DCIr ALIAS DCIr)
 
 target_compile_features(DCIr PUBLIC cxx_std_20)
 
+# MSVC：源码为 UTF-8（含中文注释），目标级启用（add_subdirectory 消费时同样生效）
+if (MSVC)
+	target_compile_options(DCIr PRIVATE /utf-8)
+endif()
+
 # 外部依赖
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)

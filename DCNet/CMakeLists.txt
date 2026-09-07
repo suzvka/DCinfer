@@ -11,6 +11,11 @@ add_library(DCNet::DCNet ALIAS DCNet)
 
 target_compile_features(DCNet PUBLIC cxx_std_20)
 
+# MSVC：源码为 UTF-8（含中文注释），目标级启用（add_subdirectory 消费时同样生效）
+if (MSVC)
+    target_compile_options(DCNet PRIVATE /utf-8)
+endif()
+
 # 外部依赖
 find_package(nlohmann_json CONFIG REQUIRED)
 # POCO：HTTP 客户端 + TLS（见 vcpkg.json / cmake/overlay-ports/poco）。
@@ -46,7 +51,7 @@ file(GLOB_RECURSE DCNET_SRC CONFIGURE_DEPENDS
 )
 target_sources(DCNet PRIVATE ${DCNET_SRC})
 
-# ── 测试（BUILD_TESTS 开启时编译）──
-if (BUILD_TESTS)
+# ── 测试（DCINFER_BUILD_TESTS 开启时编译）──
+if (DCINFER_BUILD_TESTS)
     add_subdirectory(test)
 endif()

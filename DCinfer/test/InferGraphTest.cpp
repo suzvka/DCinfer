@@ -751,6 +751,10 @@ void testWatchdogTimeoutTerminates() {
 
 		// 被阻塞节点不应产出
 		CHECK(!harness.hasOutput("t1", "id_b", "y"), "blocked node should not produce output");
+
+		// 看门狗终止的任务应处于 TimedOut 状态
+		CHECK(harness.graph().taskStatus("t1") == TaskStatus::TimedOut,
+			  "watchdog-terminated task should be TimedOut");
 	}
 	END_TEST();
 }
@@ -1042,6 +1046,190 @@ void testSubgraphDataflowCorrect() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 任务生命周期：结果保留 / taskId 复用 / 状态机 / 取消
+// ════════════════════════════════════════════
+
+// 回归：终止流程曾先清理 OutputZone 与节点缓冲、最后才 notify wait()，
+// 导致 submit → wait → getOutput 取不到结果（只能在回调内读）。
+void testOutputSurvivesWait() {
+	TEST("lifecycle: outputs retrievable after wait without callback") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
+
+		graph.feedInput("t1", "id1", "x", makeFloatTensor(7.0f));
+		graph.submit("t1", "id1", "y");
+
+		CHECK(graph.wait("t1"), "task should complete");
+		CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status should be Succeeded");
+
+		// 核心断言：wait 返回后无需回调即可取结果
+		CHECK(graph.hasOutput("t1", "id1", "y"), "output should survive wait()");
+		auto result = graph.getOutputTensor("t1", "id1", "y");
+		CHECK(std::abs(result.item<float>() - 7.0f) < 1e-6f, "result should be 7.0");
+
+		// releaseTask 回收：状态与结果一并释放
+		graph.releaseTask("t1");
+		CHECK(graph.taskStatus("t1") == TaskStatus::Unknown, "released task should be Unknown");
+		CHECK(!graph.hasOutput("t1", "id1", "y"), "released task should have no output");
+	}
+	END_TEST();
+}
+
+void testWaitForResult() {
+	TEST("lifecycle: waitForResult returns structured status") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
+
+		graph.feedInput("t1", "id1", "x", makeFloatTensor(3.0f));
+		graph.submit("t1", "id1", "y");
+
+		auto result = graph.waitForResult("t1");
+		CHECK(result.status == TaskStatus::Succeeded, "waitForResult should return Succeeded");
+		CHECK(result.errors.empty(), "no errors expected");
+
+		// 从未提交的 task：超时后返回 Unknown（区别于 Running）
+		auto unknown = graph.waitForResult("never_submitted", std::chrono::milliseconds(50));
+		CHECK(unknown.status == TaskStatus::Unknown, "unsubmitted task should be Unknown");
+	}
+	END_TEST();
+}
+
+// 回归：_terminatedTasks 只增不减，复用 ID 时 wait 立即返回、
+// 传播被拦截、回调不触发、集合无限增长。
+void testTaskIdReuseAfterCompletion() {
+	TEST("lifecycle: completed taskId can be safely reused") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
+
+		// 第一轮
+		graph.feedInput("t1", "add1", "a", makeFloatTensor(3.0f));
+		graph.feedInput("t1", "add1", "b", makeFloatTensor(4.0f));
+		graph.submit("t1", "add1", "s");
+		CHECK(graph.wait("t1"), "first run should complete");
+		auto r1 = graph.getOutputTensor("t1", "add1", "s");
+		CHECK(std::abs(r1.item<float>() - 7.0f) < 1e-6f, "first result should be 7.0");
+
+		// 复用同一 taskId：重新注入并提交
+		graph.feedInput("t1", "add1", "a", makeFloatTensor(10.0f));
+		graph.feedInput("t1", "add1", "b", makeFloatTensor(20.0f));
+		graph.submit("t1", "add1", "s");
+		CHECK(graph.wait("t1"), "reused taskId should complete normally");
+		CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "reused task status should be Succeeded");
+		auto r2 = graph.getOutputTensor("t1", "add1", "s");
+		CHECK(std::abs(r2.item<float>() - 30.0f) < 1e-6f, "second result should be 30.0");
+	}
+	END_TEST();
+}
+
+void testDuplicateActiveSubmitRejected() {
+	TEST("lifecycle: duplicate submit of a running task is rejected") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "slow", identitySchema(),
+				delayedRunFn(nullptr, 200), ThreadPoolAffinity::Operator));
+
+		graph.feedInput("t1", "slow", "x", makeFloatTensor(1.0f));
+		graph.submit("t1", "slow", "y");
+
+		bool rejected = false;
+		try {
+			graph.submit("t1", "slow", "y");
+		} catch (const GraphException& e) {
+			rejected = (e.getErrorType() == GraphException::ErrorType::DuplicateTask);
+		}
+		CHECK(rejected, "duplicate submit while running should throw DuplicateTask");
+
+		CHECK(graph.wait("t1"), "original task should still complete");
+		CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "original task should succeed");
+	}
+	END_TEST();
+}
+
+void testCancelRunningTask() {
+	TEST("lifecycle: cancel terminates a blocked task with Cancelled status") {
+		InferGraph graph;
+		auto& b = graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		graph.wire("id_a", "y", "id_b", "x");
+
+		b.bindSignal(graph.signalStore(), "gate");
+		graph.setSignal("gate", false); // id_b 永久阻塞，声明无法满足
+
+		graph.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
+		graph.submit("t1", "id_b", "y"); // 无看门狗：任务将一直挂起
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task should be running while blocked");
+
+		CHECK(graph.cancel("t1"), "cancel should succeed on active task");
+		CHECK(graph.wait("t1"), "wait should wake up after cancel");
+		CHECK(graph.taskStatus("t1") == TaskStatus::Cancelled, "status should be Cancelled");
+		CHECK(!graph.cancel("t1"), "cancel on terminated task should return false (idempotent)");
+
+		auto result = graph.waitForResult("t1");
+		CHECK(result.status == TaskStatus::Cancelled, "waitForResult should report Cancelled");
+
+		// 复用已取消的 taskId：解除信号后可重新执行
+		graph.setSignal("gate", true);
+		graph.feedInput("t1", "id_a", "x", makeFloatTensor(9.0f));
+		graph.submit("t1", "id_b", "y");
+		CHECK(graph.wait("t1"), "re-submitted task after cancel should complete");
+		auto r = graph.getOutputTensor("t1", "id_b", "y");
+		CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "re-run result should be 9.0");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// 图 API 便捷绑定：feedBoundInput / submitBound
+// ════════════════════════════════════════════
+
+void testBoundInputOutputApi() {
+	TEST("graph API: feedBoundInput / submitBound follow bindInput/bindOutput") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
+
+		graph.bindInput("inc", "x");
+		graph.bindOutput("inc", "y");
+
+		auto in = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+		*in = 41.0f;
+		graph.feedBoundInput("t1", "x", std::move(*in));
+		graph.submitBound("t1");
+		CHECK(graph.wait("t1"), "bound flow should complete");
+		auto out = graph.getOutputTensor("t1", "inc", "y");
+		CHECK(std::abs(out.item<float>() - 42.0f) < 1e-6f, "bound result should be 42.0");
+
+		// 错误路径：未绑定的端口名
+		bool noSuch = false;
+		try {
+			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+			*v = 1.0f;
+			graph.feedBoundInput("t1", "no_such_port", std::move(*v));
+		} catch (const GraphException&) {
+			noSuch = true;
+		}
+		CHECK(noSuch, "unbound port name should throw");
+
+		// 错误路径：绑定名跨节点歧义
+		InferGraph graph2;
+		graph2.addNode(std::make_unique<Node>("Builtin", "a", incSchema(), incRunFn()));
+		graph2.addNode(std::make_unique<Node>("Builtin", "b", incSchema(), incRunFn()));
+		graph2.bindInput("a", "x");
+		graph2.bindInput("b", "x");
+		bool ambiguous = false;
+		try {
+			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+			*v = 1.0f;
+			graph2.feedBoundInput("t1", "x", std::move(*v));
+		} catch (const GraphException&) {
+			ambiguous = true;
+		}
+		CHECK(ambiguous, "ambiguous bound name should throw");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
@@ -1071,6 +1259,16 @@ int main() {
 
 		// 看门狗超时（回归：曾因看门狗线程自 join 触发 std::terminate）
 		testWatchdogTimeoutTerminates();
+
+		// 任务生命周期（结果保留 / 复用 / 状态机 / 取消）
+		testOutputSurvivesWait();
+		testWaitForResult();
+		testTaskIdReuseAfterCompletion();
+		testDuplicateActiveSubmitRejected();
+		testCancelRunningTask();
+
+		// 图 API 便捷绑定
+		testBoundInputOutputApi();
 
 		// 子图（分组互斥）测试
 		testSubgraphSerializesExecution();

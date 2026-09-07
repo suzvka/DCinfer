@@ -27,6 +27,10 @@ struct DcNetTransport {
 	/// @brief 接收响应载荷（阻塞，遵守超时；失败时 remoteDetail 保留原始错误报文）。
 	virtual NetError recv(Payload&) = 0;
 
+	/// @brief 当前连接的端点配置（含超时/重试/鉴权字段；connect 后有效）。
+	///         供标准 RunFn 读取 maxRetries 等编排参数。
+	virtual const NetEndpoint& endpoint() const = 0;
+
 	/// @brief 健康判定（进程存活 / 心跳 / 连接可用）。
 	virtual bool alive() const = 0;
 

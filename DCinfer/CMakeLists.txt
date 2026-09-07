@@ -3,6 +3,11 @@ add_library(DCinfer::DCinfer ALIAS DCinfer)
 
 target_compile_features(DCinfer PUBLIC cxx_std_20)
 
+# MSVC：源码为 UTF-8（含中文注释），目标级启用（add_subdirectory 消费时同样生效）
+if (MSVC)
+    target_compile_options(DCinfer PRIVATE /utf-8)
+endif()
+
 # Linux: <thread>, <mutex>, <semaphore>, <condition_variable> 均需链接 pthread
 # Windows: Threads::Threads 是空操作，不影响
 find_package(Threads REQUIRED)

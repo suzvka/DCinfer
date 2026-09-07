@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **任务生命周期 API（issue P0-2/P0-3/P1-6）**：新增 `TaskStatus`（Unknown/Running/
+  Succeeded/Failed/TimedOut/Cancelled）与 `TaskResult`；`InferGraph` 新增
+  `taskStatus()` / `waitForResult()` / `cancel()`（幂等） / `releaseTask()`。
+  **输出在任务终止后保留**（至下次同 ID submit 或 `releaseTask()`），
+  `submit → wait → getOutput` 无需注册回调即可取结果；
+  终止时自动将声明端口残余数据从节点缓冲护送至 OutputZone（含超时/取消路径的部分结果）
+- **taskId 生命周期定义**：活动任务重复提交抛 `GraphException(DuplicateTask)`；
+  已终止 ID 可安全复用（自动清理上一轮声明/结果/诊断）；
+  修复旧 `_terminatedTasks` 只增不减导致 wait 立即返回、传播被拦截、回调不触发、内存无限增长
+- **wait 默认超时语义对齐**：`waitForResult` 超时未终止时返回 `Running`（区分"仍在运行"
+  与各类终止态）；原 `bool wait()` 保持兼容；传播/节点执行采用 gate 级终止检查，
+  同 ID 复用后旧 lambda 不得污染新任务
+- **OpenAI 适配器鉴权与可观测性（issue P0-4/P1-8）**：`OpenAiOptions` 新增
+  `authToken` / `tokenProvider` / `headers` / `connectTimeout` / `requestTimeout` /
+  `maxRetries`（裸 key 自动补 `Bearer ` 前缀；token 不写入日志与错误信息）；
+  非法 params JSON → `InvalidInput`（不再吞掉）；响应非 JSON / 缺
+  `choices[0].message.content` → `RemoteMalformed`（不再以空字符串成功）；
+  `maxRetries` 实现传输级退避重试（原字段无任何行为）
+- **DCNet 错误分类细化**：`NodeStatus` 新增 `RemoteMalformed`（原归 InternalError）；
+  新增 `DcCodecInputError` / `DcCodecRemoteError` codec 异常契约；
+  `DcNetTransport` 新增 `endpoint()` 访问器；`DcNetAdapterDesc` 新增端点级覆盖项
+  （鉴权/附加头/超时/重试）
+- **图 API 便捷绑定（issue P2-11）**：`feedBoundInput`（按 bindInput 端口名注入，
+  歧义显式报错）与 `submitBound`（以 bindOutput 绑定作为输出声明，无需重复声明）；
+  hello_graph 示例同步改用并补 `connect` vs `wire` 语义注释
+- **构建体验（issue P0-1/P0-5/P1-7/P1-9/P1-10）**：
+  - README 新增「10 分钟上手」章节（配置→构建→运行 hello_graph 及预期输出）；
+    CI 逐字执行该命令并断言输出
+  - 构建选项迁移至 `DCINFER_BUILD_*` 命名空间（旧 `BUILD_*` 名兼容映射）；
+    根 CMakeLists 全局设置加顶层保护（`add_subdirectory()` 引入零污染宿主，
+    子工程模式下测试/示例默认关）；MSVC `/utf-8` 下沉至目标级；
+    配置结束输出 configure summary
+  - `BUILD_ENGINE_OPENAI` 缺 DCNet 时 FATAL_ERROR（原 WARNING 后静默跳过）
+  - vcpkg 依赖按 feature 分层（`ir` / `net` / `ort-*`，基础依赖清空）；
+    `core-only` 预设零 vcpkg 依赖；新增 `core-ir` 预设；
+    CI 新增 core-only / README 上手路径（双平台）/ DCNet+OpenAI mock 作业，
+    时间敏感测试以 `ctest --repeat until-fail:3` 加严
+
+### Fixed
+
+- 文档漂移（issue P2-12）：`OpenAiEngine.h` 头注释 WinHTTP → POCO；
+  OpenAI README 构建命令补充 `BUILD_DCNET=ON` 并修正"默认 ON"错误说明
+
 ### Changed
 
 - **DCNet 传输层 POCO 化（跨平台）**：`NetTransport_Http` 从 WinHTTP 迁至 POCO

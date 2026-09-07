@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Node.h"
+#include "TaskStatus.h"
 #include "ThreadPool.h"
 
 #include <atomic>
@@ -11,6 +12,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -53,7 +55,19 @@ public:
 							const PoolConfig& operatorCfg = {},
 							const PoolConfig& systemCfg = {});
 
-	~ExecutionEngine() = default;
+	/// @brief  析构：先在全部状态成员存活时释放残余活动门控。
+	///         若留到成员析构阶段，门控析构触发的 _exhaustedCheck 将访问
+	///         已析构的 _watchdogs/_blockedSkips 等状态。
+	~ExecutionEngine() {
+		// 先将活动门控表整体移出（锁外释放）：门控析构触发的 _exhaustedCheck
+		// 可能经 _terminate 重入本表，锁内 clear 会自死锁。
+		decltype(_activeGates) leftover;
+		{
+			std::lock_guard lk(_activeGatesMutex);
+			leftover = std::move(_activeGates);
+		}
+		leftover.clear();
+	}
 
 	ExecutionEngine(const ExecutionEngine&) = delete;
 	ExecutionEngine& operator=(const ExecutionEngine&) = delete;
@@ -70,9 +84,24 @@ public:
 	// ── 同步等待 ──
 
 	/// @brief  同步等待 task 完成
-	/// @return true 在超时内完成，false 超时
+	/// @return true 在超时内完成，false 超时（任务仍在运行，未被取消）
 	bool wait(const TaskId& taskId,
 			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+
+	// ── task 状态与取消 ──
+
+	/// @brief  查询 task 当前状态
+	/// @return Unknown=从未提交；Running=执行中；Succeeded/Failed/TimedOut/Cancelled=已终止
+	TaskStatus status(const TaskId& taskId) const;
+
+	/// @brief  请求取消活动中的 task（幂等；未知或已终止返回 false）。
+	///         协作式取消：在飞节点执行不会被中断，传播链即刻停止，
+	///         节点缓冲与信号照常清理，wait() 被唤醒，状态置 Cancelled。
+	bool cancel(const TaskId& taskId);
+
+	/// @brief  释放已终止 task 的状态记录（结果与诊断由上层一并清理）
+	/// @note   活动（Running）task 不可释放；释放后 status 返回 Unknown
+	void releaseTask(const TaskId& taskId);
 
 	// ── 分组限流 ──
 
@@ -127,7 +156,8 @@ private:
 
 	// ── 终止辅助 ──
 	void _terminate(const TaskId& taskId,
-					GraphStore& graph, OutputZone& output, SignalStore& signals);
+					GraphStore& graph, OutputZone& output, SignalStore& signals,
+					TaskStatus terminalStatus = TaskStatus::Succeeded);
 	bool _isTerminated(const TaskId& taskId) const;
 	void _exhaustedCheck(const TaskId& taskId, OutputZone& output,
 						 GraphStore& graph, SignalStore& signals, ErrorTracker& errors);
@@ -152,8 +182,17 @@ private:
 	// 析构顺序：池(shutdown/join worker) → 共享表 → 状态 → 在飞看门狗(join) → 退役看门狗(join)。
 	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated/_watchdogs
 	// 等状态、以及向池提交任务时，所有对象均存活。
-	std::unordered_set<TaskId> _terminatedTasks;
+	// task 状态表：Running → 终态（Succeeded/Failed/TimedOut/Cancelled）。
+	// submit 时活动 ID 拒绝重复提交；已终止 ID 复用时清除旧状态。
+	// 同时承担原 _terminatedTasks 的传播拦截与 wait 谓词职责。
+	std::unordered_map<TaskId, TaskStatus> _taskStates;
 	mutable std::mutex _terminationMutex;
+
+	// 活动任务门控表：submit 注册、_terminate 移除；支撑 cancel() 定位门控。
+	// 声明位置在线程池之前：析构时池先行 shutdown，残余门控的
+	// _exhaustedCheck 访问的引擎状态成员（本表及上方互斥锁）仍然存活。
+	std::unordered_map<TaskId, std::shared_ptr<TaskGate>> _activeGates;
+	std::mutex _activeGatesMutex;
 
 	// 看门狗退役列表：超时路径中，看门狗线程会在 _terminate 内尝试回收自身，
 	// 在自身线程 join 自身将抛 resource_deadlock_would_occur，并因自 noexcept

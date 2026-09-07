@@ -27,6 +27,9 @@ if (BUILD_ENGINE_OPENAI)
     if (TARGET DCNet::DCNet)
         add_subdirectory(OpenAI)
     else()
-        message(WARNING "BUILD_ENGINE_OPENAI=ON but DCNet is not built (BUILD_DCNET=OFF); skipping OpenAI adapter")
+        # 显式失败：静默跳过会让"配置成功"被误认为功能已构建（issue P1-7）
+        message(FATAL_ERROR
+            "BUILD_ENGINE_OPENAI=ON requires BUILD_DCNET=ON (OpenAI adapter uses DCNet HTTP transport).\n"
+            "Re-configure with: -DBUILD_DCNET=ON")
     endif()
 endif()

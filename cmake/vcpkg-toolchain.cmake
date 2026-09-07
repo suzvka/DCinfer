@@ -38,11 +38,34 @@ set(DCINFER_ORT_EP "NONE" CACHE STRING
     "ONNX Runtime EP variant: NONE (no ORT deps), CPU, CUDA, TENSORRT, OPENVINO")
 set_property(CACHE DCINFER_ORT_EP PROPERTY STRINGS NONE;CPU;CUDA;TENSORRT;OPENVINO)
 
-# ── 预置引擎开关默认值（与根 CMakeLists option 保持一致；
-#    toolchain 在 project() 阶段加载，早于 option() 定义）──
+# ── 预置引擎/模块开关默认值（与根 CMakeLists option 保持一致；
+# toolchain 在 project() 阶段加载，早于 option() 定义；
+# -D 命令行/预设传入的值优先，set CACHE 不覆盖已有缓存）──
 set(BUILD_ENGINE_ONNXRUNTIME OFF CACHE BOOL "Build ONNX Runtime engine adapter")
+# 模块开关：新名 DCINFER_BUILD_IR / DCINFER_BUILD_DCNET 优先（存在时同步到旧名），
+# 否则预置旧名默认值（供下方 feature 映射与根 CMakeLists 兼容映射读取）
+if (DEFINED DCINFER_BUILD_IR)
+    set(BUILD_IR "${DCINFER_BUILD_IR}" CACHE BOOL "Build DCIr graph compiler" FORCE)
+else()
+    set(BUILD_IR ON CACHE BOOL "Build DCIr graph compiler")
+endif()
+if (DEFINED DCINFER_BUILD_DCNET)
+    set(BUILD_DCNET "${DCINFER_BUILD_DCNET}" CACHE BOOL "Build DCNet network adapters" FORCE)
+else()
+    set(BUILD_DCNET OFF CACHE BOOL "Build DCNet network adapters")
+endif()
 
-# ── EP → vcpkg manifest feature 注入 ──
+# ── EP / 模块 → vcpkg manifest feature 注入 ──
+# 依赖分层（issue P1-9）：基础 dependencies 为空，模块依赖按 feature 选择——
+# ir → DCIr（nlohmann-json/minizip/zlib）；net → DCNet（poco[netssl]）。
+# 不启用任何模块时（core-only）零 vcpkg 安装。
+if (BUILD_IR)
+    list(APPEND VCPKG_MANIFEST_FEATURES "ir")
+endif()
+if (BUILD_DCNET)
+    list(APPEND VCPKG_MANIFEST_FEATURES "net")
+endif()
+
 if (BUILD_ENGINE_ONNXRUNTIME)
     if (DCINFER_ORT_EP STREQUAL "NONE")
         message(FATAL_ERROR

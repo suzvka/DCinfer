@@ -142,14 +142,28 @@
     {
       "name": "core-only",
       "displayName": "Core only (library, no engines)",
-      "description": "只构建 DCinfer 核心库 + DCIr；不构建任何引擎适配器 / DCNet / 测试 / 示例（跨平台，使用默认生成器）",
+      "description": "只构建 DCinfer 核心库；不构建 DCIr / 引擎适配器 / DCNet / 测试 / 示例；零 vcpkg 依赖（跨平台，使用默认生成器）",
       "binaryDir": "${sourceDir}/build/core-only",
       "cacheVariables": {
+        "DCINFER_BUILD_IR": "OFF",
+        "DCINFER_BUILD_ENGINES": "OFF",
+        "DCINFER_BUILD_DCNET": "OFF",
+        "DCINFER_BUILD_TESTS": "OFF",
+        "DCINFER_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "core-ir",
+      "displayName": "Core + DCIr (JSON/.dcg compiler)",
+      "description": "构建 DCinfer 核心库 + DCIr 图编译器；不构建引擎适配器 / DCNet / 测试 / 示例（依赖经 vcpkg feature 'ir' 安装）",
+      "binaryDir": "${sourceDir}/build/core-ir",
+      "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
-        "BUILD_ENGINES": "OFF",
-        "BUILD_DCNET": "OFF",
-        "BUILD_TESTS": "OFF",
-        "BUILD_EXAMPLES": "OFF"
+        "DCINFER_BUILD_IR": "ON",
+        "DCINFER_BUILD_ENGINES": "OFF",
+        "DCINFER_BUILD_DCNET": "OFF",
+        "DCINFER_BUILD_TESTS": "OFF",
+        "DCINFER_BUILD_EXAMPLES": "OFF"
       }
     }
   ]

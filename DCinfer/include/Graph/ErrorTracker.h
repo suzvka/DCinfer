@@ -47,6 +47,12 @@ public:
 	/// @brief  清除所有 task 级错误记录（通常在重新 submit 前调用）
 	void clearErrors();
 
+	/// @brief  清除指定 task 的诊断记录（同 taskId 复用/释放时调用，防止上一轮残留）
+	void clearTask(const TaskId& taskId) {
+		std::lock_guard lk(_mutex);
+		_taskErrors.erase(taskId);
+	}
+
 	/// @brief  是否有任何 task 发生过错误
 	bool hasErrors() const;
 
