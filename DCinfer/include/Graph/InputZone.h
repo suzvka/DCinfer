@@ -11,6 +11,8 @@ namespace DC {
 struct InputBinding {
 	std::string nodeName;
 	std::string portName;
+	std::string alias;  ///< 公共别名（空 = 未设置；别名是图对外契约的一部分，
+	                    ///           内部 node:port 可重构而别名保持稳定）
 };
 
 /// @brief InputZone：图级输入端口声明区（纯结构，无 task 级状态）
@@ -24,7 +26,9 @@ struct InputBinding {
 class InputZone {
 public:
 	/// @brief  标记 node:port 为图级输入口
-	void bind(const std::string& nodeName, const std::string& portName);
+	/// @param  alias  可选公共别名；feedBoundInput 优先按别名解析
+	void bind(const std::string& nodeName, const std::string& portName,
+			  const std::string& alias = {});
 
 	/// @brief  检查是否已绑定为图级输入
 	bool isBound(const std::string& nodeName, const std::string& portName) const;
@@ -48,11 +52,12 @@ private:
 // ════════════════════════════════════════════
 
 inline void InputZone::bind(const std::string& nodeName,
-							const std::string& portName) {
+							const std::string& portName,
+							const std::string& alias) {
 	std::lock_guard lk(_mutex);
 	std::string key = _makeKey(nodeName, portName);
 	_bindings.insert(key);
-	_bindingsList.push_back({nodeName, portName});
+	_bindingsList.push_back({nodeName, portName, alias});
 }
 
 inline bool InputZone::isBound(const std::string& nodeName,

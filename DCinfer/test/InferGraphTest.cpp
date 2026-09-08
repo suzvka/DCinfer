@@ -11,6 +11,7 @@
 
 #include "TestHarness.h"
 #include "Connector.h"
+#include "NodeException.h"
 
 using namespace DC;
 
@@ -494,7 +495,7 @@ void testPartialBlockKeepsOtherPath() {
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 		auto& c = harness.addNode(std::make_unique<Node>("Builtin", "id_c", identitySchema(), identityRunFn()));
 
-		// 使用广播连接器扇出（避免 wire 同端口 getOutput 抢消费）
+		// 使用广播连接器扇出（避免 wire 同端口 takeOutput 抢消费）
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
 			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
@@ -1051,7 +1052,7 @@ void testSubgraphDataflowCorrect() {
 // ════════════════════════════════════════════
 
 // 回归：终止流程曾先清理 OutputZone 与节点缓冲、最后才 notify wait()，
-// 导致 submit → wait → getOutput 取不到结果（只能在回调内读）。
+// 导致 submit → wait → takeOutput 取不到结果（只能在回调内读）。
 void testOutputSurvivesWait() {
 	TEST("lifecycle: outputs retrievable after wait without callback") {
 		InferGraph graph;
@@ -1065,7 +1066,7 @@ void testOutputSurvivesWait() {
 
 		// 核心断言：wait 返回后无需回调即可取结果
 		CHECK(graph.hasOutput("t1", "id1", "y"), "output should survive wait()");
-		auto result = graph.getOutputTensor("t1", "id1", "y");
+		auto result = graph.takeOutputTensor("t1", "id1", "y");
 		CHECK(std::abs(result.item<float>() - 7.0f) < 1e-6f, "result should be 7.0");
 
 		// releaseTask 回收：状态与结果一并释放
@@ -1107,7 +1108,7 @@ void testTaskIdReuseAfterCompletion() {
 		graph.feedInput("t1", "add1", "b", makeFloatTensor(4.0f));
 		graph.submit("t1", "add1", "s");
 		CHECK(graph.wait("t1"), "first run should complete");
-		auto r1 = graph.getOutputTensor("t1", "add1", "s");
+		auto r1 = graph.takeOutputTensor("t1", "add1", "s");
 		CHECK(std::abs(r1.item<float>() - 7.0f) < 1e-6f, "first result should be 7.0");
 
 		// 复用同一 taskId：重新注入并提交
@@ -1116,7 +1117,7 @@ void testTaskIdReuseAfterCompletion() {
 		graph.submit("t1", "add1", "s");
 		CHECK(graph.wait("t1"), "reused taskId should complete normally");
 		CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "reused task status should be Succeeded");
-		auto r2 = graph.getOutputTensor("t1", "add1", "s");
+		auto r2 = graph.takeOutputTensor("t1", "add1", "s");
 		CHECK(std::abs(r2.item<float>() - 30.0f) < 1e-6f, "second result should be 30.0");
 	}
 	END_TEST();
@@ -1174,7 +1175,7 @@ void testCancelRunningTask() {
 		graph.feedInput("t1", "id_a", "x", makeFloatTensor(9.0f));
 		graph.submit("t1", "id_b", "y");
 		CHECK(graph.wait("t1"), "re-submitted task after cancel should complete");
-		auto r = graph.getOutputTensor("t1", "id_b", "y");
+		auto r = graph.takeOutputTensor("t1", "id_b", "y");
 		CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "re-run result should be 9.0");
 	}
 	END_TEST();
@@ -1197,7 +1198,7 @@ void testBoundInputOutputApi() {
 		graph.feedBoundInput("t1", "x", std::move(*in));
 		graph.submitBound("t1");
 		CHECK(graph.wait("t1"), "bound flow should complete");
-		auto out = graph.getOutputTensor("t1", "inc", "y");
+		auto out = graph.takeOutputTensor("t1", "inc", "y");
 		CHECK(std::abs(out.item<float>() - 42.0f) < 1e-6f, "bound result should be 42.0");
 
 		// 错误路径：未绑定的端口名
@@ -1226,6 +1227,144 @@ void testBoundInputOutputApi() {
 			ambiguous = true;
 		}
 		CHECK(ambiguous, "ambiguous bound name should throw");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// 图级公共别名：bindInput/bindOutput 三参重载 + 按别名注入/取用
+// ════════════════════════════════════════════
+
+void testAliasBindingApi() {
+	TEST("graph API: public aliases decouple callers from internal topology") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
+
+		// 输入/输出均带公共别名
+		graph.bindInput("num", "inc", "x");
+		graph.bindOutput("result", "inc", "y");
+
+		auto in = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+		*in = 5.0f;
+		graph.feedBoundInput("t1", "num", std::move(*in)); // 按别名注入
+		graph.submitBound("t1");
+		CHECK(graph.wait("t1"), "alias-bound flow should complete");
+		CHECK(graph.hasOutput("t1", "result"), "alias should resolve for hasOutput");
+		auto out = graph.takeOutputTensor("t1", "result"); // 按别名取，无需内部节点名
+		CHECK(std::abs(out.item<float>() - 6.0f) < 1e-6f, "alias result should be 6.0");
+
+		// 2 参重载也接受唯一绑定端口名（向后兼容）
+		auto in2 = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+		*in2 = 7.0f;
+		graph.feedBoundInput("t2", "num", std::move(*in2));
+		graph.submitBound("t2");
+		CHECK(graph.wait("t2"), "second task should complete");
+		auto out2 = graph.takeOutputTensor("t2", "y"); // 按唯一绑定端口名取
+		CHECK(std::abs(out2.item<float>() - 8.0f) < 1e-6f, "port-name retrieval should be 8.0");
+
+		// 跨节点同名端口：唯一别名消除注入歧义（同名端口仍歧义，但别名不歧义）
+		InferGraph graph2;
+		graph2.addNode(std::make_unique<Node>("Builtin", "a", incSchema(), incRunFn()));
+		graph2.addNode(std::make_unique<Node>("Builtin", "b", incSchema(), incRunFn()));
+		graph2.bindInput("first", "a", "x");
+		graph2.bindInput("second", "b", "x");
+		{
+			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+			*v = 1.0f;
+			graph2.feedBoundInput("t1", "first", std::move(*v));
+		}
+		{
+			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+			*v = 2.0f;
+			graph2.feedBoundInput("t1", "second", std::move(*v));
+		}
+
+		// 别名唯一性校验：输入别名重复
+		bool dupIn = false;
+		try {
+			graph2.bindInput("first", "b", "x");
+		} catch (const GraphException& e) {
+			dupIn = (e.getErrorType() == GraphException::ErrorType::DuplicateBinding);
+		}
+		CHECK(dupIn, "duplicate input alias should throw DuplicateBinding");
+
+		// 别名唯一性校验：输出别名重复（输出别名与输入别名是独立命名空间）
+		bool dupOut = false;
+		try {
+			graph2.bindOutput("first", "a", "y");
+			graph2.bindOutput("first", "b", "y");
+		} catch (const GraphException& e) {
+			dupOut = (e.getErrorType() == GraphException::ErrorType::DuplicateBinding);
+		}
+		CHECK(dupOut, "duplicate output alias should throw DuplicateBinding");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// 消费式取用语义：takeOutput 取出即消耗，不可重复读取
+// ════════════════════════════════════════════
+
+void testTakeOutputDestructive() {
+	TEST("graph API: takeOutput is consumptive (single read)") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
+
+		graph.feedInput("t1", "id1", "x", makeFloatTensor(9.0f));
+		graph.submit("t1", "id1", "y");
+		CHECK(graph.wait("t1"), "task should complete");
+
+		CHECK(graph.hasOutput("t1", "id1", "y"), "output should exist before take");
+		auto first = graph.takeOutputTensor("t1", "id1", "y");
+		CHECK(std::abs(first.item<float>() - 9.0f) < 1e-6f, "first take should be 9.0");
+
+		// 取出即消耗：OutputZone 已清空且节点缓冲已随终止清理 → 再次取出抛异常
+		CHECK(!graph.hasOutput("t1", "id1", "y"), "output should be consumed after take");
+		bool consumed = false;
+		try {
+			auto again = graph.takeOutputTensor("t1", "id1", "y");
+			(void)again;
+		} catch (const GraphException&) {
+			consumed = true;
+		} catch (const NodeException&) {
+			consumed = true;
+		}
+		CHECK(consumed, "second take should throw (output already consumed)");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// wait/waitForResult 超时语义：默认无限等待；显式超时只放弃等待不取消
+// ════════════════════════════════════════════
+
+void testWaitSemantics() {
+	TEST("lifecycle: wait semantics (0=infinite, waiter-only timeout, unknown-id fast-fail)") {
+		InferGraph graph;
+		auto& b = graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		graph.wire("id_a", "y", "id_b", "x");
+
+		b.bindSignal(graph.signalStore(), "gate");
+		graph.setSignal("gate", false); // id_b 阻塞，任务保持 Running
+
+		graph.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
+		graph.submit("t1", "id_b", "y");
+
+		// 显式超时：只放弃等待，不取消任务（任务仍 Running）
+		CHECK(!graph.wait("t1", std::chrono::milliseconds(80)), "explicit timeout should return false while blocked");
+		auto running = graph.waitForResult("t1", std::chrono::milliseconds(80));
+		CHECK(running.status == TaskStatus::Running, "waitForResult timeout should report Running");
+
+		// 未知 taskId：立即返回（无限等待模式下防误拼写挂死）
+		CHECK(!graph.wait("never_submitted"), "unknown taskId should return false immediately");
+		auto unknown = graph.waitForResult("never_submitted");
+		CHECK(unknown.status == TaskStatus::Unknown, "unknown taskId waitForResult should be Unknown");
+
+		// 默认无限等待：cancel 唤醒后返回（配合 testCancelRunningTask 的 wait 覆盖）
+		CHECK(graph.cancel("t1"), "cancel should succeed on active task");
+		auto cancelled = graph.waitForResult("t1");
+		CHECK(cancelled.status == TaskStatus::Cancelled, "default waitForResult should wait until termination");
 	}
 	END_TEST();
 }
@@ -1269,6 +1408,11 @@ int main() {
 
 		// 图 API 便捷绑定
 		testBoundInputOutputApi();
+		testAliasBindingApi();
+		testTakeOutputDestructive();
+
+		// wait/waitForResult 超时语义
+		testWaitSemantics();
 
 		// 子图（分组互斥）测试
 		testSubgraphSerializesExecution();

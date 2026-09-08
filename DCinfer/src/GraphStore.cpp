@@ -119,8 +119,9 @@ Node& GraphStore::wire(const std::string& srcNode, const std::string& srcPort,
 	return wireRef;
 }
 
-void GraphStore::bindInput(const std::string& nodeName, const std::string& portName) {
-	_inputZone.bind(nodeName, portName);
+void GraphStore::bindInput(const std::string& nodeName, const std::string& portName,
+						   const std::string& alias) {
+	_inputZone.bind(nodeName, portName, alias);
 }
 
 // ════════════════════════════════════════════

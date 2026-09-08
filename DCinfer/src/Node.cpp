@@ -133,8 +133,8 @@ bool Node::hasOutput(const TaskId& taskId, const std::string& name) const {
 	return _buffer->hasOutput(taskId, name);
 }
 
-Value Node::getOutput(const TaskId& taskId, const std::string& name) {
-	return _buffer->getOutput(taskId, name);
+Value Node::takeOutput(const TaskId& taskId, const std::string& name) {
+	return _buffer->takeOutput(taskId, name);
 }
 
 const Value& Node::peekOutput(const TaskId& taskId, const std::string& name) const {
@@ -221,11 +221,11 @@ void Node::setInput(const TaskId& taskId, std::unordered_map<std::string, Tensor
 	setInput(taskId, std::move(wrapped));
 }
 
-Tensor Node::getOutputTensor(const TaskId& taskId, const std::string& name) {
-	auto nt = getOutput(taskId, name);
+Tensor Node::takeOutputTensor(const TaskId& taskId, const std::string& name) {
+	auto nt = takeOutput(taskId, name);
 	auto* t = nt.as<Tensor>();
 	if (!t) {
-		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::getOutputTensor",
+		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::takeOutputTensor",
 							"output '" + name + "' is not a DC::Tensor (innerType=" +
 								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}

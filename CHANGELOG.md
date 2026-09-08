@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **图级公共 I/O 别名**：`bindInput(alias, nodeName, portName)` /
+  `bindOutput(alias, nodeName, portName)` 三参重载为图级绑定赋予公共别名
+  （别名须唯一，重复抛 `GraphException(DuplicateBinding)`；输入/输出别名独立命名空间）；
+  `feedBoundInput` 优先按别名解析，跨节点同名端口可用唯一别名消歧；
+  `takeOutput` / `takeOutputTensor` / `hasOutput` 新增 2 参重载，
+  按公共别名或唯一绑定端口名定位，调用方无需感知内部节点/端口名
+- **README 新增「环境要求」矩阵**：CMake/C++ 标准/各编译器下限与 CI 验证平台、
+  可选依赖与模块的对应关系
 - **任务生命周期 API（issue P0-2/P0-3/P1-6）**：新增 `TaskStatus`（Unknown/Running/
   Succeeded/Failed/TimedOut/Cancelled）与 `TaskResult`；`InferGraph` 新增
   `taskStatus()` / `waitForResult()` / `cancel()`（幂等） / `releaseTask()`。
@@ -54,6 +62,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **破坏性重命名：`getOutput` → `takeOutput`、`getOutputTensor` → `takeOutputTensor`**
+  （InferGraph 与 Node/TaskBuffer 同步更名）：输出取用一直是消费式语义
+  （取出即从 OutputZone/节点缓冲清除，不可重复读取），旧名隐匿了该行为；
+  非破坏式预览仍可用 Node::peekOutput
+- **`wait()` / `waitForResult()` 默认改为无限等待直至终止**：原默认 5s 隐式超时
+  与方法名语义相悖；显式超时改经重载传入，`timeout <= 0` 视为无限等待
+  （与 `submit` 的执行超时 0=不限时约定一致）；未知 taskId（从未提交/已释放）
+  在无限等待模式下立即返回，防误拼写挂死；超时只放弃等待、不取消任务
+  （取消须显式 `cancel()`）
+- **README quickstart 与 CI 逐字对齐**：`readme-hello-graph` CI 作业不再注入
+  vcpkg toolchain、不再初始化 submodule——逐字验证 README「10 分钟上手」的
+  零依赖命令（新增"未安装 vcpkg 依赖"断言）；README 同步将 submodule 初始化
+  与 toolchain 参数移至扩展模块段落，消除文档与 CI 的信任偏差
 - **DCNet 传输层 POCO 化（跨平台）**：`NetTransport_Http` 从 WinHTTP 迁至 POCO
   （vcpkg `poco[netssl]`，HTTP/HTTPS 单一实现覆盖 Windows/Linux/macOS）；
   `connect()` 新增 TCP 就绪探测（拒连/DNS 失败提前到 createEngine 配置期报告）；

@@ -87,9 +87,34 @@ public:
 		_store.bindInput(nodeName, portName);
 	}
 
+	/// @brief  带公共别名的图级输入绑定
+	///
+	/// 别名是图对外契约的一部分：内部节点/端口重构后，只要别名映射不变，
+	/// 调用方代码无需改动。feedBoundInput 优先按别名解析，可消除
+	/// 跨节点同名端口的注入歧义。
+	/// @param  alias  公共别名（须在全部输入绑定中唯一）
+	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
+	void bindInput(const std::string& alias, const std::string& nodeName,
+				   const std::string& portName) {
+		_ensureAliasUnique(alias, _store.inputBindings(), "InferGraph::bindInput");
+		_store.bindInput(nodeName, portName, alias);
+	}
+
 	/// @brief  标记输出：该节点的该端口产出进入 OutputZone（与边目的地互斥）
 	void bindOutput(const std::string& nodeName, const std::string& portName) {
 		_outputZone.bind(nodeName, portName);
+	}
+
+	/// @brief  带公共别名的图级输出绑定
+	///
+	/// 绑定后即可用 takeOutput(taskId, alias) / takeOutputTensor(taskId, alias)
+	/// 按公共名取结果，无需向调用方暴露内部节点名与端口名。
+	/// @param  alias  公共别名（须在全部输出绑定中唯一）
+	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
+	void bindOutput(const std::string& alias, const std::string& nodeName,
+					const std::string& portName) {
+		_ensureAliasUnique(alias, _outputZone.bindings(), "InferGraph::bindOutput");
+		_outputZone.bind(nodeName, portName, alias);
 	}
 
 	// ── 子图声明 ──
@@ -129,7 +154,7 @@ public:
 	/// @param  declarations  期望产出：{nodeName, portName, count} 列表
 	/// @throws GraphException(DuplicateTask) 若同 taskId 任务仍在执行
 	/// @note   复用已终止的 taskId 合法：上一轮的声明/结果/诊断随之清理。
-	///         输出在 task 终止后仍保留，供 wait → getOutput 取用。
+	///         输出在 task 终止后仍保留，供 wait → takeOutput 取用。
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
@@ -152,20 +177,33 @@ public:
 		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
 	}
 
-	// ── 结果获取 ──
+	// ── 结果获取（消费式：取出即消耗）──
 
-	/// @brief  获取输出区中指定端口的结果（消费式取出）
+	/// @brief  消费式取出输出区中指定端口的结果（取出后内部清空，不可重复读取）
 	/// @note   结果在 task 终止（wait 返回）后仍然有效，直至下一次同 ID submit
-	///         或 releaseTask()——支持 submit → wait → getOutput 的同步用法
+	///         或 releaseTask()——支持 submit → wait → takeOutput 的同步用法；
+	///         非破坏式预览见 Node::peekOutput（底层接口）
 	/// @throws GraphException(NodeNotFound) 若节点不存在
-	Value getOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
+	Value takeOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
-	/// @brief  便捷接口：取出 DC::Tensor
+	/// @brief  便捷接口：消费式取出 DC::Tensor
 	/// @throws GraphException(NodeNotFound) 若节点不存在
-	Tensor getOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
+	Tensor takeOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
+
+	/// @brief  消费式取出：按公共别名或唯一绑定端口名定位，无需内部节点名
+	/// @throws GraphException(NodeNotFound) 无此别名/绑定端口
+	/// @throws GraphException(FeedFailed)   名称跨绑定歧义（用唯一别名消除）
+	Value takeOutput(const TaskId& taskId, const std::string& name);
+
+	/// @brief  消费式取出 Tensor：按公共别名或唯一绑定端口名定位
+	/// @throws 同 2 参 takeOutput
+	Tensor takeOutputTensor(const TaskId& taskId, const std::string& name);
 
 	/// @brief  检查输出区中是否有结果
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
+
+	/// @brief  检查结果是否存在（按公共别名或唯一绑定端口名）
+	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
 	/// @brief  便捷提交：以全部 bindOutput 绑定作为输出声明（各 count=1）。
 	///         已 bindOutput 的端口无需在 submit 时重复声明。
@@ -186,12 +224,16 @@ public:
 	///         wait()/waitForResult() 被唤醒，状态置 Cancelled。
 	bool cancel(const TaskId& taskId) { return _engine.cancel(taskId); }
 
-	/// @brief  同步等待 task 终止并返回结构化结果（状态 + 诊断记录）
+	/// @brief  同步等待 task 终止并返回结构化结果（无限等待直至终止）
+	/// @note   可能长时间阻塞（远端/慢引擎/信号阻塞）的场景应改用
+	///         显式超时重载，或从其他线程调用 cancel() 唤醒等待
+	TaskResult waitForResult(const TaskId& taskId);
+
+	/// @brief  同步等待 task 终止并返回结构化结果（显式超时）
 	/// @param  timeout 等待超时（超时未终止时 status 为 Running，调用方可据此区分
-	///         "仍在运行"与各类终止态）
-	/// @note   输出数据在终止后仍由 OutputZone 持有，经 getOutput/getOutputTensor 取出
-	TaskResult waitForResult(const TaskId& taskId,
-							 std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+	///         "仍在运行"与各类终止态）；超时只放弃等待，不取消任务
+	/// @note   输出数据在终止后仍由 OutputZone 持有，经 takeOutput 取出
+	TaskResult waitForResult(const TaskId& taskId, std::chrono::milliseconds timeout);
 
 	/// @brief  释放已终止 task 的全部资源（状态表条目、OutputZone 结果、诊断记录）
 	/// @note   此后 taskStatus 返回 Unknown、hasOutput 返回 false；
@@ -261,10 +303,15 @@ public:
 
 	// ── 同步等待与图导出 ──
 
-	/// @brief  同步等待 task 终止（返回后可经 getOutput/getOutputTensor 读取结果）
-	/// @return true 在超时内终止，false 超时（任务仍在运行，未被取消）
-	bool wait(const TaskId& taskId,
-			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
+	/// @brief  同步等待 task 终止（无限等待；返回后可经 takeOutput 读取结果）
+	/// @return true 已终止；false taskId 未知（从未提交或已 releaseTask）
+	bool wait(const TaskId& taskId) {
+		return _engine.wait(taskId, std::chrono::milliseconds(0));
+	}
+
+	/// @brief  同步等待 task 终止（显式超时；timeout <= 0 视为无限等待）
+	/// @return true 在超时内终止，false 超时或 taskId 未知（任务仍在运行，未被取消）
+	bool wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
 		return _engine.wait(taskId, timeout);
 	}
 
@@ -286,6 +333,28 @@ private:
 			throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::submit",
 								 "task '" + taskId + "' is still running; duplicate submit rejected");
 	}
+
+	/// @brief  校验别名在绑定列表中唯一（别名是图对外契约的公共名）
+	template <typename Bindings>
+	void _ensureAliasUnique(const std::string& alias, const Bindings& bindings,
+							const char* api) const {
+		if (alias.empty())
+			return;
+		for (const auto& b : bindings) {
+			if (b.alias == alias)
+				throw GraphException(GraphException::ErrorType::DuplicateBinding, api,
+									 "alias '" + alias + "' is already bound; aliases must be unique");
+		}
+	}
+
+	/// @brief  解析图级输出名：公共别名优先，其次唯一绑定的端口名
+	/// @return (nodeName, portName)
+	std::pair<std::string, std::string>
+	_resolveOutputName(const std::string& name, const char* api) const;
+
+	/// @brief  解析图级输入名：公共别名优先，其次唯一绑定的端口名
+	std::pair<std::string, std::string>
+	_resolveInputName(const std::string& name, const char* api) const;
 
 	// ── 内部组件（声明顺序决定析构顺序）──
 	// ExecutionEngine 必须最后声明 → 最先析构：

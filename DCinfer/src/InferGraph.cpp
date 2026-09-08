@@ -64,23 +64,8 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 }
 
 void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portName, Value data) {
-	std::string nodeName;
-	size_t matches = 0;
-	for (const auto& b : _store.inputBindings()) {
-		if (b.portName != portName)
-			continue;
-		if (++matches == 1)
-			nodeName = b.nodeName;
-	}
-	if (matches == 0)
-		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedBoundInput",
-							 "no bound input port named '" + portName
-								 + "' (call bindInput(nodeName, portName) first)");
-	if (matches > 1)
-		throw GraphException(GraphException::ErrorType::FeedFailed, "InferGraph::feedBoundInput",
-							 "bound input port '" + portName
-								 + "' is ambiguous across nodes; use feedInput(taskId, nodeName, ...) instead");
-	feedInput(taskId, nodeName, portName, std::move(data));
+	auto [nodeName, resolvedPort] = _resolveInputName(portName, "InferGraph::feedBoundInput");
+	feedInput(taskId, nodeName, resolvedPort, std::move(data));
 }
 
 void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portName, Tensor data) {
@@ -94,7 +79,8 @@ void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds tim
 		declarations.push_back({ob.nodeName, ob.portName, 1});
 	if (declarations.empty())
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submitBound",
-							 "no bound output ports; call bindOutput(nodeName, portName) first");
+							 "no bound output ports; call bindOutput(nodeName, portName) "
+								 "or bindOutput(alias, nodeName, portName) first");
 	submit(taskId, std::move(declarations), timeout, maxHops);
 }
 
@@ -102,7 +88,7 @@ void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds tim
 // 结果获取
 // ════════════════════════════════════════════
 
-Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName,
+Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 							const std::string& portName) {
 	// 优先查 OutputZone（OutputZone 绑定端口的数据在 _propagateFrom 第二步已搬运至此）
 	auto ozVal = _outputZone.take(taskId, nodeName, portName);
@@ -111,13 +97,13 @@ Value InferGraph::getOutput(const TaskId& taskId, const std::string& nodeName,
 
 	auto* n = _store.node(nodeName);
 	if (!n) {
-		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutput",
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutput",
 							 "node '" + nodeName + "' not found");
 	}
-	return n->getOutput(taskId, portName);
+	return n->takeOutput(taskId, portName);
 }
 
-Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& nodeName,
+Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nodeName,
 								   const std::string& portName) {
 	// 优先查 OutputZone
 	auto ozVal = _outputZone.take(taskId, nodeName, portName);
@@ -125,17 +111,17 @@ Tensor InferGraph::getOutputTensor(const TaskId& taskId, const std::string& node
 		auto* t = ozVal->as<Tensor>();
 		if (t)
 			return std::move(*t);
-		throw GraphException(GraphException::ErrorType::Other, "InferGraph::getOutputTensor",
+		throw GraphException(GraphException::ErrorType::Other, "InferGraph::takeOutputTensor",
 							 "OutputZone artifact for '" + nodeName + "." + portName
 								 + "' is not a DC::Tensor");
 	}
 
 	auto* n = _store.node(nodeName);
 	if (!n) {
-		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::getOutputTensor",
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutputTensor",
 							 "node '" + nodeName + "' not found");
 	}
-	return n->getOutputTensor(taskId, portName);
+	return n->takeOutputTensor(taskId, portName);
 }
 
 bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
@@ -148,6 +134,87 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	if (!n)
 		return false;
 	return n->hasOutput(taskId, portName);
+}
+
+// ── 按公共别名 / 唯一绑定端口名的图级取用 ──
+
+Value InferGraph::takeOutput(const TaskId& taskId, const std::string& name) {
+	auto [nodeName, portName] = _resolveOutputName(name, "InferGraph::takeOutput");
+	return takeOutput(taskId, nodeName, portName);
+}
+
+Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& name) {
+	auto [nodeName, portName] = _resolveOutputName(name, "InferGraph::takeOutputTensor");
+	return takeOutputTensor(taskId, nodeName, portName);
+}
+
+bool InferGraph::hasOutput(const TaskId& taskId, const std::string& name) const {
+	auto [nodeName, portName] = _resolveOutputName(name, "InferGraph::hasOutput");
+	return hasOutput(taskId, nodeName, portName);
+}
+
+// ── 名称解析：公共别名优先，其次唯一绑定的端口名 ──
+
+std::pair<std::string, std::string>
+InferGraph::_resolveOutputName(const std::string& name, const char* api) const {
+	const auto& bindings = _outputZone.bindings();
+	size_t aliasMatches = 0;
+	size_t portMatches = 0;
+	std::pair<std::string, std::string> resolved;
+	for (const auto& b : bindings) {
+		if (!b.alias.empty() && b.alias == name) {
+			if (++aliasMatches == 1)
+				resolved = {b.nodeName, b.portName};
+		}
+	}
+	if (aliasMatches == 1)
+		return resolved;
+	for (const auto& b : bindings) {
+		if (b.portName == name) {
+			if (++portMatches == 1)
+				resolved = {b.nodeName, b.portName};
+		}
+	}
+	if (portMatches == 1)
+		return resolved;
+	if (aliasMatches > 1 || portMatches > 1)
+		throw GraphException(GraphException::ErrorType::FeedFailed, api,
+							 "'" + name + "' is ambiguous across output bindings; "
+								 "disambiguate with a unique alias or the 3-argument overload");
+	throw GraphException(GraphException::ErrorType::NodeNotFound, api,
+							 "no bound output port or alias named '" + name
+								 + "' (call bindOutput(nodeName, portName) first)");
+}
+
+std::pair<std::string, std::string>
+InferGraph::_resolveInputName(const std::string& name, const char* api) const {
+	const auto& bindings = _store.inputBindings();
+	size_t aliasMatches = 0;
+	size_t portMatches = 0;
+	std::pair<std::string, std::string> resolved;
+	for (const auto& b : bindings) {
+		if (!b.alias.empty() && b.alias == name) {
+			if (++aliasMatches == 1)
+				resolved = {b.nodeName, b.portName};
+		}
+	}
+	if (aliasMatches == 1)
+		return resolved;
+	for (const auto& b : bindings) {
+		if (b.portName == name) {
+			if (++portMatches == 1)
+				resolved = {b.nodeName, b.portName};
+		}
+	}
+	if (portMatches == 1)
+		return resolved;
+	if (aliasMatches > 1 || portMatches > 1)
+		throw GraphException(GraphException::ErrorType::FeedFailed, api,
+							 "bound input '" + name + "' is ambiguous across nodes; "
+								 "use feedInput(taskId, nodeName, ...) or a unique alias instead");
+	throw GraphException(GraphException::ErrorType::NodeNotFound, api,
+							 "no bound input port or alias named '" + name
+								 + "' (call bindInput(nodeName, portName) first)");
 }
 
 // ════════════════════════════════════════════
@@ -166,8 +233,12 @@ TaskStatus InferGraph::taskStatus(const TaskId& taskId) const {
 	return st;
 }
 
+TaskResult InferGraph::waitForResult(const TaskId& taskId) {
+	return waitForResult(taskId, std::chrono::milliseconds(0)); // 0 = 无限等待
+}
+
 TaskResult InferGraph::waitForResult(const TaskId& taskId, std::chrono::milliseconds timeout) {
-	_engine.wait(taskId, timeout);
+	_engine.wait(taskId, timeout);   // timeout <= 0 视为无限等待
 	TaskResult result;
 	result.status = taskStatus(taskId);
 	result.errors = _errors.taskErrors(taskId);
@@ -242,7 +313,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			}
 			for (auto& ob : _outputZone.bindings()) {
 				if (!hasOutput(tid, ob.nodeName, ob.portName)) continue;
-				(*capturedOutputs)[ob.portName] = getOutput(tid, ob.nodeName, ob.portName);
+				(*capturedOutputs)[ob.portName] = takeOutput(tid, ob.nodeName, ob.portName);
 			}
 			{
 				std::lock_guard lk(*mtx);

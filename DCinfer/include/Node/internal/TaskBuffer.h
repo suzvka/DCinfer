@@ -19,7 +19,7 @@ struct NodeSchema; // 前向声明（定义见 Node.h）
 /// @brief 线程安全的 task 级 I/O 缓冲区管理器。
 ///
 /// 封装原 Node 中的 _taskInputs / _taskOutputs / _bufferMutex，
-/// 提供线程安全的 setInput / getOutput / isReady / 生命周期管理。
+/// 提供线程安全的 setInput / takeOutput / isReady / 生命周期管理。
 /// 所有需要 Schema 信息的操作通过参数传入，避免头文件循环依赖。
 class TaskBuffer {
 public:
@@ -50,10 +50,10 @@ public:
 	/// @brief  查询指定任务是否已产出指定输出端口的数据。
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
-	/// @brief  消费式取出输出数据（调用后缓冲区该槽位清空）。
+	/// @brief  消费式取出输出数据（调用后缓冲区该槽位清空；非破坏式读取见 peekOutput）。
 	/// @throws NodeException(TaskNotFound) 若任务不存在。
 	/// @throws NodeException(OutputNotProduced) 若输出端口为空。
-	Value getOutput(const TaskId& taskId, const std::string& name);
+	Value takeOutput(const TaskId& taskId, const std::string& name);
 
 	/// @brief  只读查看输出（不消费，数据保留在缓冲区）。
 	const Value& peekOutput(const TaskId& taskId, const std::string& name) const;

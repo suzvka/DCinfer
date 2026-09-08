@@ -93,7 +93,7 @@ TEST(chatRoundtrip) {
 	auto result = node->tryExecute("t1");
 	CHECK(result.ok(), "chat roundtrip should succeed");
 	CHECK(node->hasOutput("t1", "response"), "response output should exist");
-	auto out = node->getOutputTensor("t1", "response");
+	auto out = node->takeOutputTensor("t1", "response");
 	CHECK(out.type() == Tensor::TensorType::Data && out.typeSize() == 1, "response tensor type/size");
 	auto bytes = out.bytes();
 	CHECK(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == "hi there",
@@ -215,7 +215,7 @@ TEST(emptyContentSucceeds) {
 	node->setInput("t1", "prompt", makeTextTensor("hi"));
 	auto result = node->tryExecute("t1");
 	CHECK(result.ok(), "empty content is a legitimate response");
-	auto out = node->getOutputTensor("t1", "response");
+	auto out = node->takeOutputTensor("t1", "response");
 	CHECK(out.bytes().empty(), "response should be empty string");
 }
 
@@ -241,7 +241,7 @@ TEST(transportRetryOnServerError) {
 	auto result = node->tryExecute("t1");
 	CHECK(result.ok(), "retry after 500 should succeed");
 	CHECK(calls.load() == 2, "server should have seen exactly 2 attempts");
-	auto out = node->getOutputTensor("t1", "response");
+	auto out = node->takeOutputTensor("t1", "response");
 	auto bytes = out.bytes();
 	CHECK(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == "recovered",
 		  "recovered response content");

@@ -212,8 +212,8 @@ public:
 
 	// ── 任务级输出 ──
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
-	Value getOutput(const TaskId& taskId, const std::string& name);
-	Tensor getOutputTensor(const TaskId& taskId, const std::string& name);
+	Value takeOutput(const TaskId& taskId, const std::string& name);
+	Tensor takeOutputTensor(const TaskId& taskId, const std::string& name);
 	const Value& peekOutput(const TaskId& taskId, const std::string& name) const;
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
 	std::unordered_map<std::string, Tensor> collectOutputTensors(const TaskId& taskId);

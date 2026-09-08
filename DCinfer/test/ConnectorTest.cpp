@@ -74,13 +74,13 @@ void testBroadcastBasic() {
 		CHECK(node->hasOutput("t1", "out_2"), "out_2 should have data");
 
 		// 验证数据正确性
-		auto t0 = node->getOutputTensor("t1", "out_0");
+		auto t0 = node->takeOutputTensor("t1", "out_0");
 		CHECK(std::abs(t0.item<float>() - 42.0f) < 1e-6f, "out_0 value mismatch");
 
-		auto t1 = node->getOutputTensor("t1", "out_1");
+		auto t1 = node->takeOutputTensor("t1", "out_1");
 		CHECK(std::abs(t1.item<float>() - 42.0f) < 1e-6f, "out_1 value mismatch");
 
-		auto t2 = node->getOutputTensor("t1", "out_2");
+		auto t2 = node->takeOutputTensor("t1", "out_2");
 		CHECK(std::abs(t2.item<float>() - 42.0f) < 1e-6f, "out_2 value mismatch");
 
 		node->clearTask("t1");
@@ -99,7 +99,7 @@ void testBroadcastSingle() {
 		node->tryExecute("t1");
 
 		CHECK(node->hasOutput("t1", "out_0"), "out_0 should exist");
-		auto t0 = node->getOutputTensor("t1", "out_0");
+		auto t0 = node->takeOutputTensor("t1", "out_0");
 		CHECK(std::abs(t0.item<float>() - 99.0f) < 1e-6f, "single value mismatch");
 
 		node->clearTask("t1");
@@ -136,7 +136,7 @@ void testRoutingRoundRobin() {
 		CHECK(!node->hasOutput("t1", "out_1"), "t1 should NOT go to out_1");
 		CHECK(!node->hasOutput("t1", "out_2"), "t1 should NOT go to out_2");
 		{
-			auto t = node->getOutputTensor("t1", "out_0");
+			auto t = node->takeOutputTensor("t1", "out_0");
 			CHECK(std::abs(t.item<float>() - 1.0f) < 1e-6f, "t1 value");
 		}
 		node->clearTask("t1");
@@ -176,7 +176,7 @@ void testRoutingSingleOutput() {
 			node->setInput(tid, "in", makeIntTensor(i));
 			node->tryExecute(tid);
 			CHECK(node->hasOutput(tid, "out_0"), "should always hit out_0");
-			auto t = node->getOutputTensor(tid, "out_0");
+			auto t = node->takeOutputTensor(tid, "out_0");
 			CHECK(t.item<int>() == i, "value mismatch");
 			node->clearTask(tid);
 		}

@@ -76,16 +76,16 @@ bool TaskBuffer::hasOutput(const TaskId& taskId, const std::string& name) const 
 	return slotIt->second.has_value();
 }
 
-Value TaskBuffer::getOutput(const TaskId& taskId, const std::string& name) {
+Value TaskBuffer::takeOutput(const TaskId& taskId, const std::string& name) {
 	std::unique_lock lk(_mutex);
 	auto taskIt = _taskOutputs.find(taskId);
 	if (taskIt == _taskOutputs.end()) {
-		throw NodeException(NodeException::ErrorType::TaskNotFound, "TaskBuffer::getOutput",
+		throw NodeException(NodeException::ErrorType::TaskNotFound, "TaskBuffer::takeOutput",
 							"task '" + taskId + "' not found");
 	}
 	auto& optVal = taskIt->second.at(name);
 	if (!optVal.has_value()) {
-		throw NodeException(NodeException::ErrorType::OutputNotProduced, "TaskBuffer::getOutput",
+		throw NodeException(NodeException::ErrorType::OutputNotProduced, "TaskBuffer::takeOutput",
 							"output '" + name + "' is empty");
 	}
 	Value result = std::move(optVal.value());

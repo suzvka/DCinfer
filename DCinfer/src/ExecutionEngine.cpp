@@ -241,7 +241,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		if (!src->hasOutput(taskId, outPort.name))
 			continue;
 		if (output.isBound(nodeName, outPort.name)) {
-			Value data = src->getOutput(taskId, outPort.name);
+			Value data = src->takeOutput(taskId, outPort.name);
 			output.append(taskId, nodeName, outPort.name, std::move(data),
 						  {nodeName, outPort.name, taskId});
 		}
@@ -267,7 +267,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 			continue;
 		}
 
-		Value data = src->getOutput(taskId, edge.srcPort);
+		Value data = src->takeOutput(taskId, edge.srcPort);
 
 		// [检查点 3] 写入下游前再确认一次本轮未被终止（gate 级，同 ID 复用安全）
 		if (gate->terminated.load(std::memory_order_acquire))
@@ -346,7 +346,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	}
 
 	// ③（生命周期变更）不再清理 OutputZone：结果保留至下一次同 ID submit
-	//    或 releaseTask() —— 支持 submit → wait → getOutput 的同步取结果用法
+	//    或 releaseTask() —— 支持 submit → wait → takeOutput 的同步取结果用法
 
 	// ④ 清理该 task 的所有 task 级信号（防止泄漏）
 	signals.clearTask(taskId);
@@ -359,7 +359,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 
 	// ⑥ 抢救结果 + 清理节点缓冲：
 	//    终止路径在打卡满足后直接返回，声明端口的数据仍留在节点缓冲。
-	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → getOutput 可取，
+	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → takeOutput 可取，
 	//    含看门狗/取消路径的部分结果），再清理缓冲。回调在②已先行触发，
 	//    其消费过的端口 hasOutput=false 自然跳过。
 	for (auto& [name, nodePtr] : graph.nodes()) {
@@ -370,14 +370,14 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 				continue;
 			if (!nodePtr->hasOutput(taskId, decl.portName))
 				continue;
-			Value data = nodePtr->getOutput(taskId, decl.portName);
+			Value data = nodePtr->takeOutput(taskId, decl.portName);
 			output.append(taskId, decl.nodeName, decl.portName, std::move(data),
 						  {decl.nodeName, decl.portName, taskId});
 		}
 		nodePtr->terminateTask(taskId);
 	}
 
-	// ⑦ 移除活动门控并通知同步等待者（结果仍保留，供 wait 后 getOutput 取用）
+	// ⑦ 移除活动门控并通知同步等待者（结果仍保留，供 wait 后 takeOutput 取用）
 	{
 		std::lock_guard lk(_activeGatesMutex);
 		_activeGates.erase(taskId);
@@ -467,7 +467,16 @@ void ExecutionEngine::registerGroupLimit(ThreadPoolAffinity /*affinity*/, const 
 // ════════════════════════════════════════════
 
 bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
+	// timeout <= 0 视为无限等待（与 submit 的执行超时 0=不限时约定一致）。
+	// 未知 taskId（从未提交或已 releaseTask）不可终止，立即返回 false，
+	// 防止无限等待模式下误拼写 taskId 挂死。
+	if (timeout.count() <= 0 && status(taskId) == TaskStatus::Unknown)
+		return false;
 	std::unique_lock lk(_completionMutex);
+	if (timeout.count() <= 0) {
+		_completionCv.wait(lk, [this, &taskId] { return _isTerminated(taskId); });
+		return true;
+	}
 	return _completionCv.wait_for(lk, timeout, [this, &taskId] {
 		return _isTerminated(taskId);
 	});

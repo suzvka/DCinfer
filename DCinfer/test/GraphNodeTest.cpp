@@ -457,7 +457,7 @@ void testWaitMechanism() {
 		graph.setTaskCompleteCallback([mtx, cv, done, capturedOutput, &graph](const InferGraph::TaskId& tid) {
 			if (tid != "t1") return;
 			if (graph.hasOutput("t1", "n1", "y")) {
-				*capturedOutput = graph.getOutputTensor("t1", "n1", "y");
+				*capturedOutput = graph.takeOutputTensor("t1", "n1", "y");
 			}
 			{
 				std::lock_guard lk(*mtx);

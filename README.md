@@ -52,6 +52,20 @@ DCinfer 将"节点做什么"与"用什么引擎执行"解耦。`EngineRegistry` 
 
 DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准库。DCIr 序列化模块依赖 nlohmann-json、minizip、zlib（通过 vcpkg 管理），核心库本身不引入任何外部依赖。
 
+## 环境要求
+
+| 组件 | 要求 |
+|---|---|
+| CMake | >= 3.17 |
+| C++ 标准 | C++20 |
+| GCC | >= 11（Linux；CI 在 ubuntu-24.04 上验证） |
+| Clang | >= 14（CI 在 ubuntu-24.04 上验证） |
+| MSVC | VS 2022（Windows；CI 在 windows-latest 上验证） |
+| Ninja | 可选（README 示例使用 `-G Ninja`） |
+| vcpkg | 仅 DCIr / DCNet / OnnxRuntime / OpenAI 模块需要（仓库以 submodule 提供） |
+
+平台支持：Linux 与 Windows 为 CI 验证平台；macOS 未经验证（核心库理论上可随任意 C++20 工具链构建）。
+
 ## 开始使用
 
 ### 10 分钟上手（hello_graph 示例）
@@ -59,11 +73,8 @@ DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准�
 ```bash
 cd DCinfer
 
-# 初始化 submodule（使用 vcpkg 依赖的模块前必须：DCIr / 引擎适配器 / DCNet）
-git submodule update --init --recursive
-
-# 配置：核心库 + Builtin 引擎 + 示例（核心与 Builtin 均零外部依赖，
-# 无需 vcpkg；需要 JSON/.dcg 序列化时改用 core-ir 预设，见下文）
+# 配置：核心库 + Builtin 引擎 + 示例
+# （核心与 Builtin 均零外部依赖：无需 vcpkg，也无需初始化 submodule）
 cmake -B build -S . -G Ninja -DBUILD_ENGINE_BUILTIN=ON
 
 # 构建
@@ -79,20 +90,31 @@ cmake --build build
 3.0 + 4.0 = 7
 ```
 
+后续需要 JSON/.dcg 序列化（DCIr）、DCNet 或 OnnxRuntime/OpenAI 适配器时，
+再初始化 vcpkg submodule 并追加 toolchain 参数：
+
+```bash
+git submodule update --init --recursive
+cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake -DBUILD_ENGINE_BUILTIN=ON
+```
+
 示例代码（[examples/01_hello_graph](examples/01_hello_graph/main.cpp)）展示标准任务生命周期：
 
 ```cpp
-graph.bindInput("adder", "a");            // 标记图级输入端口
-graph.bindOutput("pass", "y");            // 标记图级输出端口
-graph.feedBoundInput("task1", "a", ...);  // 按绑定名注入（无需重复节点名）
-graph.submitBound("task1");               // 以 bindOutput 绑定作为输出声明
+graph.bindInput("adder", "a");             // 标记图级输入端口
+graph.bindOutput("result", "pass", "y");   // 公共别名绑定图级输出（result → pass.y）
+graph.feedBoundInput("task1", "a", ...);   // 按绑定名注入（无需重复节点名）
+graph.submitBound("task1");                // 以 bindOutput 绑定作为输出声明
 if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
-    auto result = graph.getOutputTensor("task1", "pass", "y");  // wait 后取结果
+    auto result = graph.takeOutputTensor("task1", "result");  // 按别名取结果（无需内部节点名）
 }
 ```
 
-输出在任务终止后仍有效（无需注册回调即可读取）；复用已终止的 taskId 合法；
-活动任务重复提交会抛出明确错误；支持 `cancel()` / `taskStatus()` / `releaseTask()`。
+输出在任务终止后仍保留；`takeOutput` / `takeOutputTensor` 为消费式取出
+（按公共别名或绑定端口名定位，取出即不可重复读取）。`waitForResult(taskId)`
+默认无限等待直至终止，可能阻塞的场景改用显式超时重载 `waitForResult(taskId, 5s)`
+或从其他线程 `cancel()`。复用已终止的 taskId 合法；活动任务重复提交会抛出明确错误；
+支持 `cancel()` / `taskStatus()` / `releaseTask()`。
 
 ### 默认构建内容
 

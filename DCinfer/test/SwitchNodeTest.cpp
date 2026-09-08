@@ -95,7 +95,7 @@ void testBasicSwitch() {
 	std::optional<DC::Tensor> captured;
 	graph.setTaskCompleteCallback([&](const DC::InferGraph::TaskId& tid) {
 		if (graph.hasOutput(tid, "sw", "y")) {
-			auto val = graph.getOutput(tid, "sw", "y");
+			auto val = graph.takeOutput(tid, "sw", "y");
 			if (auto* t = val.as<DC::Tensor>())
 				captured = std::move(*t);
 		}
@@ -182,7 +182,7 @@ void testGraphIntegration() {
 	std::optional<DC::Tensor> captured;
 	graph.setTaskCompleteCallback([&](const DC::InferGraph::TaskId& tid) {
 		if (graph.hasOutput(tid, "dst", "y")) {
-			auto val = graph.getOutput(tid, "dst", "y");
+			auto val = graph.takeOutput(tid, "dst", "y");
 			if (auto* t = val.as<DC::Tensor>())
 				captured = std::move(*t);
 		}

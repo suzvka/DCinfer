@@ -17,6 +17,7 @@ public:
 		DirectConnect,       ///< 两个非 Connector 节点直连被拒
 		NoDeclaration,       ///< submit 时未声明输出期望
 		DuplicateTask,       ///< 同一 taskId 的活动任务被重复提交
+		DuplicateBinding,    ///< 图级绑定别名重复（别名必须是图的唯一公共名）
 		FeedFailed,          ///< feedInput 时调用 Node::setInput 失败
 		ExecutionFailed,     ///< 线程池中 Node::tryExecute 抛出 NodeException
 		PropagateFailed,     ///< 数据传播链中写下游输入失败
@@ -60,6 +61,9 @@ private:
 			break;
 		case ErrorType::DuplicateTask:
 			errorStr = "Duplicate Task";
+			break;
+		case ErrorType::DuplicateBinding:
+			errorStr = "Duplicate Binding";
 			break;
 		case ErrorType::FeedFailed:
 			errorStr = "Feed Failed";

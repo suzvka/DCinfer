@@ -83,10 +83,12 @@ public:
 
 	// ── 同步等待 ──
 
-	/// @brief  同步等待 task 完成
-	/// @return true 在超时内完成，false 超时（任务仍在运行，未被取消）
-	bool wait(const TaskId& taskId,
-			  std::chrono::milliseconds timeout = std::chrono::milliseconds(5000));
+	/// @brief  同步等待 task 终止
+	/// @param  timeout 等待超时；count() <= 0 视为无限等待
+	///         （与 submit 的执行超时 0=不限时约定一致）
+	/// @return true 在超时内终止；false 超时，或 taskId 未知
+	///         （从未提交/已释放，无限等待模式下立即返回）。任务未被取消。
+	bool wait(const TaskId& taskId, std::chrono::milliseconds timeout);
 
 	// ── task 状态与取消 ──
 

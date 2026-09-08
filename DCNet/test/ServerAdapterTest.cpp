@@ -226,7 +226,7 @@ TEST(paritySuccess) {
 	CHECK(node->hasOutput("p1", "result"), "remote result exists");
 
 	const auto localVals = localOut["result"].getData<float>();
-	const auto remoteVals = node->getOutputTensor("p1", "result").getData<float>();
+	const auto remoteVals = node->takeOutputTensor("p1", "result").getData<float>();
 	CHECK(localVals == remoteVals, "parity: output values identical");
 	CHECK(remoteVals.size() == 3 && remoteVals[0] == 2.0f && remoteVals[1] == 4.0f && remoteVals[2] == 6.0f,
 		  "remote values doubled");

@@ -27,8 +27,9 @@ enum class TaskStatus {
 /// @brief task 终止后的结构化结果（InferGraph::waitForResult 返回）。
 ///
 /// 输出数据本体仍由 OutputZone 持有，终止后依然有效：
-/// 经 getOutput / getOutputTensor 按 (nodeName, portName) 取出，
-/// 存活至下一次同 taskId 的 submit 或 releaseTask()。
+/// 经 takeOutput / takeOutputTensor 按 (nodeName, portName) 消费式取出，
+/// 或按公共别名/唯一绑定端口名经 2 参重载取出（取出即消耗）；
+/// 数据存活至下一次同 taskId 的 submit 或 releaseTask()。
 struct TaskResult {
 	TaskStatus status = TaskStatus::Unknown; ///< 终止状态（超时未终止则为 Running）
 	std::vector<TaskError> errors;           ///< 诊断记录（可能为空）

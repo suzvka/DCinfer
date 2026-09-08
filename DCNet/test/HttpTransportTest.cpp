@@ -221,7 +221,7 @@ TEST(endToEndTensorOverHttp) {
 	auto result = node->tryExecute("t1");
 	CHECK(result.ok(), "tensor roundtrip should succeed");
 	CHECK(node->hasOutput("t1", "result"), "result output should exist");
-	auto out = node->getOutputTensor("t1", "result");
+	auto out = node->takeOutputTensor("t1", "result");
 	CHECK(out.type() == Tensor::TensorType::Float && out.typeSize() == sizeof(float),
 		  "decoded tensor type/size");
 	auto vals = out.getData<float>();
@@ -263,7 +263,7 @@ TEST(endToEndTextOverHttp) {
 	auto result = node->tryExecute("t1");
 	CHECK(result.ok(), "text roundtrip should succeed");
 	CHECK(node->hasOutput("t1", "result"), "result output should exist");
-	auto out = node->getOutputTensor("t1", "result");
+	auto out = node->takeOutputTensor("t1", "result");
 	CHECK(out.type() == Tensor::TensorType::Data && out.typeSize() == 1, "decoded tensor type/size");
 	auto bytes = out.bytes();
 	CHECK(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == "hi there",

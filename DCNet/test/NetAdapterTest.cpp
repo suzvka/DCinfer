@@ -188,7 +188,7 @@ TEST(runFlowSuccess) {
 	CHECK(result.ok(), "run should succeed");
 	CHECK(t->sentPayload == "hello", "encoded request should reach transport");
 	CHECK(node->hasOutput("t1", "response"), "response output should exist");
-	auto out = node->getOutputTensor("t1", "response");
+	auto out = node->takeOutputTensor("t1", "response");
 	CHECK(textOf(out) == "hello-from-remote", "decoded response should match");
 }
 

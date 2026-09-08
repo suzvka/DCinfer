@@ -58,7 +58,9 @@ public:
 			   const std::string& dstNode, const std::string& dstPort);
 
 	/// @brief  标记输入：该节点的该端口为图级输入口
-	void bindInput(const std::string& nodeName, const std::string& portName);
+	/// @param  alias  可选公共别名（唯一性校验由 InferGraph 门面负责）
+	void bindInput(const std::string& nodeName, const std::string& portName,
+				   const std::string& alias = {});
 
 	// ── 查找 ──
 

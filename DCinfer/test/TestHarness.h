@@ -203,7 +203,7 @@ private:
 					if (!_graph.hasOutput(tid, nodeName, portName))
 						continue;
 					try {
-						auto val = _graph.getOutput(tid, nodeName, portName);
+						auto val = _graph.takeOutput(tid, nodeName, portName);
 						auto* t = val.as<Tensor>();
 						if (t)
 							captured[key] = std::move(*t);

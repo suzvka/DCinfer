@@ -187,7 +187,7 @@ static void runTests() {
 		if (!node->hasOutput("task1", "out"))
 			throw std::runtime_error("output not produced");
 
-		auto outNT = node->getOutput("task1", "out");
+		auto outNT = node->takeOutput("task1", "out");
 		auto* out = outNT.as<Tensor>();
 		if (std::abs(out->item<float>() - 150.0f) > 1e-6f)
 			throw std::runtime_error("output value mismatch: expected 150, got " + std::to_string(out->item<float>()));

@@ -130,7 +130,7 @@ void runTests() {
 
 		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
-			auto outNT = node->getOutput(taskId, "s");
+			auto outNT = node->takeOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
 			resultValue = out->item<float>();
 			node->clearTask(taskId);
@@ -159,7 +159,7 @@ void runTests() {
 
 		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
-			auto outNT = node->getOutput(taskId, "s");
+			auto outNT = node->takeOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
 			resultValue = out->item<float>();
 			node->clearTask(taskId);
@@ -237,7 +237,7 @@ void runTests() {
 		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			completed = true;
 			if (result.ok()) {
-				auto outNT = node->getOutput(taskId, "s");
+				auto outNT = node->takeOutput(taskId, "s");
 				auto* out = outNT.as<Tensor>();
 				resultValue = out->item<float>();
 			}
@@ -271,7 +271,7 @@ void runTests() {
 		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			completed = true;
 			if (result.ok()) {
-				auto outNT = node->getOutput(taskId, "s");
+				auto outNT = node->takeOutput(taskId, "s");
 				auto* out = outNT.as<Tensor>();
 				resultValue = out->item<float>();
 			}
@@ -357,11 +357,11 @@ void runTests() {
 		node->tryExecute("task1");
 
 		CHECK(node->hasOutput("task1", "s"), "hasOutput should be true");
-		auto outNT = node->getOutput("task1", "s");
+		auto outNT = node->takeOutput("task1", "s");
 		auto* out = outNT.as<Tensor>();
 		CHECK(std::abs(out->item<float>() - 15.0f) < 1e-6f, "polling value mismatch");
 
-		CHECK(!node->hasOutput("task1", "s"), "after getOutput, hasOutput should be false");
+		CHECK(!node->hasOutput("task1", "s"), "after takeOutput, hasOutput should be false");
 		node->clearTask("task1");
 		CHECK(node->taskCount() == 0, "task should be cleaned up");
 	}
@@ -408,7 +408,7 @@ void runTests() {
 		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			++callCount;
 			if (result.ok()) {
-				auto outNT = node->getOutput(taskId, "s");
+				auto outNT = node->takeOutput(taskId, "s");
 				auto* out = outNT.as<Tensor>();
 				resultValue = out->item<float>();
 			}
@@ -452,8 +452,8 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 14: 回调中 getOutput + clearTask ──
-	TEST("callback getOutput and clearTask") {
+	// ── Test 14: 回调中 takeOutput + clearTask ──
+	TEST("callback takeOutput and clearTask") {
 		auto node = reg.createNode("add14", scalarAddSchema(), addRunImpl);
 
 		std::atomic<bool> gotOutput{false};
@@ -461,7 +461,7 @@ void runTests() {
 
 		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
-			auto outNT = node->getOutput(taskId, "s");
+			auto outNT = node->takeOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
 			gotOutput = (std::abs(out->item<float>() - 9.0f) < 1e-6f);
 			node->clearTask(taskId);
@@ -547,7 +547,7 @@ void runTests() {
 
 		node->setCompletionCallback([&](const Node::TaskId& taskId, const Node::Result& result) {
 			CHECK(result.ok(), "result should be Ok");
-			auto outNT = node->getOutput(taskId, "s");
+			auto outNT = node->takeOutput(taskId, "s");
 			auto* out = outNT.as<Tensor>();
 			auto outData = out->data<float>();
 			match = true;

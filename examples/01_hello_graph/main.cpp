@@ -32,12 +32,12 @@ int main() {
 	// 连接 adder.sum → pass.x（wire 自动插入广播连接器）
 	graph.wire("adder", "sum", "pass", "x");
 
-	// 标记图级输入输出端口
+	// 标记图级输入输出端口（输出绑定带公共别名，作为图的对外契约）
 	// 注：connect() 禁止两个业务节点直连（数据必须经 Connector 中转），
 	// wire() 则自动插入广播连接器——这是两者唯一的语义差异。
 	graph.bindInput("adder", "a");
 	graph.bindInput("adder", "b");
-	graph.bindOutput("pass", "y");
+	graph.bindOutput("result", "pass", "y");   // 公共别名 result → 内部 pass.y
 
 	// ── 4. 注入数据（按绑定端口名，无需重复提供节点名）──
 	auto tensorA = DC::Tensor::Create<float>();
@@ -62,8 +62,8 @@ int main() {
 		return 1;
 	}
 
-	// ── 7. 获取结果（wait 返回后仍然有效）──
-	auto output = graph.getOutputTensor("task1", "pass", "y");
+	// ── 7. 按公共别名取结果（无需知道内部节点名/端口名；取出即消耗）──
+	auto output = graph.takeOutputTensor("task1", "result");
 	std::cout << "3.0 + 4.0 = " << output.item<float>() << std::endl;
 
 	return 0;
