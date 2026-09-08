@@ -17,8 +17,9 @@ namespace DC {
 ///
 /// Build → Freeze → Execute 中的拓扑载体：
 /// - 构建期：由 GraphBuilder 独占持有（增删改唯一入口，冻结检查在 builder）；
-/// - 冻结后：所有权移交 CompiledGraph，结构不可变；仅节点任务级缓冲
-///   （TaskBuffer 等）经 Node 自身接口清理，拓扑增删改无公开入口。
+/// - 冻结后：所有权移交 CompiledGraph，结构与节点运行期状态均不可变——
+///   节点 task 级状态已归 task 执行域（GraphRuntimeState::exec），
+///   拓扑增删改无公开入口。
 ///
 /// Node 不知下游，Connector 即 Node。GraphStore 对一切顶点统一处理。
 class GraphStore {
@@ -92,11 +93,8 @@ public:
 	/// @brief  获取所有输入绑定的只读引用
 	const std::vector<InputBinding>& inputBindings() const { return _inputZone.bindings(); }
 
-	/// @brief  获取所有节点的只读引用（供执行引擎遍历）
+	/// @brief  获取所有节点的只读引用
 	const std::unordered_map<std::string, std::unique_ptr<Node>>& nodes() const { return _nodes; }
-
-	/// @brief  获取所有节点的可写引用（供执行引擎遍历清理）
-	std::unordered_map<std::string, std::unique_ptr<Node>>& nodes() { return _nodes; }
 
 private:
 	std::unordered_map<std::string, std::unique_ptr<Node>> _nodes;

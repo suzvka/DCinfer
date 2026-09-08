@@ -7,6 +7,7 @@
 //   4. Node type identity: SwitchNode reports type='Switch'
 
 #include "SwitchNode.h"
+#include "NodeExecutor.h"
 #include "InferGraph.h"
 #include "Tensor.hpp"
 
@@ -225,9 +226,10 @@ void testOutOfRange() {
 	handle.select(99); // out of range
 
 	// Direct test: feed input and tryExecute without graph
-	node->setInput("t1", "x", makeFloatTensor(1.0f));
-	CHECK(node->isReady("t1"), "node should be ready");
-	auto result = node->tryExecute("t1");
+	DC::NodeExecutor exec(*node);
+	exec.setInput("t1", "x", makeFloatTensor(1.0f));
+	CHECK(exec.isReady("t1"), "node should be ready");
+	auto result = exec.tryExecute("t1");
 	CHECK(!result.ok(), "out-of-range should fail");
 	CHECK(result.message.find("out of range") != std::string::npos, "error contains 'out of range'");
 

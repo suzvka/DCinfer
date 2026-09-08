@@ -1,5 +1,6 @@
 // Connector 广播/路由 RunFn 单元测试
 #include <atomic>
+#include "NodeExecutor.h"
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -64,26 +65,27 @@ void testBroadcastBasic() {
 		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc1", schema, runFn);
+		NodeExecutor exec(*node);
 
-		node->setInput("t1", "in", makeFloatTensor(42.0f));
-		node->tryExecute("t1");
+		exec.setInput("t1", "in", makeFloatTensor(42.0f));
+		exec.tryExecute("t1");
 
 		// 验证所有三个输出口都有数据
-		CHECK(node->hasOutput("t1", "out_0"), "out_0 should have data");
-		CHECK(node->hasOutput("t1", "out_1"), "out_1 should have data");
-		CHECK(node->hasOutput("t1", "out_2"), "out_2 should have data");
+		CHECK(exec.hasOutput("t1", "out_0"), "out_0 should have data");
+		CHECK(exec.hasOutput("t1", "out_1"), "out_1 should have data");
+		CHECK(exec.hasOutput("t1", "out_2"), "out_2 should have data");
 
 		// 验证数据正确性
-		auto t0 = node->takeOutputTensor("t1", "out_0");
+		auto t0 = exec.takeOutputTensor("t1", "out_0");
 		CHECK(std::abs(t0.item<float>() - 42.0f) < 1e-6f, "out_0 value mismatch");
 
-		auto t1 = node->takeOutputTensor("t1", "out_1");
+		auto t1 = exec.takeOutputTensor("t1", "out_1");
 		CHECK(std::abs(t1.item<float>() - 42.0f) < 1e-6f, "out_1 value mismatch");
 
-		auto t2 = node->takeOutputTensor("t1", "out_2");
+		auto t2 = exec.takeOutputTensor("t1", "out_2");
 		CHECK(std::abs(t2.item<float>() - 42.0f) < 1e-6f, "out_2 value mismatch");
 
-		node->clearTask("t1");
+		exec.clearTask("t1");
 	}
 	END_TEST();
 }
@@ -94,15 +96,16 @@ void testBroadcastSingle() {
 		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc2", schema, runFn);
+		NodeExecutor exec(*node);
 
-		node->setInput("t1", "in", makeFloatTensor(99.0f));
-		node->tryExecute("t1");
+		exec.setInput("t1", "in", makeFloatTensor(99.0f));
+		exec.tryExecute("t1");
 
-		CHECK(node->hasOutput("t1", "out_0"), "out_0 should exist");
-		auto t0 = node->takeOutputTensor("t1", "out_0");
+		CHECK(exec.hasOutput("t1", "out_0"), "out_0 should exist");
+		auto t0 = exec.takeOutputTensor("t1", "out_0");
 		CHECK(std::abs(t0.item<float>() - 99.0f) < 1e-6f, "single value mismatch");
 
-		node->clearTask("t1");
+		exec.clearTask("t1");
 	}
 	END_TEST();
 }
@@ -113,9 +116,10 @@ void testBroadcastNotReady() {
 		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc3", schema, runFn);
+		NodeExecutor exec(*node);
 
-		CHECK(!node->isReady("t1"), "should not be ready with no input");
-		CHECK_THROWS(node->tryExecute("t1"), NodeException, "tryExecute should throw without input");
+		CHECK(!exec.isReady("t1"), "should not be ready with no input");
+		CHECK_THROWS(exec.tryExecute("t1"), NodeException, "tryExecute should throw without input");
 	}
 	END_TEST();
 }
@@ -128,38 +132,39 @@ void testRoutingRoundRobin() {
 		auto runFn = Connector::routingRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Routing", "rt1", schema, runFn);
+		NodeExecutor exec(*node);
 
 		// task1 → out_0
-		node->setInput("t1", "in", makeFloatTensor(1.0f));
-		node->tryExecute("t1");
-		CHECK(node->hasOutput("t1", "out_0"), "t1 should go to out_0");
-		CHECK(!node->hasOutput("t1", "out_1"), "t1 should NOT go to out_1");
-		CHECK(!node->hasOutput("t1", "out_2"), "t1 should NOT go to out_2");
+		exec.setInput("t1", "in", makeFloatTensor(1.0f));
+		exec.tryExecute("t1");
+		CHECK(exec.hasOutput("t1", "out_0"), "t1 should go to out_0");
+		CHECK(!exec.hasOutput("t1", "out_1"), "t1 should NOT go to out_1");
+		CHECK(!exec.hasOutput("t1", "out_2"), "t1 should NOT go to out_2");
 		{
-			auto t = node->takeOutputTensor("t1", "out_0");
+			auto t = exec.takeOutputTensor("t1", "out_0");
 			CHECK(std::abs(t.item<float>() - 1.0f) < 1e-6f, "t1 value");
 		}
-		node->clearTask("t1");
+		exec.clearTask("t1");
 
 		// task2 → out_1
-		node->setInput("t2", "in", makeFloatTensor(2.0f));
-		node->tryExecute("t2");
-		CHECK(node->hasOutput("t2", "out_1"), "t2 should go to out_1");
-		CHECK(!node->hasOutput("t2", "out_0"), "t2 should NOT go to out_0");
-		CHECK(!node->hasOutput("t2", "out_2"), "t2 should NOT go to out_2");
-		node->clearTask("t2");
+		exec.setInput("t2", "in", makeFloatTensor(2.0f));
+		exec.tryExecute("t2");
+		CHECK(exec.hasOutput("t2", "out_1"), "t2 should go to out_1");
+		CHECK(!exec.hasOutput("t2", "out_0"), "t2 should NOT go to out_0");
+		CHECK(!exec.hasOutput("t2", "out_2"), "t2 should NOT go to out_2");
+		exec.clearTask("t2");
 
 		// task3 → out_2
-		node->setInput("t3", "in", makeFloatTensor(3.0f));
-		node->tryExecute("t3");
-		CHECK(node->hasOutput("t3", "out_2"), "t3 should go to out_2");
-		node->clearTask("t3");
+		exec.setInput("t3", "in", makeFloatTensor(3.0f));
+		exec.tryExecute("t3");
+		CHECK(exec.hasOutput("t3", "out_2"), "t3 should go to out_2");
+		exec.clearTask("t3");
 
 		// task4 → out_0 (wrap around)
-		node->setInput("t4", "in", makeFloatTensor(4.0f));
-		node->tryExecute("t4");
-		CHECK(node->hasOutput("t4", "out_0"), "t4 should wrap to out_0");
-		node->clearTask("t4");
+		exec.setInput("t4", "in", makeFloatTensor(4.0f));
+		exec.tryExecute("t4");
+		CHECK(exec.hasOutput("t4", "out_0"), "t4 should wrap to out_0");
+		exec.clearTask("t4");
 	}
 	END_TEST();
 }
@@ -170,15 +175,16 @@ void testRoutingSingleOutput() {
 		auto runFn = Connector::routingRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Routing", "rt2", schema, runFn);
+		NodeExecutor exec(*node);
 
 		for (int i = 0; i < 5; ++i) {
 			auto tid = "t" + std::to_string(i);
-			node->setInput(tid, "in", makeIntTensor(i));
-			node->tryExecute(tid);
-			CHECK(node->hasOutput(tid, "out_0"), "should always hit out_0");
-			auto t = node->takeOutputTensor(tid, "out_0");
+			exec.setInput(tid, "in", makeIntTensor(i));
+			exec.tryExecute(tid);
+			CHECK(exec.hasOutput(tid, "out_0"), "should always hit out_0");
+			auto t = exec.takeOutputTensor(tid, "out_0");
 			CHECK(t.item<int>() == i, "value mismatch");
-			node->clearTask(tid);
+			exec.clearTask(tid);
 		}
 	}
 	END_TEST();
@@ -192,18 +198,19 @@ void testReentrancy() {
 		auto runFn = Connector::broadcastRunFn();
 
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc_re", schema, runFn);
+		NodeExecutor exec(*node);
 
 		// 注入两个不同 task 的数据
-		node->setInput("t1", "in", makeFloatTensor(1.0f));
-		node->setInput("t2", "in", makeFloatTensor(2.0f));
+		exec.setInput("t1", "in", makeFloatTensor(1.0f));
+		exec.setInput("t2", "in", makeFloatTensor(2.0f));
 
 		// 第一个执行成功
-		node->tryExecute("t1");
+		exec.tryExecute("t1");
 		// 第二个也应该能执行（t1 已完成，锁已释放）
-		node->tryExecute("t2");
+		exec.tryExecute("t2");
 
-		node->clearTask("t1");
-		node->clearTask("t2");
+		exec.clearTask("t1");
+		exec.clearTask("t2");
 	}
 	END_TEST();
 }

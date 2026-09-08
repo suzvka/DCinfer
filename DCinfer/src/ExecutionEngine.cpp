@@ -1,11 +1,13 @@
 #include "ExecutionEngine.h"
 #include "GraphRuntimeState.h"
+#include "Graph/internal/TaskExecutionState.h"
 #include "GraphStore.h"
 #include "OutputZone.h"
 #include "SignalStore.h"
 #include "ErrorTracker.h"
 #include "GraphException.h"
 #include "NodeException.h"
+#include "Node/internal/ExecutionPipeline.h"
 
 #include <thread>
 #include <chrono>
@@ -53,7 +55,8 @@ void ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity, const std::st
 	}
 }
 
-void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, const TaskId& taskId,
+void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeName,
+									 const TaskId& taskId,
 									 std::shared_ptr<TaskGate> gate, uint32_t remainingHops,
 									 const std::shared_ptr<GraphRuntimeState>& state) {
 	// 捕获 state 共享句柄：图拓扑/输出区/信号/诊断的存活期由引用计数保证，
@@ -63,7 +66,13 @@ void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, co
 		auto& errors = state->errors;
 		NodeResult result;
 		try {
-			result = node->tryExecute(taskId);
+			// task 态取自 task 执行域（原 Node 内嵌态），执行闸按节点名定位：
+			// 节点本身只读（const），可变状态全部在 task 域；lambda 持
+			// shared_ptr 副本，终止清理不会回收在飞执行态
+			auto taskExec = state->exec->taskState(taskId);
+			auto& exec = taskExec->ensure(nodeName, node->schema());
+			result = ExecutionPipeline::execute(taskId, *node, exec,
+												state->exec->gateFor(nodeName));
 		} catch (const NodeException& e) {
 			// 就绪判定竞态（NotReady/Reentrant）：记录错误，跳过传播
 			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
@@ -80,10 +89,16 @@ void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, co
 		// 部分输出场景（如 Routing 连接器仅路由到一个输出口）允许继续传播；
 		// 完全无输出的节点记录错误并跳过传播。
 		bool hasAnyOutput = false;
-		for (const auto& p : node->schema().outputs) {
-			if (node->hasOutput(taskId, p.name)) {
-				hasAnyOutput = true;
-				break;
+		{
+			auto execState = state->exec->findTaskState(taskId);
+			auto* ns = execState ? execState->find(nodeName) : nullptr;
+			if (ns) {
+				for (const auto& p : node->schema().outputs) {
+					if (ns->buffer.hasOutput(taskId, p.name)) {
+						hasAnyOutput = true;
+						break;
+					}
+				}
 			}
 		}
 		if (!hasAnyOutput) {
@@ -123,6 +138,8 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 				throw GraphException(GraphException::ErrorType::DuplicateTask, "ExecutionEngine::submit",
 									 "task '" + taskId + "' is still running; duplicate submit rejected");
 			_taskStates.erase(it);
+			// 节点执行态无需在此清理：所有终态必经 _terminate（唯一清理点），
+			// 且本分支之后调用方可能重新 feedInput——此时清理会抹掉新输入
 		}
 		_taskStates.emplace(taskId, TaskStatus::Running);
 	}
@@ -179,9 +196,12 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 		// replaced（若存在）在此析构：request_stop + join，位于锁外
 	}
 
-	// 扫描全图（运行时视图），对所有已就绪的节点提交执行任务（执行完成后再传播下游）
+	// 扫描全图（运行时视图），对所有已就绪的节点提交执行任务（执行完成后再传播下游）。
+	// 就绪查询仅针对已有 task 态条目（feedInput 时创建）：无条目 = 无暂存输入 = 未就绪
+	auto taskExec = state->exec->findTaskState(taskId);
 	for (const auto& [nodeName, nodePtr] : graph.nodes) {
-		if (!nodePtr->isReady(taskId))
+		auto* ns = taskExec ? taskExec->find(nodeName) : nullptr;
+		if (!ns || !nodePtr->isReady(taskId, ns->buffer))
 			continue;
 
 		// 入口节点：执行 + 完成后就地传播（_submitNodeRun 内部处理）
@@ -225,11 +245,15 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 	if (!src)
 		return;
 
+	// 本节点 task 态（调用前提：本节点已执行成功，条目必已存在）
+	auto execState = state->exec->findTaskState(taskId);
+	NodeExecState* srcNs = execState ? execState->find(nodeName) : nullptr;
+
 	// [检查点 2] 节点完成 → 三步流水线：打卡 → OutputZone 搬运 → 边搬运
 	//
 	// 第一步：打卡 — 所有产出端口统一累加计数，不论目的地
 	for (const auto& outPort : src->schema().outputs) {
-		if (!src->hasOutput(taskId, outPort.name))
+		if (!srcNs || !srcNs->buffer.hasOutput(taskId, outPort.name))
 			continue;
 		// 终止复查：打卡写入前再确认本轮未被终止（取消/超时可能在检查点 1 之后触发）
 		if (gate->terminated.load(std::memory_order_acquire))
@@ -243,10 +267,10 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 
 	// 第二步：OutputZone 目的地搬运 — OutputZone 绑定端口消费后自然空
 	for (const auto& outPort : src->schema().outputs) {
-		if (!src->hasOutput(taskId, outPort.name))
+		if (!srcNs || !srcNs->buffer.hasOutput(taskId, outPort.name))
 			continue;
 		if (state->graph->signature().isOutputBound(nodeName, outPort.name)) {
-			Value data = src->takeOutput(taskId, outPort.name);
+			Value data = srcNs->buffer.takeOutput(taskId, outPort.name);
 			output.append(taskId, nodeName, outPort.name, std::move(data),
 						  {nodeName, outPort.name, taskId});
 		}
@@ -258,11 +282,11 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		if (edge.srcNode != nodeName)
 			continue;
 
-		if (!src->hasOutput(taskId, edge.srcPort))
+		if (!srcNs || !srcNs->buffer.hasOutput(taskId, edge.srcPort))
 			continue;
 
 		// 阻塞检查：下游节点被信号阻塞时跳过此边，不消费上游输出
-		// 数据留在上游输出槽中等待其他出边消费或自然背压释放
+		// 数据留在上游 task 缓冲中等待其他出边消费或自然背压释放
 		auto* dst = graph.node(edge.dstNode);
 		if (!dst)
 			continue;
@@ -273,14 +297,18 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 			continue;
 		}
 
-		Value data = src->takeOutput(taskId, edge.srcPort);
+		Value data = srcNs->buffer.takeOutput(taskId, edge.srcPort);
 
 		// [检查点 3] 写入下游前再确认一次本轮未被终止（gate 级，同 ID 复用安全）
 		if (gate->terminated.load(std::memory_order_acquire))
 			return;
 
 		try {
-			dst->setInput(taskId, edge.dstPort, std::move(data));
+			// 下游 task 态：惰性创建（原 Node 内嵌 TaskBuffer 的 set 输入语义）；
+			// shared_ptr 先落局部量，防止临时量析构导致引用悬垂
+			auto dstExec = state->exec->taskState(taskId);
+			auto& dstNs = dstExec->ensure(edge.dstNode, dst->schema());
+			dstNs.buffer.setInput(taskId, edge.dstPort, std::move(data), dst->schema());
 		} catch (const NodeException& e) {
 			errors.recordError(taskId, edge.dstNode, "ExecutionEngine::_propagateFrom",
 							   "NodeException in setInput for port '" + edge.dstPort
@@ -289,7 +317,9 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		}
 
 		// 下游就绪 → 提交执行 + 完成后继续传播（数据冒泡）
-		if (dst->isReady(taskId)) {
+		auto dstExec = state->exec->findTaskState(taskId);
+		auto* dstNs = dstExec ? dstExec->find(edge.dstNode) : nullptr;
+		if (dstNs && dst->isReady(taskId, dstNs->buffer)) {
 			_submitNodeRun(dst, edge.dstNode, taskId, gate, remainingHops - 1, state);
 		}
 	}
@@ -365,25 +395,22 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		_blockedSkips.erase(taskId);
 	}
 
-	// ⑥ 抢救结果 + 清理节点缓冲：
-	//    终止路径在打卡满足后直接返回，声明端口的数据仍留在节点缓冲。
+	// ⑥ 抢救结果 + 清理 task 执行态：
+	//    终止路径在打卡满足后直接返回，声明端口的数据仍留在 task 缓冲。
 	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → takeOutput 可取，
-	//    含看门狗/取消路径的部分结果），再清理缓冲。回调在②已先行触发，
-	//    其消费过的端口 hasOutput=false 自然跳过。
-	for (auto& [name, nodePtr] : graph.nodes) {
-		if (!nodePtr->hasTask(taskId))
-			continue;
+	//    含看门狗/取消路径的部分结果），再整体清除该 task 的节点执行态。
+	//    回调在②已先行触发，其消费过的端口 hasOutput=false 自然跳过。
+	if (auto taskExec = state->exec->findTaskState(taskId)) {
 		for (const auto& decl : output.declarationsOf(taskId)) {
-			if (decl.nodeName != name)
+			auto* ns = taskExec->find(decl.nodeName);
+			if (!ns || !ns->buffer.hasOutput(taskId, decl.portName))
 				continue;
-			if (!nodePtr->hasOutput(taskId, decl.portName))
-				continue;
-			Value data = nodePtr->takeOutput(taskId, decl.portName);
+			Value data = ns->buffer.takeOutput(taskId, decl.portName);
 			output.append(taskId, decl.nodeName, decl.portName, std::move(data),
 						  {decl.nodeName, decl.portName, taskId});
 		}
-		nodePtr->terminateTask(taskId);
 	}
+	state->exec->clearTaskState(taskId);
 
 	// ⑦ 移除活动门控并通知同步等待者（结果仍保留，供 wait 后 takeOutput 取用）
 	{
@@ -454,10 +481,12 @@ void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string&
 							 "data may have been prevented from reaching declared outputs");
 	}
 
-	// ③ 报告从未被到达的声明输出节点（无 task 级 IO 缓冲区）
+	// ③ 报告从未被到达的声明输出节点（无 task 态条目）
+	auto taskExec = state->exec->findTaskState(taskId);
 	for (const auto& u : unsatisfied) {
 		auto* node = graph.node(u.decl.nodeName);
-		if (node && !node->hasTask(taskId)) {
+		auto* ns = taskExec ? taskExec->find(u.decl.nodeName) : nullptr;
+		if (node && !ns) {
 			errors.recordWarning(taskId, u.decl.nodeName, "ExecutionEngine::_diagnoseAbnormal",
 								 "node was never reached during propagation "
 								 "(no task-level IO buffer was created)");

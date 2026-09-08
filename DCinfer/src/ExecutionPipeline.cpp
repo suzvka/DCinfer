@@ -1,4 +1,5 @@
 #include "Node/internal/ExecutionPipeline.h"
+#include "Node/internal/NodeExecState.h"
 #include "Node/internal/TaskBuffer.h"
 #include "Node/internal/SlotWorkspace.h"
 #include "Node/internal/EngineAdapter.h"
@@ -8,14 +9,29 @@ namespace DC {
 
 NodeResult ExecutionPipeline::execute(
 	const TaskId& taskId,
-	TaskBuffer& buffer,
-	SlotWorkspace& workspace,
-	EngineAdapter& engine,
-	const RunFn& fn,
-	const NodeSchema& schema,
-	const CompletionFn& onComplete,
-	const std::string& nodeType,
-	const std::string& nodeName) {
+	const Node& node,
+	NodeExecState& exec,
+	NodeExecutionGate& gate) {
+
+	auto& buffer = exec.buffer;
+	auto& workspace = *exec.workspace;
+	auto& engine = node.engine();
+	const auto& schema = node.schema();
+	const auto& fn = node.runFn();
+	const auto& onComplete = node.completionCallback();
+
+	// ⓪ 就绪预检：必选输入未就绪则拒绝执行（原 Node::tryExecute 语义）
+	if (!node.isReady(taskId, buffer)) {
+		throw NodeException(NodeException::ErrorType::NotReady, "ExecutionPipeline::execute",
+							"task '" + taskId + "' is not ready");
+	}
+
+	// ⓪½ 节点闸租约：同一节点同时只允许一个 task 执行（Reentrant 语义）
+	if (!gate.tryAcquire()) {
+		throw NodeException(NodeException::ErrorType::Reentrant, "ExecutionPipeline::execute",
+							"node '" + node.name() + "' is busy executing another task");
+	}
+	gate.setCurrentTask(taskId);
 
 	NodeResult result;
 
@@ -31,7 +47,7 @@ NodeResult ExecutionPipeline::execute(
 
 		// ③ 执行 RunFn
 		try {
-			Node::RunContext ctx(workspace, engine, schema, nodeType, nodeName);
+			Node::RunContext ctx(workspace, engine, schema, node.type(), node.name());
 			result = fn(ctx);
 		} catch (const std::exception& e) {
 			result.status = NodeStatus::ExecutionFailed;
@@ -53,7 +69,7 @@ NodeResult ExecutionPipeline::execute(
 
 		// ③¾ postRun 钩子：同步后的后处理
 		if (result.ok()) {
-			Node::RunContext ctx(workspace, engine, schema, nodeType, nodeName);
+			Node::RunContext ctx(workspace, engine, schema, node.type(), node.name());
 			engine.postRun(ctx);
 		}
 
@@ -80,9 +96,13 @@ NodeResult ExecutionPipeline::execute(
 		if (onComplete) {
 			onComplete(taskId, result);
 		}
+		gate.clearCurrentTask();
+		gate.release();
 		throw;
 	}
 
+	gate.clearCurrentTask();
+	gate.release();
 	return result;
 }
 

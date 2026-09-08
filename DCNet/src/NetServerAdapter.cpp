@@ -1,11 +1,13 @@
 // 节点服务化装配：把本地 DCinfer 节点暴露为可被出站 send→recv 驱动的监听服务
-// （M-server / DESIGN.md §3.6）。执行走与本地完全相同的节点管线
-// （setInput → tryExecute → collectOutputs），图级语义与本地执行无差别。
+// （M-server / DESIGN.md §3.6）。执行走与本地完全相同的节点管线，task 态由
+// NodeExecutor 显式承载（setInput → tryExecute → collectOutputs），
+// 图级语义与本地执行无差别。
 
 #include "DCNet/NetServerAdapter.h"
 
 #include "DCNet/NetError.h"
 #include "Node.h"
+#include "NodeExecutor.h"
 #include "NodeException.h"
 #include "NetWire.h"
 
@@ -113,16 +115,18 @@ private:
 			std::unordered_map<std::string, Tensor> outputs;
 			{
 				std::lock_guard lk(_execMutex);
+				// task 态随每请求的执行器走（ADR-7 实例级隔离），节点仅作执行计划
+				NodeExecutor exec(*node);
 				try {
-					node->setInput(taskId, std::move(inputs));
+					exec.setInput(taskId, std::move(inputs));
 				} catch (const NodeException& e) {
 					// 端口名不在 schema（PortNotFound）→ schema 违例 → 400
 					return {400, detail::wireErrorBody("invalid_input", e.what())};
 				}
-				if (!node->isReady(taskId))
+				if (!exec.isReady(taskId))
 					return {400, detail::wireErrorBody("missing_input", "required input port(s) missing")};
 				try {
-					result = node->tryExecute(taskId);
+					result = exec.tryExecute(taskId);
 				} catch (const NodeException& e) {
 					// 深层形状/类型校验（ValidatorRegistry abort 漏网到 drain 层）
 					// 同属输入违例 → 400；其余按本地执行失败语义 → 500
@@ -139,8 +143,8 @@ private:
 					return {500, detail::wireErrorBody("server_error", std::string("execute failed: ") + e.what())};
 				}
 				if (result.ok())
-					outputs = node->collectOutputTensors(taskId);
-				node->clearTask(taskId);
+					outputs = exec.collectOutputTensors(taskId);
+				exec.clearTask(taskId);
 			}
 
 			// ④ 本地执行失败 → wire 逆向映射（DESIGN.md §6.1；语义一致性）

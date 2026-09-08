@@ -213,7 +213,7 @@ public:
 	/// @brief  消费式取出输出区中指定端口的结果（取出后内部清空，不可重复读取）
 	/// @note   结果在 task 终止（wait 返回）后仍然有效，直至下一次同 ID submit
 	///         或 releaseTask()——支持 submit → wait → takeOutput 的同步用法；
-	///         非破坏式预览见 Node::peekOutput（底层接口）
+	///         非破坏式预览见 NodeExecutor::peekOutput（底层接口）
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	Value takeOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
@@ -273,8 +273,13 @@ public:
 
 	// ── 查询（源图视角：冻结前后均反映源图拓扑/绑定，供内省与序列化）──
 
-	/// @brief  获取节点指针（非拥有），不存在返回 nullptr
-	Node* node(const std::string& name) { return _topology().node(name); }
+	/// @brief  获取节点指针（非拥有），不存在返回 nullptr。
+	///         构建期专用（冻结后抛 Frozen）：运行期节点不可变，
+	///         只读访问用 const 重载。
+	Node* node(const std::string& name) {
+		_ensureNotFrozen("InferGraph::node");
+		return _builder->store().node(name);
+	}
 
 	/// @brief  获取节点指针（只读）
 	const Node* node(const std::string& name) const { return _topology().node(name); }
@@ -381,7 +386,7 @@ private:
 			return _state->graph;
 		std::lock_guard lk(_freezeMutex);
 		if (!_state->graph)
-			_state->graph = _builder->compile();
+			_state->attachGraph(_builder->compile()); // 快照 + 节点执行闸表一并就位
 		return _state->graph;
 	}
 
@@ -395,9 +400,6 @@ private:
 	}
 
 	/// @brief  拓扑访问（源图视角）：冻结后读快照，构建期读 builder
-	GraphStore& _topology() {
-		return _state->graph ? _state->graph->store() : _builder->store();
-	}
 	const GraphStore& _topology() const {
 		return _state->graph ? _state->graph->store() : _builder->store();
 	}

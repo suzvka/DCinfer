@@ -10,6 +10,7 @@
 //      拒绝）。
 
 #include "DCNet/DcNetHttp.h"
+#include "NodeExecutor.h"
 #include "DCNet/NetCodec_Tensor.h"
 #include "DCNet/NetError.h"
 #include "DCNet/NetServerAdapter.h"
@@ -195,10 +196,11 @@ static Node::Result runLocalDoubler(const std::string& taskId, std::unordered_ma
 		EngineRegistry::instance().createNode(std::string(kEngineType), "local-" + taskId, std::string(kModelRef));
 	if (!node)
 		throw std::runtime_error("local node create failed");
-	node->setInput(taskId, std::move(inputs));
-	auto result = node->tryExecute(taskId);
+	NodeExecutor exec(*node);
+	exec.setInput(taskId, std::move(inputs));
+	auto result = exec.tryExecute(taskId);
 	if (result.ok())
-		outputs = node->collectOutputTensors(taskId);
+		outputs = exec.collectOutputTensors(taskId);
 	return result;
 }
 
@@ -219,13 +221,14 @@ TEST(paritySuccess) {
 	auto node = EngineRegistry::instance().createNode(
 		"DCNet.Tensor", "remote-p1", std::string("http://127.0.0.1:" + std::to_string(srv.port) + "/v1"));
 	CHECK(node != nullptr, "remote node created");
-	node->setInput("p1", "data", makeFloatTensor({1.0f, 2.0f, 3.0f}));
-	auto remoteRes = node->tryExecute("p1");
+	NodeExecutor exec(*node);
+	exec.setInput("p1", "data", makeFloatTensor({1.0f, 2.0f, 3.0f}));
+	auto remoteRes = exec.tryExecute("p1");
 	CHECK(remoteRes.ok(), "remote drive ok");
-	CHECK(node->hasOutput("p1", "result"), "remote result exists");
+	CHECK(exec.hasOutput("p1", "result"), "remote result exists");
 
 	const auto localVals = localOut["result"].getData<float>();
-	const auto remoteVals = node->takeOutputTensor("p1", "result").getData<float>();
+	const auto remoteVals = exec.takeOutputTensor("p1", "result").getData<float>();
 	CHECK(localVals == remoteVals, "parity: output values identical");
 	CHECK(remoteVals.size() == 3 && remoteVals[0] == 2.0f && remoteVals[1] == 4.0f && remoteVals[2] == 6.0f,
 		  "remote values doubled");
@@ -242,8 +245,9 @@ TEST(authGate) {
 
 	auto node = EngineRegistry::instance().createNode(
 		"DCNet.Tensor", "remote-auth", std::string("http://127.0.0.1:" + std::to_string(srv.port) + "/v1"));
-	node->setInput("a1", "data", makeFloatTensor({1.0f}));
-	auto res = node->tryExecute("a1");
+	NodeExecutor exec(*node);
+	exec.setInput("a1", "data", makeFloatTensor({1.0f}));
+	auto res = exec.tryExecute("a1");
 	CHECK(!res.ok(), "request without token should fail");
 	CHECK(res.status == Node::Status::InternalError, "401 → InternalError");
 	CHECK_MSG_PREFIX(res.message, "remote:auth");
@@ -298,10 +302,11 @@ TEST(paritySchemaViolation) {
 	{
 		auto node = EngineRegistry::instance().createNode(std::string(kEngineType), "local-p5",
 															  std::string(kModelRef));
-		node->setInput("p5", "data", makeTextTensor("hi"));
+		NodeExecutor exec(*node);
+		exec.setInput("p5", "data", makeTextTensor("hi"));
 		bool rejected = false;
 		try {
-			node->tryExecute("p5");
+			exec.tryExecute("p5");
 		} catch (const NodeException& e) {
 			rejected = true;
 			CHECK(e.getErrorType() == NodeException::ErrorType::TypeMismatch,

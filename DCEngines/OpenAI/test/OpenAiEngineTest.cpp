@@ -8,6 +8,7 @@
 // 迁移自 DCNet/test/HttpTransportTest.cpp 的 chat 端到端（2026-08）。
 
 #include "DCEngine/OpenAiEngine.h"
+#include "NodeExecutor.h"
 #include "Node.h"
 #include "Tensor.hpp"
 
@@ -83,17 +84,18 @@ TEST(chatRoundtrip) {
 
 	auto node = reg.createNode("OpenAI", "chatNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
+		NodeExecutor exec(*node);
 	CHECK(node != nullptr, "OpenAI node should be created");
 	CHECK(node->schema().inputs[0].name == "prompt" && node->schema().outputs[0].name == "response",
 		  "local shape rules from chat codec");
 
-	node->setInput("t1", "system", makeTextTensor("be brief"));
-	node->setInput("t1", "prompt", makeTextTensor("hello"));
-	node->setInput("t1", "params", makeTextTensor(R"({"temperature":0.7})"));
-	auto result = node->tryExecute("t1");
+	exec.setInput("t1", "system", makeTextTensor("be brief"));
+	exec.setInput("t1", "prompt", makeTextTensor("hello"));
+	exec.setInput("t1", "params", makeTextTensor(R"({"temperature":0.7})"));
+	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "chat roundtrip should succeed");
-	CHECK(node->hasOutput("t1", "response"), "response output should exist");
-	auto out = node->takeOutputTensor("t1", "response");
+	CHECK(exec.hasOutput("t1", "response"), "response output should exist");
+	auto out = exec.takeOutputTensor("t1", "response");
 	CHECK(out.type() == Tensor::TensorType::Data && out.typeSize() == 1, "response tensor type/size");
 	auto bytes = out.bytes();
 	CHECK(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == "hi there",
@@ -113,10 +115,11 @@ TEST(remoteServerErrorNormalized) {
 
 	auto node = reg.createNode("OpenAI", "errNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
+		NodeExecutor exec(*node);
 	CHECK(node != nullptr, "OpenAI error node should be created");
 
-	node->setInput("t1", "prompt", makeTextTensor("hello"));
-	auto result = node->tryExecute("t1");
+	exec.setInput("t1", "prompt", makeTextTensor("hello"));
+	auto result = exec.tryExecute("t1");
 	CHECK(!result.ok(), "500 → failure");
 	CHECK(result.status == Node::Status::ExecutionFailed, "500 → ExecutionFailed");
 	CHECK_MSG_PREFIX(result.message, "remote:server_error");
@@ -140,9 +143,10 @@ TEST(bearerTokenInjected) {
 
 	auto node = reg.createNode("OpenAI.Auth", "authNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
+		NodeExecutor exec(*node);
 	CHECK(node != nullptr, "auth node should be created");
-	node->setInput("t1", "prompt", makeTextTensor("hi"));
-	auto result = node->tryExecute("t1");
+	exec.setInput("t1", "prompt", makeTextTensor("hi"));
+	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "request with bearer token should succeed");
 	CHECK(server.lastRequestHeaders().find("Authorization: Bearer sk-test-123") != std::string::npos,
 		  "Authorization: Bearer <token> should be injected");
@@ -161,10 +165,11 @@ TEST(invalidParamsRejected) {
 	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m"});
 	auto node = reg.createNode("OpenAI", "badParamsNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
+		NodeExecutor exec(*node);
 	CHECK(node != nullptr, "node should be created");
-	node->setInput("t1", "prompt", makeTextTensor("hi"));
-	node->setInput("t1", "params", makeTextTensor("{not-json"));
-	auto result = node->tryExecute("t1");
+	exec.setInput("t1", "prompt", makeTextTensor("hi"));
+	exec.setInput("t1", "params", makeTextTensor("{not-json"));
+	auto result = exec.tryExecute("t1");
 	CHECK(!result.ok(), "invalid params JSON should fail");
 	CHECK(result.status == Node::Status::InvalidInput, "invalid params → InvalidInput");
 }
@@ -181,8 +186,9 @@ TEST(malformedResponseRejected) {
 	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m"});
 	auto node = reg.createNode("OpenAI", "malformedNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
-	node->setInput("t1", "prompt", makeTextTensor("hi"));
-	auto result = node->tryExecute("t1");
+		NodeExecutor exec(*node);
+	exec.setInput("t1", "prompt", makeTextTensor("hi"));
+	auto result = exec.tryExecute("t1");
 	CHECK(!result.ok(), "non-JSON response should fail");
 	CHECK(result.status == Node::Status::ExecutionFailed, "non-JSON → ExecutionFailed（核心枚举保持通用）");
 	CHECK(result.diagnostic.has_value(), "non-JSON → 附带领域诊断");
@@ -197,8 +203,9 @@ TEST(malformedResponseRejected) {
 	});
 	auto node2 = reg.createNode("OpenAI", "missingContentNode",
 								std::string("http://127.0.0.1:" + std::to_string(server2.port()) + "/v1"));
-	node2->setInput("t1", "prompt", makeTextTensor("hi"));
-	auto result2 = node2->tryExecute("t1");
+		NodeExecutor exec2(*node2);
+	exec.setInput("t1", "prompt", makeTextTensor("hi"));
+	auto result2 = exec.tryExecute("t1");
 	CHECK(!result2.ok(), "missing content should fail");
 	CHECK(result2.status == Node::Status::ExecutionFailed, "missing content → ExecutionFailed");
 	CHECK(result2.diagnostic.has_value() && result2.diagnostic->domain == "dcnet",
@@ -217,10 +224,11 @@ TEST(emptyContentSucceeds) {
 	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m"});
 	auto node = reg.createNode("OpenAI", "emptyContentNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
-	node->setInput("t1", "prompt", makeTextTensor("hi"));
-	auto result = node->tryExecute("t1");
+		NodeExecutor exec(*node);
+	exec.setInput("t1", "prompt", makeTextTensor("hi"));
+	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "empty content is a legitimate response");
-	auto out = node->takeOutputTensor("t1", "response");
+	auto out = exec.takeOutputTensor("t1", "response");
 	CHECK(out.bytes().empty(), "response should be empty string");
 }
 
@@ -242,11 +250,12 @@ TEST(transportRetryOnServerError) {
 	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m", .engineType = "OpenAI.Retry", .maxRetries = 1});
 	auto node = reg.createNode("OpenAI.Retry", "retryNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
-	node->setInput("t1", "prompt", makeTextTensor("hi"));
-	auto result = node->tryExecute("t1");
+		NodeExecutor exec(*node);
+	exec.setInput("t1", "prompt", makeTextTensor("hi"));
+	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "retry after 500 should succeed");
 	CHECK(calls.load() == 2, "server should have seen exactly 2 attempts");
-	auto out = node->takeOutputTensor("t1", "response");
+	auto out = exec.takeOutputTensor("t1", "response");
 	auto bytes = out.bytes();
 	CHECK(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == "recovered",
 		  "recovered response content");

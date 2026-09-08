@@ -149,7 +149,7 @@ private:
 
 	/// @brief  提交一个节点执行任务（tryExecute + 成功后就地传播）
 	/// @note   由 submit 入口与传播下游共用；任务在节点 affinity 对应线程池执行
-	void _submitNodeRun(Node* node, const std::string& nodeName, const TaskId& taskId,
+	void _submitNodeRun(const Node* node, const std::string& nodeName, const TaskId& taskId,
 						std::shared_ptr<TaskGate> gate, uint32_t remainingHops,
 						const std::shared_ptr<GraphRuntimeState>& state);
 

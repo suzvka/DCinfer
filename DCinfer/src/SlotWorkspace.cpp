@@ -82,34 +82,12 @@ const Value* SlotWorkspace::peekOutputRaw(const std::string& name) const {
 	return it->second.peek<Value>();
 }
 
-// ── 执行保护 ──
-
-bool SlotWorkspace::tryAcquire() {
-	return !_executionGuard.test_and_set(std::memory_order_acquire);
-}
-
-void SlotWorkspace::release() {
-	_executionGuard.clear(std::memory_order_release);
-}
-
-// ── 清空/跟踪 ──
+// ── 清空 ──
 
 void SlotWorkspace::clearOutputs() {
 	for (auto& [name, slot] : _outputSlots) {
 		slot.clear();
 	}
-}
-
-void SlotWorkspace::setCurrentTask(const std::string& taskId) {
-	_currentTaskId = taskId;
-}
-
-void SlotWorkspace::clearCurrentTask() {
-	_currentTaskId.reset();
-}
-
-std::optional<std::string> SlotWorkspace::currentTask() const {
-	return _currentTaskId;
 }
 
 } // namespace DC

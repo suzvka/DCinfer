@@ -19,11 +19,11 @@ namespace DC {
 /// 调度、传播与耗尽检查。
 class GraphRuntimeView {
 public:
-	std::unordered_map<std::string, Node*> nodes; ///< 参与调度的节点表（借用指针）
+	std::unordered_map<std::string, const Node*> nodes; ///< 参与调度的节点表（借用指针）
 	std::vector<GraphStore::Edge> edges;          ///< lowering 后的运行时边
 
 	/// @brief  按名查找节点（借用指针；不存在返回 nullptr）
-	Node* node(const std::string& name) const {
+	const Node* node(const std::string& name) const {
 		auto it = nodes.find(name);
 		return it != nodes.end() ? it->second : nullptr;
 	}
@@ -49,10 +49,10 @@ class CompiledGraph {
 public:
 	/// @brief  冻结的源图拓扑。
 	///
-	/// 返回 GraphStore&（非 const）：结构不可变 ≠ 节点任务状态不可变——
-	/// 执行引擎需经 Node 自身接口做任务级缓冲清理（clearTask/terminateTask）。
+	/// 返回 const：结构不可变，节点 task 级状态已归 task 执行域
+	/// （GraphRuntimeState::exec）——运行期不再经 Node 写入任何状态，
 	/// 拓扑增删改（addNode/connect/...）在冻结后无公开入口，属不可达 API。
-	GraphStore& store() const { return *_store; }
+	const GraphStore& store() const { return *_store; }
 
 	/// @brief  图级签名（不可变；执行期别名/绑定解析无锁）
 	const GraphSignature& signature() const { return _signature; }

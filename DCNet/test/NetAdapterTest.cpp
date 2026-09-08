@@ -2,6 +2,7 @@
 // EngineRegistry → createNode → setInput → tryExecute 路径，不依赖真实远端。
 
 #include "DCNet/NetAdapter.h"
+#include "NodeExecutor.h"
 #include "DCNet/NetEndpoint.h"
 #include "DCNet/NetTransport.h"
 #include "DCNet/NetCodec.h"
@@ -183,12 +184,13 @@ TEST(runFlowSuccess) {
 	auto t = FakeTransport::byEndpoint["http://127.0.0.1:8080/v1"];
 	t->response = "hello-from-remote";
 
-	node->setInput("t1", "request", makeTextTensor("hello"));
-	auto result = node->tryExecute("t1");
+	NodeExecutor exec(*node);
+	exec.setInput("t1", "request", makeTextTensor("hello"));
+	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "run should succeed");
 	CHECK(t->sentPayload == "hello", "encoded request should reach transport");
-	CHECK(node->hasOutput("t1", "response"), "response output should exist");
-	auto out = node->takeOutputTensor("t1", "response");
+	CHECK(exec.hasOutput("t1", "response"), "response output should exist");
+	auto out = exec.takeOutputTensor("t1", "response");
 	CHECK(textOf(out) == "hello-from-remote", "decoded response should match");
 }
 
@@ -228,8 +230,9 @@ TEST(sendFailureNormalized) {
 	auto t = FakeTransport::byEndpoint["http://127.0.0.1:8080/v1"];
 	t->sendResult = normalizeTransportError(NetTransportError::Timeout, "request timed out");
 
-	node->setInput("t1", "request", makeTextTensor("hello"));
-	auto result = node->tryExecute("t1");
+	NodeExecutor exec(*node);
+	exec.setInput("t1", "request", makeTextTensor("hello"));
+	auto result = exec.tryExecute("t1");
 	CHECK(!result.ok(), "send failure → run failure");
 	CHECK(result.status == Node::Status::ExecutionFailed, "timeout → ExecutionFailed");
 	CHECK_MSG_PREFIX(result.message, "net:timeout");
@@ -243,8 +246,9 @@ TEST(recvFailureNormalized) {
 	t->sendResult = {};  // 重置（sendFailure 测试可能已污染共享实例）
 	t->recvResult = normalizeHttpResponse(503, R"({"error":{"code":"server_error","message":"down"}})");
 
-	node->setInput("t1", "request", makeTextTensor("hello"));
-	auto result = node->tryExecute("t1");
+	NodeExecutor exec(*node);
+	exec.setInput("t1", "request", makeTextTensor("hello"));
+	auto result = exec.tryExecute("t1");
 	CHECK(!result.ok(), "recv failure → run failure");
 	CHECK(result.status == Node::Status::ExecutionFailed, "5xx → ExecutionFailed");
 	CHECK_MSG_PREFIX(result.message, "remote:server_error");
@@ -257,8 +261,9 @@ TEST(remoteRejectedMapsToInvalidInput) {
 	t->sendResult = {};  // 重置（sendFailure 测试可能已污染共享实例）
 	t->recvResult = normalizeHttpStatus(400, R"({"error":"bad request"})");
 
-	node->setInput("t1", "request", makeTextTensor("hello"));
-	auto result = node->tryExecute("t1");
+	NodeExecutor exec(*node);
+	exec.setInput("t1", "request", makeTextTensor("hello"));
+	auto result = exec.tryExecute("t1");
 	CHECK(!result.ok(), "400 → run failure");
 	CHECK(result.status == Node::Status::InvalidInput, "400 → InvalidInput");
 	CHECK_MSG_PREFIX(result.message, "remote:invalid_request");

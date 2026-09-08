@@ -201,7 +201,7 @@ public:
 	///         子图节点按内部"声明通路可达性"应答父级。
 	void setBlockedOverride(std::function<bool(const TaskId&)> fn) { _blockedOverride = std::move(fn); }
 
-	/// @brief  注册 task 级就绪状态委托；注册后 isReady(taskId) 转发至此回调。
+	/// @brief 注册 task 级就绪状态委托；注册后 isReady(taskId, buffer) 转发至此回调。
 	///         未注册时回退 TaskBuffer 逻辑。
 	void setReadyOverride(std::function<bool(const TaskId&)> fn) { _readyOverride = std::move(fn); }
 
@@ -213,40 +213,22 @@ public:
 	void setCompletionCallback(CompletionFn fn);
 	bool hasCompletionCallback() const;
 
-	// ── 任务级输入 ──
-	void setInput(const TaskId& taskId, const std::string& portName, Value data);
-	void setInput(const TaskId& taskId, const std::string& portName, Tensor data);
-	void setInput(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs);
-	void setInput(const TaskId& taskId, std::unordered_map<std::string, Tensor> inputs);
+	// ── 执行依赖访问器（task 态已归 task 域，pipeline 经此注入）──
 
-	// ── 任务级输出 ──
-	bool hasOutput(const TaskId& taskId, const std::string& name) const;
-	Value takeOutput(const TaskId& taskId, const std::string& name);
-	Tensor takeOutputTensor(const TaskId& taskId, const std::string& name);
-	const Value& peekOutput(const TaskId& taskId, const std::string& name) const;
-	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
-	std::unordered_map<std::string, Tensor> collectOutputTensors(const TaskId& taskId);
+	/// @brief  节点执行函数（ExecutionPipeline 注入用）
+	const RunFn& runFn() const { return _fn; }
+
+	/// @brief  完成回调（ExecutionPipeline 注入用）
+	const CompletionFn& completionCallback() const { return _onComplete; }
+
+	/// @brief  引擎适配器（借用；const Node 仍可驱动引擎——适配器钩子
+	///         本身 const，引擎实例经 shared_ptr 共享，由节点执行闸串行化）
+	EngineAdapter& engine() const;
 
 	// ── 调度接口 ──
-	/// @brief  就绪判定：所有必选输入已就绪（或存在默认值/形状锚定）
-	bool isReady(const TaskId& taskId) const;
-
-	/// @brief  执行节点流水线（就绪判定 + 槽位互斥 + 7 步执行）
-	/// @return 执行结果（失败不抛出，通过 NodeResult 返回）
-	/// @throws NodeException(NotReady)     任务未就绪
-	/// @throws NodeException(Reentrant)    节点正被另一任务占用
-	NodeResult tryExecute(const TaskId& taskId);
-	std::optional<TaskId> currentTaskId() const;
-
-	// ── 任务生命周期 ──
-	bool hasTask(const TaskId& taskId) const;
-	void clearTask(const TaskId& taskId);
-	void terminateTask(const TaskId& taskId);
-	size_t taskCount() const;
-
-	// ── 槽位暴露 ──
-	const std::unordered_map<std::string, TensorSlot>& inputSlots() const;
-	const std::unordered_map<std::string, TensorSlot>& outputSlots() const;
+	/// @brief  就绪判定（task 态由外部 task 域持有，经 buffer 传入）：
+	///         readyOverride 优先，否则检查所有必选输入已就绪（或存在默认值/形状锚定）
+	bool isReady(const TaskId& taskId, const TaskBuffer& buffer) const;
 
 private:
 	friend class RunContext;
@@ -263,8 +245,6 @@ private:
 	};
 
 	NodeMeta _meta;
-	std::unique_ptr<TaskBuffer> _buffer;
-	std::unique_ptr<SlotWorkspace> _workspace;
 	std::unique_ptr<SignalGate> _signal;
 	std::unique_ptr<EngineAdapter> _engine;
 	RunFn _fn;

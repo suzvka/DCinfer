@@ -78,8 +78,6 @@ Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
 	_meta.affinity = affinity;
 	_meta.schema = std::move(schema);
 
-	_buffer = std::make_unique<TaskBuffer>();
-	_workspace = std::make_unique<SlotWorkspace>(_meta.schema);
 	_signal = std::make_unique<SignalGate>();
 	_engine = std::make_unique<EngineAdapter>(nullptr, nullptr);
 }
@@ -117,142 +115,16 @@ bool Node::isBlocked(const TaskId& taskId) const {
 	return _signal->isBlocked(taskId);
 }
 
-// ── 单端口输入 ──
+// ── 执行依赖访问器 / 调度接口 ──
 
-void Node::setInput(const TaskId& taskId, const std::string& portName, Value data) {
-	_buffer->setInput(taskId, portName, std::move(data), _meta.schema);
+EngineAdapter& Node::engine() const {
+	return *_engine;
 }
 
-void Node::setInput(const TaskId& taskId, std::unordered_map<std::string, TaskData> inputs) {
-	_buffer->setInputBatch(taskId, std::move(inputs), _meta.schema);
-}
-
-// ── 任务级输出 ──
-
-bool Node::hasOutput(const TaskId& taskId, const std::string& name) const {
-	return _buffer->hasOutput(taskId, name);
-}
-
-Value Node::takeOutput(const TaskId& taskId, const std::string& name) {
-	return _buffer->takeOutput(taskId, name);
-}
-
-const Value& Node::peekOutput(const TaskId& taskId, const std::string& name) const {
-	return _buffer->peekOutput(taskId, name);
-}
-
-std::unordered_map<std::string, Node::TaskData> Node::collectOutputs(const TaskId& taskId) {
-	return _buffer->collectOutputs(taskId);
-}
-
-// ── 任务生命周期 ──
-
-bool Node::hasTask(const TaskId& taskId) const {
-	return _buffer->hasTask(taskId);
-}
-
-void Node::clearTask(const TaskId& taskId) {
-	_buffer->clearTask(taskId);
-}
-
-void Node::terminateTask(const TaskId& taskId) {
-	_buffer->clearTask(taskId);
-}
-
-size_t Node::taskCount() const {
-	return _buffer->taskCount();
-}
-
-// ── 调度接口 ──
-
-bool Node::isReady(const TaskId& taskId) const {
+bool Node::isReady(const TaskId& taskId, const TaskBuffer& buffer) const {
 	if (_readyOverride)
 		return _readyOverride(taskId);
-	return _buffer->isReady(taskId, _meta.schema);
-}
-
-NodeResult Node::tryExecute(const TaskId& taskId) {
-	if (!_buffer->isReady(taskId, _meta.schema)) {
-		throw NodeException(NodeException::ErrorType::NotReady, "Node::tryExecute",
-							"task '" + taskId + "' is not ready");
-	}
-
-	if (!_workspace->tryAcquire()) {
-		throw NodeException(NodeException::ErrorType::Reentrant, "Node::tryExecute",
-							"node '" + _meta.name + "' is busy executing another task");
-	}
-
-	_workspace->setCurrentTask(taskId);
-
-	NodeResult result;
-	try {
-		result = ExecutionPipeline::execute(taskId, *_buffer, *_workspace, *_engine,
-											_fn, _meta.schema, _onComplete,
-											_meta.type, _meta.name);
-	} catch (...) {
-		_workspace->clearCurrentTask();
-		_workspace->release();
-		throw;
-	}
-
-	_workspace->clearCurrentTask();
-	_workspace->release();
-	return result;
-}
-
-std::optional<Node::TaskId> Node::currentTaskId() const {
-	return _workspace->currentTask();
-}
-
-// ════════════════════════════════════════════
-// Tensor 便捷接口
-// ════════════════════════════════════════════
-
-void Node::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
-	setInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
-}
-
-void Node::setInput(const TaskId& taskId, std::unordered_map<std::string, Tensor> inputs) {
-	std::unordered_map<std::string, TaskData> wrapped;
-	wrapped.reserve(inputs.size());
-	for (auto& [name, t] : inputs) {
-		wrapped.emplace(name, Value(std::make_unique<Tensor>(std::move(t))));
-	}
-	setInput(taskId, std::move(wrapped));
-}
-
-Tensor Node::takeOutputTensor(const TaskId& taskId, const std::string& name) {
-	auto nt = takeOutput(taskId, name);
-	auto* t = nt.as<Tensor>();
-	if (!t) {
-		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::takeOutputTensor",
-							"output '" + name + "' is not a DC::Tensor (innerType=" +
-								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
-	}
-	return std::move(*t);
-}
-
-std::unordered_map<std::string, Tensor> Node::collectOutputTensors(const TaskId& taskId) {
-	auto outputs = collectOutputs(taskId);
-	std::unordered_map<std::string, Tensor> result;
-	result.reserve(outputs.size());
-	for (auto& [name, nt] : outputs) {
-		auto* t = nt.as<Tensor>();
-		if (t) {
-			result.emplace(name, std::move(*t));
-		}
-	}
-	return result;
-}
-
-// ── 槽位暴露 ──
-
-const std::unordered_map<std::string, TensorSlot>& Node::inputSlots() const {
-	return _workspace->inputSlots();
-}
-
-const std::unordered_map<std::string, TensorSlot>& Node::outputSlots() const {
-	return _workspace->outputSlots();
+	return buffer.isReady(taskId, _meta.schema);
 }
 
 // ── RunContext 方法实现 ──

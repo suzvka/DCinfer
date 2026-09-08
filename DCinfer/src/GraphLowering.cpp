@@ -3,7 +3,7 @@
 namespace DC {
 
 void buildRuntimeView(const GraphStore& source, const GraphSignature& signature,
-					  std::unordered_map<std::string, Node*>& outNodes,
+					  std::unordered_map<std::string, const Node*>& outNodes,
 					  std::vector<GraphStore::Edge>& outEdges, GraphLoweringStats& stats) {
 	// ── 1. 识别退化连接器候选：Broadcast(N=1) wire ──
 	// 前置防护：wire 的输出口被绑定为图级输出 / 输入口被绑定为图级输入时，

@@ -1,6 +1,7 @@
 #include "InferGraph.h"
 #include "NodeException.h"
 #include "GraphException.h"
+#include "Graph/internal/TaskExecutionState.h"
 #include "SignalProbe.h"
 
 namespace DC {
@@ -30,9 +31,9 @@ void InferGraph::declareSubgraph(const std::string& name,
 								 "node '" + nname + "' not found");
 	}
 
-	// 2. 设置所有节点的 tag 为子图名
+	// 2. 设置所有节点的 tag 为子图名（构建期专用：_ensureNotFrozen 已校验未冻结）
 	for (const auto& nname : nodeNames)
-		_topology().node(nname)->setTag(name);
+		_builder->store().node(nname)->setTag(name);
 
 	// 3. 注册跨池分组限流（共享信号量，对三个线程池同时生效）
 	_engine->registerGroupLimit(name, 1);
@@ -50,7 +51,11 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
 							 "node '" + nodeName + "' not found");
 	try {
-		n->setInput(taskId, portName, std::move(data));
+		// 输入写入 task 执行域的 per-node 缓冲（原 Node 内嵌 TaskBuffer）；
+		// shared_ptr 先落局部量，防止临时量析构导致引用悬垂
+		auto ts = _state->exec->taskState(taskId);
+		auto& ns = ts->ensure(nodeName, n->schema());
+		ns.buffer.setInput(taskId, portName, std::move(data), n->schema());
 	} catch (const NodeException& e) {
 		_state->errors.recordError(taskId, nodeName, "InferGraph::feedInput",
 							"NodeException in setInput for port '" + portName
@@ -103,7 +108,13 @@ Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutput",
 							 "node '" + nodeName + "' not found");
 	}
-	return n->takeOutput(taskId, portName);
+	// 回退查 task 执行域的 per-node 缓冲（消息/异常语义与原 Node::takeOutput 一致）
+	auto taskExec = _state->exec->findTaskState(taskId);
+	auto* ns = taskExec ? taskExec->find(nodeName) : nullptr;
+	if (!ns)
+		throw NodeException(NodeException::ErrorType::TaskNotFound, "TaskBuffer::takeOutput",
+							"task '" + taskId + "' not found");
+	return ns->buffer.takeOutput(taskId, portName);
 }
 
 Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nodeName,
@@ -124,7 +135,19 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutputTensor",
 							 "node '" + nodeName + "' not found");
 	}
-	return n->takeOutputTensor(taskId, portName);
+	auto taskExec = _state->exec->findTaskState(taskId);
+	auto* ns = taskExec ? taskExec->find(nodeName) : nullptr;
+	if (!ns)
+		throw NodeException(NodeException::ErrorType::TaskNotFound, "TaskBuffer::takeOutput",
+							"task '" + taskId + "' not found");
+	auto nt = ns->buffer.takeOutput(taskId, portName);
+	auto* t = nt.as<Tensor>();
+	if (!t) {
+		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::takeOutputTensor",
+							"output '" + portName + "' is not a DC::Tensor (innerType=" +
+								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
+	}
+	return std::move(*t);
 }
 
 bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
@@ -136,7 +159,9 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	auto* n = _topology().node(nodeName);
 	if (!n)
 		return false;
-	return n->hasOutput(taskId, portName);
+	auto taskExec = _state->exec->findTaskState(taskId);
+	auto* ns = taskExec ? taskExec->find(nodeName) : nullptr;
+	return ns && ns->buffer.hasOutput(taskId, portName);
 }
 
 // ── 按公共别名 / 唯一绑定端口名的图级取用 ──

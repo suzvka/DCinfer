@@ -7,6 +7,7 @@
 // 注：OpenAI chat 端到端已随适配器迁至 DCEngines/OpenAI（OpenAiEngineTest）。
 
 #include "DCNet/DcNetHttp.h"
+#include "NodeExecutor.h"
 #include "DCNet/NetCodec_Tensor.h"
 #include "DCNet/NetError.h"
 #include "DCNet/NetTransport_Http.h"
@@ -213,15 +214,16 @@ TEST(endToEndTensorOverHttp) {
 
 	auto node = reg.createNode("DCNet.Tensor", "tensorNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
+		NodeExecutor exec(*node);
 	CHECK(node != nullptr, "DCNet.Tensor node should be created");
 	CHECK(node->schema().inputs[0].name == "data" && node->schema().outputs[0].name == "result",
 		  "local shape rules from tensor codec");
 
-	node->setInput("t1", "data", makeFloatTensor({1.0f, 2.0f}));
-	auto result = node->tryExecute("t1");
+	exec.setInput("t1", "data", makeFloatTensor({1.0f, 2.0f}));
+	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "tensor roundtrip should succeed");
-	CHECK(node->hasOutput("t1", "result"), "result output should exist");
-	auto out = node->takeOutputTensor("t1", "result");
+	CHECK(exec.hasOutput("t1", "result"), "result output should exist");
+	auto out = exec.takeOutputTensor("t1", "result");
 	CHECK(out.type() == Tensor::TensorType::Float && out.typeSize() == sizeof(float),
 		  "decoded tensor type/size");
 	auto vals = out.getData<float>();
@@ -255,15 +257,16 @@ TEST(endToEndTextOverHttp) {
 
 	auto node = reg.createNode("DCNet.Text", "textNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
+		NodeExecutor exec(*node);
 	CHECK(node != nullptr, "DCNet.Text text node should be created");
 	CHECK(node->schema().inputs[0].name == "text" && node->schema().outputs[0].name == "result",
 		  "local shape rules from text codec");
 
-	node->setInput("t1", "text", makeTextTensor("hello"));
-	auto result = node->tryExecute("t1");
+	exec.setInput("t1", "text", makeTextTensor("hello"));
+	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "text roundtrip should succeed");
-	CHECK(node->hasOutput("t1", "result"), "result output should exist");
-	auto out = node->takeOutputTensor("t1", "result");
+	CHECK(exec.hasOutput("t1", "result"), "result output should exist");
+	auto out = exec.takeOutputTensor("t1", "result");
 	CHECK(out.type() == Tensor::TensorType::Data && out.typeSize() == 1, "decoded tensor type/size");
 	auto bytes = out.bytes();
 	CHECK(std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size()) == "hi there",

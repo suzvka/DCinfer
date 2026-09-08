@@ -1,5 +1,6 @@
 // EngineRegistry 单元测试：注册、创建、转换钩子
 #include <atomic>
+#include "NodeExecutor.h"
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
@@ -307,13 +308,14 @@ static void runTests() {
 
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 50.0f;
-		node->setInput("task1", "in", Value(std::make_unique<Tensor>(std::move(in))));
-		node->tryExecute("task1");
+		NodeExecutor exec(*node);
+		exec.setInput("task1", "in", Value(std::make_unique<Tensor>(std::move(in))));
+		exec.tryExecute("task1");
 
-		if (!node->hasOutput("task1", "out"))
+		if (!exec.hasOutput("task1", "out"))
 			throw std::runtime_error("output not produced");
 
-		auto outNT = node->takeOutput("task1", "out");
+		auto outNT = exec.takeOutput("task1", "out");
 		auto* out = outNT.as<Tensor>();
 		if (std::abs(out->item<float>() - 150.0f) > 1e-6f)
 			throw std::runtime_error("output value mismatch: expected 150, got " + std::to_string(out->item<float>()));
@@ -435,11 +437,12 @@ static void runTests() {
 		// 节点继续执行成功（旧实现此处 EngineAdapter 指针已悬空）
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 1.0f;
-		node->setInput("task1", "in", Value(std::make_unique<Tensor>(std::move(in))));
-		auto result = node->tryExecute("task1");
+		NodeExecutor exec(*node);
+		exec.setInput("task1", "in", Value(std::make_unique<Tensor>(std::move(in))));
+		auto result = exec.tryExecute("task1");
 		if (!result.ok())
 			throw std::runtime_error("node should run after releaseAllEngines");
-		if (!node->hasOutput("task1", "out"))
+		if (!exec.hasOutput("task1", "out"))
 			throw std::runtime_error("output should be produced after releaseAllEngines");
 
 		// 释放节点：最后一个句柄析构，释放钩子恰好调用一次

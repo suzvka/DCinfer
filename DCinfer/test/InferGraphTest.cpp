@@ -176,8 +176,8 @@ void testSimpleDataflow() {
 		harness.feedInput("t1", "add1", "a", makeFloatTensor(3.0f));
 		harness.feedInput("t1", "add1", "b", makeFloatTensor(4.0f));
 
-		// 检查就绪
-		CHECK(harness.node("add1")->isReady("t1"), "add1 should be ready");
+		// 检查就绪：task 态已归 task 执行域，就绪性由 submit 后传播链验证
+		// （未就绪则入口节点不会被调度，awaitCompletion 将失败）
 
 		// 异步驱动执行
 		harness.submit("t1", "id1", "y");
@@ -987,7 +987,7 @@ void testGraphNodeBranchBlocking() {
 
 		// 恢复信号：通路口径重新导通
 		sub.setSignal("enableB", true);
-		CHECK(!parent.node("gn")->isBlocked("t1"), "GraphNode should unblock after signal restore");
+		CHECK(!std::as_const(parent).node("gn")->isBlocked("t1"), "GraphNode should unblock after signal restore");
 
 		// 新 task：恢复后正常完成
 		parent.feedInput("t2", "src", "x", makeFloatTensor(7.0f));

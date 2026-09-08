@@ -44,7 +44,7 @@ struct GraphLoweringStats {
 /// @param  outEdges  [out] 运行时边表（1:1 wire 的入边已改写为直连边）
 /// @param  stats     [out] lowering 统计
 void buildRuntimeView(const GraphStore& source, const GraphSignature& signature,
-					  std::unordered_map<std::string, Node*>& outNodes,
+					  std::unordered_map<std::string, const Node*>& outNodes,
 					  std::vector<GraphStore::Edge>& outEdges, GraphLoweringStats& stats);
 
 } // namespace DC
