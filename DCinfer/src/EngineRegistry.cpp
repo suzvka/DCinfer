@@ -6,6 +6,17 @@
 
 namespace DC {
 
+// ── EngineInstance 生命周期 ──
+
+EngineInstance::~EngineInstance() {
+	// 释放钩子：仅在最后一个共享句柄析构时调用一次（移动构造移交后
+	// 源对象 _desc 置空，不会双发）。钩子在 _engine 成员仍存活的阶段
+	// 执行，拿到原生指针做有序清理；随后 shared_ptr<void> 正常析构原生对象。
+	if (_desc && _engine && _desc->releaseEngine) {
+		_desc->releaseEngine(_engine.get());
+	}
+}
+
 // ── Builtin 引擎的 TensorConverter（DC::Tensor ↔ NativeTensor）──
 static Value builtinToNative(const Tensor& t) {
 	return Value(std::make_unique<Tensor>(t));
@@ -74,7 +85,7 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& nodeName, No
 std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, const std::string& nodeName,
 												 const std::string& modelPath) {
 	// 单路径：一次加载并缓存引擎实例 → 从实例推导 Schema → factory 构造节点
-	auto* engineInstance = getOrCreateEngine(engineType, modelPath);
+	auto engineInstance = getOrCreateEngine(engineType, modelPath);
 	if (!engineInstance)
 		return nullptr;
 
@@ -101,7 +112,8 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, 
 
 	NodeFactoryParams params;
 	params.nodeName = nodeName;
-	params.engineConfig = engineInstance;
+	params.engineConfig = engineInstance.get(); // 兼容：旧式工厂仍可从裸指针提取
+	params.engineInstance = engineInstance;    // 共享句柄：新式工厂直接绑定
 	params.schema = std::move(schema);
 	params.modelPath = modelPath;
 
@@ -117,58 +129,113 @@ std::string EngineRegistry::_makeEngineKey(const std::string& engineType, const 
 	return engineType + ":" + modelPath;
 }
 
-EngineInstance* EngineRegistry::getOrCreateEngine(const std::string& engineType, const std::string& modelPath) {
+EngineHandle EngineRegistry::getOrCreateEngine(const std::string& engineType, const std::string& modelPath) {
 	auto key = _makeEngineKey(engineType, modelPath);
 
-	// 全程持锁：查缓存 → 创建 → 插入原子完成，保证同一 key 的引擎实例只创建一次。
-	// （锁外创建存在 check-then-act 竞态窗口，并发线程会各自重复创建实例。）
-	// 注意：createEngine 钩子在锁内执行，钩子内不得反向调用本 registry 的方法
-	// （_mutex 非递归，否则死锁）。引擎创建按 modelPath 缓存、低频发生，锁内创建开销可接受。
-	std::lock_guard lk(_mutex);
-
-	// 已缓存直接返回
-	auto it = _engineInstances.find(key);
-	if (it != _engineInstances.end()) {
-		return &it->second;
+	// 快路径：ready 缓存命中（无创建，锁开销极小）
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engineInstances.find(key);
+		if (it != _engineInstances.end() && it->second.ready)
+			return it->second.ready;
 	}
 
-	auto engIt = _engines.find(engineType);
-	if (engIt == _engines.end() || !engIt->second.createEngine)
-		return nullptr;
+	// single-flight 登记：同 key 首个调用者成为领导者，其余成为跟随者
+	std::promise<EngineHandle> promise;
+	std::shared_future<EngineHandle> myFuture = promise.get_future().share();
+	bool leader = false;
+	std::function<EngineInstance(const std::string&)> createEngine;
+	{
+		std::lock_guard lk(_mutex);
+		auto& slot = _engineInstances[key]; // 按需创建空槽位
+		if (slot.ready) {
+			return slot.ready; // 双重检查：登记竞态期间他人已完成创建
+		}
+		if (slot.loading.valid()) {
+			myFuture = slot.loading; // 跟随者：等待首个创建者的同一结果
+		} else {
+			auto engIt = _engines.find(engineType);
+			if (engIt == _engines.end() || !engIt->second.createEngine) {
+				_engineInstances.erase(key); // 未注册：不留空槽位
+				return nullptr;
+			}
+			slot.loading = myFuture; // 领导者登记 loading 条目
+			createEngine = engIt->second.createEngine;
+			leader = true;
+		}
+	}
 
-	auto instance = engIt->second.createEngine(modelPath);
-	if (!instance)
-		return nullptr;
+	if (!leader) {
+		// 跟随者：阻塞等待；成功拿句柄，失败透传领导者异常
+		return myFuture.get();
+	}
 
-	auto [insertedIt, ok] = _engineInstances.emplace(std::move(key), std::move(instance));
-	// 注入所属描述符（权威值，覆盖构造时传入值）。
-	// _engines 注册后不擦除，节点地址稳定，指针可安全长存。
-	insertedIt->second.setDescriptor(&engIt->second);
-	return &insertedIt->second;
+	// 领导者：锁外执行创建回调——ORT Session 加载等秒级操作不持有 _mutex，
+	// backend 可安全重入 registry，其他 key 的创建/建图互不阻塞。
+	EngineHandle handle;
+	std::exception_ptr error;
+	try {
+		auto instance = createEngine(modelPath);
+		if (instance) {
+			handle = std::make_shared<EngineInstance>(std::move(instance));
+			// 注入所属描述符（权威值，覆盖构造时传入值）；find 内部加锁，此处不持 _mutex。
+			// _engines 注册后不擦除，节点地址稳定，指针可安全长存。
+			if (const EngineDescriptor* desc = find(engineType))
+				handle->setDescriptor(desc);
+		}
+	} catch (...) {
+		error = std::current_exception();
+	}
+
+	// 发布：锁内写 ready / 清失败槽位；set_value 唤醒等待者放锁外，
+	// 避免被唤醒者立即抢锁阻塞发布者自身
+	{
+		std::lock_guard lk(_mutex);
+		if (handle) {
+			auto& slot = _engineInstances[key];
+			slot.ready = handle;
+			slot.loading = {}; // 清除 loading 条目（valid() 变 false）
+		} else {
+			auto it = _engineInstances.find(key);
+			if (it != _engineInstances.end() && !it->second.ready)
+				_engineInstances.erase(it); // 失败：清槽位，后续调用重试创建
+		}
+	}
+	if (error)
+		promise.set_exception(std::move(error));
+	else
+		promise.set_value(handle);
+
+	if (error)
+		std::rethrow_exception(error); // 保持旧行为：创建异常透传给首个调用者
+	return handle;
 }
 
 void EngineRegistry::releaseEngine(const std::string& engineType, const std::string& modelPath) {
+	// 仅移除注册表缓存条目，不直接销毁实例：仍被节点持有的共享句柄
+	// 保持实例存活，实际销毁（含 releaseEngine 钩子）发生在最后一个
+	// 句柄释放时——与调用方无需任何释放顺序约定。
+	// single-flight 创建中的条目（loading）无可释放对象，保留槽位，
+	// 待领导者完成发布后由后续 release 生效。
 	std::lock_guard lk(_mutex);
-	auto key = _makeEngineKey(engineType, modelPath);
-	auto it = _engineInstances.find(key);
-	if (it != _engineInstances.end()) {
-		auto* desc = it->second.descriptor();
-		if (desc && desc->releaseEngine) {
-			desc->releaseEngine(it->second.get());
-		}
-	}
-	_engineInstances.erase(key);
+	auto it = _engineInstances.find(_makeEngineKey(engineType, modelPath));
+	if (it == _engineInstances.end() || it->second.loading.valid())
+		return;
+	_engineInstances.erase(it);
 }
 
 void EngineRegistry::releaseAllEngines() {
+	// 语义同 releaseEngine：逐条目移除缓存，实例销毁由句柄引用计数决定。
+	// 旧实现在此处同步调用 releaseEngine 钩子，会悬空仍绑定实例的节点。
+	// 创建中（loading）条目跳过，待创建完成后由后续 release 处理。
 	std::lock_guard lk(_mutex);
-	for (auto& [key, instance] : _engineInstances) {
-		auto* desc = instance.descriptor();
-		if (desc && desc->releaseEngine) {
-			desc->releaseEngine(instance.get());
+	for (auto it = _engineInstances.begin(); it != _engineInstances.end();) {
+		if (it->second.loading.valid()) {
+			++it;
+			continue;
 		}
+		it = _engineInstances.erase(it);
 	}
-	_engineInstances.clear();
 }
 
 const EngineDescriptor* EngineRegistry::find(const std::string& engineType) const {

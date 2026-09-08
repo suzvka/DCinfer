@@ -84,9 +84,9 @@ Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
 	_engine = std::make_unique<EngineAdapter>(nullptr, nullptr);
 }
 
-void Node::bindEngine(EngineInstance* engineInstance, const EngineDescriptor* engineDesc) {
+void Node::bindEngine(std::shared_ptr<EngineInstance> engineInstance, const EngineDescriptor* engineDesc) {
 	_meta.engineDescriptor = engineDesc;
-	_engine = std::make_unique<EngineAdapter>(engineInstance, engineDesc);
+	_engine = std::make_unique<EngineAdapter>(std::move(engineInstance), engineDesc);
 }
 
 Node::~Node() = default;

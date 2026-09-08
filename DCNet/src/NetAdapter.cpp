@@ -83,7 +83,8 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 	const std::function<std::shared_ptr<DcNetTransport>()> transportFactory = std::move(desc.transportFactory);
 
 	// ── createEngine：modelPath 即远端端点 → 解析 + 覆盖 → 创建 transport → 连接 ──
-	// 注意：getOrCreateEngine 在锁内调用本钩子，钩子内不得反向调用 registry。
+	// 注意：钩子在 single-flight 领导者线程锁外执行（不持有 registry 锁），
+	// 可安全反向调用 registry；同 key 并发调用只执行一次。
 	// 覆盖项捕获为值：注册级配置固化（authToken 不参与日志/错误信息）。
 	const std::string epAuthToken = desc.authToken;
 	const std::vector<std::string> epHeaders = desc.headers;
@@ -125,11 +126,10 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 
 	// ── factory：构造节点（System affinity）并绑定引擎实例 ──
 	ed.factory = [engineType, runFn](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		auto* engineInstance = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(p.engineConfig));
 		auto node = std::make_unique<Node>(engineType, p.nodeName, p.schema, runFn,
 										   ThreadPoolAffinity::System);
-		if (engineInstance)
-			node->bindEngine(engineInstance, engineInstance->descriptor());
+		if (p.engineInstance)
+			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
 	};
 

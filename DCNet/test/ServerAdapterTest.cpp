@@ -112,11 +112,10 @@ static void ensureDoublerEngine() {
 	ed.getInputPorts = [](const EngineInstance&) { return doublerSchema().inputs; };
 	ed.getOutputPorts = [](const EngineInstance&) { return doublerSchema().outputs; };
 	ed.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		auto* engineInstance = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(p.engineConfig));
 		auto node = std::make_unique<Node>(kEngineType, p.nodeName, p.schema, doublerRunFn(),
 										   ThreadPoolAffinity::System);
-		if (engineInstance)
-			node->bindEngine(engineInstance, engineInstance->descriptor());
+		if (p.engineInstance)
+			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
 	};
 	reg.registerEngine(ed);

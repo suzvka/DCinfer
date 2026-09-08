@@ -339,17 +339,15 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 	};
 
 	// ── factory: 使用框架推导的 Schema 构造节点并绑定引擎实例 ──
-	// createNode(engineType, name, modelPath) 传入的 engineConfig 是
-	// EngineInstance* 本身（框架已创建并缓存），直接转型即可
+	// createNode(engineType, name, modelPath) 路径下 engineInstance 为
+	// 框架创建并缓存的共享句柄，节点绑定后引擎存活期覆盖节点存活期
 	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		auto* engineInstance = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(p.engineConfig));
-
 		auto node = std::make_unique<Node>(
 			"OnnxRuntime", p.nodeName, p.schema, onnxRunFn(),
 			ThreadPoolAffinity::Compute);
 
-		if (engineInstance)
-			node->bindEngine(engineInstance, engineInstance->descriptor());
+		if (p.engineInstance)
+			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 
 		return node;
 	};

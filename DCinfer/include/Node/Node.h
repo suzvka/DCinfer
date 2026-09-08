@@ -108,13 +108,17 @@ private:
 /// @brief 节点工厂参数：框架在 createNode 时收集并传入工厂。
 ///
 /// - engineConfig：createNode(engineType, name, engineConfig) 透传的配置指针；
-///   createNode(engineType, name, modelPath) 路径下为 EngineInstance*（框架已创建并缓存）。
+///   createNode(engineType, name, modelPath) 路径下兼容性指向引擎实例（新式
+///   工厂应改用 engineInstance 共享句柄）。
+/// - engineInstance：modelPath 路径下的引擎实例共享句柄（可空）；
+///   工厂经 Node::bindEngine 绑定后，节点持有句柄，引擎存活期覆盖节点存活期。
 /// - schema：框架从 EngineInstance 推导（需引擎注册 getInputPorts/getOutputPorts）；
 ///   可为空，工厂可自行推导或使用内置 Schema 兜底。
 /// - modelPath：createNode(engineType, name, modelPath) 路径下非空。
 struct NodeFactoryParams {
 	std::string nodeName;
-	const void* engineConfig = nullptr; ///< EngineInstance* 或任意配置
+	const void* engineConfig = nullptr;                 ///< 任意自定义配置（兼容：modelPath 路径下为实例裸指针）
+	std::shared_ptr<class EngineInstance> engineInstance; ///< 引擎实例共享句柄（modelPath 路径下非空）
 	NodeSchema schema;                  ///< 框架推导的端口 Schema（可为空）
 	std::string modelPath;              ///< 模型路径（modelPath 路径下非空）
 };
@@ -166,7 +170,9 @@ public:
 	Node& operator=(Node&&) = delete;
 
 	// ── 引擎绑定（引擎支持节点构造后绑定）──
-	void bindEngine(EngineInstance* engineInstance, const EngineDescriptor* engineDesc = nullptr);
+	/// 节点持有引擎实例共享句柄：节点存活 ⇒ 引擎实例存活，
+	/// releaseEngine/releaseAllEngines 移除缓存条目不影响已绑定节点。
+	void bindEngine(std::shared_ptr<EngineInstance> engineInstance, const EngineDescriptor* engineDesc = nullptr);
 
 	// ── 只读属性 ──
 	const std::string& type() const { return _meta.type; }
@@ -319,8 +325,8 @@ public:
 	NodeBuilder& connector(bool v = true) { _isConnector = v; return *this; }
 	NodeBuilder& tag(std::string t) { _tag = std::move(t); return *this; }
 	NodeBuilder& modelPath(std::string path) { _modelPath = std::move(path); return *this; }
-	NodeBuilder& engine(EngineInstance* instance, const EngineDescriptor* desc = nullptr) {
-		_engineInstance = instance;
+	NodeBuilder& engine(std::shared_ptr<EngineInstance> instance, const EngineDescriptor* desc = nullptr) {
+		_engineInstance = std::move(instance);
 		_engineDesc = desc;
 		return *this;
 	}
@@ -344,7 +350,7 @@ private:
 	Node::Schema _schema;
 	Node::RunFn _fn;
 	ThreadPoolAffinity _affinity = ThreadPoolAffinity::Operator;
-	EngineInstance* _engineInstance = nullptr;
+	std::shared_ptr<EngineInstance> _engineInstance = nullptr;
 	const EngineDescriptor* _engineDesc = nullptr;
 	bool _isConnector = false;
 	std::string _tag;

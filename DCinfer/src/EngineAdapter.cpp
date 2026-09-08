@@ -4,8 +4,8 @@
 
 namespace DC {
 
-EngineAdapter::EngineAdapter(EngineInstance* instance, const EngineDescriptor* descriptor)
-	: _instance(instance), _desc(descriptor) {}
+EngineAdapter::EngineAdapter(std::shared_ptr<EngineInstance> instance, const EngineDescriptor* descriptor)
+	: _instance(std::move(instance)), _desc(descriptor) {}
 
 void EngineAdapter::preRun() const {
 	if (!_instance)

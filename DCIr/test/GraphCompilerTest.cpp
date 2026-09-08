@@ -68,10 +68,9 @@ static void registerTestEngine(const std::string& type, bool createSuccess,
 	EngineDescriptor desc;
 	desc.engineType = type;
 	desc.factory = [type](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		auto* inst = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(p.engineConfig));
 		auto node = std::make_unique<Node>(type, p.nodeName, p.schema, nullptr, ThreadPoolAffinity::Compute);
-		if (inst)
-			node->bindEngine(inst, inst->descriptor());
+		if (p.engineInstance)
+			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
 	};
 	desc.createEngine = [createSuccess, checkFileExists](const std::string& modelPath) -> EngineInstance {

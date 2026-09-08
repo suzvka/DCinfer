@@ -4,6 +4,7 @@
 #include "Value.h"
 
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -16,6 +17,11 @@ namespace DC {
 // ── 引擎实例：类型擦除的运行时引擎句柄 ──
 // 封装引擎运行时对象（Ort::Session / nvinfer1::ICudaEngine / 自定义对象）
 // 基于 shared_ptr<void> 实现类型擦除，EngineDescriptor 充当虚表
+//
+// 生命周期（EngineHandle 共享所有权）：注册表缓存实例的共享句柄，
+// 节点经 EngineAdapter 同样持有句柄；releaseEngine/releaseAllEngines
+// 仅移除注册表条目，实际销毁（含 releaseEngine 钩子）发生在最后一个
+// 共享句柄释放时——仍持有句柄的节点安全存活，消除悬空引用。
 class EngineInstance {
 public:
 	EngineInstance() = default;
@@ -23,6 +29,17 @@ public:
 	template <typename T>
 	EngineInstance(std::shared_ptr<T> engine, const EngineDescriptor* desc = nullptr)
 		: _engine(std::move(engine)), _desc(desc) {}
+
+	~EngineInstance();
+
+	// 共享句柄对象：禁止拷贝；移动移交释放钩子职责（源不再触发）
+	EngineInstance(EngineInstance&& other) noexcept
+		: _engine(std::move(other._engine)), _desc(other._desc) {
+		other._desc = nullptr;
+	}
+	EngineInstance& operator=(EngineInstance&&) = delete;
+	EngineInstance(const EngineInstance&) = delete;
+	EngineInstance& operator=(const EngineInstance&) = delete;
 
 	void* get() {
 		return _engine.get();
@@ -50,6 +67,9 @@ private:
 	std::shared_ptr<void> _engine;
 	const EngineDescriptor* _desc = nullptr;
 };
+
+/// @brief 引擎实例共享句柄：节点/注册表共同持有，引用计数决定实例销毁时机。
+using EngineHandle = std::shared_ptr<EngineInstance>;
 
 // ── 引擎描述符：注册一个引擎所需的全部信息 ──
 struct EngineDescriptor {
@@ -85,7 +105,7 @@ struct EngineDescriptor {
 	/// ctx.output() 写回 host 数据
 	std::function<void(void* engine, Node::RunContext& ctx)> postRun;
 
-	/// 引擎实例释放前调用，用于有序清理 GPU 资源
+	/// 最后一个共享句柄析构时调用一次，用于有序清理 GPU 资源
 	/// 若为 nullptr，退化为 shared_ptr<void> 默认析构
 	std::function<void(void* engine)> releaseEngine;
 
@@ -109,7 +129,7 @@ public:
 
 	// ── 接口 3：从已注册引擎 + 模型路径创建节点 ──
 	// 自动调用 getOrCreateEngine（一次加载并缓存实例）→ 从实例推导 Schema → 构建节点
-	// 节点持有 EngineInstance 的非拥有引用，引擎生命周期由 Registry 管理
+	// 节点经 EngineAdapter 持有 EngineInstance 共享句柄，实例生命周期由句柄引用计数管理
 	std::unique_ptr<Node> createNode(const std::string& engineType, const std::string& nodeName,
 									 const std::string& modelPath);
 
@@ -117,13 +137,14 @@ public:
 
 	/// 获取或创建引擎实例（以 engineType + modelPath 复合键缓存）
 	/// 若未缓存则调用 EngineDescriptor::createEngine 创建
-	/// 返回非拥有指针，由 Registry 统一管理生命周期
-	EngineInstance* getOrCreateEngine(const std::string& engineType, const std::string& modelPath);
+	/// 返回共享句柄：注册表与调用方共同持有，引用计数决定实例销毁时机
+	EngineHandle getOrCreateEngine(const std::string& engineType, const std::string& modelPath);
 
-	/// 释放指定引擎类型 + 模型路径的引擎实例
+	/// 移除指定引擎类型 + 模型路径的缓存条目（不销毁实例：
+	/// 实际释放发生在最后一个共享句柄析构时，仍被节点持有的实例安全存活）
 	void releaseEngine(const std::string& engineType, const std::string& modelPath);
 
-	/// 释放所有引擎实例
+	/// 移除全部引擎实例缓存条目（语义同上，逐条目移除）
 	void releaseAllEngines();
 
 	const EngineDescriptor* find(const std::string& engineType) const;
@@ -148,10 +169,19 @@ private:
 	static std::string _makeEngineKey(const std::string& engineType, const std::string& modelPath);
 
 	// 容器访问互斥：注册表支持并发建图（多个线程同时 getOrCreateEngine/createNode）
-	// 注意：用户回调（factory / createEngine / 端口推导）一律在锁外调用，防重入死锁
+	// 用户回调（factory / createEngine / 端口推导）一律在锁外调用（single-flight）
 	mutable std::mutex _mutex;
+
+	/// 引擎槽位：ready = 已就绪实例（缓存条目）；
+	/// loading = single-flight 创建中条目（同 key 并发首个创建者登记，
+	/// 其余调用者经 shared_future 等待同一结果，创建回调在锁外执行）。
+	struct EngineSlot {
+		EngineHandle ready;
+		std::shared_future<EngineHandle> loading;
+	};
+
 	std::unordered_map<std::string, EngineDescriptor> _engines;
-	std::unordered_map<std::string, EngineInstance> _engineInstances;
+	std::unordered_map<std::string, EngineSlot> _engineInstances;
 };
 
 // ── 节点工厂辅助模板 ──
@@ -177,19 +207,17 @@ NodeFactory makeNodeFactory(std::string engineType, Node::Schema schema, F&& fn)
 	};
 }
 
-// 带引擎实例版本：自动从 engineConfig 提取 EngineInstance* 并传给节点构造
+// 带引擎实例版本：自动从 NodeFactoryParams 提取共享句柄并传给节点构造
 // 同时注入 engineInstance->descriptor()，消除 EngineRegistry::instance() 隐式依赖
-// 注意：createNode(engineType, name, modelPath) 传入的 engineConfig 是
-// EngineInstance* 本身，直接转型即可，不可二次解引用
+// 注意：句柄引用由节点持有，引擎实例存活期覆盖节点存活期
 template <typename F>
 NodeFactory makeNodeFactoryWithEngine(std::string engineType, Node::Schema schema, F&& fn) {
 	return [engineType = std::move(engineType), schema = std::move(schema),
 			fn = std::forward<F>(fn)](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		auto* engineInstance = const_cast<EngineInstance*>(static_cast<const EngineInstance*>(p.engineConfig));
 		auto node = std::make_unique<Node>(engineType, p.nodeName, schema, fn,
 									  ThreadPoolAffinity::Compute);
-		if (engineInstance)
-			node->bindEngine(engineInstance, engineInstance->descriptor());
+		if (p.engineInstance)
+			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
 	};
 }

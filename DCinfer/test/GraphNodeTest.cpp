@@ -1,6 +1,7 @@
-﻿// GraphNode：InferGraph::exportNode 集成测试
+// GraphNode：InferGraph::exportNode 集成测试
 // 验证子图嵌入为 Node 的完整生命周期
 
+#include <atomic>
 #include <cmath>
 #include <condition_variable>
 #include <iostream>
@@ -484,6 +485,67 @@ void testWaitMechanism() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 测试 10: GraphRuntimeState 生命周期压力 — 并发 submit/cancel/wait/releaseTask
+// 验证共享图状态下 TaskGate/看门狗/状态表在交错生命周期操作下无崩溃/死锁
+// ════════════════════════════════════════════
+
+void testConcurrentTaskLifecycleStress() {
+	TEST("concurrent submit/cancel/wait/releaseTask stress (shared GraphRuntimeState)") {
+		InferGraph graph;
+		// 每线程独立节点：节点级互斥（Reentrant 丢弃）是既有设计，
+		// 本测试聚焦并发任务生命周期（TaskGate/看门狗/状态表/OutputZone）的安全性
+		constexpr int kThreads = 4;
+		constexpr int kIters = 150;
+		for (int t = 0; t < kThreads; ++t) {
+			auto name = "n" + std::to_string(t);
+			graph.addNode(std::make_unique<Node>("Builtin", name, identitySchema(), identityRunFn()));
+			graph.bindOutput(name, "y");
+		}
+
+		std::atomic<int> anomalies{0};
+		std::vector<std::thread> threads;
+		for (int t = 0; t < kThreads; ++t) {
+			threads.emplace_back([&, t] {
+				const std::string nodeName = "n" + std::to_string(t);
+				try {
+					for (int i = 0; i < kIters; ++i) {
+						// 每迭代唯一 taskId（贴近真实请求 ID 语义）：
+						// 取消后迟到的旧 lambda 经 gate 级检查安全退出（既有设计中
+						// 同 ID 复用在取消场景存在 tryExecute 副作用竞态，不属于本测试目标）
+						const std::string tid = "stress-" + std::to_string(t) + "-" + std::to_string(i);
+						Tensor in(TensorType::Float, sizeof(float));
+						in = static_cast<float>(i);
+						graph.feedInput(tid, nodeName, "x", Value(std::make_unique<Tensor>(std::move(in))));
+						graph.submit(tid, nodeName, "y", 1);
+						if (i % 2 == 0)
+							graph.cancel(tid); // 交错取消：终态为 Cancelled（或已完成的 Succeeded）
+						if (!graph.wait(tid, std::chrono::milliseconds(5000))) {
+							std::cerr << "\n  [stress] wait timeout: task=" << tid
+									  << " status=" << static_cast<int>(graph.taskStatus(tid))
+									  << " iter=" << i << std::endl;
+							for (auto& err : graph.taskErrors(tid))
+								std::cerr << "    [err] node=" << err.nodeName
+										  << " lvl=" << static_cast<int>(err.level)
+										  << " msg=" << err.message << std::endl;
+							++anomalies; // 终止超时视为异常
+						}
+						graph.releaseTask(tid); // 释放已终止任务全部资源
+					}
+				} catch (const std::exception& e) {
+					std::cerr << "\n  [stress] exception: thread=" << t
+							  << " what=" << e.what() << std::endl;
+					++anomalies;
+				}
+			});
+		}
+		for (auto& th : threads)
+			th.join();
+		CHECK(anomalies.load() == 0, "no anomalies under concurrent lifecycle stress");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testBasicGraphEmbedding();
@@ -495,6 +557,7 @@ int main() {
 		testEmptyInterfaceSubgraph();
 		testInputZoneRoundTrip();
 		testWaitMechanism();
+		testConcurrentTaskLifecycleStress();
 
 		if (failures == 0) {
 			std::cout << "\nAll GraphNode tests passed!" << std::endl;

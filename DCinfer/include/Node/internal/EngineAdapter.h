@@ -12,18 +12,19 @@ namespace DC {
 struct EngineDescriptor;
 class EngineInstance;
 
-/// @brief 引擎适配器：封装引擎实例的非拥有引用，编排引擎生命周期钩子。
+/// @brief 引擎适配器：持有引擎实例共享句柄，编排引擎生命周期钩子。
 ///
 /// 彻底消除 EngineRegistry::instance() 的隐式依赖：
 /// EngineDescriptor* 在构造时注入，Builtin 节点传入 nullptr。
+/// 句柄由节点持有：节点存活 ⇒ 引擎实例存活，注册表释放仅移除缓存条目。
 ///
 /// 编排 preRun → onError → synchronize → postRun 的调用顺序。
 class EngineAdapter {
 public:
-	/// @brief 构造引擎适配器（两个参数都可以为 nullptr）。
-	/// @param instance    引擎实例指针（非拥有）。
+	/// @brief 构造引擎适配器（两个参数都可以为空）。
+	/// @param instance    引擎实例共享句柄（可空）。
 	/// @param descriptor  引擎描述符指针（非拥有，构造时注入）。
-	EngineAdapter(EngineInstance* instance, const EngineDescriptor* descriptor);
+	EngineAdapter(std::shared_ptr<EngineInstance> instance, const EngineDescriptor* descriptor);
 
 	// ── 钩子 ──
 
@@ -50,11 +51,11 @@ public:
 	/// @brief  获取引擎原生指针。
 	void* engine() const;
 
-	/// @brief  获取 EngineInstance 指针。
-	const EngineInstance* instance() const { return _instance; }
+	/// @brief  获取 EngineInstance 指针（借用：适配器持有句柄保证其存活）。
+	const EngineInstance* instance() const { return _instance.get(); }
 
 private:
-	EngineInstance* _instance;
+	std::shared_ptr<EngineInstance> _instance; ///< 拥有句柄：节点存活 ⇒ 引擎实例存活
 	const EngineDescriptor* _desc;
 };
 

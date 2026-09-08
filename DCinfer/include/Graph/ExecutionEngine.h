@@ -24,6 +24,7 @@ class GraphStore;
 class OutputZone;
 class SignalStore;
 class ErrorTracker;
+struct GraphRuntimeState;
 
 /// @brief 推理图执行引擎：事件驱动的数据流传播与调度。
 ///
@@ -34,7 +35,9 @@ class ErrorTracker;
 /// - 超时看门狗与耗尽检测
 /// - 同步等待（wait）
 ///
-/// 不持有图拓扑、输出区、信号仓库、错误收集器——均通过参数化依赖注入。
+/// 不持有图拓扑、输出区、信号仓库、错误收集器——任务经
+/// shared_ptr<GraphRuntimeState> 共享持有（GraphRuntimeState 聚合四组件，
+/// 飞行任务期间状态保活），与 InferGraph 共同拥有。
 ///
 /// 调度模型：无协程、无独立调度器线程。节点执行与数据传播打包为
 /// 一个任务 lambda 提交到对应线程池，池线程执行完节点后就地传播输出，
@@ -78,8 +81,10 @@ public:
 
 	/// @brief  异步启动整张图的计算
 	/// @throws GraphException(NoDeclaration) 若未事先调用 declareOutput
+	/// @note   state 为图运行时状态共享句柄：任务 lambda / TaskGate / 看门狗
+	///         各持一份，图对象先行析构时在飞任务所需的图组件仍存活
 	void submit(const TaskId& taskId, std::chrono::milliseconds timeout, uint32_t maxHops,
-				GraphStore& graph, OutputZone& output, SignalStore& signals, ErrorTracker& errors);
+				const std::shared_ptr<GraphRuntimeState>& state);
 
 	// ── 同步等待 ──
 
@@ -131,10 +136,9 @@ private:
 	struct TaskGate {
 		std::atomic<bool> terminated{false};
 		ExecutionEngine* engine = nullptr;
-		OutputZone* output = nullptr;
-		GraphStore* graph = nullptr;
-		SignalStore* signals = nullptr;
-		ErrorTracker* errors = nullptr; ///< 诊断用：耗尽检测时写入警告
+		/// 图运行时状态共享句柄：TaskGate、任务 lambda、看门狗与 InferGraph
+		/// 共同持有，图对象先行析构时在飞任务所需的图组件仍存活
+		std::shared_ptr<GraphRuntimeState> state;
 		TaskId taskId;
 
 		~TaskGate();
@@ -146,23 +150,21 @@ private:
 	/// @note   由 submit 入口与传播下游共用；任务在节点 affinity 对应线程池执行
 	void _submitNodeRun(Node* node, const std::string& nodeName, const TaskId& taskId,
 						std::shared_ptr<TaskGate> gate, uint32_t remainingHops,
-						GraphStore& graph, OutputZone& output,
-						SignalStore& signals, ErrorTracker& errors);
+						const std::shared_ptr<GraphRuntimeState>& state);
 
 	/// @brief  传播节点输出到下游（调用前提：节点已由 _submitNodeRun 执行成功）
 	void _propagateFrom(std::string nodeName, TaskId taskId,
 						std::shared_ptr<TaskGate> gate,
 						uint32_t remainingHops,
-						GraphStore& graph, OutputZone& output,
-						SignalStore& signals, ErrorTracker& errors);
+						const std::shared_ptr<GraphRuntimeState>& state);
 
 	// ── 终止辅助 ──
 	void _terminate(const TaskId& taskId,
-					GraphStore& graph, OutputZone& output, SignalStore& signals,
+					const std::shared_ptr<GraphRuntimeState>& state,
 					TaskStatus terminalStatus = TaskStatus::Succeeded);
 	bool _isTerminated(const TaskId& taskId) const;
-	void _exhaustedCheck(const TaskId& taskId, OutputZone& output,
-						 GraphStore& graph, SignalStore& signals, ErrorTracker& errors);
+	void _exhaustedCheck(const TaskId& taskId,
+						 const std::shared_ptr<GraphRuntimeState>& state);
 
 	// ── 运行时诊断 ──
 
@@ -170,7 +172,7 @@ private:
 	///         必须在 _terminate 之前调用（_terminate 会清理 OutputZone 和 _blockedSkips）。
 	/// @param  reason  终止原因描述（如 "task timed out (5000ms)"）
 	void _diagnoseAbnormal(const TaskId& taskId, const std::string& reason,
-						   OutputZone& output, GraphStore& graph, ErrorTracker& errors);
+						   const std::shared_ptr<GraphRuntimeState>& state);
 
 	// ── 线程池分发（消除重复的 affinity switch-case）──
 
@@ -179,11 +181,12 @@ private:
 						 std::function<void()> task);
 
 	// ── 成员 ──
-	// 声明顺序即析构顺序约束（关键！）：
+	// 声明顺序即析构顺序约束：
 	//   状态成员最先声明 → 最后析构；线程池最后声明 → 最先析构。
 	// 析构顺序：池(shutdown/join worker) → 共享表 → 状态 → 在飞看门狗(join) → 退役看门狗(join)。
 	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated/_watchdogs
 	// 等状态、以及向池提交任务时，所有对象均存活。
+	// （图组件生命周期由 GraphRuntimeState shared_ptr 保证，不依赖本表顺序。）
 	// task 状态表：Running → 终态（Succeeded/Failed/TimedOut/Cancelled）。
 	// submit 时活动 ID 拒绝重复提交；已终止 ID 复用时清除旧状态。
 	// 同时承担原 _terminatedTasks 的传播拦截与 wait 谓词职责。

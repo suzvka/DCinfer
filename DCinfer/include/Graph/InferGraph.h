@@ -1,11 +1,8 @@
 #pragma once
 
 #include "Node.h"
-#include "GraphStore.h"
+#include "GraphRuntimeState.h"
 #include "ExecutionEngine.h"
-#include "OutputZone.h"
-#include "SignalStore.h"
-#include "ErrorTracker.h"
 #include "GraphException.h"
 #include "TaskStatus.h"
 
@@ -50,8 +47,8 @@ public:
 	InferGraph(const InferGraph&) = delete;
 	InferGraph& operator=(const InferGraph&) = delete;
 
-	// 移动语义禁止：ExecutionEngine 持有活跃线程池状态，
-	// 移动会导致 TaskGate 中裸指针（graph/output/signals）悬空。
+	// 移动语义禁止：ExecutionEngine 持有活跃线程池状态与任务状态表，
+	// 移动后线程池内飞行任务的 this 捕获会悬空。
 	InferGraph(InferGraph&&) = delete;
 	InferGraph& operator=(InferGraph&&) = delete;
 
@@ -59,7 +56,7 @@ public:
 
 	/// @brief  添加节点（转移所有权），返回引用供后续接线引用
 	/// @throws GraphException(DuplicateNode) 若节点名为空或重名
-	Node& addNode(std::unique_ptr<Node> node) { return _store.addNode(std::move(node)); }
+	Node& addNode(std::unique_ptr<Node> node) { return _state->store.addNode(std::move(node)); }
 
 	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
 	///         自动插入广播连接器（Broadcast Connector, N=1）
@@ -67,7 +64,7 @@ public:
 	/// @return 指向自动创建的广播连接器的引用
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort) {
-		return _store.connect(srcNode, srcPort, dstNode, dstPort);
+		return _state->store.connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	/// @brief  端口级接线原语（低层）：上游输出口 → 下游输入口，直接建边
@@ -75,19 +72,19 @@ public:
 	/// @throws GraphException(NodeNotFound/PortNotFound/DirectConnect) 若接线不合法
 	void connectRaw(const std::string& srcNode, const std::string& srcPort,
 					const std::string& dstNode, const std::string& dstPort) {
-		_store.connectRaw(srcNode, srcPort, dstNode, dstPort);
+		_state->store.connectRaw(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	/// @brief  快捷批量接线（低层）：自动匹配上游所有输出口到下游同名的输入口，
 	///         直接建边，不插入连接器
 	/// @return 成功匹配的端口对数
 	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
-		return _store.connectAll(srcNode, dstNode);
+		return _state->store.connectAll(srcNode, dstNode);
 	}
 
 	/// @brief  标记输入：该节点的该端口为图级输入口，外部通过此口注入数据
 	void bindInput(const std::string& nodeName, const std::string& portName) {
-		_store.bindInput(nodeName, portName);
+		_state->store.bindInput(nodeName, portName);
 	}
 
 	/// @brief  带公共别名的图级输入绑定
@@ -99,13 +96,13 @@ public:
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
 	void bindInput(const std::string& alias, const std::string& nodeName,
 				   const std::string& portName) {
-		_ensureAliasUnique(alias, _store.inputBindings(), "InferGraph::bindInput");
-		_store.bindInput(nodeName, portName, alias);
+		_ensureAliasUnique(alias, _state->store.inputBindings(), "InferGraph::bindInput");
+		_state->store.bindInput(nodeName, portName, alias);
 	}
 
 	/// @brief  标记输出：该节点的该端口产出进入 OutputZone（与边目的地互斥）
 	void bindOutput(const std::string& nodeName, const std::string& portName) {
-		_outputZone.bind(nodeName, portName);
+		_state->output.bind(nodeName, portName);
 	}
 
 	/// @brief  带公共别名的图级输出绑定
@@ -116,8 +113,8 @@ public:
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
 	void bindOutput(const std::string& alias, const std::string& nodeName,
 					const std::string& portName) {
-		_ensureAliasUnique(alias, _outputZone.bindings(), "InferGraph::bindOutput");
-		_outputZone.bind(nodeName, portName, alias);
+		_ensureAliasUnique(alias, _state->output.bindings(), "InferGraph::bindOutput");
+		_state->output.bind(nodeName, portName, alias);
 	}
 
 	// ── 子图声明 ──
@@ -162,10 +159,10 @@ public:
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
 		_ensureSubmittable(taskId);
-		_errors.clearTask(taskId);      // 上一轮诊断不残留（影响 taskStatus 归一化）
-		_outputZone.clearTask(taskId);  // 复用同 ID：清掉上一轮声明/累加/结果
-		_outputZone.declare(taskId, std::move(declarations));
-		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
+		_state->errors.clearTask(taskId);    // 上一轮诊断不残留（影响 taskStatus 归一化）
+		_state->output.clearTask(taskId);    // 复用同 ID：清掉上一轮声明/累加/结果
+		_state->output.declare(taskId, std::move(declarations));
+		_engine->submit(taskId, timeout, maxHops, _state);
 	}
 
 	/// @brief  单输出便捷重载（生命周期语义同上）
@@ -174,10 +171,10 @@ public:
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
 		_ensureSubmittable(taskId);
-		_errors.clearTask(taskId);
-		_outputZone.clearTask(taskId);
-		_outputZone.declare(taskId, nodeName, portName, count);
-		_engine.submit(taskId, timeout, maxHops, _store, _outputZone, *_signalStore, _errors);
+		_state->errors.clearTask(taskId);
+		_state->output.clearTask(taskId);
+		_state->output.declare(taskId, nodeName, portName, count);
+		_engine->submit(taskId, timeout, maxHops, _state);
 	}
 
 	// ── 结果获取（消费式：取出即消耗）──
@@ -225,7 +222,7 @@ public:
 	/// @brief  请求取消活动中的 task（幂等；未知或已终止返回 false）。
 	///         协作式取消：在飞节点执行不被中断，传播链即刻停止，
 	///         wait()/waitForResult() 被唤醒，状态置 Cancelled。
-	bool cancel(const TaskId& taskId) { return _engine.cancel(taskId); }
+	bool cancel(const TaskId& taskId) { return _engine->cancel(taskId); }
 
 	/// @brief  同步等待 task 终止并返回结构化结果（无限等待直至终止）
 	/// @note   可能长时间阻塞（远端/慢引擎/信号阻塞）的场景应改用
@@ -246,76 +243,76 @@ public:
 	// ── 查询 ──
 
 	/// @brief  获取节点指针（非拥有），不存在返回 nullptr
-	Node* node(const std::string& name) { return _store.node(name); }
+	Node* node(const std::string& name) { return _state->store.node(name); }
 
 	/// @brief  获取节点指针（只读）
-	const Node* node(const std::string& name) const { return _store.node(name); }
+	const Node* node(const std::string& name) const { return _state->store.node(name); }
 
 	/// @brief  节点数量
-	size_t nodeCount() const { return _store.nodeCount(); }
+	size_t nodeCount() const { return _state->store.nodeCount(); }
 
 	/// @brief  边数量
-	size_t edgeCount() const { return _store.edgeCount(); }
+	size_t edgeCount() const { return _state->store.edgeCount(); }
 
 	/// @brief  获取所有节点名的列表
-	std::vector<std::string> nodeNames() const { return _store.nodeNames(); }
+	std::vector<std::string> nodeNames() const { return _state->store.nodeNames(); }
 
 	/// @brief  获取所有边的只读引用
-	const std::vector<Edge>& edges() const { return _store.edges(); }
+	const std::vector<Edge>& edges() const { return _state->store.edges(); }
 
 	/// @brief  获取所有输入绑定的只读引用
-	const std::vector<InputBinding>& inputBindings() const { return _store.inputBindings(); }
+	const std::vector<InputBinding>& inputBindings() const { return _state->store.inputBindings(); }
 
 	/// @brief  获取所有输出绑定的只读引用
-	const std::vector<OutputBinding>& outputBindings() const { return _outputZone.bindings(); }
+	const std::vector<OutputBinding>& outputBindings() const { return _state->output.bindings(); }
 
 	// ── 错误诊断 ──
 
 	/// @brief  查询指定 task 在整条传播链上的所有错误记录
-	std::vector<TaskError> taskErrors(const TaskId& taskId) const { return _errors.taskErrors(taskId); }
+	std::vector<TaskError> taskErrors(const TaskId& taskId) const { return _state->errors.taskErrors(taskId); }
 
 	/// @brief  清除所有 task 级错误记录（通常在重新 submit 前调用）
-	void clearErrors() { _errors.clearErrors(); }
+	void clearErrors() { _state->errors.clearErrors(); }
 
 	/// @brief  是否有任何 task 发生过错误
-	bool hasErrors() const { return _errors.hasErrors(); }
+	bool hasErrors() const { return _state->errors.hasErrors(); }
 
 	// ── task 完成回调 ──
 
 	using TaskCompleteCallback = std::function<void(const TaskId&)>;
 
 	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）
-	void setTaskCompleteCallback(TaskCompleteCallback cb) { _engine.setTaskCompleteCallback(std::move(cb)); }
+	void setTaskCompleteCallback(TaskCompleteCallback cb) { _engine->setTaskCompleteCallback(std::move(cb)); }
 
 	// ── 信号系统 ──
 
 	/// @brief  写入图级信号值（广播，所有 task 生效）。
-	void setSignal(const std::string& name, bool value) { _signalStore->set(name, value); }
+	void setSignal(const std::string& name, bool value) { _state->signals->set(name, value); }
 
 	/// @brief  写入 task 级信号值（仅对指定 taskId 生效，覆盖同名的广播信号）。
-	void setSignal(const std::string& name, const TaskId& taskId, bool value) { _signalStore->set(name, taskId, value); }
+	void setSignal(const std::string& name, const TaskId& taskId, bool value) { _state->signals->set(name, taskId, value); }
 
 	/// @brief  读取全局信号值。
-	bool getSignal(const std::string& name) const { return _signalStore->get(name); }
+	bool getSignal(const std::string& name) const { return _state->signals->get(name); }
 
 	/// @brief  读取信号值（task 级优先 → 全局回退）。
-	bool getSignal(const std::string& name, const TaskId& taskId) const { return _signalStore->get(name, taskId); }
+	bool getSignal(const std::string& name, const TaskId& taskId) const { return _state->signals->get(name, taskId); }
 
 	/// @brief  获取信号仓库指针，供 Node::bindSignal 使用。
-	std::shared_ptr<SignalStore> signalStore() { return _signalStore; }
+	std::shared_ptr<SignalStore> signalStore() { return _state->signals; }
 
 	// ── 同步等待与图导出 ──
 
 	/// @brief  同步等待 task 终止（无限等待；返回后可经 takeOutput 读取结果）
 	/// @return true 已终止；false taskId 未知（从未提交或已 releaseTask）
 	bool wait(const TaskId& taskId) {
-		return _engine.wait(taskId, std::chrono::milliseconds(0));
+		return _engine->wait(taskId, std::chrono::milliseconds(0));
 	}
 
 	/// @brief  同步等待 task 终止（显式超时；timeout <= 0 视为无限等待）
 	/// @return true 在超时内终止，false 超时或 taskId 未知（任务仍在运行，未被取消）
 	bool wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
-		return _engine.wait(taskId, timeout);
+		return _engine->wait(taskId, timeout);
 	}
 
 	/// @brief  导出为可嵌入父图的包装 Node
@@ -332,7 +329,7 @@ public:
 private:
 	/// @brief  提交前置校验：活动 task 拒绝重复提交（engine.submit 内部还有权威校验）
 	void _ensureSubmittable(const TaskId& taskId) const {
-		if (_engine.status(taskId) == TaskStatus::Running)
+		if (_engine->status(taskId) == TaskStatus::Running)
 			throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::submit",
 								 "task '" + taskId + "' is still running; duplicate submit rejected");
 	}
@@ -359,14 +356,14 @@ private:
 	std::pair<std::string, std::string>
 	_resolveInputName(const std::string& name, const char* api) const;
 
-	// ── 内部组件（声明顺序决定析构顺序）──
-	// ExecutionEngine 必须最后声明 → 最先析构：
-	//   其线程池 shutdown 期间 TaskGate 析构函数需访问下方成员。
-	std::shared_ptr<SignalStore> _signalStore;
-	ErrorTracker    _errors;
-	OutputZone      _outputZone;
-	GraphStore      _store;
-	ExecutionEngine _engine;
+	// ── 内部组件 ──
+	// 图状态（store/output/signals/errors）聚合为共享的 GraphRuntimeState：
+	// 飞行任务经 TaskGate/任务 lambda/看门狗持有同一 shared_ptr，图组件的
+	// 存活期由引用计数保证，不再依赖成员声明顺序约定。
+	// ExecutionEngine 保持与图同生命周期：engine 最后声明 → 最先析构，
+	// 线程池 shutdown（join 全部 worker）先于 state 释放发生。
+	std::shared_ptr<GraphRuntimeState> _state;
+	std::unique_ptr<ExecutionEngine> _engine;
 };
 
 } // namespace DC

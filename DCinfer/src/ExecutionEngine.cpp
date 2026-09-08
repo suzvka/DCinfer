@@ -1,4 +1,5 @@
 #include "ExecutionEngine.h"
+#include "GraphRuntimeState.h"
 #include "GraphStore.h"
 #include "OutputZone.h"
 #include "SignalStore.h"
@@ -16,8 +17,8 @@ namespace DC {
 // ════════════════════════════════════════════
 
 ExecutionEngine::TaskGate::~TaskGate() {
-	if (!terminated.load(std::memory_order_acquire) && engine && output && graph && signals && errors) {
-		engine->_exhaustedCheck(taskId, *output, *graph, *signals, *errors);
+	if (!terminated.load(std::memory_order_acquire) && engine && state) {
+		engine->_exhaustedCheck(taskId, state);
 	}
 }
 
@@ -54,12 +55,12 @@ void ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity, const std::st
 
 void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, const TaskId& taskId,
 									 std::shared_ptr<TaskGate> gate, uint32_t remainingHops,
-									 GraphStore& graph, OutputZone& output,
-									 SignalStore& signals, ErrorTracker& errors) {
-	// 捕获裸指针：图拓扑的存活期必须覆盖全部飞行中的任务（与 gate 相同约束）
+									 const std::shared_ptr<GraphRuntimeState>& state) {
+	// 捕获 state 共享句柄：图拓扑/输出区/信号/诊断的存活期由引用计数保证，
+	// 与图对象析构顺序无关（gate 与 lambda 各持一份）
 	_dispatchToPool(node->affinity(), node->tag(),
-					[this, node, nodeName, taskId, gate, remainingHops,
-					 &graph, &output, &signals, &errors] {
+					[this, node, nodeName, taskId, gate, remainingHops, state] {
+		auto& errors = state->errors;
 		NodeResult result;
 		try {
 			result = node->tryExecute(taskId);
@@ -92,7 +93,7 @@ void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, co
 		}
 
 		// 节点执行成功 → 就地传播输出到下游（池线程内，与调度点同上下文）
-		_propagateFrom(nodeName, taskId, gate, remainingHops, graph, output, signals, errors);
+		_propagateFrom(nodeName, taskId, gate, remainingHops, state);
 	});
 }
 
@@ -101,8 +102,10 @@ void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, co
 // ════════════════════════════════════════════
 
 void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds timeout,
-							 uint32_t maxHops, GraphStore& graph, OutputZone& output,
-							 SignalStore& signals, ErrorTracker& errors) {
+							 uint32_t maxHops, const std::shared_ptr<GraphRuntimeState>& state) {
+	auto& output = state->output;
+	auto& graph = state->store;
+
 	// 校验：必须已声明输出
 	if (!output.hasDeclaration(taskId)) {
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "ExecutionEngine::submit",
@@ -128,10 +131,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	// 注册到活动表供 cancel() 定位，_terminate 时移除
 	auto gate = std::make_shared<TaskGate>();
 	gate->engine = this;
-	gate->output = &output;
-	gate->graph = &graph;
-	gate->signals = &signals;
-	gate->errors = &errors;
+	gate->state = state; // 与图对象共享图运行时状态（在飞任务保活）
 	gate->taskId = taskId;
 	{
 		std::lock_guard lk(_activeGatesMutex);
@@ -142,8 +142,11 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	if (timeout.count() > 0) {
 		auto deadline = std::chrono::steady_clock::now() + timeout;
 		auto watchdog = std::jthread(
-			[this, taskId, timeout, deadline, gate, &graph, &output, &signals, &errors](
+			[this, taskId, timeout, deadline, gate, state](
 				std::stop_token stoken) {
+				auto& errors = state->errors;
+				auto& output = state->output;
+				auto& graph = state->store;
 				// 轮询 sleep，支持 stop_token 提前取消
 				while (!stoken.stop_requested()
 					   && std::chrono::steady_clock::now() < deadline) {
@@ -156,8 +159,8 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 					std::string reason = "task timed out (" + std::to_string(timeout.count())
 										 + "ms) without meeting output declarations";
 					errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit", reason);
-					_diagnoseAbnormal(taskId, reason, output, graph, errors);
-					_terminate(taskId, graph, output, signals, TaskStatus::TimedOut);
+					_diagnoseAbnormal(taskId, reason, state);
+					_terminate(taskId, state, TaskStatus::TimedOut);
 				}
 			});
 
@@ -182,8 +185,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 			continue;
 
 		// 入口节点：执行 + 完成后就地传播（_submitNodeRun 内部处理）
-		_submitNodeRun(nodePtr.get(), nodeName, taskId, gate, maxHops,
-					   graph, output, signals, errors);
+		_submitNodeRun(nodePtr.get(), nodeName, taskId, gate, maxHops, state);
 	}
 }
 
@@ -194,8 +196,11 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 									 std::shared_ptr<TaskGate> gate,
 									 uint32_t remainingHops,
-									 GraphStore& graph, OutputZone& output,
-									 SignalStore& signals, ErrorTracker& errors) {
+									 const std::shared_ptr<GraphRuntimeState>& state) {
+	auto& graph = state->store;
+	auto& output = state->output;
+	auto& signals = *state->signals;
+	auto& errors = state->errors;
 	// 调用前提：节点已由 _submitNodeRun 执行成功（失败路径已记录错误并跳过传播），
 	// 输出已写入 TaskBuffer 输出槽位，本函数在池线程内就地执行。
 
@@ -205,8 +210,8 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 							 + "': cycle or excessively deep graph detected";
 		errors.recordError(taskId, nodeName, "ExecutionEngine::_propagateFrom", reason);
 		gate->terminated.store(true, std::memory_order_release);
-		_diagnoseAbnormal(taskId, reason, output, graph, errors);
-		_terminate(taskId, graph, output, signals, TaskStatus::Failed);
+		_diagnoseAbnormal(taskId, reason, state);
+		_terminate(taskId, state, TaskStatus::Failed);
 		return;
 	}
 
@@ -231,7 +236,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 			return;
 		if (output.accumulateAndCheck(nodeName, outPort.name, taskId)) {
 			gate->terminated.store(true, std::memory_order_release);
-			_terminate(taskId, graph, output, signals, TaskStatus::Succeeded);
+			_terminate(taskId, state, TaskStatus::Succeeded);
 			return;
 		}
 	}
@@ -284,8 +289,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 
 		// 下游就绪 → 提交执行 + 完成后继续传播（数据冒泡）
 		if (dst->isReady(taskId)) {
-			_submitNodeRun(dst, edge.dstNode, taskId, gate, remainingHops - 1,
-						   graph, output, signals, errors);
+			_submitNodeRun(dst, edge.dstNode, taskId, gate, remainingHops - 1, state);
 		}
 	}
 }
@@ -301,8 +305,11 @@ bool ExecutionEngine::_isTerminated(const TaskId& taskId) const {
 }
 
 void ExecutionEngine::_terminate(const TaskId& taskId,
-								 GraphStore& graph, OutputZone& output,
-								 SignalStore& signals, TaskStatus terminalStatus) {
+								 const std::shared_ptr<GraphRuntimeState>& state,
+								 TaskStatus terminalStatus) {
+	auto& graph = state->store;
+	auto& output = state->output;
+	auto& signals = *state->signals;
 	{
 		std::lock_guard lk(_terminationMutex);
 		// 防止重复终止（幂等）：仅 Running → 终态迁移一次有效
@@ -389,8 +396,10 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 // 耗尽检测：TaskGate 析构或超时触发
 // ════════════════════════════════════════════
 
-void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
-									  GraphStore& graph, SignalStore& signals, ErrorTracker& errors) {
+void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
+									  const std::shared_ptr<GraphRuntimeState>& state) {
+	auto& output = state->output;
+	auto& graph = state->store;
 	// 已终止则跳过
 	if (_isTerminated(taskId)) {
 		return;
@@ -401,7 +410,7 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 
 	if (allMet) {
 		// 声明已满足 → 正常终止（守护路径，主路径在 OutputZone::accumulateAndCheck 中处理）
-		_terminate(taskId, graph, output, signals);
+		_terminate(taskId, state);
 		return;
 	}
 
@@ -409,7 +418,7 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 	// 写入诊断警告，但不主动终止——留给看门狗（若已配置）处理真正的死锁。
 	// 若未配置看门狗（timeout=0），调用方需自行处理 wait() 超时。
 	_diagnoseAbnormal(taskId, "propagation chain exhausted with unsatisfied output declarations",
-					  output, graph, errors);
+					  state);
 }
 
 // ════════════════════════════════════════════
@@ -417,7 +426,10 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId, OutputZone& output,
 // ════════════════════════════════════════════
 
 void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string& reason,
-										OutputZone& output, GraphStore& graph, ErrorTracker& errors) {
+										const std::shared_ptr<GraphRuntimeState>& state) {
+	auto& output = state->output;
+	auto& graph = state->store;
+	auto& errors = state->errors;
 	// ① 报告未满足的输出声明
 	auto unsatisfied = output.unsatisfiedDeclarations(taskId);
 	for (const auto& u : unsatisfied) {
@@ -504,7 +516,7 @@ bool ExecutionEngine::cancel(const TaskId& taskId) {
 	if (gate->terminated.exchange(true, std::memory_order_acq_rel))
 		return false; // 已被正常路径/看门狗终止
 	// 传播链在下个检查点停止；缓冲与信号由 _terminate 照常清理
-	_terminate(taskId, *gate->graph, *gate->output, *gate->signals, TaskStatus::Cancelled);
+	_terminate(taskId, gate->state, TaskStatus::Cancelled);
 	return true;
 }
 

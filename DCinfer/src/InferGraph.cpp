@@ -11,8 +11,8 @@ namespace DC {
 
 InferGraph::InferGraph(const PoolConfig& computeCfg,
 					   const PoolConfig& operatorCfg, const PoolConfig& systemCfg)
-	: _signalStore(std::make_shared<SignalStore>()),
-	  _engine(computeCfg, operatorCfg, systemCfg) {}
+	: _state(std::make_shared<GraphRuntimeState>()),
+	  _engine(std::make_unique<ExecutionEngine>(computeCfg, operatorCfg, systemCfg)) {}
 
 // ════════════════════════════════════════════
 // 子图声明
@@ -22,7 +22,7 @@ void InferGraph::declareSubgraph(const std::string& name,
 								  std::initializer_list<std::string> nodeNames) {
 	// 1. 验证所有节点存在（affinity 可混合：组信号量跨池共享，全局互斥）
 	for (const auto& nname : nodeNames) {
-		auto* n = _store.node(nname);
+		auto* n = _state->store.node(nname);
 		if (!n)
 			throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::declareSubgraph",
 								 "node '" + nname + "' not found");
@@ -30,10 +30,10 @@ void InferGraph::declareSubgraph(const std::string& name,
 
 	// 2. 设置所有节点的 tag 为子图名
 	for (const auto& nname : nodeNames)
-		_store.node(nname)->setTag(name);
+		_state->store.node(nname)->setTag(name);
 
 	// 3. 注册跨池分组限流（共享信号量，对三个线程池同时生效）
-	_engine.registerGroupLimit(ThreadPoolAffinity::Compute, name, 1);
+	_engine->registerGroupLimit(ThreadPoolAffinity::Compute, name, 1);
 }
 
 // ════════════════════════════════════════════
@@ -42,14 +42,14 @@ void InferGraph::declareSubgraph(const std::string& name,
 
 void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName, Value data) {
-	auto* n = _store.node(nodeName);
+	auto* n = _state->store.node(nodeName);
 	if (!n)
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
 							 "node '" + nodeName + "' not found");
 	try {
 		n->setInput(taskId, portName, std::move(data));
 	} catch (const NodeException& e) {
-		_errors.recordError(taskId, nodeName, "InferGraph::feedInput",
+		_state->errors.recordError(taskId, nodeName, "InferGraph::feedInput",
 							"NodeException in setInput for port '" + portName
 								+ "': " + std::string(e.what()));
 		throw GraphException(GraphException::ErrorType::FeedFailed, "InferGraph::feedInput",
@@ -75,7 +75,7 @@ void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portNam
 void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds timeout,
 							 uint32_t maxHops) {
 	std::vector<OutputDeclaration> declarations;
-	for (const auto& ob : _outputZone.bindings())
+	for (const auto& ob : _state->output.bindings())
 		declarations.push_back({ob.nodeName, ob.portName, 1});
 	if (declarations.empty())
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submitBound",
@@ -91,11 +91,11 @@ void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds tim
 Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 							const std::string& portName) {
 	// 优先查 OutputZone（OutputZone 绑定端口的数据在 _propagateFrom 第二步已搬运至此）
-	auto ozVal = _outputZone.take(taskId, nodeName, portName);
+	auto ozVal = _state->output.take(taskId, nodeName, portName);
 	if (ozVal)
 		return std::move(*ozVal);
 
-	auto* n = _store.node(nodeName);
+	auto* n = _state->store.node(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutput",
 							 "node '" + nodeName + "' not found");
@@ -106,7 +106,7 @@ Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nodeName,
 								   const std::string& portName) {
 	// 优先查 OutputZone
-	auto ozVal = _outputZone.take(taskId, nodeName, portName);
+	auto ozVal = _state->output.take(taskId, nodeName, portName);
 	if (ozVal) {
 		auto* t = ozVal->as<Tensor>();
 		if (t)
@@ -116,7 +116,7 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 								 + "' is not a DC::Tensor");
 	}
 
-	auto* n = _store.node(nodeName);
+	auto* n = _state->store.node(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutputTensor",
 							 "node '" + nodeName + "' not found");
@@ -127,10 +127,10 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName) const {
 	// 优先查 OutputZone
-	if (_outputZone.hasOutput(taskId, nodeName, portName))
+	if (_state->output.hasOutput(taskId, nodeName, portName))
 		return true;
 
-	auto* n = _store.node(nodeName);
+	auto* n = _state->store.node(nodeName);
 	if (!n)
 		return false;
 	return n->hasOutput(taskId, portName);
@@ -157,7 +157,7 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& name) const 
 
 std::pair<std::string, std::string>
 InferGraph::_resolveOutputName(const std::string& name, const char* api) const {
-	const auto& bindings = _outputZone.bindings();
+	const auto& bindings = _state->output.bindings();
 	size_t aliasMatches = 0;
 	size_t portMatches = 0;
 	std::pair<std::string, std::string> resolved;
@@ -188,7 +188,7 @@ InferGraph::_resolveOutputName(const std::string& name, const char* api) const {
 
 std::pair<std::string, std::string>
 InferGraph::_resolveInputName(const std::string& name, const char* api) const {
-	const auto& bindings = _store.inputBindings();
+	const auto& bindings = _state->store.inputBindings();
 	size_t aliasMatches = 0;
 	size_t portMatches = 0;
 	std::pair<std::string, std::string> resolved;
@@ -222,10 +222,10 @@ InferGraph::_resolveInputName(const std::string& name, const char* api) const {
 // ════════════════════════════════════════════
 
 TaskStatus InferGraph::taskStatus(const TaskId& taskId) const {
-	auto st = _engine.status(taskId);
+	auto st = _engine->status(taskId);
 	if (st == TaskStatus::Succeeded) {
 		// 正常终止但存在 Error 级诊断 → 归一化为 Failed（部分节点执行失败）
-		for (const auto& e : _errors.taskErrors(taskId)) {
+		for (const auto& e : _state->errors.taskErrors(taskId)) {
 			if (e.level == DiagnosticLevel::Error)
 				return TaskStatus::Failed;
 		}
@@ -238,17 +238,17 @@ TaskResult InferGraph::waitForResult(const TaskId& taskId) {
 }
 
 TaskResult InferGraph::waitForResult(const TaskId& taskId, std::chrono::milliseconds timeout) {
-	_engine.wait(taskId, timeout);   // timeout <= 0 视为无限等待
+	_engine->wait(taskId, timeout);   // timeout <= 0 视为无限等待
 	TaskResult result;
 	result.status = taskStatus(taskId);
-	result.errors = _errors.taskErrors(taskId);
+	result.errors = _state->errors.taskErrors(taskId);
 	return result;
 }
 
 void InferGraph::releaseTask(const TaskId& taskId) {
-	_engine.releaseTask(taskId);     // 仅终止态可释放（活动任务拒绝）
-	_outputZone.clearTask(taskId);   // 释放结果 artifact
-	_errors.clearTask(taskId);       // 释放诊断记录
+	_engine->releaseTask(taskId);     // 仅终止态可释放（活动任务拒绝）
+	_state->output.clearTask(taskId);   // 释放结果 artifact
+	_state->errors.clearTask(taskId);       // 释放诊断记录
 }
 
 // ════════════════════════════════════════════
@@ -258,8 +258,8 @@ void InferGraph::releaseTask(const TaskId& taskId) {
 std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32_t maxHops) {
 	// ① 从 InputZone 推导输入 Schema
 	Node::Schema inSchema;
-	for (auto& b : _store.inputBindings()) {
-		auto* n = _store.node(b.nodeName);
+	for (auto& b : _state->store.inputBindings()) {
+		auto* n = _state->store.node(b.nodeName);
 		if (!n) continue;
 		auto* port = n->schema().findInput(b.portName);
 		if (port) inSchema.inputs.push_back(*port);
@@ -267,8 +267,8 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 	// ② 从 OutputZone 推导输出 Schema（跳过连接器）
 	Node::Schema outSchema;
-	for (auto& b : _outputZone.bindings()) {
-		auto* n = _store.node(b.nodeName);
+	for (auto& b : _state->output.bindings()) {
+		auto* n = _state->store.node(b.nodeName);
 		if (!n || n->isConnector()) continue;
 		auto* port = n->schema().findOutput(b.portName);
 		if (port) outSchema.outputs.push_back(*port);
@@ -285,7 +285,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 		// 将 RunContext 的输入注入子图
 		int fedCount = 0;
-		for (auto& ib : _store.inputBindings()) {
+		for (auto& ib : _state->store.inputBindings()) {
 			const auto& inVal = ctx.peek(ib.portName);
 			if (!inVal.as<Tensor>()) {
 				continue;
@@ -297,7 +297,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 		// 收集输出声明
 		std::vector<OutputDeclaration> declarations;
-		for (auto& ob : _outputZone.bindings()) {
+		for (auto& ob : _state->output.bindings()) {
 			declarations.push_back({ob.nodeName, ob.portName, 1});
 		}
 
@@ -311,7 +311,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			if (task != tid) {
 				return;
 			}
-			for (auto& ob : _outputZone.bindings()) {
+			for (auto& ob : _state->output.bindings()) {
 				if (!hasOutput(tid, ob.nodeName, ob.portName)) continue;
 				(*capturedOutputs)[ob.portName] = takeOutput(tid, ob.nodeName, ob.portName);
 			}
@@ -341,7 +341,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		}
 
 		// 收集输出到 RunContext
-		for (auto& ob : _outputZone.bindings()) {
+		for (auto& ob : _state->output.bindings()) {
 			auto it = capturedOutputs->find(ob.portName);
 			if (it != capturedOutputs->end()) {
 				ctx.output(ob.portName, std::move(it->second));
@@ -360,7 +360,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 	// blockedOverride：内部无通路满足输出声明时，子图节点向父级应答阻塞。
 	// isReady 保持边界缓冲语义（父级数据齐即可进入执行）。
 	graphNode->setBlockedOverride([this](const Node::TaskId& tid) {
-		return !canSatisfyDeclarations(_store, _outputZone, tid);
+		return !canSatisfyDeclarations(_state->store, _state->output, tid);
 	});
 
 	return graphNode;
