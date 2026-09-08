@@ -59,13 +59,12 @@ DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准�
 ```bash
 cd DCinfer
 
-# 初始化 submodule（首次克隆后必须执行）
+# 初始化 submodule（使用 vcpkg 依赖的模块前必须：DCIr / 引擎适配器 / DCNet）
 git submodule update --init --recursive
 
-# 配置：核心库 + DCIr + Builtin 引擎 + 示例（一条命令，无需额外依赖）
-cmake -B build -S . -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake \
-  -DBUILD_ENGINE_BUILTIN=ON
+# 配置：核心库 + Builtin 引擎 + 示例（核心与 Builtin 均零外部依赖，
+# 无需 vcpkg；需要 JSON/.dcg 序列化时改用 core-ir 预设，见下文）
+cmake -B build -S . -G Ninja -DBUILD_ENGINE_BUILTIN=ON
 
 # 构建
 cmake --build build
@@ -97,7 +96,8 @@ if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
 
 ### 默认构建内容
 
-不带任何 `-D` 开关的默认配置只构建核心库（`DCinfer`）+ DCIr + 核心测试；
+不带任何 `-D` 开关的默认配置只构建核心库（`DCinfer`）+ 核心测试——
+裸 `cmake -B build` **零外部依赖**即可配置成功；DCIr（需 nlohmann-json/minizip/zlib）、
 引擎适配器（Builtin / OnnxRuntime / OpenAI）与网络框架 DCNet **全部默认 OFF**，按需启用。
 启用/停用情况在配置结束时以 **configure summary** 汇总输出。
 
@@ -115,10 +115,8 @@ cmake --build build/core-only --config Release
 cmake --preset core-ir
 cmake --build build/core-ir --config Release
 
-# 方式三：手动开关（等价于 core-only）
-cmake -B build -S . \
-  -DDCINFER_BUILD_IR=OFF -DDCINFER_BUILD_ENGINES=OFF -DDCINFER_BUILD_DCNET=OFF \
-  -DDCINFER_BUILD_TESTS=OFF -DDCINFER_BUILD_EXAMPLES=OFF
+# 方式三：手动开关——IR/引擎/DCNet 均已默认 OFF，最简即一条裸命令（默认含核心测试）
+cmake -B build -S .
 ```
 
 模块依赖分层（`vcpkg.json` feature）：`ir` → DCIr（nlohmann-json/minizip/zlib）、
@@ -135,6 +133,39 @@ git sparse-checkout set DCinfer DCIr cmake vcpkg.json CMakeLists.txt
 
 核心之上注册自有引擎：实现 `EngineDescriptor` 钩子 → `EngineRegistry::registerEngine()`
 （详见 `DCinfer/include/Graph/EngineRegistry.h`），图级语义与内置引擎完全一致。
+
+### 作为库消费（安装与 find_package）
+
+除源码内 `add_subdirectory()` 外，DCinfer 支持 `cmake --install` 后以
+`find_package` 消费——这是集成到宿主工程的推荐方式：
+
+```bash
+# 构建 + 安装（core-only；其他预设同理，预设名见 CMakePresets.json）
+cmake --preset core-only
+cmake --install build/core-only --prefix <安装前缀>
+```
+
+安装树按包分层（与 vcpkg feature 分层一致），传递依赖由各包 Config 自动解析：
+
+| 包 | 消费方式 | 导出目标 | 传递依赖 |
+|---|---|---|---|
+| DCinfer | `find_package(DCinfer CONFIG REQUIRED)` | `DCinfer::DCinfer` | 无（仅 C++20 标准库） |
+| DCIr | `find_package(DCIr CONFIG REQUIRED)` | `DCIr::DCIr` | 自动拉起 DCinfer + nlohmann-json/minizip/zlib |
+| DCNet | `find_package(DCNet CONFIG REQUIRED)` | `DCNet::DCNet` | 自动拉起 DCinfer + json + Poco |
+| DCEngine | `find_package(DCEngine CONFIG REQUIRED)` | `DCEngine::Builtin` | 自动拉起 DCinfer |
+
+宿主工程 CMakeLists 示例：
+
+```cmake
+find_package(DCinfer 0.2 CONFIG REQUIRED)
+find_package(DCEngine CONFIG REQUIRED)   # 需要 Builtin 引擎时
+
+target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)
+```
+
+安装闭环可运行 [examples/install_smoke](examples/install_smoke/CMakeLists.txt)
+冒烟验证（独立消费工程，不参与主构建）。OnnxRuntime / OpenAI 适配器依赖
+vcpkg 重型依赖，暂未纳入安装导出，仍以 `add_subdirectory` 消费。
 
 ### 运行测试
 

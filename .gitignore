@@ -26,6 +26,8 @@ Testing/
 !cmake/vcpkg-toolchain.cmake
 !cmake/overlay-ports/
 !cmake/overlay-ports/**
+!cmake/triplets/
+!cmake/triplets/**
 
 
 # Compiled object files, libraries, and executables

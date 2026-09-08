@@ -59,11 +59,15 @@ endif()
 
 target_include_directories(DCinfer
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/Tensor
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/Tools
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/Node
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/Graph
+        # BUILD_INTERFACE：源码内消费（多子目录扁平路径，裸文件名 include）。
+        # 必须用生成器表达式包装——裸源码绝对路径会被 install(EXPORT) 拒绝。
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Tensor>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Tools>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Node>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Graph>
+        # INSTALL_INTERFACE：安装树（各子目录公开头扁平合并到 include/，见下方 install 规则）
+        $<INSTALL_INTERFACE:include>
 )
 
 file(GLOB_RECURSE DCINFER_SRC_FILES CONFIGURE_DEPENDS
@@ -72,3 +76,58 @@ file(GLOB_RECURSE DCINFER_SRC_FILES CONFIGURE_DEPENDS
 )
 target_sources(DCinfer PRIVATE ${DCINFER_SRC_FILES})
 # Tests are handled in DCinfer/test when BUILD_TESTS is enabled from the root CMakeLists
+
+# ── 安装与 find_package 支持 ──
+# 消费方式二选一：add_subdirectory()（BUILD_INTERFACE 源码路径）或安装后
+# find_package(DCinfer CONFIG REQUIRED)（INSTALL_INTERFACE 相对路径）。
+include(GNUInstallDirs)
+
+# 包版本：顶层 project(DCinfer VERSION) 为权威；宿主经 add_subdirectory 引入且
+# 未声明版本号时兜底（需与顶层 project() 版本同步维护）。
+set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
+if(NOT DCINFER_PKG_VERSION)
+    set(DCINFER_PKG_VERSION "0.2.0")
+endif()
+
+install(TARGETS DCinfer EXPORT DCinferTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# 公开头扁平安装：源码与示例均以裸文件名 include（如 "InferGraph.h"、"Tensor.hpp"），
+# 因此各子目录公开头直接合并进 include/，与 BUILD_INTERFACE 的搜索路径语义等价。
+# Node/internal/ 为 Pimpl 私有组件头（公开头零引用），不进入安装树。
+install(DIRECTORY
+    include/Graph/
+    include/Node/
+    include/Tensor/
+    include/Tools/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    PATTERN "internal" EXCLUDE
+)
+
+set(DCINFER_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/DCinfer")
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/DCinferConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/DCinferConfig.cmake"
+    INSTALL_DESTINATION ${DCINFER_INSTALL_CMAKEDIR}
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/DCinferConfigVersion.cmake"
+    VERSION ${DCINFER_PKG_VERSION}
+    COMPATIBILITY SameMinorVersion
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/DCinferConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/DCinferConfigVersion.cmake"
+    DESTINATION ${DCINFER_INSTALL_CMAKEDIR}
+)
+install(EXPORT DCinferTargets
+    FILE DCinferTargets.cmake
+    NAMESPACE DCinfer::
+    DESTINATION ${DCINFER_INSTALL_CMAKEDIR}
+)

@@ -1,0 +1,22 @@
+# DCIrConfig.cmake.in - DCIr 图编译器包配置模板
+#
+# 生成：configure_package_config_file()（见 DCIr/CMakeLists.txt）
+# 提供：DCIr::DCIr 目标；依赖 DCinfer 核心包 + json/zlib/minizip。
+
+@PACKAGE_INIT@
+
+# find_package(DCIr 0.2) 版本匹配与消费方可见的版本变量
+set(DCIr_VERSION "@DCINFER_PKG_VERSION@")
+
+include(CMakeFindDependencyMacro)
+
+# 传递依赖（与 vcpkg feature 'ir' 对应；config 名与 DCIr 构建时的
+# find_package 调用保持一致）
+find_dependency(DCinfer CONFIG)
+find_dependency(nlohmann_json CONFIG)
+find_dependency(ZLIB)
+find_dependency(unofficial-minizip CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/DCIrTargets.cmake")
+
+check_required_components(DCIr)

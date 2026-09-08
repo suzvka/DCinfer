@@ -34,7 +34,9 @@ else()
     set(_dcinfer_examples_default OFF)
 endif()
 
-_dcinfer_option(DCINFER_BUILD_IR        BUILD_IR        ON  "Build DCIr graph compiler")
+# IR 默认 OFF：新用户裸 `cmake -B build` 零依赖即可配置成功；需要 JSON/.dcg
+# 序列化时显式 -DDCINFER_BUILD_IR=ON（或用 core-ir 预设，经 vcpkg feature 'ir' 拉依赖）。
+_dcinfer_option(DCINFER_BUILD_IR        BUILD_IR        OFF "Build DCIr graph compiler")
 _dcinfer_option(DCINFER_BUILD_TESTS     BUILD_TESTS     "${_dcinfer_tests_default}"    "Build DCinfer tests")
 _dcinfer_option(DCINFER_BUILD_DCNET     BUILD_DCNET     OFF "Build DCNet network adapters")
 _dcinfer_option(DCINFER_BUILD_ENGINES   BUILD_ENGINES   ON  "Build engine adapters")

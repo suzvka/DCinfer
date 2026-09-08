@@ -1,0 +1,14 @@
+{
+  "$comment": "install_smoke 作为独立宿主工程的 vcpkg manifest（与主工程 vcpkg.json 同构分层）。\n基础 dependencies 为空：core-only 冒烟（不带 toolchain 或不启用任何 feature）零 vcpkg 安装。\nSMOKE_WITH_IR 冒烟（-DDCINFER_BUILD_IR=ON 经 cmake/vcpkg-toolchain.cmake 注入 feature）\n→ 安装 DCIr 的传递依赖 nlohmann-json/minizip/zlib。",
+  "dependencies": [],
+  "features": {
+    "ir": {
+      "description": "DCIr transitive dependencies for the smoke test (nlohmann-json/minizip/zlib)",
+      "dependencies": [
+        "nlohmann-json",
+        "minizip",
+        "zlib"
+      ]
+    }
+  }
+}

@@ -1,0 +1,20 @@
+# DCinferConfig.cmake.in - DCinfer 核心库包配置模板
+#
+# 生成：configure_package_config_file()（见 DCinfer/CMakeLists.txt）
+# 提供：DCinfer::DCinfer 目标；版本文件支持 find_package(DCinfer 0.2) 形式。
+
+@PACKAGE_INIT@
+
+# find_package(DCinfer 0.2) 版本匹配与消费方可见的版本变量
+set(DCinfer_VERSION "@DCINFER_PKG_VERSION@")
+
+include(CMakeFindDependencyMacro)
+
+# 核心库唯一常规外部依赖。
+# 注：GCC 下若构建期检测到需要 libatomic，导出目标会携带裸库名 "atomic"，
+# 由消费方平台链接器解析（Linux 标准库路径），无需 find_dependency。
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/DCinferTargets.cmake")
+
+check_required_components(DCinfer)

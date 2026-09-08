@@ -1,0 +1,26 @@
+# DCNetConfig.cmake.in - DCNet 网络框架包配置模板
+#
+# 生成：configure_package_config_file()（见 DCNet/CMakeLists.txt）
+# 提供：DCNet::DCNet 目标；依赖 DCinfer 核心包 + nlohmann-json + Poco。
+
+@PACKAGE_INIT@
+
+# find_package(DCNet 0.2) 版本匹配与消费方可见的版本变量
+set(DCNet_VERSION "@DCINFER_PKG_VERSION@")
+
+include(CMakeFindDependencyMacro)
+
+# 传递依赖（与 vcpkg feature 'net' 对应；TLS 后端随平台切换：
+# Windows NetSSLWin(SChannel) / POSIX NetSSL(OpenSSL)）
+find_dependency(DCinfer CONFIG)
+find_dependency(nlohmann_json CONFIG)
+
+if (WIN32)
+    find_dependency(Poco CONFIG COMPONENTS Foundation Net NetSSLWin)
+else()
+    find_dependency(Poco CONFIG COMPONENTS Foundation Net NetSSL)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/DCNetTargets.cmake")
+
+check_required_components(DCNet)
