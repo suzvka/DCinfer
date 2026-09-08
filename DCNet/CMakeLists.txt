@@ -63,7 +63,7 @@ include(GNUInstallDirs)
 # 包版本：与 DCinfer 模块同一约定（顶层 project(DCinfer VERSION) 权威 + 兑底）
 set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 if(NOT DCINFER_PKG_VERSION)
-    set(DCINFER_PKG_VERSION "0.2.0")
+    set(DCINFER_PKG_VERSION "0.3.0")
 endif()
 
 install(TARGETS DCNet EXPORT DCNetTargets

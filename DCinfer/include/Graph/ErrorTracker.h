@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../Node/Diagnostic.h"
+#include "Diagnostic.h"
 
 #include <mutex>
 #include <optional>

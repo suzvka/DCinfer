@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(DCinfer VERSION 0.2.0 LANGUAGES CXX)
+project(DCinfer VERSION 0.3.0 LANGUAGES CXX)
 
 # Guidance: on Windows, prefer configuring with an explicit platform (e.g. -A x64)
 # or from an x64 developer command prompt. If CMake selects NMake Makefiles it may

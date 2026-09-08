@@ -86,7 +86,7 @@ include(GNUInstallDirs)
 # 未声明版本号时兜底（需与顶层 project() 版本同步维护）。
 set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 if(NOT DCINFER_PKG_VERSION)
-    set(DCINFER_PKG_VERSION "0.2.0")
+    set(DCINFER_PKG_VERSION "0.3.0")
 endif()
 
 install(TARGETS DCinfer EXPORT DCinferTargets

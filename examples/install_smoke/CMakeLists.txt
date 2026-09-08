@@ -19,7 +19,7 @@ project(DCinferInstallSmoke LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(DCinfer 0.2 CONFIG REQUIRED)
+find_package(DCinfer 0.3 CONFIG REQUIRED)
 message(STATUS "DCinfer_VERSION = ${DCinfer_VERSION}")
 
 add_executable(install_smoke main.cpp)
