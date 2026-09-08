@@ -19,6 +19,7 @@
 #include "SlotType.h"
 #include "Value.h"
 #include "NodeException.h"
+#include "Diagnostic.h"
 
 namespace DC {
 
@@ -107,17 +108,16 @@ private:
 
 /// @brief 节点工厂参数：框架在 createNode 时收集并传入工厂。
 ///
-/// - engineConfig：createNode(engineType, name, engineConfig) 透传的配置指针；
-///   createNode(engineType, name, modelPath) 路径下兼容性指向引擎实例（新式
-///   工厂应改用 engineInstance 共享句柄）。
-/// - engineInstance：modelPath 路径下的引擎实例共享句柄（可空）；
+/// - engineConfig：createNode(engineType, name, engineConfig) 透传的**用户配置**指针；
+///   仅承载用户自定义配置（一字段一语义），引擎实例不经此字段传递。
+/// - engineInstance：引擎实例共享句柄（modelPath 路径下非空）；
 ///   工厂经 Node::bindEngine 绑定后，节点持有句柄，引擎存活期覆盖节点存活期。
 /// - schema：框架从 EngineInstance 推导（需引擎注册 getInputPorts/getOutputPorts）；
 ///   可为空，工厂可自行推导或使用内置 Schema 兜底。
 /// - modelPath：createNode(engineType, name, modelPath) 路径下非空。
 struct NodeFactoryParams {
 	std::string nodeName;
-	const void* engineConfig = nullptr;                 ///< 任意自定义配置（兼容：modelPath 路径下为实例裸指针）
+	const void* engineConfig = nullptr;                 ///< 用户自定义配置指针（仅 createNode(engineType,name,engineConfig) 路径非空）
 	std::shared_ptr<class EngineInstance> engineInstance; ///< 引擎实例共享句柄（modelPath 路径下非空）
 	NodeSchema schema;                  ///< 框架推导的端口 Schema（可为空）
 	std::string modelPath;              ///< 模型路径（modelPath 路径下非空）
@@ -126,12 +126,14 @@ struct NodeFactoryParams {
 using NodeFactory = std::function<std::unique_ptr<class Node>(const NodeFactoryParams&)>;
 
 /// @brief 节点执行结果状态。
+///
+/// 保持最小通用词表：后端 / 协议 / 子系统的细分错误不进入本枚举，
+/// 经 NodeResult::diagnostic（DC::Diagnostic，domain+code）附带上报。
 enum class NodeStatus {
 	Ok,
 	InvalidInput,
 	SchemaMismatch,
 	ExecutionFailed,
-	RemoteMalformed, ///< 远端响应结构异常（非 JSON / 缺关键字段）
 	InternalError
 };
 
@@ -139,6 +141,7 @@ enum class NodeStatus {
 struct NodeResult {
 	NodeStatus status = NodeStatus::Ok;
 	std::string message;
+	std::optional<Diagnostic> diagnostic; ///< 领域结构化诊断（可为空；细分分类由产生它的子系统定义）
 	bool ok() const { return status == NodeStatus::Ok; }
 };
 
@@ -282,6 +285,7 @@ public:
 
 	Node::Result success(std::string message = {}) const;
 	Node::Result failure(Node::Status status, std::string message) const;
+	Node::Result failure(Node::Status status, std::string message, Diagnostic diagnostic) const;
 	const TensorConverter* converter() const;
 	const EngineDescriptor* engineDescriptor() const;
 	const EngineInstance* engineInstance() const;

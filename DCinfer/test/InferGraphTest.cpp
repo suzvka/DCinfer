@@ -1268,18 +1268,9 @@ void testAliasBindingApi() {
 		graph2.addNode(std::make_unique<Node>("Builtin", "b", incSchema(), incRunFn()));
 		graph2.bindInput("first", "a", "x");
 		graph2.bindInput("second", "b", "x");
-		{
-			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
-			*v = 1.0f;
-			graph2.feedBoundInput("t1", "first", std::move(*v));
-		}
-		{
-			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
-			*v = 2.0f;
-			graph2.feedBoundInput("t1", "second", std::move(*v));
-		}
 
-		// 别名唯一性校验：输入别名重复
+		// 别名唯一性校验：输入别名重复（构建期 API：需在首次运行期调用前完成，
+		// feedBoundInput 触发惰性冻结后构建面关闭，另见 FreezeBoundaryTest）
 		bool dupIn = false;
 		try {
 			graph2.bindInput("first", "b", "x");
@@ -1297,6 +1288,17 @@ void testAliasBindingApi() {
 			dupOut = (e.getErrorType() == GraphException::ErrorType::DuplicateBinding);
 		}
 		CHECK(dupOut, "duplicate output alias should throw DuplicateBinding");
+
+		{
+			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+			*v = 1.0f;
+			graph2.feedBoundInput("t1", "first", std::move(*v));
+		}
+		{
+			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
+			*v = 2.0f;
+			graph2.feedBoundInput("t1", "second", std::move(*v));
+		}
 	}
 	END_TEST();
 }

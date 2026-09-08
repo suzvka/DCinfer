@@ -169,7 +169,7 @@ TEST(invalidParamsRejected) {
 	CHECK(result.status == Node::Status::InvalidInput, "invalid params → InvalidInput");
 }
 
-// ── 响应结构异常不再被吞掉：缺 content / 非 JSON → RemoteMalformed ──
+// ── 响应结构异常不再被吞掉：缺 content / 非 JSON → ExecutionFailed + dcnet 诊断 ──
 TEST(malformedResponseRejected) {
 	MockHttpServer server;
 	server.start([&](const std::string&, const std::string&, int& status) {
@@ -184,9 +184,12 @@ TEST(malformedResponseRejected) {
 	node->setInput("t1", "prompt", makeTextTensor("hi"));
 	auto result = node->tryExecute("t1");
 	CHECK(!result.ok(), "non-JSON response should fail");
-	CHECK(result.status == Node::Status::RemoteMalformed, "non-JSON → RemoteMalformed");
+	CHECK(result.status == Node::Status::ExecutionFailed, "non-JSON → ExecutionFailed（核心枚举保持通用）");
+	CHECK(result.diagnostic.has_value(), "non-JSON → 附带领域诊断");
+	CHECK(result.diagnostic->domain == "dcnet", "诊断 domain=dcnet");
 
-	// 缺 choices[0].message.content（协议漂移）→ RemoteMalformed，而非空字符串成功
+	// 缺 choices[0].message.content（协议漂移）→ ExecutionFailed（dcnet 诊断 code=RemoteMalformed），
+	// 而非空字符串成功
 	MockHttpServer server2;
 	server2.start([&](const std::string&, const std::string&, int& status) {
 		status = 200;
@@ -197,7 +200,9 @@ TEST(malformedResponseRejected) {
 	node2->setInput("t1", "prompt", makeTextTensor("hi"));
 	auto result2 = node2->tryExecute("t1");
 	CHECK(!result2.ok(), "missing content should fail");
-	CHECK(result2.status == Node::Status::RemoteMalformed, "missing content → RemoteMalformed");
+	CHECK(result2.status == Node::Status::ExecutionFailed, "missing content → ExecutionFailed");
+	CHECK(result2.diagnostic.has_value() && result2.diagnostic->domain == "dcnet",
+		  "missing content → dcnet 领域诊断");
 }
 
 // ── 合法空内容与字段缺失严格区分：content="" 成功返回 ──

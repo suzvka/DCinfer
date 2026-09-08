@@ -20,9 +20,11 @@ InferGraph::InferGraph(const PoolConfig& computeCfg,
 
 void InferGraph::declareSubgraph(const std::string& name,
 								  std::initializer_list<std::string> nodeNames) {
+	_ensureNotFrozen("InferGraph::declareSubgraph");
+
 	// 1. 验证所有节点存在（affinity 可混合：组信号量跨池共享，全局互斥）
 	for (const auto& nname : nodeNames) {
-		auto* n = _state->store.node(nname);
+		auto* n = _topology().node(nname);
 		if (!n)
 			throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::declareSubgraph",
 								 "node '" + nname + "' not found");
@@ -30,10 +32,10 @@ void InferGraph::declareSubgraph(const std::string& name,
 
 	// 2. 设置所有节点的 tag 为子图名
 	for (const auto& nname : nodeNames)
-		_state->store.node(nname)->setTag(name);
+		_topology().node(nname)->setTag(name);
 
 	// 3. 注册跨池分组限流（共享信号量，对三个线程池同时生效）
-	_engine->registerGroupLimit(ThreadPoolAffinity::Compute, name, 1);
+	_engine->registerGroupLimit(name, 1);
 }
 
 // ════════════════════════════════════════════
@@ -42,7 +44,8 @@ void InferGraph::declareSubgraph(const std::string& name,
 
 void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName, Value data) {
-	auto* n = _state->store.node(nodeName);
+	_ensureFrozen(); // 惰性冻结：运行期 API 入口统一编译（此后拓扑不可变）
+	auto* n = _topology().node(nodeName);
 	if (!n)
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
 							 "node '" + nodeName + "' not found");
@@ -75,7 +78,7 @@ void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portNam
 void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds timeout,
 							 uint32_t maxHops) {
 	std::vector<OutputDeclaration> declarations;
-	for (const auto& ob : _state->output.bindings())
+	for (const auto& ob : _outputBindingsView())
 		declarations.push_back({ob.nodeName, ob.portName, 1});
 	if (declarations.empty())
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submitBound",
@@ -95,7 +98,7 @@ Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 	if (ozVal)
 		return std::move(*ozVal);
 
-	auto* n = _state->store.node(nodeName);
+	auto* n = _topology().node(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutput",
 							 "node '" + nodeName + "' not found");
@@ -116,7 +119,7 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 								 + "' is not a DC::Tensor");
 	}
 
-	auto* n = _state->store.node(nodeName);
+	auto* n = _topology().node(nodeName);
 	if (!n) {
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutputTensor",
 							 "node '" + nodeName + "' not found");
@@ -130,7 +133,7 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	if (_state->output.hasOutput(taskId, nodeName, portName))
 		return true;
 
-	auto* n = _state->store.node(nodeName);
+	auto* n = _topology().node(nodeName);
 	if (!n)
 		return false;
 	return n->hasOutput(taskId, portName);
@@ -157,7 +160,7 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& name) const 
 
 std::pair<std::string, std::string>
 InferGraph::_resolveOutputName(const std::string& name, const char* api) const {
-	const auto& bindings = _state->output.bindings();
+	const auto& bindings = _outputBindingsView();
 	size_t aliasMatches = 0;
 	size_t portMatches = 0;
 	std::pair<std::string, std::string> resolved;
@@ -188,7 +191,7 @@ InferGraph::_resolveOutputName(const std::string& name, const char* api) const {
 
 std::pair<std::string, std::string>
 InferGraph::_resolveInputName(const std::string& name, const char* api) const {
-	const auto& bindings = _state->store.inputBindings();
+	const auto& bindings = _inputBindingsView();
 	size_t aliasMatches = 0;
 	size_t portMatches = 0;
 	std::pair<std::string, std::string> resolved;
@@ -258,8 +261,8 @@ void InferGraph::releaseTask(const TaskId& taskId) {
 std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32_t maxHops) {
 	// ① 从 InputZone 推导输入 Schema
 	Node::Schema inSchema;
-	for (auto& b : _state->store.inputBindings()) {
-		auto* n = _state->store.node(b.nodeName);
+	for (auto& b : _inputBindingsView()) {
+		auto* n = _topology().node(b.nodeName);
 		if (!n) continue;
 		auto* port = n->schema().findInput(b.portName);
 		if (port) inSchema.inputs.push_back(*port);
@@ -267,8 +270,8 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 	// ② 从 OutputZone 推导输出 Schema（跳过连接器）
 	Node::Schema outSchema;
-	for (auto& b : _state->output.bindings()) {
-		auto* n = _state->store.node(b.nodeName);
+	for (auto& b : _outputBindingsView()) {
+		auto* n = _topology().node(b.nodeName);
 		if (!n || n->isConnector()) continue;
 		auto* port = n->schema().findOutput(b.portName);
 		if (port) outSchema.outputs.push_back(*port);
@@ -285,7 +288,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 		// 将 RunContext 的输入注入子图
 		int fedCount = 0;
-		for (auto& ib : _state->store.inputBindings()) {
+		for (auto& ib : _inputBindingsView()) {
 			const auto& inVal = ctx.peek(ib.portName);
 			if (!inVal.as<Tensor>()) {
 				continue;
@@ -297,7 +300,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 		// 收集输出声明
 		std::vector<OutputDeclaration> declarations;
-		for (auto& ob : _state->output.bindings()) {
+		for (auto& ob : _outputBindingsView()) {
 			declarations.push_back({ob.nodeName, ob.portName, 1});
 		}
 
@@ -311,7 +314,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			if (task != tid) {
 				return;
 			}
-			for (auto& ob : _state->output.bindings()) {
+			for (auto& ob : _outputBindingsView()) {
 				if (!hasOutput(tid, ob.nodeName, ob.portName)) continue;
 				(*capturedOutputs)[ob.portName] = takeOutput(tid, ob.nodeName, ob.portName);
 			}
@@ -341,7 +344,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		}
 
 		// 收集输出到 RunContext
-		for (auto& ob : _state->output.bindings()) {
+		for (auto& ob : _outputBindingsView()) {
 			auto it = capturedOutputs->find(ob.portName);
 			if (it != capturedOutputs->end()) {
 				ctx.output(ob.portName, std::move(it->second));
@@ -360,7 +363,8 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 	// blockedOverride：内部无通路满足输出声明时，子图节点向父级应答阻塞。
 	// isReady 保持边界缓冲语义（父级数据齐即可进入执行）。
 	graphNode->setBlockedOverride([this](const Node::TaskId& tid) {
-		return !canSatisfyDeclarations(_state->store, _state->output, tid);
+		_ensureFrozen(); // 通路检测读图级签名（冻结快照）
+		return !canSatisfyDeclarations(_state->graph->store(), _state->graph->signature(), tid);
 	});
 
 	return graphNode;

@@ -263,7 +263,7 @@ TEST(authGate) {
 	srv.svc->stop();
 }
 
-// ── wire 级垃圾报文：415 → RemoteMalformed → RemoteMalformed（DESIGN.md §6.1）──
+// ── wire 级垃圾报文：415 → RemoteMalformed → ExecutionFailed + dcnet 诊断（DESIGN.md §6.1）──
 
 TEST(malformedFrame) {
 	ensureDoublerEngine();
@@ -273,7 +273,9 @@ TEST(malformedFrame) {
 	// 非 2xx 错误由 send() 返回（含状态行接收）；recv 仅读 2xx 响应体
 	auto err = t.send("this is not json at all");
 	CHECK(!err.ok(), "malformed frame should fail");
-	CHECK(err.localStatus == Node::Status::RemoteMalformed, "415 → RemoteMalformed → RemoteMalformed");
+	CHECK(err.localStatus == Node::Status::ExecutionFailed, "415 → RemoteMalformed → ExecutionFailed（核心枚举通用）");
+	CHECK(err.diagnostic.code == static_cast<int>(DC::Net::NetErrorCategory::RemoteMalformed),
+		  "415 → dcnet 领域诊断保留原始分类");
 	CHECK_MSG_PREFIX(err.localMessage, "remote:malformed");
 	t.close();
 	srv.svc->stop();

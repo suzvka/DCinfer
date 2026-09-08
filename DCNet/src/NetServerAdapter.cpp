@@ -83,7 +83,7 @@ private:
 		try {
 			// ① decodeRequest：报文 → 本地输入端口张量
 			//    解析失败 = wire 级垃圾报文（DESIGN.md §6.1）→ 415，对端归一化
-			//    RemoteMalformed → InternalError，与 schema 违例区分
+			//    为 ExecutionFailed（dcnet 诊断 code=RemoteMalformed），与 schema 违例区分
 			std::unordered_map<std::string, Tensor> inputs;
 			try {
 				inputs = _codec->decodeRequest(body);

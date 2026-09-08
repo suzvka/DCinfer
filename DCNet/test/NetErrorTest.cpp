@@ -142,8 +142,10 @@ TEST(remoteBodyMalformed) {
 	auto e = DC::Net::normalizeRemoteBody("this is not json at all");
 	CHECK(e.category == NetErrorCategory::RemoteMalformed, "non-json → RemoteMalformed");
 	CHECK(!e.retryable, "malformed not retryable");
-	CHECK(e.localStatus == Status::RemoteMalformed, "malformed → RemoteMalformed");
+	CHECK(e.localStatus == Status::ExecutionFailed, "malformed → ExecutionFailed（核心枚举保持通用）");
 	CHECK_MSG_PREFIX(e.localMessage, "remote:malformed");
+	CHECK(e.diagnostic.domain == "dcnet", "领域诊断 domain=dcnet");
+	CHECK(e.diagnostic.code == static_cast<int>(NetErrorCategory::RemoteMalformed), "诊断 code 保留原始分类");
 }
 
 TEST(httpResponseCombo) {
@@ -232,8 +234,12 @@ TEST(wireRoundTripParity) {
 		  "401 → RemoteAuth → InternalError（remote:auth）");
 	CHECK(normalizeHttpResponse(429, R"({"error":{"code":"overloaded"}})").localStatus == Status::ExecutionFailed,
 		  "429 → RemoteRateLimited → ExecutionFailed（retryable）");
-	CHECK(normalizeHttpResponse(415, R"({"error":{"code":"malformed_frame"}})").localStatus == Status::RemoteMalformed,
-		  "415（未列举状态） → RemoteMalformed → RemoteMalformed（remote:malformed）");
+	{
+		const auto m = normalizeHttpResponse(415, R"({"error":{"code":"malformed_frame"}})");
+		CHECK(m.localStatus == Status::ExecutionFailed,
+			  "415（未列举状态） → RemoteMalformed → ExecutionFailed（remote:malformed）");
+		CHECK(m.diagnostic.code == static_cast<int>(NetErrorCategory::RemoteMalformed), "415 → dcnet 诊断保留分类");
+	}
 }
 
 int main() {

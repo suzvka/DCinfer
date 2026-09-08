@@ -15,7 +15,8 @@ struct DcCodecInputError : std::runtime_error {
 	using std::runtime_error::runtime_error;
 };
 
-/// @brief codec 远端响应异常：decode 阶段抛出，由标准 RunFn 映射为 RemoteMalformed。
+/// @brief codec 远端响应异常：decode 阶段抛出，由标准 RunFn 映射为
+///         ExecutionFailed + dcnet 领域诊断（code=RemoteMalformed）。
 ///         （如响应非 JSON、缺 choices[0].message.content 等关键字段）
 struct DcCodecRemoteError : std::runtime_error {
 	using std::runtime_error::runtime_error;

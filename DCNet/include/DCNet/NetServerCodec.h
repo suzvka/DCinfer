@@ -14,8 +14,8 @@ namespace DC::Net {
 /// 载荷格式复用出站 codec（v1：张量 JSON，数值 base64 / Data 文本 UTF-8），
 /// 不另造格式。错误归一化不属 codec 职责：
 /// decodeRequest 抛异常视为 wire 级垃圾报文（监听器回 415，对端归一化
-/// RemoteMalformed → InternalError，见 DESIGN.md §6.1）；本地执行失败经
-/// wireStatusFor 逆向映射。
+/// ExecutionFailed + dcnet 诊断 code=RemoteMalformed，见 DESIGN.md §6.1）；
+/// 本地执行失败经 wireStatusFor 逆向映射。
 ///
 /// 不暴露 Node::RunContext（ADR-7）：服务端一请求一节点实例，codec 以
 /// 「端口名 ↔ 张量」为界，实例级隔离由装配层保证。

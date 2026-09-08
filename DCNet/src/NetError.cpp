@@ -79,7 +79,8 @@ NetError finalize(NetError e) {
 		e.localMessage = "remote:server_error";
 		break;
 	case NetErrorCategory::RemoteMalformed:
-		e.localStatus = Node::Status::RemoteMalformed;
+		// 核心枚举保持通用：细分分类经领域诊断上报，不再占用 NodeStatus
+		e.localStatus = Node::Status::ExecutionFailed;
 		e.localMessage = "remote:malformed";
 		break;
 	case NetErrorCategory::Other:
@@ -89,6 +90,11 @@ NetError finalize(NetError e) {
 	}
 	if (!e.remoteDetail.empty())
 		e.localMessage += " - " + e.remoteDetail;
+
+	// 领域诊断统一出口：分类法保留在 dcnet，核心只透传（domain + 原始 category 值）
+	e.diagnostic.domain = "dcnet";
+	e.diagnostic.code = static_cast<int>(e.category);
+	e.diagnostic.message = e.localMessage;
 	return e;
 }
 

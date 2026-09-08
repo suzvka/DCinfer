@@ -40,8 +40,9 @@ struct NetError {
 	std::string code;            ///< 对方原始错误码（如 "invalid_api_key"）
 	bool retryable = false;      ///< 超时 / 5xx / 429 → true
 	std::string remoteDetail;    ///< 对方原始报文摘要（保留回溯现场）
-	Node::Status localStatus = Node::Status::Ok;   ///< 归一化出口（图级语义）
+	Node::Status localStatus = Node::Status::Ok;   ///< 归一化出口（图级语义，核心枚举保持通用）
 	std::string localMessage;    ///< 形如 "net:timeout - <detail>"
+	Diagnostic diagnostic;       ///< 领域诊断（DC::Diagnostic）：domain="dcnet"，code=NetErrorCategory 原值
 
 	bool ok() const noexcept { return category == NetErrorCategory::None; }
 };

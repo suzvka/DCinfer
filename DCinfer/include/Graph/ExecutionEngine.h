@@ -112,11 +112,12 @@ public:
 
 	// ── 分组限流 ──
 
-	/// @brief  注册分组限流（跨池全局生效，忽略 affinity 维度）
-	/// @param  affinity  忽略：组信号量由所有线程池共享，注册一次全局生效
+	/// @brief  注册分组限流（组信号量由所有线程池共享，注册一次全局生效）
 	/// @param  tag       分组标识
 	/// @param  limit     最大并发执行数
-	void registerGroupLimit(ThreadPoolAffinity affinity, const std::string& tag, size_t limit);
+	/// @note   组限流不区分线程池归属：信号量跨池共享、全局互斥，
+	///         公开 API 不暴露模型并不区分的 affinity 维度
+	void registerGroupLimit(const std::string& tag, size_t limit);
 
 	// ── task 完成回调 ──
 

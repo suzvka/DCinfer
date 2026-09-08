@@ -287,6 +287,14 @@ Node::Result Node::RunContext::failure(Node::Status status, std::string message)
 	return r;
 }
 
+Node::Result Node::RunContext::failure(Node::Status status, std::string message, Diagnostic diagnostic) const {
+	Node::Result r;
+	r.status = status;
+	r.message = std::move(message);
+	r.diagnostic = std::move(diagnostic);
+	return r;
+}
+
 const TensorConverter* Node::RunContext::converter() const {
 	return _engine.converter();
 }

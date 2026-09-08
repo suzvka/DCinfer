@@ -2,6 +2,7 @@
 
 #include "Node.h"
 #include "GraphRuntimeState.h"
+#include "GraphBuilder.h"
 #include "ExecutionEngine.h"
 #include "GraphException.h"
 #include "TaskStatus.h"
@@ -10,6 +11,7 @@
 #include <functional>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -17,10 +19,15 @@ namespace DC {
 
 // ── 推理图：DC 电路图语义 ──
 //
-// InferGraph 是用户唯一接触的 Facade，内部委托给：
-//   - GraphStore      图拓扑存储
+// InferGraph 是用户唯一接触的 Facade，生命周期分两个阶段：
+//
+//   Build（构建期）── GraphBuilder 承接 addNode/connect/bind... 等可变构建 API
+//        │ compile()（惰性：首次运行期 API 自动触发；或显式 freeze()）
+//        v
+//   Freeze/Execute（执行期）── 构建面关闭（Frozen），运行期只读冻结快照：
+//   - CompiledGraph  不可变拓扑 + GraphSignature（图级绑定契约）
 //   - ExecutionEngine 执行调度与事件驱动数据传播
-//   - OutputZone      输出聚合
+//   - OutputZone      输出聚合（纯任务态）
 //   - ErrorTracker    错误收集
 //   - SignalStore     信号仓库
 //
@@ -52,39 +59,57 @@ public:
 	InferGraph(InferGraph&&) = delete;
 	InferGraph& operator=(InferGraph&&) = delete;
 
-	// ── 图构建 ──
+	// ── 图构建（构建期 API：惰性冻结后抛 GraphException(Frozen)）──
+	//
+	// Build → Freeze → Execute：构建方法仅可在首次运行期 API（submit/feedInput）
+	// 之前使用；届时构建面自动编译为不可变 CompiledGraph 快照（惰性冻结），
+	// 也可经 freeze() 显式提前冻结。执行期拓扑不可变——
+	// "Can topology change while tasks are active?" 的答案恒为 No。
+	// 拓扑演进路径：重新构建 GraphBuilder → compile 产生新快照，旧图任务排空后替换。
 
 	/// @brief  添加节点（转移所有权），返回引用供后续接线引用
 	/// @throws GraphException(DuplicateNode) 若节点名为空或重名
-	Node& addNode(std::unique_ptr<Node> node) { return _state->store.addNode(std::move(node)); }
+	/// @throws GraphException(Frozen) 若图已冻结
+	Node& addNode(std::unique_ptr<Node> node) {
+		_ensureNotFrozen("InferGraph::addNode");
+		return _builder->addNode(std::move(node));
+	}
 
 	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
 	///         自动插入广播连接器（Broadcast Connector, N=1）
 	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
+	/// @throws GraphException(Frozen) 若图已冻结
 	/// @return 指向自动创建的广播连接器的引用
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort) {
-		return _state->store.connect(srcNode, srcPort, dstNode, dstPort);
+		_ensureNotFrozen("InferGraph::connect");
+		return _builder->connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	/// @brief  端口级接线原语（低层）：上游输出口 → 下游输入口，直接建边
 	///         约束：至少有一端是连接器（两个业务节点禁止直连）
 	/// @throws GraphException(NodeNotFound/PortNotFound/DirectConnect) 若接线不合法
+	/// @throws GraphException(Frozen) 若图已冻结
 	void connectRaw(const std::string& srcNode, const std::string& srcPort,
 					const std::string& dstNode, const std::string& dstPort) {
-		_state->store.connectRaw(srcNode, srcPort, dstNode, dstPort);
+		_ensureNotFrozen("InferGraph::connectRaw");
+		_builder->connectRaw(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	/// @brief  快捷批量接线（低层）：自动匹配上游所有输出口到下游同名的输入口，
 	///         直接建边，不插入连接器
 	/// @return 成功匹配的端口对数
+	/// @throws GraphException(Frozen) 若图已冻结
 	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
-		return _state->store.connectAll(srcNode, dstNode);
+		_ensureNotFrozen("InferGraph::connectAll");
+		return _builder->connectAll(srcNode, dstNode);
 	}
 
 	/// @brief  标记输入：该节点的该端口为图级输入口，外部通过此口注入数据
+	/// @throws GraphException(Frozen) 若图已冻结
 	void bindInput(const std::string& nodeName, const std::string& portName) {
-		_state->store.bindInput(nodeName, portName);
+		_ensureNotFrozen("InferGraph::bindInput");
+		_builder->bindInput(nodeName, portName);
 	}
 
 	/// @brief  带公共别名的图级输入绑定
@@ -94,15 +119,18 @@ public:
 	/// 跨节点同名端口的注入歧义。
 	/// @param  alias  公共别名（须在全部输入绑定中唯一）
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
+	/// @throws GraphException(Frozen) 若图已冻结
 	void bindInput(const std::string& alias, const std::string& nodeName,
 				   const std::string& portName) {
-		_ensureAliasUnique(alias, _state->store.inputBindings(), "InferGraph::bindInput");
-		_state->store.bindInput(nodeName, portName, alias);
+		_ensureNotFrozen("InferGraph::bindInput");
+		_builder->bindInput(nodeName, portName, alias);
 	}
 
-	/// @brief  标记输出：该节点的该端口产出进入 OutputZone（与边目的地互斥）
+	/// @brief  标记输出：该节点的该端口产出进入输出区（与边目的地互斥）
+	/// @throws GraphException(Frozen) 若图已冻结
 	void bindOutput(const std::string& nodeName, const std::string& portName) {
-		_state->output.bind(nodeName, portName);
+		_ensureNotFrozen("InferGraph::bindOutput");
+		_builder->bindOutput(nodeName, portName);
 	}
 
 	/// @brief  带公共别名的图级输出绑定
@@ -111,10 +139,11 @@ public:
 	/// 按公共名取结果，无需向调用方暴露内部节点名与端口名。
 	/// @param  alias  公共别名（须在全部输出绑定中唯一）
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
+	/// @throws GraphException(Frozen) 若图已冻结
 	void bindOutput(const std::string& alias, const std::string& nodeName,
 					const std::string& portName) {
-		_ensureAliasUnique(alias, _state->output.bindings(), "InferGraph::bindOutput");
-		_state->output.bind(nodeName, portName, alias);
+		_ensureNotFrozen("InferGraph::bindOutput");
+		_builder->bindOutput(nodeName, portName, alias);
 	}
 
 	// ── 子图声明 ──
@@ -158,6 +187,7 @@ public:
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
+		_ensureFrozen();                     // 惰性冻结：首次提交即编译（此后拓扑不可变）
 		_ensureSubmittable(taskId);
 		_state->errors.clearTask(taskId);    // 上一轮诊断不残留（影响 taskStatus 归一化）
 		_state->output.clearTask(taskId);    // 复用同 ID：清掉上一轮声明/累加/结果
@@ -170,6 +200,7 @@ public:
 				size_t count = 1,
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
+		_ensureFrozen();                     // 惰性冻结：首次提交即编译（此后拓扑不可变）
 		_ensureSubmittable(taskId);
 		_state->errors.clearTask(taskId);
 		_state->output.clearTask(taskId);
@@ -240,31 +271,38 @@ public:
 	///         活动 task 不可释放；"大量短任务"场景建议在消费结果后调用以防内存增长
 	void releaseTask(const TaskId& taskId);
 
-	// ── 查询 ──
+	// ── 查询（源图视角：冻结前后均反映源图拓扑/绑定，供内省与序列化）──
 
 	/// @brief  获取节点指针（非拥有），不存在返回 nullptr
-	Node* node(const std::string& name) { return _state->store.node(name); }
+	Node* node(const std::string& name) { return _topology().node(name); }
 
 	/// @brief  获取节点指针（只读）
-	const Node* node(const std::string& name) const { return _state->store.node(name); }
+	const Node* node(const std::string& name) const { return _topology().node(name); }
 
 	/// @brief  节点数量
-	size_t nodeCount() const { return _state->store.nodeCount(); }
+	size_t nodeCount() const { return _topology().nodeCount(); }
 
 	/// @brief  边数量
-	size_t edgeCount() const { return _state->store.edgeCount(); }
+	size_t edgeCount() const { return _topology().edgeCount(); }
 
 	/// @brief  获取所有节点名的列表
-	std::vector<std::string> nodeNames() const { return _state->store.nodeNames(); }
+	std::vector<std::string> nodeNames() const { return _topology().nodeNames(); }
 
 	/// @brief  获取所有边的只读引用
-	const std::vector<Edge>& edges() const { return _state->store.edges(); }
+	const std::vector<Edge>& edges() const { return _topology().edges(); }
 
 	/// @brief  获取所有输入绑定的只读引用
-	const std::vector<InputBinding>& inputBindings() const { return _state->store.inputBindings(); }
+	const std::vector<InputBinding>& inputBindings() const { return _inputBindingsView(); }
 
 	/// @brief  获取所有输出绑定的只读引用
-	const std::vector<OutputBinding>& outputBindings() const { return _state->output.bindings(); }
+	const std::vector<OutputBinding>& outputBindings() const { return _outputBindingsView(); }
+
+	// ── 冻结 ──
+
+	/// @brief  显式冻结（高级用法）：立即编译构建面为不可变快照。
+	///         此后所有构建 API 抛 GraphException(Frozen)；运行期 API 照常。
+	/// @return 冻结快照（与运行时共享同一份；幂等：重复调用返回同一快照）
+	std::shared_ptr<const CompiledGraph> freeze() { return _ensureFrozen(); }
 
 	// ── 错误诊断 ──
 
@@ -334,17 +372,44 @@ private:
 								 "task '" + taskId + "' is still running; duplicate submit rejected");
 	}
 
-	/// @brief  校验别名在绑定列表中唯一（别名是图对外契约的公共名）
-	template <typename Bindings>
-	void _ensureAliasUnique(const std::string& alias, const Bindings& bindings,
-							const char* api) const {
-		if (alias.empty())
-			return;
-		for (const auto& b : bindings) {
-			if (b.alias == alias)
-				throw GraphException(GraphException::ErrorType::DuplicateBinding, api,
-									 "alias '" + alias + "' is already bound; aliases must be unique");
-		}
+	/// @brief  惰性冻结：首次运行期调用时把构建面编译为不可变快照。
+	/// @return 冻结快照（幂等：已冻结时直接返回现有快照）
+	/// @note   快指针无锁（快照非空即已冻结）；竞态由 _freezeMutex 串行化，
+	///         compile 仅在首个 submit/feedInput 时执行一次
+	std::shared_ptr<const CompiledGraph> _ensureFrozen() const {
+		if (_state->graph)
+			return _state->graph;
+		std::lock_guard lk(_freezeMutex);
+		if (!_state->graph)
+			_state->graph = _builder->compile();
+		return _state->graph;
+	}
+
+	/// @brief  构建期守卫：冻结后调用构建 API 抛 GraphException(Frozen)
+	void _ensureNotFrozen(const char* api) const {
+		if (_state->graph)
+			throw GraphException(GraphException::ErrorType::Frozen, api,
+								 "graph is frozen; topology is immutable after first submit/feedInput"
+								 " (rebuild a GraphBuilder and compile a new snapshot to evolve)"
+								 );
+	}
+
+	/// @brief  拓扑访问（源图视角）：冻结后读快照，构建期读 builder
+	GraphStore& _topology() {
+		return _state->graph ? _state->graph->store() : _builder->store();
+	}
+	const GraphStore& _topology() const {
+		return _state->graph ? _state->graph->store() : _builder->store();
+	}
+
+	/// @brief  输入绑定视图：冻结后读 GraphSignature（无锁），构建期读 builder
+	const std::vector<InputBinding>& _inputBindingsView() const {
+		return _state->graph ? _state->graph->signature().inputs : _builder->inputBindings();
+	}
+
+	/// @brief  输出绑定视图：冻结后读 GraphSignature（无锁），构建期读 builder
+	const std::vector<OutputBinding>& _outputBindingsView() const {
+		return _state->graph ? _state->graph->signature().outputs : _builder->outputBindings();
 	}
 
 	/// @brief  解析图级输出名：公共别名优先，其次唯一绑定的端口名
@@ -357,13 +422,16 @@ private:
 	_resolveInputName(const std::string& name, const char* api) const;
 
 	// ── 内部组件 ──
-	// 图状态（store/output/signals/errors）聚合为共享的 GraphRuntimeState：
+	// 图状态（graph/output/signals/errors）聚合为共享的 GraphRuntimeState：
 	// 飞行任务经 TaskGate/任务 lambda/看门狗持有同一 shared_ptr，图组件的
 	// 存活期由引用计数保证，不再依赖成员声明顺序约定。
+	// _builder 为构建期唯一可变面（compile 时拓扑所有权移交快照）；
 	// ExecutionEngine 保持与图同生命周期：engine 最后声明 → 最先析构，
 	// 线程池 shutdown（join 全部 worker）先于 state 释放发生。
 	std::shared_ptr<GraphRuntimeState> _state;
+	std::unique_ptr<GraphBuilder> _builder = std::make_unique<GraphBuilder>();
 	std::unique_ptr<ExecutionEngine> _engine;
+	mutable std::mutex _freezeMutex; ///< 惰性冻结串行化（快照填充一次性）
 };
 
 } // namespace DC

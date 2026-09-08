@@ -41,10 +41,11 @@ struct OutputBinding {
 	                    ///           内部 node:port 可重构而别名保持稳定）
 };
 
-/// @brief OutputZone：append-only 输出区，聚合声明/累加/artifact 存储。
+/// @brief OutputZone：append-only 输出区，聚合纯任务态（声明/累加/artifact）。
 ///
-/// 语义：
-/// - bind() 标记 node:port 的目的地是输出区（与边目的地互斥）
+/// 语义（Build → Freeze → Execute 拆分后）：
+/// - 图级输出绑定已迁入 GraphSignature（冻结快照，构建期在 GraphBuilder）——
+///   本类不再持有绑定面，仅承载逐 task 的可变状态；
 /// - declare() 声明 task 的期望产出
 /// - append() 写入 artifact（数据 + 审计信息）
 /// - accumulateAndCheck() 累加计数并检查所有声明是否满足
@@ -54,15 +55,6 @@ struct OutputBinding {
 class OutputZone {
 public:
 	using TaskId = std::string;
-
-	// ── 绑定管理 ──
-
-	/// @brief  标记 node:port 的目的地是输出区
-	/// @param  alias  可选公共别名；takeOutput/takeOutputTensor 优先按别名解析
-	void bind(const std::string& nodeName, const std::string& portName,
-			  const std::string& alias = {});
-	bool isBound(const std::string& nodeName, const std::string& portName) const;
-	const std::vector<OutputBinding>& bindings() const;
 
 	// ── 声明管理 ──
 
@@ -122,9 +114,6 @@ private:
 
 	mutable std::mutex _mutex;
 
-	std::unordered_set<std::string> _bindings;   // "nodeName:portName"
-	std::vector<OutputBinding> _bindingsList;    // 序列化用
-
 	std::unordered_map<TaskId, std::vector<OutputDeclaration>> _declarations;
 	std::unordered_map<TaskId, std::unordered_map<std::string, size_t>> _accumulated;
 	std::unordered_map<TaskId, std::unordered_map<std::string, Artifact>> _artifacts;
@@ -133,24 +122,6 @@ private:
 // ════════════════════════════════════════════
 // 内联实现
 // ════════════════════════════════════════════
-
-inline void OutputZone::bind(const std::string& nodeName, const std::string& portName,
-							 const std::string& alias) {
-	std::lock_guard lk(_mutex);
-	std::string key = _makeKey(nodeName, portName);
-	_bindings.insert(key);
-	_bindingsList.push_back({nodeName, portName, alias});
-}
-
-inline bool OutputZone::isBound(const std::string& nodeName, const std::string& portName) const {
-	std::lock_guard lk(_mutex);
-	return _bindings.contains(_makeKey(nodeName, portName));
-}
-
-inline const std::vector<OutputBinding>& OutputZone::bindings() const {
-	std::lock_guard lk(_mutex);
-	return _bindingsList;
-}
 
 inline void OutputZone::declare(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
 	std::lock_guard lk(_mutex);

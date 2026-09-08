@@ -17,7 +17,8 @@ namespace {
 ///
 /// 编排细节：
 /// - encode 抛 DcCodecInputError → InvalidInput（调用方输入问题，不重试）
-/// - decode 抛 DcCodecRemoteError → RemoteMalformed（远端结构异常，不重试）
+/// - decode 抛 DcCodecRemoteError → ExecutionFailed + dcnet 领域诊断
+///   （code=NetErrorCategory::RemoteMalformed；远端结构异常，不重试）
 /// - send/recv 传输级失败按 ep.maxRetries 退避重试（100ms × 已试次数）；
 ///   重试以 send+recv 整体为原子单元重放，幂等性由服务语义保证
 Node::RunFn makeDefaultRunFn(std::shared_ptr<DcNetCodec> codec) {
@@ -53,14 +54,15 @@ Node::RunFn makeDefaultRunFn(std::shared_ptr<DcNetCodec> codec) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(100 * (attempt + 1)));
 		}
 		if (!err.ok())
-			return ctx.failure(err.localStatus, err.localMessage);
+			return ctx.failure(err.localStatus, err.localMessage, err.diagnostic);
 
 		// 4. 对方响应报文 → 本地端口（校验本地形状规则；结构异常不重试）
 		try {
 			codec->decodeResponse(response, ctx);
 		} catch (const DcCodecRemoteError& e) {
-			return ctx.failure(Node::Status::RemoteMalformed,
-							   std::string("DCNet: malformed remote response: ") + e.what());
+			const std::string msg = std::string("DCNet: malformed remote response: ") + e.what();
+			return ctx.failure(Node::Status::ExecutionFailed, msg,
+							   DC::Diagnostic{"dcnet", static_cast<int>(NetErrorCategory::RemoteMalformed), msg});
 		} catch (const std::exception& e) {
 			return ctx.failure(Node::Status::InternalError,
 							   std::string("DCNet: decode failed: ") + e.what());

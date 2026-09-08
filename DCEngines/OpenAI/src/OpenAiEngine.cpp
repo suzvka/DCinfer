@@ -108,7 +108,7 @@ public:
 	}
 
 	void decodeResponse(DC::Net::Payload& payload, Node::RunContext& ctx) override {
-		// 结构异常 → DcCodecRemoteError（标准 RunFn 映射为 RemoteMalformed）；
+		// 结构异常 → DcCodecRemoteError（标准 RunFn 映射为 ExecutionFailed + dcnet 诊断）；
 		// content 为合法空字符串（""）时正常成功返回，与字段缺失严格区分。
 		nlohmann::json j;
 		try {

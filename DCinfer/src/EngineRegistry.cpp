@@ -112,8 +112,7 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, 
 
 	NodeFactoryParams params;
 	params.nodeName = nodeName;
-	params.engineConfig = engineInstance.get(); // 兼容：旧式工厂仍可从裸指针提取
-	params.engineInstance = engineInstance;    // 共享句柄：新式工厂直接绑定
+	params.engineInstance = engineInstance;    // 引擎实例一律经共享句柄（engineConfig 仅用户配置，不再承载实例指针）
 	params.schema = std::move(schema);
 	params.modelPath = modelPath;
 

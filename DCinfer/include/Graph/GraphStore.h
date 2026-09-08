@@ -15,8 +15,10 @@ namespace DC {
 
 /// @brief 图拓扑存储：持有所有顶点（Node）和边（Edge），管理端口级拓扑连接。
 ///
-/// 从 InferGraph 提取的独立组件，只负责图结构的增删查，
-/// 不涉及执行、调度、数据传播。
+/// Build → Freeze → Execute 中的拓扑载体：
+/// - 构建期：由 GraphBuilder 独占持有（增删改唯一入口，冻结检查在 builder）；
+/// - 冻结后：所有权移交 CompiledGraph，结构不可变；仅节点任务级缓冲
+///   （TaskBuffer 等）经 Node 自身接口清理，拓扑增删改无公开入口。
 ///
 /// Node 不知下游，Connector 即 Node。GraphStore 对一切顶点统一处理。
 class GraphStore {
@@ -61,7 +63,7 @@ public:
 	size_t connectAll(const std::string& srcNode, const std::string& dstNode);
 
 	/// @brief  标记输入：该节点的该端口为图级输入口
-	/// @param  alias  可选公共别名（唯一性校验由 InferGraph 门面负责）
+	/// @param  alias  可选公共别名（唯一性校验由 GraphBuilder 负责）
 	void bindInput(const std::string& nodeName, const std::string& portName,
 				   const std::string& alias = {});
 

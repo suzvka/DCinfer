@@ -88,7 +88,7 @@ void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, co
 		}
 		if (!hasAnyOutput) {
 			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
-							   "Node execution failed: " + result.message);
+							   "Node execution failed: " + result.message, result.diagnostic);
 			return; // 失败不传播
 		}
 
@@ -104,7 +104,7 @@ void ExecutionEngine::_submitNodeRun(Node* node, const std::string& nodeName, co
 void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds timeout,
 							 uint32_t maxHops, const std::shared_ptr<GraphRuntimeState>& state) {
 	auto& output = state->output;
-	auto& graph = state->store;
+	auto& graph = state->graph->runtimeView();
 
 	// 校验：必须已声明输出
 	if (!output.hasDeclaration(taskId)) {
@@ -146,7 +146,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 				std::stop_token stoken) {
 				auto& errors = state->errors;
 				auto& output = state->output;
-				auto& graph = state->store;
+				auto& graph = state->graph->runtimeView();
 				// 轮询 sleep，支持 stop_token 提前取消
 				while (!stoken.stop_requested()
 					   && std::chrono::steady_clock::now() < deadline) {
@@ -179,13 +179,13 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 		// replaced（若存在）在此析构：request_stop + join，位于锁外
 	}
 
-	// 扫描全图，对所有已就绪的节点提交执行任务（执行完成后再传播下游）
-	for (const auto& [nodeName, nodePtr] : graph.nodes()) {
+	// 扫描全图（运行时视图），对所有已就绪的节点提交执行任务（执行完成后再传播下游）
+	for (const auto& [nodeName, nodePtr] : graph.nodes) {
 		if (!nodePtr->isReady(taskId))
 			continue;
 
 		// 入口节点：执行 + 完成后就地传播（_submitNodeRun 内部处理）
-		_submitNodeRun(nodePtr.get(), nodeName, taskId, gate, maxHops, state);
+		_submitNodeRun(nodePtr, nodeName, taskId, gate, maxHops, state);
 	}
 }
 
@@ -197,7 +197,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 									 std::shared_ptr<TaskGate> gate,
 									 uint32_t remainingHops,
 									 const std::shared_ptr<GraphRuntimeState>& state) {
-	auto& graph = state->store;
+	auto& graph = state->graph->runtimeView();
 	auto& output = state->output;
 	auto& signals = *state->signals;
 	auto& errors = state->errors;
@@ -245,7 +245,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 	for (const auto& outPort : src->schema().outputs) {
 		if (!src->hasOutput(taskId, outPort.name))
 			continue;
-		if (output.isBound(nodeName, outPort.name)) {
+		if (state->graph->signature().isOutputBound(nodeName, outPort.name)) {
 			Value data = src->takeOutput(taskId, outPort.name);
 			output.append(taskId, nodeName, outPort.name, std::move(data),
 						  {nodeName, outPort.name, taskId});
@@ -253,7 +253,8 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 	}
 
 	// 第三步：边目的地搬运 — 已在第二步消费的端口 hasOutput=false，自动跳过
-	for (const auto& edge : graph.edges()) {
+	// （运行时视图：Broadcast(1) wire 已被 lowering 擦除，边为改写后的直连边）
+	for (const auto& edge : graph.edges) {
 		if (edge.srcNode != nodeName)
 			continue;
 
@@ -307,7 +308,7 @@ bool ExecutionEngine::_isTerminated(const TaskId& taskId) const {
 void ExecutionEngine::_terminate(const TaskId& taskId,
 								 const std::shared_ptr<GraphRuntimeState>& state,
 								 TaskStatus terminalStatus) {
-	auto& graph = state->store;
+	auto& graph = state->graph->runtimeView();
 	auto& output = state->output;
 	auto& signals = *state->signals;
 	{
@@ -369,7 +370,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → takeOutput 可取，
 	//    含看门狗/取消路径的部分结果），再清理缓冲。回调在②已先行触发，
 	//    其消费过的端口 hasOutput=false 自然跳过。
-	for (auto& [name, nodePtr] : graph.nodes()) {
+	for (auto& [name, nodePtr] : graph.nodes) {
 		if (!nodePtr->hasTask(taskId))
 			continue;
 		for (const auto& decl : output.declarationsOf(taskId)) {
@@ -399,7 +400,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
 									  const std::shared_ptr<GraphRuntimeState>& state) {
 	auto& output = state->output;
-	auto& graph = state->store;
+	auto& graph = state->graph->runtimeView();
 	// 已终止则跳过
 	if (_isTerminated(taskId)) {
 		return;
@@ -428,7 +429,7 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
 void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string& reason,
 										const std::shared_ptr<GraphRuntimeState>& state) {
 	auto& output = state->output;
-	auto& graph = state->store;
+	auto& graph = state->graph->runtimeView();
 	auto& errors = state->errors;
 	// ① 报告未满足的输出声明
 	auto unsatisfied = output.unsatisfiedDeclarations(taskId);
@@ -468,9 +469,8 @@ void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string&
 // 分组限流
 // ════════════════════════════════════════════
 
-void ExecutionEngine::registerGroupLimit(ThreadPoolAffinity /*affinity*/, const std::string& tag,
-										 size_t limit) {
-	// 语义升级：组信号量由三个线程池共享，注册一次全局生效（跨池互斥）
+void ExecutionEngine::registerGroupLimit(const std::string& tag, size_t limit) {
+	// 组信号量由三个线程池共享，注册一次全局生效（跨池互斥）
 	_sharedGroups->setLimit(tag, limit);
 }
 

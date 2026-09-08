@@ -55,6 +55,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     CI 新增 core-only / README 上手路径（双平台）/ DCNet+OpenAI mock 作业，
     时间敏感测试以 `ctest --repeat until-fail:3` 加严
 
+- **Build → Freeze → Execute 生命周期（freeze/lowering 边界）**：
+  - 新增 `GraphBuilder`（构建期唯一可变面）与 `compile()`：产出不可变
+    `CompiledGraph` 快照（冻结拓扑 + `GraphSignature` 图级签名 + lowering 后
+    运行时视图）；`InferGraph` 保留为执行 Facade，惰性冻结（首次
+    `submit`/`feedInput` 自动编译），新增显式 `freeze()`（幂等）
+  - 新增 `GraphSignature`：图级输入/输出绑定快照；执行期别名/绑定解析
+    无锁（原 `OutputZone` 绑定面移除，仅承载声明/累加/artifact 纯任务态）
+  - 新增 lowering pass（`GraphLowering`）：`Broadcast(1)` 导线连接器从
+    运行时视图擦除（入边改写为直连；源图不变——DCIr 序列化/exportNode/
+    内省查询仍反映源图）；防护：绑定图级输入/输出或多出边的 wire 不擦除；
+    `CompiledGraph` 新增 `runtimeNodeCount()/runtimeEdgeCount()/loweringStats()`；
+    新增 `examples/02_lowering_benchmark`（100 节点链：199→100 调度顶点）
+- **领域结构化诊断**：新增 `DC::Diagnostic`（domain/code/message，见
+  `Node/Diagnostic.h`）；`NodeResult`/`TaskError` 携带可选诊断；
+  `ErrorTracker::recordError` 新增带诊断重载；`RunContext::failure` 新增
+  三参重载
+
 ### Fixed
 
 - 文档漂移（issue P2-12）：`OpenAiEngine.h` 头注释 WinHTTP → POCO；
@@ -93,6 +110,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   测试设施跨平台可用，测试目标不再链接 `ws2_32`
 - 外部消费方注意：vcpkg manifest 需新增声明 `poco[netssl]`；Windows 下随项目
   wrapper toolchain 自动启用 SChannel 实现（见 `DCNet/DESIGN.md` §9）
+
+- **执行期拓扑不可变（破坏性）**：首次 `submit`/`feedInput` 触发惰性冻结后，
+  `addNode/connect/connectRaw/connectAll/bindInput/bindOutput/declareSubgraph`
+  抛 `GraphException(Frozen)`——"任务执行期间拓扑能否改变"的答案恒为否；
+  拓扑演进路径：重建 `GraphBuilder` 重新 compile 产生新快照，旧图任务排空后
+  替换（绑定须在首次运行期调用前完成，InferGraphTest 别名用例已同步调整）
+- **破坏性：`NodeStatus` 移除 `RemoteMalformed`**：核心枚举保持最小通用词表，
+  远端结构异常改报 `ExecutionFailed` + `Diagnostic{domain="dcnet",
+  code=RemoteMalformed}`（分类法保留在 DCNet `NetErrorCategory`，核心只透传）；
+  `NetError` 新增 `diagnostic` 字段，`finalize` 统一填充；DCNet/OpenAI
+  测试断言同步更新
+- **破坏性：`registerGroupLimit(affinity, tag, limit)` → `registerGroupLimit(tag, limit)`**：
+  组信号量由三个线程池共享、注册一次全局生效，公开 API 不再暴露模型并不
+  区分的 affinity 维度（`DCNet/DESIGN.md` 引用同步更新）
+- **`NodeFactoryParams::engineConfig` 语义单一化（一字段一语义）**：仅承载
+  `createNode(engineType, name, engineConfig)` 透传的用户配置指针；
+  modelPath 路径不再兼容性塞入引擎实例裸指针（在树工厂均只读
+  `engineInstance`，零消费者），引擎实例一律经共享句柄传递
+- **TTL 语义（lowering 配套）**：`maxHops` 只统计运行时顶点，被擦除的
+  1:1 导线不再消耗 hop——成环图 TTL 触发时机后移（方向安全：更不易误杀
+  深图）；直连后传播握手在上游节点的完成线程执行（原 System 池；N=1 导线
+  本就是零拷贝 move 直通，无数据搬运；Broadcast(N>1)/Routing 不受影响）
 
 ### Fixed
 

@@ -51,7 +51,8 @@ struct OpenAiOptions {
 ///   连接失败在配置期抛 NodeException（携带 NetError 归一化消息）
 /// - 端口（本地形状规则）：in prompt（Data，必填）/ system（Data，可选）/
 ///   params（Data，可选，请求级采样参数 JSON，逐请求覆盖；非法 JSON 报 InvalidInput）
-///   → out response（Data；响应缺 choices[0].message.content 报 RemoteMalformed）
+///   → out response（Data；响应缺 choices[0].message.content 报 ExecutionFailed，
+///   附 dcnet 领域诊断 code=RemoteMalformed）
 /// - 请求路径：{basePath}/chat/completions（OpenAI 兼容协议面）
 /// - 节点归属 ThreadPoolAffinity::System（I/O 池）；失败经
 ///   Node::Result + NodeStatus + ErrorTracker 诊断，图级语义与本地引擎一致

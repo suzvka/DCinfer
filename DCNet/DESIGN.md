@@ -440,7 +440,7 @@ transport 内部自持 I/O 线程 / 事件循环（异步 SDK、流式、多路�
   阻塞式 HTTP 调用天然适合；
 - 适配器内不加锁：连接池线程安全由 transport 实现保证（如 libcurl easy handle
   每线程独立创建 / 互斥保护共享连接）；
-- 并发上限控制用既有 `registerGroupLimit(ThreadPoolAffinity::System, tag, N)`，
+- 并发上限控制用既有 `registerGroupLimit(tag, N)`（组信号量跨池共享、全局互斥），
   适配器不自行串行化；
 - transport 内部 `std::mutex` 仅保护状态字段（连接、健康、重连计数），不保护请求路径。
 
