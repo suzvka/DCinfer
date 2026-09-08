@@ -300,7 +300,7 @@ void testRoundTrip() {
 		TestHarness harness;
 		harness.addNode(std::make_unique<Node>("ONNX", "test1", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "test2", identitySchema(), identityRunFn()));
-		harness.wire("test1", "y", "test2", "x");
+		harness.connect("test1", "y", "test2", "x");
 		harness.bindOutput("test2", "y");
 		harness.node("test1")->setModelPath("models/test.onnx");
 
@@ -480,7 +480,7 @@ void testDcgRoundTrip() {
 		n1->setModelPath(modelFile); // 指向刚才创建的临时文件
 		harness.addNode(std::move(n1));
 		harness.addNode(std::make_unique<Node>("Builtin", "dcg_n2", identitySchema(), identityRunFn()));
-		harness.wire("dcg_n1", "y", "dcg_n2", "x");
+		harness.connect("dcg_n1", "y", "dcg_n2", "x");
 		harness.bindOutput("dcg_n2", "y");
 
 		// 序列化为 .dcg

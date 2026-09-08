@@ -17,7 +17,7 @@ namespace DC {
 /// @brief 多线程场景化测试夹具：封装 InferGraph + 同步等待机制
 ///
 /// 使用方式：
-///   1. 构建图：addNode / wire / connect / connectAll
+///   1. 构建图：addNode / connect / connectRaw / connectAll
 ///   2. 注入数据：feedInput
 ///   3. 声明输出并异步提交：submit（输出声明已融入 submit 参数）
 ///   4. 等待完成：awaitCompletion（由 _terminate 中的回调触发）
@@ -38,18 +38,18 @@ public:
 		return _graph.addNode(std::move(node));
 	}
 
-	void connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
-				 const std::string& dstPort) {
-		_graph.connect(srcNode, srcPort, dstNode, dstPort);
+	void connectRaw(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
+					const std::string& dstPort) {
+		_graph.connectRaw(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
 		return _graph.connectAll(srcNode, dstNode);
 	}
 
-	Node& wire(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
-			   const std::string& dstPort) {
-		return _graph.wire(srcNode, srcPort, dstNode, dstPort);
+	Node& connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
+				  const std::string& dstPort) {
+		return _graph.connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	void bindOutput(const std::string& nodeName, const std::string& portName) {

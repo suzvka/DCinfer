@@ -39,29 +39,29 @@ Node& GraphStore::addNode(std::unique_ptr<Node> node) {
 	return *raw;
 }
 
-void GraphStore::connect(const std::string& srcNode, const std::string& srcPort,
+void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPort,
 						 const std::string& dstNode, const std::string& dstPort) {
 	auto* src = node(srcNode);
 	auto* dst = node(dstNode);
 	if (!src)
-		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::connect",
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::connectRaw",
 							 "source node '" + srcNode + "' not found");
 	if (!dst)
-		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::connect",
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::connectRaw",
 							 "destination node '" + dstNode + "' not found");
 
 	// 约束：至少有一端是连接器（两个业务节点禁止直连，必须通过 Connector 中转）
 	if (!src->isConnector() && !dst->isConnector())
-		throw GraphException(GraphException::ErrorType::DirectConnect, "GraphStore::connect",
+		throw GraphException(GraphException::ErrorType::DirectConnect, "GraphStore::connectRaw",
 							 "direct connect between non-connector nodes '" + srcNode + "' and '" + dstNode
-								 + "' is forbidden. Use wire() instead.");
+								 + "' is forbidden. Use connect() instead.");
 
 	// 验证端口存在
 	if (!src->schema().findOutput(srcPort))
-		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connect",
+		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connectRaw",
 							 "output port '" + srcPort + "' not found on node '" + srcNode + "'");
 	if (!dst->schema().findInput(dstPort))
-		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connect",
+		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connectRaw",
 							 "input port '" + dstPort + "' not found on node '" + dstNode + "'");
 
 	_edges.push_back({srcNode, srcPort, dstNode, dstPort});
@@ -84,24 +84,24 @@ size_t GraphStore::connectAll(const std::string& srcNode, const std::string& dst
 }
 
 // ════════════════════════════════════════════
-// wire：自动插入广播连接器（1→1，零拷贝 move 直通）
+// connect：自动插入广播连接器（1→1，零拷贝 move 直通）
 // ════════════════════════════════════════════
 
-Node& GraphStore::wire(const std::string& srcNode, const std::string& srcPort,
+Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort,
 					   const std::string& dstNode, const std::string& dstPort) {
 	auto* src = node(srcNode);
 	auto* dst = node(dstNode);
 	if (!src)
-		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::wire",
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::connect",
 							 "source node '" + srcNode + "' not found");
 	if (!dst)
-		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::wire",
+		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::connect",
 							 "destination node '" + dstNode + "' not found");
 	if (!src->schema().findOutput(srcPort))
-		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::wire",
+		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connect",
 							 "output port '" + srcPort + "' not found on node '" + srcNode + "'");
 	if (!dst->schema().findInput(dstPort))
-		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::wire",
+		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connect",
 							 "input port '" + dstPort + "' not found on node '" + dstNode + "'");
 
 	// 自动创建广播连接器（1 下游 → 零拷贝 move 直通，等效导线）

@@ -93,7 +93,7 @@ void testBasicGraphEmbedding() {
 		InferGraph subGraph;
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_add", addSchema(), addRunFn()));
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_id", identitySchema(), identityRunFn()));
-		subGraph.wire("sub_add", "s", "sub_id", "x");
+		subGraph.connect("sub_add", "s", "sub_id", "x");
 
 		// 声明子图接口：输入 = sub_add 的两个端口，输出 = sub_id 的 y
 		subGraph.bindInput("sub_add", "a");
@@ -115,11 +115,11 @@ void testBasicGraphEmbedding() {
 		                                     Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		parent.addNode(std::move(bcNode));
-		parent.connect("source", "y", "source_bc", "in");
-		parent.connect("source_bc", "out_0", "SubAdder", "a");
-		parent.connect("source_bc", "out_1", "SubAdder", "b");
+		parent.connectRaw("source", "y", "source_bc", "in");
+		parent.connectRaw("source_bc", "out_0", "SubAdder", "a");
+		parent.connectRaw("source_bc", "out_1", "SubAdder", "b");
 
-		parent.wire("SubAdder", "y", "sink", "x");
+		parent.connect("SubAdder", "y", "sink", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(3.0f));
 		parent.submit("t1", "sink", "y");
@@ -152,9 +152,9 @@ void testBranchSubgraph() {
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_a", identitySchema(), identityRunFn()));
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_b", identitySchema(), identityRunFn()));
 
-		subGraph.connect("sub_src", "y", "sub_bc", "in");
-		subGraph.connect("sub_bc", "out_0", "sub_a", "x");
-		subGraph.connect("sub_bc", "out_1", "sub_b", "x");
+		subGraph.connectRaw("sub_src", "y", "sub_bc", "in");
+		subGraph.connectRaw("sub_bc", "out_0", "sub_a", "x");
+		subGraph.connectRaw("sub_bc", "out_1", "sub_b", "x");
 
 		subGraph.bindInput("sub_src", "x");
 		// 只 bind 一个输出验证广播数据流
@@ -168,8 +168,8 @@ void testBranchSubgraph() {
 		parent.addNode(std::move(graphNode));
 		parent.addNode(std::make_unique<Node>("Builtin", "sink", identitySchema(), identityRunFn()));
 
-		parent.wire("source", "y", "FanOutGraph", "x");
-		parent.wire("FanOutGraph", "y", "sink", "x");
+		parent.connect("source", "y", "FanOutGraph", "x");
+		parent.connect("FanOutGraph", "y", "sink", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(7.0f));
 		parent.submit("t1", "sink", "y");
@@ -199,7 +199,7 @@ void testThreeLevelNesting() {
 		InferGraph graphB;
 		graphB.addNode(std::move(nodeC));
 		graphB.addNode(std::make_unique<Node>("Builtin", "b_id", identitySchema(), identityRunFn()));
-		graphB.wire("LevelC", "y", "b_id", "x");
+		graphB.connect("LevelC", "y", "b_id", "x");
 		graphB.bindInput("LevelC", "x");
 		graphB.bindOutput("b_id", "y");
 		auto nodeB = graphB.exportNode("LevelB");
@@ -208,7 +208,7 @@ void testThreeLevelNesting() {
 		InferGraph graphA;
 		graphA.addNode(std::move(nodeB));
 		graphA.addNode(std::make_unique<Node>("Builtin", "a_id", identitySchema(), identityRunFn()));
-		graphA.wire("LevelB", "y", "a_id", "x");
+		graphA.connect("LevelB", "y", "a_id", "x");
 		graphA.bindInput("LevelB", "x");
 		graphA.bindOutput("a_id", "y");
 		auto nodeA = graphA.exportNode("LevelA");
@@ -219,8 +219,8 @@ void testThreeLevelNesting() {
 		parent.addNode(std::move(nodeA));
 		parent.addNode(std::make_unique<Node>("Builtin", "sink", identitySchema(), identityRunFn()));
 
-		parent.wire("source", "y", "LevelA", "x");
-		parent.wire("LevelA", "y", "sink", "x");
+		parent.connect("source", "y", "LevelA", "x");
+		parent.connect("LevelA", "y", "sink", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(42.0f));
 		parent.submit("t1", "sink", "y");
@@ -258,7 +258,7 @@ void testSubgraphTimeout() {
 		};
 
 		subGraph.addNode(std::make_unique<Node>("Builtin", "loop", incSchema, incRunFn));
-		subGraph.wire("loop", "y", "loop", "x");
+		subGraph.connect("loop", "y", "loop", "x");
 		subGraph.bindInput("loop", "x");
 		subGraph.bindOutput("loop", "y");
 
@@ -269,7 +269,7 @@ void testSubgraphTimeout() {
 		parent.addNode(std::make_unique<Node>("Builtin", "source", identitySchema(), identityRunFn()));
 		parent.addNode(std::move(graphNode));
 
-		parent.wire("source", "y", "LoopGraph", "x");
+		parent.connect("source", "y", "LoopGraph", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(0.0f));
 		parent.submit("t1", "LoopGraph", "y", 1, std::chrono::milliseconds(5000));
@@ -318,9 +318,9 @@ void testChainedSubgraphs() {
 		                                      Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bc1Node->setConnector(true);
 		parent.addNode(std::move(bc1Node));
-		parent.connect("src1", "y", "bc1", "in");
-		parent.connect("bc1", "out_0", "Adder1", "a");
-		parent.connect("bc1", "out_1", "Adder2", "a");
+		parent.connectRaw("src1", "y", "bc1", "in");
+		parent.connectRaw("bc1", "out_0", "Adder1", "a");
+		parent.connectRaw("bc1", "out_1", "Adder2", "a");
 
 		// src2 扇出到 Adder1.b 和 Adder2.b
 		auto bc2Schema = Connector::broadcastSchema(2);
@@ -328,9 +328,9 @@ void testChainedSubgraphs() {
 		                                      Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bc2Node->setConnector(true);
 		parent.addNode(std::move(bc2Node));
-		parent.connect("src2", "y", "bc2", "in");
-		parent.connect("bc2", "out_0", "Adder1", "b");
-		parent.connect("bc2", "out_1", "Adder2", "b");
+		parent.connectRaw("src2", "y", "bc2", "in");
+		parent.connectRaw("bc2", "out_0", "Adder1", "b");
+		parent.connectRaw("bc2", "out_1", "Adder2", "b");
 
 		parent.feedInput("t1", "src1", "x", makeFloatTensor(10.0f));
 		parent.feedInput("t1", "src2", "x", makeFloatTensor(20.0f));
@@ -355,7 +355,7 @@ void testSubgraphInputSchema() {
 		InferGraph subGraph;
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_add", addSchema(), addRunFn()));
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_id", identitySchema(), identityRunFn()));
-		subGraph.wire("sub_add", "s", "sub_id", "x");
+		subGraph.connect("sub_add", "s", "sub_id", "x");
 
 		subGraph.bindInput("sub_add", "a");
 		subGraph.bindInput("sub_add", "b");

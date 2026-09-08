@@ -61,25 +61,28 @@ public:
 	/// @throws GraphException(DuplicateNode) 若节点名为空或重名
 	Node& addNode(std::unique_ptr<Node> node) { return _store.addNode(std::move(node)); }
 
-	/// @brief  端口级接线：上游输出口 → 下游输入口
-	/// @throws GraphException(NodeNotFound/PortNotFound/DirectConnect) 若接线不合法
-	void connect(const std::string& srcNode, const std::string& srcPort,
-				 const std::string& dstNode, const std::string& dstPort) {
-		_store.connect(srcNode, srcPort, dstNode, dstPort);
+	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
+	///         自动插入广播连接器（Broadcast Connector, N=1）
+	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
+	/// @return 指向自动创建的广播连接器的引用
+	Node& connect(const std::string& srcNode, const std::string& srcPort,
+				  const std::string& dstNode, const std::string& dstPort) {
+		return _store.connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
-	/// @brief  快捷接线：自动匹配上游所有输出口到下游同名的输入口
+	/// @brief  端口级接线原语（低层）：上游输出口 → 下游输入口，直接建边
+	///         约束：至少有一端是连接器（两个业务节点禁止直连）
+	/// @throws GraphException(NodeNotFound/PortNotFound/DirectConnect) 若接线不合法
+	void connectRaw(const std::string& srcNode, const std::string& srcPort,
+					const std::string& dstNode, const std::string& dstPort) {
+		_store.connectRaw(srcNode, srcPort, dstNode, dstPort);
+	}
+
+	/// @brief  快捷批量接线（低层）：自动匹配上游所有输出口到下游同名的输入口，
+	///         直接建边，不插入连接器
 	/// @return 成功匹配的端口对数
 	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
 		return _store.connectAll(srcNode, dstNode);
-	}
-
-	/// @brief  接线：在两个节点间自动插入广播连接器（Broadcast Connector, N=1）
-	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
-	/// @return 指向自动创建的广播连接器的引用
-	Node& wire(const std::string& srcNode, const std::string& srcPort,
-			   const std::string& dstNode, const std::string& dstPort) {
-		return _store.wire(srcNode, srcPort, dstNode, dstPort);
 	}
 
 	/// @brief  标记输入：该节点的该端口为图级输入口，外部通过此口注入数据

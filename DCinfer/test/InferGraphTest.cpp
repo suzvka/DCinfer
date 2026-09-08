@@ -118,7 +118,7 @@ static Node::RunFn incRunFn() {
 // ════════════════════════════════════════════
 
 void testBuildGraph() {
-	TEST("build graph - addNode and wire") {
+	TEST("build graph - addNode and connect") {
 		TestHarness harness;
 
 		auto& n1 = harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
@@ -137,25 +137,25 @@ void testBuildGraph() {
 		CHECK(dupRejected, "duplicate name should be rejected");
 		CHECK(harness.nodeCount() == 2, "nodeCount still 2");
 
-		// 接线：两个业务节点之间 → wire() 自动插入导线连接器
-		auto& w = harness.wire("add1", "s", "id1", "x");
-		CHECK(w.isConnector(), "wire node should be a connector");
+		// 接线：两个业务节点之间 → connect() 自动插入导线连接器
+		auto& w = harness.connect("add1", "s", "id1", "x");
+		CHECK(w.isConnector(), "connect() should return the auto-inserted connector");
 		CHECK(harness.nodeCount() == 3, "nodeCount should be 3 (add1, id1, __wire_0)");
-		CHECK(harness.edgeCount() == 2, "edgeCount should be 2 (add1→wire, wire→id1)");
+		CHECK(harness.edgeCount() == 2, "edgeCount should be 2 (add1→connector, connector→id1)");
 
 		// 无效接线：端口不存在
-		bool badWire = false;
+		bool badConnect = false;
 		try {
-			harness.wire("add1", "no_such", "id1", "x");
+			harness.connect("add1", "no_such", "id1", "x");
 		} catch (const GraphException&) {
-			badWire = true;
+			badConnect = true;
 		}
-		CHECK(badWire, "wire with bad src port should throw");
+		CHECK(badConnect, "connect with bad src port should throw");
 
-		// 业务节点直连应被 connect() 拒绝
+		// 业务节点直连应被 connectRaw() 拒绝
 		bool directRejected = false;
 		try {
-			harness.connect("add1", "s", "id1", "x");
+			harness.connectRaw("add1", "s", "id1", "x");
 		} catch (const GraphException&) {
 			directRejected = true;
 		}
@@ -170,7 +170,7 @@ void testSimpleDataflow() {
 
 		harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "id1", identitySchema(), identityRunFn()));
-		harness.wire("add1", "s", "id1", "x");
+		harness.connect("add1", "s", "id1", "x");
 
 		// 注入输入
 		harness.feedInput("t1", "add1", "a", makeFloatTensor(3.0f));
@@ -209,9 +209,9 @@ void testBroadcastConnectorInGraph() {
 		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
 		// 接线：add1 → bc → [id_a, id_b]
-		harness.connect("add1", "s", "bc", "in");
-		harness.connect("bc", "out_0", "id_a", "x");
-		harness.connect("bc", "out_1", "id_b", "x");
+		harness.connectRaw("add1", "s", "bc", "in");
+		harness.connectRaw("bc", "out_0", "id_a", "x");
+		harness.connectRaw("bc", "out_1", "id_b", "x");
 
 		// 注入
 		harness.feedInput("t1", "add1", "a", makeFloatTensor(10.0f));
@@ -249,9 +249,9 @@ void testRoutingConnectorInGraph() {
 		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		harness.connect("add1", "s", "rt", "in");
-		harness.connect("rt", "out_0", "id_a", "x");
-		harness.connect("rt", "out_1", "id_b", "x");
+		harness.connectRaw("add1", "s", "rt", "in");
+		harness.connectRaw("rt", "out_0", "id_a", "x");
+		harness.connectRaw("rt", "out_1", "id_b", "x");
 
 		// 第一轮：t1 → out_0 → id_a
 		harness.feedInput("t1", "add1", "a", makeFloatTensor(1.0f));
@@ -348,7 +348,7 @@ void testSerializationAccessors() {
 		TestHarness harness;
 		harness.addNode(std::make_unique<Node>("ONNX", "test1", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "test2", identitySchema(), identityRunFn()));
-		harness.wire("test1", "y", "test2", "x");
+		harness.connect("test1", "y", "test2", "x");
 		harness.bindOutput("test2", "y");
 
 		// 遍历
@@ -380,7 +380,7 @@ void testSimpleCycle() {
 		harness.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
 
 		// 反馈环：inc.y → inc.x
-		harness.wire("inc", "y", "inc", "x");
+		harness.connect("inc", "y", "inc", "x");
 
 		// 注入初始值
 		harness.feedInput("t1", "inc", "x", makeFloatTensor(0.0f));
@@ -404,7 +404,7 @@ void testCycleHopsExhaustion() {
 		harness.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
 
 		// 反馈环
-		harness.wire("inc", "y", "inc", "x");
+		harness.connect("inc", "y", "inc", "x");
 		harness.feedInput("t1", "inc", "x", makeFloatTensor(0.0f));
 
 		// 声明一个极大的 count，不可能在 5 跳内完成
@@ -441,9 +441,9 @@ void testCycleMultiNode() {
 		harness.addNode(std::make_unique<Node>("Builtin", "B", incSchema(), incRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "C", incSchema(), incRunFn()));
 
-		harness.wire("A", "y", "B", "x");
-		harness.wire("B", "y", "C", "x");
-		harness.wire("C", "y", "A", "x");
+		harness.connect("A", "y", "B", "x");
+		harness.connect("B", "y", "C", "x");
+		harness.connect("C", "y", "A", "x");
 
 		harness.feedInput("t1", "A", "x", makeFloatTensor(0.0f));
 
@@ -471,7 +471,7 @@ void testBlockedNodeNotReceiving() {
 		auto& a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		harness.wire("id_a", "y", "id_b", "x");
+		harness.connect("id_a", "y", "id_b", "x");
 
 		b.bindSignal(harness.signalStore(), "enable_b");
 		harness.setSignal("enable_b", false);
@@ -495,15 +495,15 @@ void testPartialBlockKeepsOtherPath() {
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 		auto& c = harness.addNode(std::make_unique<Node>("Builtin", "id_c", identitySchema(), identityRunFn()));
 
-		// 使用广播连接器扇出（避免 wire 同端口 takeOutput 抢消费）
+		// 使用广播连接器扇出（避免 connect 同端口 takeOutput 抢消费）
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
 			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
-		harness.connect("id_a", "y", "bc", "in");
-		harness.connect("bc", "out_0", "id_b", "x");
-		harness.connect("bc", "out_1", "id_c", "x");
+		harness.connectRaw("id_a", "y", "bc", "in");
+		harness.connectRaw("bc", "out_0", "id_b", "x");
+		harness.connectRaw("bc", "out_1", "id_c", "x");
 
 		b.bindSignal(harness.signalStore(), "enable_b");
 		harness.setSignal("enable_b", false);
@@ -528,8 +528,8 @@ void testDynamicSignalToggle() {
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 		auto& c = harness.addNode(std::make_unique<Node>("Builtin", "id_c", identitySchema(), identityRunFn()));
 
-		harness.wire("id_a", "y", "id_b", "x");
-		harness.wire("id_b", "y", "id_c", "x");
+		harness.connect("id_a", "y", "id_b", "x");
+		harness.connect("id_b", "y", "id_c", "x");
 
 		b.bindSignal(harness.signalStore(), "gate");
 
@@ -558,7 +558,7 @@ void testUnboundNodeNeverBlocked() {
 		auto& a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		harness.wire("id_a", "y", "id_b", "x");
+		harness.connect("id_a", "y", "id_b", "x");
 
 		CHECK(!b.isBlocked(), "unbound node should not be blocked");
 
@@ -581,7 +581,7 @@ void testTaskScopedSignalBlocksOnlyOneTask() {
 		auto& a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		harness.wire("id_a", "y", "id_b", "x");
+		harness.connect("id_a", "y", "id_b", "x");
 
 		b.bindSignal(harness.signalStore(), "gate");
 
@@ -614,7 +614,7 @@ void testTaskScopedSignalBlocksOnlyTargetTask() {
 		auto& a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		harness.wire("id_a", "y", "id_b", "x");
+		harness.connect("id_a", "y", "id_b", "x");
 
 		b.bindSignal(harness.signalStore(), "gate");
 
@@ -647,7 +647,7 @@ void testTaskSignalCleanupOnTerminate() {
 		auto& a = harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		auto& b = harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		harness.wire("id_a", "y", "id_b", "x");
+		harness.connect("id_a", "y", "id_b", "x");
 
 		b.bindSignal(harness.signalStore(), "gate");
 
@@ -689,9 +689,9 @@ void testTaskScopedSignalWithPartialBlock() {
 			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
-		harness.connect("id_a", "y", "bc", "in");
-		harness.connect("bc", "out_0", "id_b", "x");
-		harness.connect("bc", "out_1", "id_c", "x");
+		harness.connectRaw("id_a", "y", "bc", "in");
+		harness.connectRaw("bc", "out_0", "id_b", "x");
+		harness.connectRaw("bc", "out_1", "id_c", "x");
 
 		// id_b 绑定信号
 		b.bindSignal(harness.signalStore(), "enable_b");
@@ -727,7 +727,7 @@ void testWatchdogTimeoutTerminates() {
 		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
-		harness.wire("id_a", "y", "id_b", "x");
+		harness.connect("id_a", "y", "id_b", "x");
 
 		// id_b 被信号阻塞 → 声明永远无法满足 → 看门狗超时必然触发
 		harness.node("id_b")->bindSignal(harness.signalStore(), "enable_b");
@@ -915,9 +915,9 @@ void testGraphNodeBranchBlocking() {
 		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
 			ThreadPoolAffinity::Operator));
 
-		sub.connect("id_in", "y", "bc", "in");
-		sub.connect("bc", "out_0", "idA", "x");
-		sub.connect("bc", "out_1", "idB", "x");
+		sub.connectRaw("id_in", "y", "bc", "in");
+		sub.connectRaw("bc", "out_0", "idA", "x");
+		sub.connectRaw("bc", "out_1", "idB", "x");
 
 		sub.bindInput("id_in", "x");
 		sub.bindOutput("idB", "y");
@@ -933,7 +933,7 @@ void testGraphNodeBranchBlocking() {
 		TestHarness parent;
 		parent.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
 		parent.addNode(std::move(gn));
-		parent.wire("src", "y", "gn", "x");
+		parent.connect("src", "y", "gn", "x");
 
 		parent.feedInput("t1", "src", "x", makeFloatTensor(42.0f));
 		parent.submit("t1", "gn", "y", 1, std::chrono::milliseconds(3000));
@@ -957,9 +957,9 @@ void testGraphNodeBranchBlocking() {
 		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
 			ThreadPoolAffinity::Operator));
 
-		sub.connect("id_in", "y", "bc", "in");
-		sub.connect("bc", "out_0", "idA", "x");
-		sub.connect("bc", "out_1", "idB", "x");
+		sub.connectRaw("id_in", "y", "bc", "in");
+		sub.connectRaw("bc", "out_0", "idA", "x");
+		sub.connectRaw("bc", "out_1", "idB", "x");
 
 		sub.bindInput("id_in", "x");
 		sub.bindOutput("idB", "y");
@@ -977,7 +977,7 @@ void testGraphNodeBranchBlocking() {
 		TestHarness parent;
 		parent.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
 		parent.addNode(std::move(gn));
-		parent.wire("src", "y", "gn", "x");
+		parent.connect("src", "y", "gn", "x");
 
 		parent.feedInput("t1", "src", "x", makeFloatTensor(7.0f));
 		parent.submit("t1", "gn", "y", 1); // 无看门狗：阻塞期间 task 保持挂起
@@ -1029,8 +1029,8 @@ void testSubgraphDataflowCorrect() {
 		harness.addNode(std::make_unique<Node>("Builtin", "C", incSchema(), incRunFn(),
 			ThreadPoolAffinity::Operator));
 
-		harness.wire("A", "y", "B", "x");
-		harness.wire("B", "y", "C", "x");
+		harness.connect("A", "y", "B", "x");
+		harness.connect("B", "y", "C", "x");
 
 		// 声明子图
 		harness.graph().declareSubgraph("chain", {"A", "B", "C"});
@@ -1151,7 +1151,7 @@ void testCancelRunningTask() {
 		InferGraph graph;
 		auto& b = graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		graph.wire("id_a", "y", "id_b", "x");
+		graph.connect("id_a", "y", "id_b", "x");
 
 		b.bindSignal(graph.signalStore(), "gate");
 		graph.setSignal("gate", false); // id_b 永久阻塞，声明无法满足
@@ -1343,7 +1343,7 @@ void testWaitSemantics() {
 		InferGraph graph;
 		auto& b = graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		graph.wire("id_a", "y", "id_b", "x");
+		graph.connect("id_a", "y", "id_b", "x");
 
 		b.bindSignal(graph.signalStore(), "gate");
 		graph.setSignal("gate", false); // id_b 阻塞，任务保持 Running

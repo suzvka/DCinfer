@@ -150,7 +150,7 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 			if (it != connectorOut.end() && it->second.size() > 1) {
 				mode = "broadcast";
 			}
-			// N=1 → 不输出 mode（反序列化用 wire 还原）
+			// N=1 → 不输出 mode（反序列化用 connect 还原）
 		}
 
 		auto it = connectorOut.find(e.dstNode);
@@ -307,7 +307,7 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 
 			// src → conn.in
 			try {
-				graph.connect(key.srcNode, key.srcPort, connName, "in");
+				graph.connectRaw(key.srcNode, key.srcPort, connName, "in");
 			} catch (const DC::GraphException& e) {
 				std::cerr << "GraphCompiler: warning — failed to connect '" << key.srcNode
 					<< "." << key.srcPort << "' → '" << connName << ".in': "
@@ -317,7 +317,7 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 			for (size_t i = 0; i < targets.size(); ++i) {
 				std::string outPort = "out_" + std::to_string(i);
 				try {
-					graph.connect(connName, outPort, targets[i].dstNode, targets[i].dstPort);
+					graph.connectRaw(connName, outPort, targets[i].dstNode, targets[i].dstPort);
 				} catch (const DC::GraphException& e) {
 					std::cerr << "GraphCompiler: warning — failed to connect '" << connName
 						<< "." << outPort << "' → '" << targets[i].dstNode
@@ -325,12 +325,12 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 				}
 			}
 		} else {
-			// 默认 1→1：用 wire() 自动插入导线连接器
+			// 默认 1→1：用 connect() 自动插入导线连接器
 			for (auto& tgt : targets) {
 				try {
-					graph.wire(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
+					graph.connect(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
 				} catch (const DC::GraphException& e) {
-					std::cerr << "GraphCompiler: warning — failed to wire '" << key.srcNode
+					std::cerr << "GraphCompiler: warning — failed to connect '" << key.srcNode
 						<< "." << key.srcPort << "' → '" << tgt.dstNode
 						<< "." << tgt.dstPort << "': " << e.what() << std::endl;
 				}

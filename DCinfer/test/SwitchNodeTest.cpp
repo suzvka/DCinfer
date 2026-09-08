@@ -175,8 +175,8 @@ void testGraphIntegration() {
 	graph.addNode(std::move(swNode));
 	graph.addNode(std::make_unique<DC::Node>("Builtin", "dst", identitySchema, addOneFn));
 
-	graph.wire("src", "y", "sw", "x");
-	graph.wire("sw", "y", "dst", "x");
+	graph.connect("src", "y", "sw", "x");
+	graph.connect("sw", "y", "dst", "x");
 	graph.bindOutput("dst", "y");
 
 	std::optional<DC::Tensor> captured;

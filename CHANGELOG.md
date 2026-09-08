@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （鉴权/附加头/超时/重试）
 - **图 API 便捷绑定（issue P2-11）**：`feedBoundInput`（按 bindInput 端口名注入，
   歧义显式报错）与 `submitBound`（以 bindOutput 绑定作为输出声明，无需重复声明）；
-  hello_graph 示例同步改用并补 `connect` vs `wire` 语义注释
+  hello_graph 示例同步改用便捷绑定 API
 - **构建体验（issue P0-1/P0-5/P1-7/P1-9/P1-10）**：
   - README 新增「10 分钟上手」章节（配置→构建→运行 hello_graph 及预期输出）；
     CI 逐字执行该命令并断言输出
@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （InferGraph 与 Node/TaskBuffer 同步更名）：输出取用一直是消费式语义
   （取出即从 OutputZone/节点缓冲清除，不可重复读取），旧名隐匿了该行为；
   非破坏式预览仍可用 Node::peekOutput
+- **破坏性重命名：`wire()` → `connect()`、`connect()` → `connectRaw()`**
+  （GraphStore 与 InferGraph 门面同步更名）：自动插入广播连接器的节点连线
+  回收最直观的 `connect()` 命名，对齐“连接两个节点”的用户心智（可用性评审
+  第 2 点）；低层建边原语更名为 `connectRaw()`（语义不变，仍要求两端至少
+  一端为连接器，直连报错提示同步改为 “Use connect() instead.”）；
+  `connectAll()` 语义不变（低层批量直连，不插入连接器）
 - **`wait()` / `waitForResult()` 默认改为无限等待直至终止**：原默认 5s 隐式超时
   与方法名语义相悖；显式超时改经重载传入，`timeout <= 0` 视为无限等待
   （与 `submit` 的执行超时 0=不限时约定一致）；未知 taskId（从未提交/已释放）

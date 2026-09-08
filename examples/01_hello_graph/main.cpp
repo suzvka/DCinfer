@@ -29,12 +29,12 @@ int main() {
 	graph.addNode(std::move(addNode));
 	graph.addNode(std::move(idNode));
 
-	// 连接 adder.sum → pass.x（wire 自动插入广播连接器）
-	graph.wire("adder", "sum", "pass", "x");
+	// 连接 adder.sum → pass.x（connect 自动插入广播连接器）
+	graph.connect("adder", "sum", "pass", "x");
 
 	// 标记图级输入输出端口（输出绑定带公共别名，作为图的对外契约）
-	// 注：connect() 禁止两个业务节点直连（数据必须经 Connector 中转），
-	// wire() 则自动插入广播连接器——这是两者唯一的语义差异。
+	// 注：connect() 面向业务节点间的 1→1 连线，自动插入广播连接器中转；
+	// connectRaw() 为低层原语，直接建边且要求两端至少一端是连接器。
 	graph.bindInput("adder", "a");
 	graph.bindInput("adder", "b");
 	graph.bindOutput("result", "pass", "y");   // 公共别名 result → 内部 pass.y
