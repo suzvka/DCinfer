@@ -352,14 +352,14 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 		return node;
 	};
 
-	// ── 运行时钩子 ──
-	desc.synchronize = [](void* /*engine*/) {
+	// ── 执行相位协议：同步引擎——仅 no-op synchronize，其余留空（逻辑内联 RunFn）──
+	desc.phases.synchronize = [](void* /*engine*/) {
 		// no-op: Ort::Session::Run() blocks until completion
 	};
-	desc.preRun = nullptr;
-	desc.postRun = nullptr;
+	desc.phases.preRun = nullptr;
+	desc.phases.postRun = nullptr;
 	desc.releaseEngine = nullptr; // shared_ptr 自动释放
-	desc.onError = nullptr;
+	desc.phases.onError = nullptr;
 
 	reg.registerEngine(desc);
 }

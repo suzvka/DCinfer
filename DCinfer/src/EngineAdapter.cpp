@@ -10,32 +10,32 @@ EngineAdapter::EngineAdapter(std::shared_ptr<EngineInstance> instance, const Eng
 void EngineAdapter::preRun() const {
 	if (!_instance)
 		return;
-	if (_desc && _desc->preRun) {
-		_desc->preRun(_instance->get());
+	if (_desc && _desc->phases.preRun) {
+		_desc->phases.preRun(_instance->get());
 	}
 }
 
 void EngineAdapter::synchronize() const {
 	if (!_instance)
 		return;
-	if (_desc && _desc->synchronize) {
-		_desc->synchronize(_instance->get());
+	if (_desc && _desc->phases.synchronize) {
+		_desc->phases.synchronize(_instance->get());
 	}
 }
 
 void EngineAdapter::postRun(Node::RunContext& ctx) const {
 	if (!_instance)
 		return;
-	if (_desc && _desc->postRun) {
-		_desc->postRun(_instance->get(), ctx);
+	if (_desc && _desc->phases.postRun) {
+		_desc->phases.postRun(_instance->get(), ctx);
 	}
 }
 
 void EngineAdapter::onError() const {
 	if (!_instance)
 		return;
-	if (_desc && _desc->onError) {
-		_desc->onError(_instance->get());
+	if (_desc && _desc->phases.onError) {
+		_desc->phases.onError(_instance->get());
 	}
 }
 

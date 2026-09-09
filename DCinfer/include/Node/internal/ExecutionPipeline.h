@@ -18,7 +18,8 @@ struct NodeExecState;  // 节点 task 执行态（buffer + workspace 一致性�
 /// 将原 Node::_checkAndExecute 的流水线提取为纯函数：
 ///   ⓪ 就绪预检 → ⓪½ 节点闸租约
 ///   → ① 加载输入 → ② 清空输出 → ②½ preRun → ③ RunFn
-///   → ③¼ onError → ③½ synchronize → ③¾ postRun
+///   → ③¼ onError（任一引擎相位失败） → ③½ synchronize（仅成功路径）
+///   → ③¾ postRun（仅成功路径）
 ///   → ④ 保存输出 → ⑤ 验证完整性 → ⑥ 清理输入 → ⑦ 回调
 ///
 /// 所有依赖通过参数注入，无状态，独立可测。task 态（buffer/workspace）

@@ -7,6 +7,20 @@
 
 namespace DC {
 
+namespace {
+
+/// @brief 触发 onError 引擎复位（尽力而为）：onError 自身抛异常时吞掉，
+///        不传播次生异常——原失败经调用方 rethrow / NodeResult 继续传播。
+void safeTriggerOnError(EngineAdapter& engine) {
+	try {
+		engine.onError();
+	} catch (...) {
+		// 复位失败不传播次生异常
+	}
+}
+
+} // namespace
+
 NodeResult ExecutionPipeline::execute(
 	const TaskId& taskId,
 	const Node& node,
@@ -42,8 +56,13 @@ NodeResult ExecutionPipeline::execute(
 		// ② 清空上一轮工作输出
 		workspace.clearOutputs();
 
-		// ②½ preRun 钩子：推理前准备
-		engine.preRun();
+		// ②½ preRun 钩子：推理前引擎级准备（钩子自身失败同样触发 onError 复位）
+		try {
+			engine.preRun();
+		} catch (...) {
+			safeTriggerOnError(engine);
+			throw;
+		}
 
 		// ③ 执行 RunFn
 		try {
@@ -57,20 +76,31 @@ NodeResult ExecutionPipeline::execute(
 			result.message = "Unknown exception in RunFn";
 		}
 
-		// ③¼ onError 钩子：执行失败时重置引擎状态
+		// ③¼ onError 钩子：任一引擎相位失败时重置引擎状态
+		//（RunFn 失败经 result 汇总；相位钩子抛异常在各自 catch 中触发）
 		if (!result.ok()) {
-			engine.onError();
+			safeTriggerOnError(engine);
 		}
 
-		// ③½ 同步：确保异步引擎计算已完成
+		// ③½ 同步：确保异步引擎计算已完成（仅成功路径；自身失败同样触发 onError 复位）
 		if (result.ok()) {
-			engine.synchronize();
+			try {
+				engine.synchronize();
+			} catch (...) {
+				safeTriggerOnError(engine);
+				throw;
+			}
 		}
 
-		// ③¾ postRun 钩子：同步后的后处理
+		// ③¾ postRun 钩子：同步后的后处理（仅成功路径；自身失败同样触发 onError 复位）
 		if (result.ok()) {
-			Node::RunContext ctx(workspace, engine, schema, node.type(), node.name());
-			engine.postRun(ctx);
+			try {
+				Node::RunContext ctx(workspace, engine, schema, node.type(), node.name());
+				engine.postRun(ctx);
+			} catch (...) {
+				safeTriggerOnError(engine);
+				throw;
+			}
 		}
 
 		// ④ 保存输出：工作输出槽位 → task 输出缓冲区

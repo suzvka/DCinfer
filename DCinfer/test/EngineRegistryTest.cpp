@@ -177,6 +177,89 @@ static void registerFailingEngine(EngineRegistry& reg, const std::string& type) 
 	reg.registerEngine(desc);
 }
 
+// ── 执行相位失败传播引擎：验证执行相位协议契约（onError 覆盖任一相位失败）──
+
+struct PhaseSession {
+	std::string modelPath;
+};
+
+// 注入失败点：RunFn 失败经 NodeResult 返回，其余相位以异常注入
+enum class PhaseFailAt { None, PreRun, RunFn, Synchronize, PostRun };
+
+static std::atomic<int> g_phasePreRun{0};
+static std::atomic<int> g_phaseSync{0};
+static std::atomic<int> g_phasePost{0};
+static std::atomic<int> g_phaseOnError{0};
+static std::atomic<int> g_phaseFailAt{0};
+static std::atomic<bool> g_phaseOnErrorThrows{false};
+
+static Node::Result phaseRunImpl(Node::RunContext& ctx) {
+	if (static_cast<PhaseFailAt>(g_phaseFailAt.load()) == PhaseFailAt::RunFn)
+		return ctx.failure(Node::Status::ExecutionFailed, "injected RunFn failure");
+	const auto& inVal = ctx.peek("in");
+	const auto* inT = inVal.as<Tensor>();
+	auto t = std::make_unique<Tensor>(Tensor::TensorType::Float, sizeof(float));
+	*t = inT->item<float>();
+	ctx.output("out", Value(std::move(t)));
+	return ctx.success();
+}
+
+static void resetPhaseState(PhaseFailAt failAt, bool onErrorThrows) {
+	g_phasePreRun = 0;
+	g_phaseSync = 0;
+	g_phasePost = 0;
+	g_phaseOnError = 0;
+	g_phaseFailAt = static_cast<int>(failAt);
+	g_phaseOnErrorThrows = onErrorThrows;
+}
+
+static void registerPhaseEngine(EngineRegistry& reg, const std::string& type) {
+	if (reg.hasEngine(type))
+		return;
+	EngineDescriptor desc;
+	desc.engineType = type;
+	desc.converter = {mockToNative, mockToDC};
+	desc.createEngine = [](const std::string& path) -> EngineInstance {
+		return EngineInstance(std::make_shared<PhaseSession>(PhaseSession{path}));
+	};
+	desc.getInputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
+		return inst.get() ? std::vector<Node::Port>{{"in", Tensor::TensorType::Float, sizeof(float), {}, true}}
+						  : std::vector<Node::Port>{};
+	};
+	desc.getOutputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
+		return inst.get() ? std::vector<Node::Port>{{"out", Tensor::TensorType::Float, sizeof(float), {}, true}}
+						  : std::vector<Node::Port>{};
+	};
+	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+		auto node = std::make_unique<Node>("Phase", p.nodeName, p.schema, phaseRunImpl,
+										   ThreadPoolAffinity::Operator);
+		if (p.engineInstance)
+			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
+		return node;
+	};
+	desc.phases.preRun = [](void*) {
+		++g_phasePreRun;
+		if (static_cast<PhaseFailAt>(g_phaseFailAt.load()) == PhaseFailAt::PreRun)
+			throw std::runtime_error("injected preRun failure");
+	};
+	desc.phases.synchronize = [](void*) {
+		++g_phaseSync;
+		if (static_cast<PhaseFailAt>(g_phaseFailAt.load()) == PhaseFailAt::Synchronize)
+			throw std::runtime_error("injected synchronize failure");
+	};
+	desc.phases.postRun = [](void*, Node::RunContext&) {
+		++g_phasePost;
+		if (static_cast<PhaseFailAt>(g_phaseFailAt.load()) == PhaseFailAt::PostRun)
+			throw std::runtime_error("injected postRun failure");
+	};
+	desc.phases.onError = [](void*) {
+		++g_phaseOnError;
+		if (g_phaseOnErrorThrows.load())
+			throw std::runtime_error("injected onError failure");
+	};
+	reg.registerEngine(desc);
+}
+
 static Node::Result mockModelRunImpl(Node::RunContext& ctx) {
 	(void)ctx;
 	return ctx.success();
@@ -574,6 +657,116 @@ static void runTests() {
 			throw std::runtime_error("all concurrent callers should observe the failure");
 	}
 	std::cout << "Test 15 passed: failure propagates to followers; retry after failure" << std::endl;
+
+	// ── Test 16: 执行相位协议——preRun 抛异常触发 onError 复位，后续相位跳过 ──
+	{
+		registerPhaseEngine(reg, "Phase");
+		auto node = reg.createNode("Phase", "p1", std::string("models/phase.onnx"));
+		if (!node)
+			throw std::runtime_error("createNode(modelPath) failed");
+
+		resetPhaseState(PhaseFailAt::PreRun, false);
+		Tensor in(Tensor::TensorType::Float, sizeof(float));
+		in = 1.0f;
+		NodeExecutor exec(*node);
+		exec.setInput("t1", "in", Value(std::make_unique<Tensor>(std::move(in))));
+		bool threw = false;
+		try {
+			(void)exec.tryExecute("t1");
+		} catch (const std::runtime_error& e) {
+			threw = std::string(e.what()).find("preRun") != std::string::npos;
+		}
+		if (!threw)
+			throw std::runtime_error("preRun exception should propagate after onError reset");
+		if (g_phasePreRun != 1 || g_phaseOnError != 1)
+			throw std::runtime_error("preRun failure should trigger onError exactly once");
+		if (g_phaseSync != 0 || g_phasePost != 0)
+			throw std::runtime_error("phases after a failed phase must be skipped");
+	}
+	std::cout << "Test 16 passed: preRun failure triggers onError, later phases skipped" << std::endl;
+
+	// ── Test 17: synchronize 抛异常触发 onError 复位，postRun 跳过 ──
+	{
+		auto node = reg.createNode("Phase", "p2", std::string("models/phase.onnx"));
+		if (!node)
+			throw std::runtime_error("createNode(modelPath) failed");
+
+		resetPhaseState(PhaseFailAt::Synchronize, false);
+		Tensor in(Tensor::TensorType::Float, sizeof(float));
+		in = 2.0f;
+		NodeExecutor exec(*node);
+		exec.setInput("t1", "in", Value(std::make_unique<Tensor>(std::move(in))));
+		bool threw = false;
+		try {
+			(void)exec.tryExecute("t1");
+		} catch (const std::runtime_error&) {
+			threw = true;
+		}
+		if (!threw)
+			throw std::runtime_error("synchronize exception should propagate after onError reset");
+		if (g_phasePreRun != 1 || g_phaseSync != 1 || g_phaseOnError != 1)
+			throw std::runtime_error("synchronize failure should trigger onError exactly once");
+		if (g_phasePost != 0)
+			throw std::runtime_error("postRun must be skipped after synchronize failure");
+	}
+	std::cout << "Test 17 passed: synchronize failure triggers onError, postRun skipped" << std::endl;
+
+	// ── Test 18: 失败路径矩阵——RunFn 失败经 NodeResult 返回，onError 恰好一次 ──
+	{
+		auto node = reg.createNode("Phase", "p3", std::string("models/phase.onnx"));
+		if (!node)
+			throw std::runtime_error("createNode(modelPath) failed");
+
+		resetPhaseState(PhaseFailAt::RunFn, false);
+		Tensor in(Tensor::TensorType::Float, sizeof(float));
+		in = 3.0f;
+		NodeExecutor exec(*node);
+		exec.setInput("t1", "in", Value(std::make_unique<Tensor>(std::move(in))));
+		auto result = exec.tryExecute("t1"); // 失败经 NodeResult 返回，不抛出
+		if (result.ok() || result.status != NodeStatus::ExecutionFailed)
+			throw std::runtime_error("RunFn failure should surface as ExecutionFailed result");
+		if (g_phaseOnError != 1)
+			throw std::runtime_error("RunFn failure should trigger onError exactly once");
+		if (g_phaseSync != 0 || g_phasePost != 0)
+			throw std::runtime_error("synchronize/postRun must be skipped after RunFn failure");
+	}
+	std::cout << "Test 18 passed: RunFn failure returns via NodeResult, onError fired once" << std::endl;
+
+	// ── Test 19: onError 自身抛异常被吞——不产生次生传播 ──
+	{
+		auto node = reg.createNode("Phase", "p4", std::string("models/phase.onnx"));
+		if (!node)
+			throw std::runtime_error("createNode(modelPath) failed");
+
+		// RunFn 失败 + onError 抛异常：失败经 NodeResult 正常返回，无异常逃逸
+		resetPhaseState(PhaseFailAt::RunFn, true);
+		Tensor in(Tensor::TensorType::Float, sizeof(float));
+		in = 4.0f;
+		NodeExecutor exec(*node);
+		exec.setInput("t1", "in", Value(std::make_unique<Tensor>(std::move(in))));
+		auto result = exec.tryExecute("t1");
+		if (result.ok())
+			throw std::runtime_error("original RunFn failure should still be reported");
+		if (result.message.find("injected onError failure") != std::string::npos)
+			throw std::runtime_error("onError's own exception must not replace the original failure");
+		if (g_phaseOnError != 1)
+			throw std::runtime_error("onError should be attempted exactly once");
+
+		// preRun 失败 + onError 抛异常：透传的是原 preRun 异常，而非 onError 异常
+		resetPhaseState(PhaseFailAt::PreRun, true);
+		Tensor in2(Tensor::TensorType::Float, sizeof(float));
+		in2 = 5.0f;
+		exec.setInput("t2", "in", Value(std::make_unique<Tensor>(std::move(in2))));
+		bool originalPropagated = false;
+		try {
+			(void)exec.tryExecute("t2");
+		} catch (const std::runtime_error& e) {
+			originalPropagated = std::string(e.what()).find("preRun") != std::string::npos;
+		}
+		if (!originalPropagated)
+			throw std::runtime_error("original preRun exception should propagate, not onError's");
+	}
+	std::cout << "Test 19 passed: onError's own exception swallowed, no secondary propagation" << std::endl;
 
 	std::cout << "\nAll EngineRegistry tests passed!" << std::endl;
 }

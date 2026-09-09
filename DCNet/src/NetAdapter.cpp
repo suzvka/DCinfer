@@ -135,12 +135,12 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 		return node;
 	};
 
-	// ── 运行时钩子：v1 全 no-op（HTTP 同步返回；重连策略见 M3 / DESIGN.md §5.2）──
-	ed.synchronize = nullptr;
-	ed.preRun = nullptr;
-	ed.postRun = nullptr;
+	// ── 执行相位协议：v1 全留空（HTTP 同步返回，逻辑内联 RunFn；重连策略见 M3 / DESIGN.md §5.2）──
+	ed.phases.synchronize = nullptr;
+	ed.phases.preRun = nullptr;
+	ed.phases.postRun = nullptr;
 	ed.releaseEngine = nullptr;
-	ed.onError = nullptr;
+	ed.phases.onError = nullptr;
 
 	reg.registerEngine(ed);
 }

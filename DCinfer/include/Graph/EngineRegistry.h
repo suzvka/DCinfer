@@ -72,12 +72,25 @@ private:
 using EngineHandle = std::shared_ptr<EngineInstance>;
 
 // ── 引擎描述符：注册一个引擎所需的全部信息 ──
+//
+// 钩子按交互语义分为四组（"调用时机归谁、是否有顺序约束"各不相同）：
+//   1. 纯函数工具   —— TensorConverter，由适配器作者在 RunFn 内自行调用；
+//   2. 工厂与内省   —— 框架自主调度（建图时推导 Schema、首次使用时创建实例），无顺序约束；
+//   3. 执行相位协议 —— 框架按固定算法调用的模板方法，顺序即契约（见 ExecutionPhases）；
+//   4. 所有权事件   —— 最后一个共享句柄析构时触发，无顺序约束。
+//
+// 全部钩子均可空。同步引擎可把全部执行逻辑内联在 RunFn 内、执行相位全部留空
+// （范例见 DCEngines/OnnxRuntime 适配器：仅 synchronize = no-op，其余留空）。
 struct EngineDescriptor {
 	std::string engineType;
-	TensorConverter converter;
-	NodeFactory factory;
 
-	// ── 模型加载与实例创建（单一入口，不分离）──
+	// ── 纯函数工具：DC::Tensor ↔ 引擎原生张量 ──
+	TensorConverter converter;
+
+	// ── 工厂与内省（框架自主调度，无顺序约束）──
+
+	/// 节点工厂：框架在 createNode 时收集 NodeFactoryParams 并调用
+	NodeFactory factory;
 
 	/// 从模型路径创建引擎实例（含模型加载与运行时资源分配）
 	/// 系统以 modelPath 为 key 缓存实例，适配器在钩子内决定复用策略
@@ -89,28 +102,40 @@ struct EngineDescriptor {
 	/// 从引擎实例推导输出端口列表，用于自动推导 Schema（可空，工厂自行兜底）
 	std::function<std::vector<Node::Port>(const EngineInstance&)> getOutputPorts;
 
-	// ── 运行时钩子 ──
+	// ── 执行相位协议（顺序即契约：框架掌序、适配器填空）──
+	//
+	// 成功路径:  preRun → RunFn(框架驱动) → synchronize → postRun
+	// 失败路径:  任一相位（preRun / RunFn / synchronize / postRun）失败
+	//            → onError（后续相位跳过；onError 自身异常被吞，不传播次生异常）
+	// 约束:      postRun 依赖 synchronize 已设置且已执行（device 数据可见性）
+	struct ExecutionPhases {
+		/// 发射前引擎级准备（warmup、与 task 数据无关的 session 配置等）。
+		/// 注意：本钩子拿不到 task 输入——输入绑定发生在 RunFn 内经 TensorConverter 完成。
+		/// engine 为 EngineInstance::get() 返回的原生指针。
+		std::function<void(void* engine)> preRun;
 
-	/// RunFn 返回后、输出收集前调用，确保异步计算已完成
-	/// engine 指针为 EngineInstance::get() 返回的原生指针
-	std::function<void(void* engine)> synchronize;
+		/// 等待异步计算完成（发射后、输出收集前）。同步引擎留空或 no-op。
+		std::function<void(void* engine)> synchronize;
 
-	/// 每次 RunFn 调用前执行，用于推理前准备（I/O 绑定、warmup、动态 shape 设置等）
-	/// engine 为 EngineInstance::get() 返回的原生指针
-	std::function<void(void* engine)> preRun;
+		/// synchronize 成功后的后处理（仅成功路径调用）。
+		/// 典型用途：device→host 数据传输、输出格式后处理。
+		/// ctx 提供完整的输入/输出槽位访问，可通过 ctx.outputRaw() 读取 GPU 输出、
+		/// ctx.output() 写回 host 数据。
+		/// @note 依赖 synchronize 已设置且已执行——异步引擎留空 synchronize 而设置
+		///       postRun，会在 device 数据未就绪时产生竞态。
+		std::function<void(void* engine, Node::RunContext& ctx)> postRun;
 
-	/// synchronize 成功后、输出收集前调用
-	/// 典型用途：device→host 数据传输、输出格式后处理
-	/// ctx 提供完整的输入/输出槽位访问，可通过 ctx.outputRaw() 读取 GPU 输出、
-	/// ctx.output() 写回 host 数据
-	std::function<void(void* engine, Node::RunContext& ctx)> postRun;
+		/// 任一执行相位（preRun / RunFn / synchronize / postRun）失败后的
+		/// 引擎状态复位（尽力而为；自身异常被吞，不传播次生异常）。
+		std::function<void(void* engine)> onError;
+	};
+	ExecutionPhases phases;
+
+	// ── 所有权事件（无顺序约束）──
 
 	/// 最后一个共享句柄析构时调用一次，用于有序清理 GPU 资源
 	/// 若为 nullptr，退化为 shared_ptr<void> 默认析构
 	std::function<void(void* engine)> releaseEngine;
-
-	/// RunFn 失败或抛出异常后调用，用于引擎状态重置
-	std::function<void(void* engine)> onError;
 };
 
 // ── 引擎注册表 ──

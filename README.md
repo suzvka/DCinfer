@@ -173,6 +173,9 @@ git sparse-checkout set DCinfer DCIr cmake vcpkg.json CMakeLists.txt
 
 核心之上注册自有引擎：实现 `EngineDescriptor` 钩子 → `EngineRegistry::registerEngine()`
 （详见 `DCinfer/include/Graph/EngineRegistry.h`），图级语义与内置引擎完全一致。
+执行钩子遵循相位协议（`ExecutionPhases`：preRun → RunFn → synchronize → postRun，
+任一相位失败触发 onError）——同步引擎可全部留空、逻辑内联 RunFn
+（参见 OnnxRuntime 适配器）。
 
 ### 作为库消费（安装与 find_package）
 

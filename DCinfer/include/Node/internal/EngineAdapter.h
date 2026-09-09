@@ -18,7 +18,8 @@ class EngineInstance;
 /// EngineDescriptor* 在构造时注入，Builtin 节点传入 nullptr。
 /// 句柄由节点持有：节点存活 ⇒ 引擎实例存活，注册表释放仅移除缓存条目。
 ///
-/// 编排 preRun → onError → synchronize → postRun 的调用顺序。
+/// 编排执行相位协议：preRun → RunFn(框架外) → 成功: synchronize → postRun ｜ 失败: onError。
+/// 相位顺序契约见 EngineDescriptor::ExecutionPhases（Graph/EngineRegistry.h）。
 class EngineAdapter {
 public:
 	/// @brief 构造引擎适配器（两个参数都可以为空）。
@@ -28,7 +29,8 @@ public:
 
 	// ── 钩子 ──
 
-	/// @brief  preRun 钩子：推理前准备（I/O 绑定、warmup 等）。
+	/// @brief  preRun 钩子：推理前引擎级准备（warmup、session 配置等；
+	///         拿不到 task 输入——输入绑定在 RunFn 内经 TensorConverter 完成）。
 	void preRun() const;
 
 	/// @brief  synchronize 钩子：确保异步引擎计算已完成。
@@ -37,7 +39,7 @@ public:
 	/// @brief  postRun 钩子：同步后的后处理（D2H 传输等）。
 	void postRun(class Node::RunContext& ctx) const;
 
-	/// @brief  onError 钩子：执行失败时重置引擎状态。
+	/// @brief  onError 钩子：任一执行相位失败时重置引擎状态（尽力而为）。
 	void onError() const;
 
 	// ── 访问器 ──

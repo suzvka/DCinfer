@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **EngineDescriptor 执行钩子收编 `ExecutionPhases`（接口契约显式化）**：`preRun` /
+  `synchronize` / `postRun` / `onError` 四个平铺钩子收编为嵌套结构
+  `EngineDescriptor::ExecutionPhases phases`——类型名承载"顺序即契约"的相位语义；
+  公开头补齐成功/失败路径矩阵（任一相位失败 → onError，后续相位跳过）、
+  逐钩子可空性与组合约束（postRun 依赖 synchronize 已执行）；修正 `preRun`
+  注释越权承诺（"I/O 绑定"需要 task 输入访问，实际输入绑定发生在 RunFn 内经
+  TensorConverter）。源级破坏：`desc.X → desc.phases.X`
+  （createEngine / 端口推导 / factory / releaseEngine 保持顶层不变）
+- **onError 覆盖任一执行相位失败**：原实现仅 RunFn 失败触发 onError，
+  preRun/synchronize/postRun 自身抛出会绕过复位直通外层 catch。现统一经
+  `safeTriggerOnError`（吞掉 onError 自身异常，不传播次生异常）触发复位后
+  按原语义 rethrow / 返回 NodeResult；RunFn 失败路径行为不变。
+  失败路径矩阵以 EngineRegistryTest Test 16–19 固化
 - **超时看门狗 → 引擎级共享 TimerService**：`ExecutionEngine` 不再为每条带超时的
   submit 创建看门狗线程（原 100ms 轮询 `jthread` + per-task 注册/回收），改为单定时器
   线程 + deadline 最小堆：每任务仅登记一个 deadline 条目，终止路径 O(1) 作废、零 join。
