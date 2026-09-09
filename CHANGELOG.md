@@ -48,6 +48,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   连接器内置行为收敛为 Broadcast 单一语义（isConnector 扩展点框架保留）。
   迁移：将 Routing 节点替换为 N 输出的自定义节点，RunFn 每次仅产出一个输出口
 
+### Fixed
+
+- **lowering 悬空边（组合反例）**：`buildRuntimeView` 边融合原只向后回跳一层，
+  wire→wire 链（`connectRaw` 允许连接器与连接器相连，合法构图）会产生指向已擦除
+  节点的悬空边（如 `a→w1→w2→b` 被改写为 `a→w2`），下游不可达、数据静默滞留、
+  任务只能靠看门狗终止。现改为沿唯一出边链追踪到首个保留节点（visited 集合防
+  纯 wire 环，环上融合边丢弃——数据在源语义中同样无法抵达业务节点），并收尾
+  新增不变量校验：运行边端点必须存在于运行节点集合，违反即抛 `GraphException`。
+  新增链式 / 链终止于保留连接器 / 纯 wire 环三个组合测试
+- **wait 结果就绪窗口**：`wait()` 谓词原只绑定终态发布（`_terminate` 首步），
+  早于声明输出抢救（步骤⑥）；窗口内返回的调用方 `takeOutput` 可能抛
+  `OutputNotProduced` / `TaskNotFound`（成功路径的声明输出本就完全依赖步骤⑥
+  搬运——打卡满足即 return，绑定搬运被跳过）。`_taskStates` 值改为
+  `{status, resultsReady}`，`resultsReady` 在步骤⑥完成后、notify 前置位，
+  wait 谓词改为 `terminated && resultsReady`（`status()` 语义不变，仍在终态
+  写入即返回）。同步文档化完成回调约束：回调先于结果就绪发布触发，
+  回调内不得对同一 taskId 调用 `wait()`。新增裸 InferGraph 循环压测与
+  多声明可读性测试
+
 ## [0.3.0] - 2026-09-08
 
 ### Added

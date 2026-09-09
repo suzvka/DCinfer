@@ -1423,6 +1423,64 @@ void testCancelVsTimeoutRace() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 结果就绪发布（回归）：wait 返回后声明输出必须已在 OutputZone
+// ════════════════════════════════════════════
+
+// 用裸 InferGraph（不经 TestHarness）：TestHarness 经完成回调捕获输出，
+// 会遮蔽 wait→takeOutput 窗口，测不到"wait 返回即可读"契约本身。
+// 成功路径下输出计数满足即进入 _terminate，声明输出完全依赖步骤⑥的
+// 抢救搬运进 OutputZone——每次迭代都经过"终态先发布、结果后搬运"序点。
+// 竞态窗口本质窄，本测试为回归护栏：修复后 wait 谓词绑定 resultsReady，
+// 通过是确定性的。
+void testWaitReturnsReadableResults() {
+	TEST("lifecycle: wait returns only after declared outputs are readable") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		graph.connect("id_a", "y", "id_b", "x");
+
+		for (int i = 0; i < 100; ++i) {
+			std::string tid = "wt" + std::to_string(i);
+			graph.feedInput(tid, "id_a", "x", makeFloatTensor(static_cast<float>(i)));
+			graph.submit(tid, "id_b", "y");
+			CHECK(graph.wait(tid, std::chrono::milliseconds(2000)), "wait should succeed");
+			auto r = graph.takeOutputTensor(tid, "id_b", "y");
+			CHECK(std::abs(r.item<float>() - static_cast<float>(i)) < 1e-6f,
+				  "declared output must be readable immediately after wait returns");
+		}
+	}
+	END_TEST();
+}
+
+// 多声明可见性：⑥ 按声明逐端口抢救，wait 后两个声明都必须可读
+void testMultiDeclarationReadableAfterWait() {
+	TEST("lifecycle: all declared outputs readable after wait (multi-declaration salvage)") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "id_c", identitySchema(), identityRunFn()));
+
+		// 扇出：Broadcast(2) 保留连接器
+		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", Connector::broadcastSchema(2),
+											 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+		bcNode->setConnector(true);
+		graph.addNode(std::move(bcNode));
+		graph.connectRaw("id_a", "y", "bc", "in");
+		graph.connectRaw("bc", "out_0", "id_b", "x");
+		graph.connectRaw("bc", "out_1", "id_c", "x");
+
+		graph.feedInput("t1", "id_a", "x", makeFloatTensor(50.0f));
+		graph.submit("t1", {{"id_b", "y", 1}, {"id_c", "y", 1}});
+		CHECK(graph.wait("t1"), "task should complete");
+		auto rb = graph.takeOutputTensor("t1", "id_b", "y");
+		auto rc = graph.takeOutputTensor("t1", "id_c", "y");
+		CHECK(std::abs(rb.item<float>() - 50.0f) < 1e-6f, "id_b output readable after wait");
+		CHECK(std::abs(rc.item<float>() - 50.0f) < 1e-6f, "id_c output readable after wait");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
@@ -1466,6 +1524,10 @@ int main() {
 
 		// wait/waitForResult 超时语义
 		testWaitSemantics();
+
+		// 结果就绪发布（回归：wait 谓词绑定 resultsReady）
+		testWaitReturnsReadableResults();
+		testMultiDeclarationReadableAfterWait();
 
 		// 共享 Timer 超时（deadline 精确触发 / 复用隔离 / cancel 竞态）
 		testTimeoutLowerBound();

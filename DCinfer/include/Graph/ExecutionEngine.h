@@ -84,7 +84,8 @@ public:
 	/// @brief  同步等待 task 终止
 	/// @param  timeout 等待超时；count() <= 0 视为无限等待
 	///         （与 submit 的执行超时 0=不限时约定一致）
-	/// @return true 在超时内终止；false 超时，或 taskId 未知
+	/// @return true 在超时内终止且声明输出已就绪可读取（wait 返回后
+	///         takeOutput 必能取到已声明输出）；false 超时，或 taskId 未知
 	///         （从未提交/已释放，无限等待模式下立即返回）。任务未被取消。
 	bool wait(const TaskId& taskId, std::chrono::milliseconds timeout);
 
@@ -114,8 +115,11 @@ public:
 
 	// ── task 完成回调 ──
 
-	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）
+	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 步骤② 触发，
+	///         先于结果就绪发布——回调可安全读取 task 缓冲中尚存的输出）
 	///         线程安全：与 _terminate 的读取之间以互斥锁同步
+	/// @note   回调内不得对同一 taskId 调用 wait()：回调先于 resultsReady
+	///         置位执行，等待将自我阻塞；回调应只读取/捕获数据
 	void setTaskCompleteCallback(TaskCompleteCallback cb) {
 		std::lock_guard lk(_cbMutex);
 		_taskCompleteCb = std::move(cb);
@@ -157,6 +161,8 @@ private:
 					const std::shared_ptr<GraphRuntimeState>& state,
 					TaskStatus terminalStatus = TaskStatus::Succeeded);
 	bool _isTerminated(const TaskId& taskId) const;
+	/// @brief  结果可读判定：声明输出已全部抢救进 OutputZone（wait 谓词绑定点）
+	bool _resultsReady(const TaskId& taskId) const;
 	void _exhaustedCheck(const TaskId& taskId,
 						 const std::shared_ptr<GraphRuntimeState>& state);
 
@@ -201,9 +207,16 @@ private:
 	// 池关闭期间不再可能有超时触发访问状态成员。
 	// （图组件生命周期由 GraphRuntimeState shared_ptr 保证，不依赖本表顺序。）
 	// task 状态表：Running → 终态（Succeeded/Failed/TimedOut/Cancelled）。
-	// submit 时活动 ID 拒绝重复提交；已终止 ID 复用时清除旧状态。
-	// 同时承担原 _terminatedTasks 的传播拦截与 wait 谓词职责。
-	std::unordered_map<TaskId, TaskStatus> _taskStates;
+	// 终态发布（status 迁移）与"结果可读"是两个完成点：resultsReady 在
+	// _terminate 完成声明输出抢救（步骤⑥）后置位，wait() 谓词绑定它，
+	// 保证 wait 返回后经 takeOutput 必能读到声明输出。
+	// submit 时活动 ID 拒绝重复提交；已终止 ID 复用时清除旧记录（含 resultsReady）。
+	// status 字段同时承担原 _terminatedTasks 的传播拦截与 _isTerminated 职责。
+	struct TaskStateRecord {
+		TaskStatus status = TaskStatus::Running;
+		bool resultsReady = false;
+	};
+	std::unordered_map<TaskId, TaskStateRecord> _taskStates;
 	mutable std::mutex _terminationMutex;
 
 	// 活动任务门控表：submit 注册、_terminate 移除；支撑 cancel() 定位门控。

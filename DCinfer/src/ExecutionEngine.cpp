@@ -149,14 +149,14 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 		std::lock_guard lk(_terminationMutex);
 		auto it = _taskStates.find(taskId);
 		if (it != _taskStates.end()) {
-			if (it->second == TaskStatus::Running)
+			if (it->second.status == TaskStatus::Running)
 				throw GraphException(GraphException::ErrorType::DuplicateTask, "ExecutionEngine::submit",
 									 "task '" + taskId + "' is still running; duplicate submit rejected");
 			_taskStates.erase(it);
 			// 节点执行态无需在此清理：所有终态必经 _terminate（唯一清理点），
 			// 且本分支之后调用方可能重新 feedInput——此时清理会抹掉新输入
 		}
-		_taskStates.emplace(taskId, TaskStatus::Running);
+		_taskStates.emplace(taskId, TaskStateRecord{});
 	}
 
 	// 创建任务门控：任务 lambda 链、超时触发路径与 cancel() 共享；
@@ -312,7 +312,13 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 bool ExecutionEngine::_isTerminated(const TaskId& taskId) const {
 	std::lock_guard lk(_terminationMutex);
 	auto it = _taskStates.find(taskId);
-	return it != _taskStates.end() && it->second != TaskStatus::Running;
+	return it != _taskStates.end() && it->second.status != TaskStatus::Running;
+}
+
+bool ExecutionEngine::_resultsReady(const TaskId& taskId) const {
+	std::lock_guard lk(_terminationMutex);
+	auto it = _taskStates.find(taskId);
+	return it != _taskStates.end() && it->second.resultsReady;
 }
 
 void ExecutionEngine::_terminate(const TaskId& taskId,
@@ -323,11 +329,12 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	auto& signals = *state->signals;
 	{
 		std::lock_guard lk(_terminationMutex);
-		// 防止重复终止（幂等）：仅 Running → 终态迁移一次有效
+		// 防止重复终止（幂等）：仅 Running → 终态迁移一次有效。
+		// 此处仅发布终态（T1），结果可读（T2）由步骤⑥' 后置发布
 		auto it = _taskStates.find(taskId);
-		if (it == _taskStates.end() || it->second != TaskStatus::Running)
+		if (it == _taskStates.end() || it->second.status != TaskStatus::Running)
 			return;
-		it->second = terminalStatus;
+		it->second.status = terminalStatus;
 	}
 
 	// ① 失效超时条目（若存在）
@@ -374,6 +381,16 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		}
 	}
 	state->exec->clearTaskState(taskId);
+
+	// ⑥' 发布"结果可读"：声明输出已全部抢救进 OutputZone。wait() 谓词绑定
+	//     本标志且先于 notify 生效——此后返回的等待者必能取到结果，
+	//     消除"终态已发布、结果未抢救"的窗口（终态/可读/清理三完成点中，
+	//     wait 绑定中间点；notify 仍最后发出）。
+	{
+		std::lock_guard lk(_terminationMutex);
+		if (auto it = _taskStates.find(taskId); it != _taskStates.end())
+			it->second.resultsReady = true;
+	}
 
 	// ⑦ 移除活动门控并通知同步等待者（结果仍保留，供 wait 后 takeOutput 取用）
 	{
@@ -538,17 +555,20 @@ void ExecutionEngine::registerGroupLimit(const std::string& tag, size_t limit) {
 
 bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
 	// timeout <= 0 视为无限等待（与 submit 的执行超时 0=不限时约定一致）。
+	// 谓词绑定"终态 + 结果可读"：_terminate 先发布终态、后抢救声明输出
+	// （步骤⑥），仅查终态会让等待者早于结果就绪返回，破坏
+	// "wait 返回即可读"契约。
 	// 未知 taskId（从未提交或已 releaseTask）不可终止，立即返回 false，
 	// 防止无限等待模式下误拼写 taskId 挂死。
 	if (timeout.count() <= 0 && status(taskId) == TaskStatus::Unknown)
 		return false;
 	std::unique_lock lk(_completionMutex);
 	if (timeout.count() <= 0) {
-		_completionCv.wait(lk, [this, &taskId] { return _isTerminated(taskId); });
+		_completionCv.wait(lk, [this, &taskId] { return _isTerminated(taskId) && _resultsReady(taskId); });
 		return true;
 	}
 	return _completionCv.wait_for(lk, timeout, [this, &taskId] {
-		return _isTerminated(taskId);
+		return _isTerminated(taskId) && _resultsReady(taskId);
 	});
 }
 
@@ -559,7 +579,7 @@ bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeo
 TaskStatus ExecutionEngine::status(const TaskId& taskId) const {
 	std::lock_guard lk(_terminationMutex);
 	auto it = _taskStates.find(taskId);
-	return it != _taskStates.end() ? it->second : TaskStatus::Unknown;
+	return it != _taskStates.end() ? it->second.status : TaskStatus::Unknown;
 }
 
 bool ExecutionEngine::cancel(const TaskId& taskId) {
@@ -581,7 +601,7 @@ bool ExecutionEngine::cancel(const TaskId& taskId) {
 void ExecutionEngine::releaseTask(const TaskId& taskId) {
 	std::lock_guard lk(_terminationMutex);
 	auto it = _taskStates.find(taskId);
-	if (it == _taskStates.end() || it->second == TaskStatus::Running)
+	if (it == _taskStates.end() || it->second.status == TaskStatus::Running)
 		return; // 未知或活动任务不可释放
 	_taskStates.erase(it);
 }
