@@ -370,7 +370,14 @@ public:
 									uint32_t maxHops = kDefaultMaxHops);
 
 private:
-	/// @brief  提交前置校验：活动 task 拒绝重复提交（engine.submit 内部还有权威校验）
+	/// @brief  提交前置校验：活动 task 拒绝重复提交。
+	///
+	/// 必须在 errors.clearTask / output.clearTask / declare 之前执行：
+	/// 引擎内校验虽是权威串行点，但发生在本 facade 的状态变更之后——
+	/// 缺失此守卫时，对 Running 任务的重复提交会先清掉其声明/累加/结果
+	/// 再抛 DuplicateTask，破坏在飞任务状态。
+	/// 已知 TOCTOU 窗口（本检查与后续变更之间）由引擎 _terminationMutex
+	/// 的权威校验兑底；彻底消除需将校验与变更原子化，超出当前批次范围。
 	void _ensureSubmittable(const TaskId& taskId) const {
 		if (_engine->status(taskId) == TaskStatus::Running)
 			throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::submit",

@@ -154,7 +154,7 @@ public:
 	// ── 算子注册（轻量级，DC::Tensor only，无引擎钩子）──
 
 	/// @brief  注册一个算子节点类型
-	/// @param  operatorName  算子名（如 "Broadcast", "Routing", "Add"）
+	/// @param  operatorName  算子名（如 "Broadcast", "Add"）
 	/// @param  schema        输入/输出端口 Schema
 	/// @param  fn            算子计算逻辑
 	/// @return true 表示注册成功，false 表示已存在同名算子

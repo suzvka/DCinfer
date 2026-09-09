@@ -124,72 +124,6 @@ void testBroadcastNotReady() {
 	END_TEST();
 }
 
-// ── 路由连接器测试 ──
-
-void testRoutingRoundRobin() {
-	TEST("routing 1→3 round-robin distribution") {
-		auto schema = Connector::routingSchema(3);
-		auto runFn = Connector::routingRunFn();
-
-		auto node = std::make_unique<Node>("Connector.Routing", "rt1", schema, runFn);
-		NodeExecutor exec(*node);
-
-		// task1 → out_0
-		exec.setInput("t1", "in", makeFloatTensor(1.0f));
-		exec.tryExecute("t1");
-		CHECK(exec.hasOutput("t1", "out_0"), "t1 should go to out_0");
-		CHECK(!exec.hasOutput("t1", "out_1"), "t1 should NOT go to out_1");
-		CHECK(!exec.hasOutput("t1", "out_2"), "t1 should NOT go to out_2");
-		{
-			auto t = exec.takeOutputTensor("t1", "out_0");
-			CHECK(std::abs(t.item<float>() - 1.0f) < 1e-6f, "t1 value");
-		}
-		exec.clearTask("t1");
-
-		// task2 → out_1
-		exec.setInput("t2", "in", makeFloatTensor(2.0f));
-		exec.tryExecute("t2");
-		CHECK(exec.hasOutput("t2", "out_1"), "t2 should go to out_1");
-		CHECK(!exec.hasOutput("t2", "out_0"), "t2 should NOT go to out_0");
-		CHECK(!exec.hasOutput("t2", "out_2"), "t2 should NOT go to out_2");
-		exec.clearTask("t2");
-
-		// task3 → out_2
-		exec.setInput("t3", "in", makeFloatTensor(3.0f));
-		exec.tryExecute("t3");
-		CHECK(exec.hasOutput("t3", "out_2"), "t3 should go to out_2");
-		exec.clearTask("t3");
-
-		// task4 → out_0 (wrap around)
-		exec.setInput("t4", "in", makeFloatTensor(4.0f));
-		exec.tryExecute("t4");
-		CHECK(exec.hasOutput("t4", "out_0"), "t4 should wrap to out_0");
-		exec.clearTask("t4");
-	}
-	END_TEST();
-}
-
-void testRoutingSingleOutput() {
-	TEST("routing 1→1 always hits out_0") {
-		auto schema = Connector::routingSchema(1);
-		auto runFn = Connector::routingRunFn();
-
-		auto node = std::make_unique<Node>("Connector.Routing", "rt2", schema, runFn);
-		NodeExecutor exec(*node);
-
-		for (int i = 0; i < 5; ++i) {
-			auto tid = "t" + std::to_string(i);
-			exec.setInput(tid, "in", makeIntTensor(i));
-			exec.tryExecute(tid);
-			CHECK(exec.hasOutput(tid, "out_0"), "should always hit out_0");
-			auto t = exec.takeOutputTensor(tid, "out_0");
-			CHECK(t.item<int>() == i, "value mismatch");
-			exec.clearTask(tid);
-		}
-	}
-	END_TEST();
-}
-
 // ── 重入保护测试 ──
 
 void testReentrancy() {
@@ -220,8 +154,6 @@ int main() {
 		testBroadcastBasic();
 		testBroadcastSingle();
 		testBroadcastNotReady();
-		testRoutingRoundRobin();
-		testRoutingSingleOutput();
 		testReentrancy();
 
 		if (failures == 0) {

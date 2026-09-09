@@ -30,7 +30,7 @@ namespace DC {
 ///   ——成环图 TTL 触发时机后移（方向安全：更不易误杀深图）；
 /// - 池亲和：直连后传播握手在上游节点的完成线程执行（原为 System 池）；
 ///   N=1 wire 本就是零拷贝 move 直通、无数据搬运，不违背三层池隔离初衷
-///   （Broadcast(N>1)/Routing 等重型连接器不受影响，仍在 System 池）。
+///   （Broadcast(N>1) 等重型连接器不受影响，仍在 System 池）。
 ///
 /// 源图不受影响：DCIr 序列化、exportNode、nodeCount/edges 内省均反映源图。
 struct GraphLoweringStats {

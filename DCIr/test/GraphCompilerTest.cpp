@@ -240,8 +240,8 @@ void testCompileStringBroadcast() {
 	END_TEST();
 }
 
-void testCompileStringRouting() {
-	TEST("compileString - routing mode edge") {
+void testCompileStringRoutingRejected() {
+	TEST("compileString - routing mode edge is rejected with explicit error") {
 		const char* json = R"({
   "version": "1.0",
   "nodes": [
@@ -283,12 +283,14 @@ void testCompileStringRouting() {
     {"nodeName":"id_b","portName":"y"}
   ]
 })";
-		InferGraph graph; GraphCompiler::compileString(graph, json);
-
-		// 3 业务节点 + 1 routing 连接器 = 4
-		CHECK(graph.nodeCount() == 4, "should have 4 nodes (3 biz + 1 rt)");
-		CHECK(graph.edgeCount() == 3, "should have 3 edges");
-		CHECK(graph.outputBindings().size() == 2, "should have 2 output bindings");
+		InferGraph graph;
+		bool threw = false;
+		try {
+			GraphCompiler::compileString(graph, json);
+		} catch (const GraphException&) {
+			threw = true;
+		}
+		CHECK(threw, "routing mode should be rejected with GraphException");
 	}
 	END_TEST();
 }
@@ -798,7 +800,7 @@ int main() {
 	try {
 		testCompileStringBasic();
 		testCompileStringBroadcast();
-		testCompileStringRouting();
+		testCompileStringRoutingRejected();
 		testRoundTrip();
 		testSerializeToJsonString();
 		testModelPathHandling();

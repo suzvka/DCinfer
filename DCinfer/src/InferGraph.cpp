@@ -312,7 +312,6 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		const std::string tid = ctx.name();
 
 		// 将 RunContext 的输入注入子图
-		int fedCount = 0;
 		for (auto& ib : _inputBindingsView()) {
 			const auto& inVal = ctx.peek(ib.portName);
 			if (!inVal.as<Tensor>()) {
@@ -320,7 +319,6 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			}
 			auto val = ctx.pop(ib.portName);
 			feedInput(tid, ib.nodeName, ib.portName, std::move(val));
-			++fedCount;
 		}
 
 		// 收集输出声明
@@ -329,50 +327,23 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			declarations.push_back({ob.nodeName, ob.portName, 1});
 		}
 
-		// 通过回调在 _terminate 清理数据前捕获输出
-		auto mtx = std::make_shared<std::mutex>();
-		auto cv = std::make_shared<std::condition_variable>();
-		auto done = std::make_shared<bool>(false);
-		auto capturedOutputs = std::make_shared<std::unordered_map<std::string, Value>>();
-
-		setTaskCompleteCallback([this, tid, mtx, cv, done, capturedOutputs](const TaskId& task) {
-			if (task != tid) {
-				return;
-			}
-			for (auto& ob : _outputBindingsView()) {
-				if (!hasOutput(tid, ob.nodeName, ob.portName)) continue;
-				(*capturedOutputs)[ob.portName] = takeOutput(tid, ob.nodeName, ob.portName);
-			}
-			{
-				std::lock_guard lk(*mtx);
-				*done = true;
-			}
-			cv->notify_one();
-		});
-
-		// 驱动子图（不启用内部超时，由父图控制）
+		// 驱动子图（不启用内部超时，由父图控制）。
+		// wait 返回即 task 已终止：_terminate 先抢救声明输出至 OutputZone（步骤⑥）
+		// 再唤醒等待者（步骤⑦），此后声明输出必可经 takeOutput 取出——
+		// 无需再经引擎级完成回调手动捕获（旧 _terminate 清理 OutputZone 时的残留）
 		submit(tid, std::move(declarations), std::chrono::milliseconds(0), maxHops);
+		wait(tid);
 
-		// 等待回调完成
-		{
-			std::unique_lock lk(*mtx);
-			cv->wait(lk, [&] { return *done; });
-		}
-		setTaskCompleteCallback(nullptr);
-
-		// 检查是否有错误
-		if (hasErrors()) {
-			auto errors = taskErrors(tid);
-			std::string msg = errors.empty() ? "unknown error" : errors[0].message;
-			clearErrors();
-			return ctx.failure(Node::Status::ExecutionFailed, msg);
+		// 检查本 task 的错误诊断（task 级判定，不读全局 hasErrors/clearErrors）
+		auto errors = taskErrors(tid);
+		if (!errors.empty()) {
+			return ctx.failure(Node::Status::ExecutionFailed, errors[0].message);
 		}
 
-		// 收集输出到 RunContext
+		// 收集输出到 RunContext（终止后结果保留在 OutputZone，直至下一次同 ID submit）
 		for (auto& ob : _outputBindingsView()) {
-			auto it = capturedOutputs->find(ob.portName);
-			if (it != capturedOutputs->end()) {
-				ctx.output(ob.portName, std::move(it->second));
+			if (hasOutput(tid, ob.nodeName, ob.portName)) {
+				ctx.output(ob.portName, takeOutput(tid, ob.nodeName, ob.portName));
 			}
 		}
 

@@ -143,9 +143,7 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 		// dstNode 是连接器：查下游
 		const std::string& cType = dstNode->type();
 		std::string mode;
-		if (cType.find("Routing") != std::string::npos) {
-			mode = "routing";
-		} else if (cType.find("Broadcast") != std::string::npos) {
+		if (cType.find("Broadcast") != std::string::npos) {
 			auto it = connectorOut.find(e.dstNode);
 			if (it != connectorOut.end() && it->second.size() > 1) {
 				mode = "broadcast";
@@ -282,21 +280,24 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 	for (auto& [key, targets] : groups) {
 		if (targets.empty()) continue;
 
-		if (key.mode == "broadcast" || key.mode == "routing") {
-			// 创建 Broadcast(N) 或 Routing(N) 连接器
+		if (key.mode == "routing") {
+			// Routing 连接器已随核心库移除（轮询属业务语义，应由上层自定义节点实现）：
+			// 旧版本序列化的图在此显式报错，而非静默降级为普通连线
+			throw DC::GraphException(DC::GraphException::ErrorType::Other,
+									 "GraphCompiler::rebuildEdges",
+									 "edge mode \"routing\" is no longer supported; express "
+									 "round-robin via a custom node with per-instance selection");
+		}
+
+		if (key.mode == "broadcast") {
+			// 创建 Broadcast(N) 连接器
 			size_t n = targets.size();
 			Node::Schema connSchema;
 			Node::RunFn connRunFn;
 			std::string connType;
-			if (key.mode == "broadcast") {
-				connSchema = DC::Connector::broadcastSchema(n);
-				connRunFn = DC::Connector::broadcastRunFn();
-				connType = "Connector.Broadcast";
-			} else {
-				connSchema = DC::Connector::routingSchema(n);
-				connRunFn = DC::Connector::routingRunFn();
-				connType = "Connector.Routing";
-			}
+			connSchema = DC::Connector::broadcastSchema(n);
+			connRunFn = DC::Connector::broadcastRunFn();
+			connType = "Connector.Broadcast";
 			std::string connName = "__" + key.mode + "_" + std::to_string(connId++);
 
 			auto connNode = std::make_unique<DC::Node>(

@@ -233,53 +233,6 @@ void testBroadcastConnectorInGraph() {
 	END_TEST();
 }
 
-void testRoutingConnectorInGraph() {
-	TEST("routing connector: add → routing → [id_a, id_b]") {
-		TestHarness harness;
-
-		harness.addNode(std::make_unique<Node>("Builtin", "add1", addSchema(), addRunFn()));
-
-		auto rtSchema = Connector::routingSchema(2);
-		auto rtRunFn = Connector::routingRunFn();
-		auto rtNode =
-			std::make_unique<Node>("Connector.Routing", "rt", rtSchema, rtRunFn, ThreadPoolAffinity::System);
-		rtNode->setConnector(true);
-		harness.addNode(std::move(rtNode));
-
-		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
-
-		harness.connectRaw("add1", "s", "rt", "in");
-		harness.connectRaw("rt", "out_0", "id_a", "x");
-		harness.connectRaw("rt", "out_1", "id_b", "x");
-
-		// 第一轮：t1 → out_0 → id_a
-		harness.feedInput("t1", "add1", "a", makeFloatTensor(1.0f));
-		harness.feedInput("t1", "add1", "b", makeFloatTensor(2.0f));
-		harness.submit("t1", "id_a", "y");
-		CHECK(harness.awaitCompletion("t1"), "t1 should complete within timeout");
-
-		CHECK(harness.hasOutput("t1", "id_a", "y"), "t1 should route to id_a (out_0)");
-		CHECK(!harness.hasOutput("t1", "id_b", "y"), "t1 should NOT route to id_b");
-
-		auto r1 = harness.getOutputTensor("t1", "id_a", "y");
-		CHECK(std::abs(r1.item<float>() - 3.0f) < 1e-6f, "t1 value");
-
-		// 第二轮：t2 → out_1 → id_b
-		harness.feedInput("t2", "add1", "a", makeFloatTensor(5.0f));
-		harness.feedInput("t2", "add1", "b", makeFloatTensor(6.0f));
-		harness.submit("t2", "id_b", "y");
-		CHECK(harness.awaitCompletion("t2"), "t2 should complete within timeout");
-
-		CHECK(!harness.hasOutput("t2", "id_a", "y"), "t2 should NOT route to id_a");
-		CHECK(harness.hasOutput("t2", "id_b", "y"), "t2 should route to id_b (out_1)");
-
-		auto r2 = harness.getOutputTensor("t2", "id_b", "y");
-		CHECK(std::abs(r2.item<float>() - 11.0f) < 1e-6f, "t2 value");
-	}
-	END_TEST();
-}
-
 void testConnectAll() {
 	TEST("connectAll auto-matches output ports to input ports") {
 		TestHarness harness;
@@ -1371,12 +1324,110 @@ void testWaitSemantics() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 共享 Timer 超时（回归）：deadline 精确触发 / 旧条目不误杀复用任务 / cancel 竞态
+// ════════════════════════════════════════════
+
+// 超时触发不得早于请求的 deadline（共享 Timer 精确唤醒语义）
+void testTimeoutLowerBound() {
+	TEST("shared timer: timeout fires no earlier than the requested deadline") {
+		TestHarness harness;
+
+		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), delayedRunFn(nullptr, 500)));
+		harness.connect("id_a", "y", "id_b", "x");
+
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
+
+		auto start = std::chrono::steady_clock::now();
+		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(150));
+		CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
+			  "watchdog should terminate the task");
+		auto elapsed = std::chrono::steady_clock::now() - start;
+
+		CHECK(harness.graph().taskStatus("t1") == TaskStatus::TimedOut, "task should be TimedOut");
+		CHECK(elapsed >= std::chrono::milliseconds(150),
+			  "timeout must not fire before the requested deadline");
+	}
+	END_TEST();
+}
+
+// 同 ID 复用：上一轮超时条目到点后必须失配退出，不得终止新一轮任务
+void testTimeoutThenTaskIdReuse() {
+	TEST("shared timer: stale timeout entry must not kill a resubmitted task") {
+		TestHarness harness;
+
+		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		harness.connect("id_a", "y", "id_b", "x");
+
+		// 第 1 轮：id_b 信号阻塞 → 声明无法满足 → 必然超时
+		harness.node("id_b")->bindSignal(harness.signalStore(), "enable_b");
+		harness.setSignal("enable_b", false);
+		harness.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
+		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(120));
+		CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
+			  "round 1 should be terminated by timeout");
+		CHECK(harness.graph().taskStatus("t1") == TaskStatus::TimedOut,
+			  "round 1 should end as TimedOut");
+
+		// 第 2~5 轮：同 ID 复用、解除阻塞、不限时提交——
+		// 旧超时条目到点时经活动门控身份校验失配退出，不得误杀新任务
+		for (int i = 2; i <= 5; ++i) {
+			harness.setSignal("enable_b", true);
+			harness.feedInput("t1", "id_a", "x", makeFloatTensor(static_cast<float>(i)));
+			harness.submit("t1", "id_b", "y");
+			CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
+				  "resubmitted task should complete normally");
+			CHECK(harness.graph().taskStatus("t1") == TaskStatus::Succeeded,
+				  "resubmitted task must not be killed by the stale timeout entry");
+		}
+
+		// 产出值校验：TestHarness 输出缓存为一次性消费式读取（取出后不重捕），
+		// 缓存条目在首轮复用（第 2 轮）就位后保持不变，故在此统一校验数值
+		auto r = harness.getOutputTensor("t1", "id_b", "y");
+		CHECK(std::abs(r.item<float>() - 2.0f) < 1e-6f,
+			  "first reused task result should be correct");
+	}
+	END_TEST();
+}
+
+// cancel 与超时竞争终止权：终态二选一，无崩溃、无双重终止
+void testCancelVsTimeoutRace() {
+	TEST("shared timer: cancel racing timeout yields exactly one terminal state") {
+		for (int round = 0; round < 10; ++round) {
+			TestHarness harness;
+
+			harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
+			harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+			harness.connect("id_a", "y", "id_b", "x");
+
+			harness.node("id_b")->bindSignal(harness.signalStore(), "enable_b");
+			harness.setSignal("enable_b", false);
+
+			// 30ms 处请求取消，与 60ms 超时竞争；cancel 对未提交/已终止任务幂等
+			std::thread canceller([&harness] {
+				std::this_thread::sleep_for(std::chrono::milliseconds(30));
+				harness.graph().cancel("t1");
+			});
+
+			harness.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
+			harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(60));
+			canceller.join();
+
+			auto st = harness.graph().taskStatus("t1");
+			CHECK(st == TaskStatus::Cancelled || st == TaskStatus::TimedOut,
+				  "final status must be exactly one of Cancelled/TimedOut");
+		}
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testSimpleDataflow();
 		testBuildGraph();
 		testBroadcastConnectorInGraph();
-		testRoutingConnectorInGraph();
 		testConnectAll();
 		testNodeQuery();
 		testSerializationAccessors();
@@ -1415,6 +1466,11 @@ int main() {
 
 		// wait/waitForResult 超时语义
 		testWaitSemantics();
+
+		// 共享 Timer 超时（deadline 精确触发 / 复用隔离 / cancel 竞态）
+		testTimeoutLowerBound();
+		testTimeoutThenTaskIdReuse();
+		testCancelVsTimeoutRace();
 
 		// 子图（分组互斥）测试
 		testSubgraphSerializesExecution();

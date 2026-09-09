@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **超时看门狗 → 引擎级共享 TimerService**：`ExecutionEngine` 不再为每条带超时的
+  submit 创建看门狗线程（原 100ms 轮询 `jthread` + per-task 注册/回收），改为单定时器
+  线程 + deadline 最小堆：每任务仅登记一个 deadline 条目，终止路径 O(1) 作废、零 join。
+  超时触发从 ~100ms 轮询粒度变为精确 deadline 唤醒；引擎析构时定时器线程先于
+  线程池停止（原看门狗晚于池析构，存在池关闭期间触发超时的窗口）；
+  每 task 成本从"一线程 + 周期轮询"降为"一个堆条目"。
+  同 ID 复用后旧条目到点时经活动门控身份校验失配退出，不会误杀新任务
+  （该校验取代原 per-task join 带来的提交唯一性保证）。
+  公开 API（`submit` / `wait` / `cancel` / `waitForResult` 等）签名与语义不变
+- **exportNode 子图驱动简化**：RunFn 内不再经引擎级 `setTaskCompleteCallback` +
+  手动条件变量捕获输出，改为 `submit → wait → 逐绑定 takeOutput`——
+  `_terminate` 抢救声明输出（步骤⑥）先于唤醒等待者（步骤⑦），wait 返回后
+  声明输出必已入 OutputZone，回调捕获机制随之删除；错误判定由全局
+  `hasErrors()/clearErrors()` 收敛为 task 级 `taskErrors(tid)`，消除跨 task
+  诊断污染；顺带删除未使用的 fedCount。行为等价（超时路径的部分输出反而更完整）
+- **执行引擎传播链去重**：`_submitNodeRun` / `_propagateFrom` 复用已持有的
+  task 执行态句柄，消除每节点/每边传播中重复的 `findTaskState` + `find`
+  加锁查找（每节点执行省 1 次、每边传播省 2 次锁获取，行为不变）
+- **`InferGraph::_ensureSubmittable` 注释澄清**：补充"必须先于
+  clearTask/declare 执行"的因果说明（该守卫保护在飞任务状态不被重复提交
+  破坏，引擎内校验发生在 facade 状态变更之后，二者非冗余）与已知 TOCTOU
+  窗口说明；方法本体无变化
+
+### Removed
+
+- `_retiredWatchdogs` 看门狗自 join 补丁与 `_watchdogs` 线程表（原超时路径在看门狗
+  自身线程内 erase + join 自身 `jthread` 会抛 `resource_deadlock_would_occur`，
+  需移交退役列表延迟回收；共享定时器无线程可回收，补丁随之移除）。
+  纯内部实现，无 API 变化
+- **`Connector.Routing`（轮询连接器）全链路移除**：其轮询计数器经注册表按值
+  拷贝共享，进程内所有 Routing 实例共享同一全局计数器（跨实例隐式耦合 +
+  并发下分发顺序非确定），故将轮询语义整体迁移至应用层——以自定义节点实现
+  （实例局部选择逻辑，引擎 partial-output 传播语义天然支持）。
+  连带变更：注册名 `"Connector.Routing"` 消失（`Connector::routingSchema/`
+  `routingRunFn` 一并删除）；DCIr 序列化不再产出 `mode:"routing"`，反序列化
+  遇 `routing` 模式显式抛 `GraphException(Other)`（不再静默降级为普通连线）；
+  连接器内置行为收敛为 Broadcast 单一语义（isConnector 扩展点框架保留）。
+  迁移：将 Routing 节点替换为 N 输出的自定义节点，RunFn 每次仅产出一个输出口
+
 ## [0.3.0] - 2026-09-08
 
 ### Added
