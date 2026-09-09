@@ -1,4 +1,5 @@
 #include "GraphLowering.h"
+#include "GraphException.h"
 
 namespace DC {
 
@@ -51,18 +52,44 @@ void buildRuntimeView(const GraphStore& source, const GraphSignature& signature,
 			outNodes.emplace(name, nodePtr.get());
 	}
 
-	// ── 4. 边改写：wire 入边与其唯一出边融合为直连边 ──
+	// ── 4. 边改写：wire 入边沿唯一出边链追踪到最终保留节点后融合为直连边 ──
 	outEdges.reserve(source.edges().size());
 	for (const auto& e : source.edges()) {
 		if (erased.contains(e.srcNode))
 			continue; // wire 出边：已被入边融合吸收
 		if (erased.contains(e.dstNode)) {
-			// wire 入边 → 直连边（源 → wire 的唯一出边目标）
-			const auto* out = wireOutEdge[e.dstNode];
-			outEdges.push_back({e.srcNode, e.srcPort, out->dstNode, out->dstPort});
+			// wire 入边 → 融合边。链上后继也可能已被擦除（wire→wire 链，
+			// connectRaw 允许连接器与连接器相连），必须追到首个保留节点；
+			// visited 防纯 wire 环——环上无保留端点，融合边丢弃（数据在源
+			// 语义中同样永远无法到达任何业务节点）。
+			std::unordered_set<std::string> visited;
+			const std::string* dstNode = &e.dstNode;
+			const std::string* dstPort = &e.dstPort;
+			bool resolved = true;
+			while (erased.contains(*dstNode)) {
+				if (!visited.insert(*dstNode).second) {
+					resolved = false; // wire 环：无保留端点
+					break;
+				}
+				const auto* out = wireOutEdge.at(*dstNode); // 擦除条件保证恰有 1 条出边
+				dstNode = &out->dstNode;
+				dstPort = &out->dstPort;
+			}
+			if (resolved)
+				outEdges.push_back({e.srcNode, e.srcPort, *dstNode, *dstPort});
 			continue;
 		}
 		outEdges.push_back(e);
+	}
+
+	// ── 5. 不变量校验：运行边的端点必须存在于运行节点集合 ──
+	// 防悬空边回归（悬空边在运行期表现为数据静默滞留 + 任务无法完成）。
+	for (const auto& e : outEdges) {
+		if (!outNodes.contains(e.srcNode) || !outNodes.contains(e.dstNode))
+			throw GraphException(GraphException::ErrorType::Other, "buildRuntimeView",
+								 "lowering invariant violated: edge '" + e.srcNode + ":"
+									 + e.srcPort + "' → '" + e.dstNode + ":" + e.dstPort
+									 + "' references a node outside the runtime view");
 	}
 }
 

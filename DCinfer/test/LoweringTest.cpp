@@ -79,6 +79,14 @@ static std::unique_ptr<Tensor> floatTensor(float v) {
 	return t;
 }
 
+// 手动构造 Broadcast 连接器（fanOut=1 为等效导线，可被 lowering 擦除）
+static std::unique_ptr<Node> makeWire(const std::string& name, size_t fanOut = 1) {
+	auto w = std::make_unique<Node>("Connector.Broadcast", name, Connector::broadcastSchema(fanOut),
+								 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+	w->setConnector(true);
+	return w;
+}
+
 // ── 1. 自动 wire（Broadcast(1)）被擦除：源图不变、运行时视图收缩、值传播不变 ──
 
 static void test_autoWireErased() {
@@ -274,6 +282,89 @@ static void test_errorPropagationThroughLoweredEdge() {
 	CHECK(!graph.hasOutput("t1", "down", "y"), "downstream must not produce output");
 }
 
+// ── 7. 链式 wire：wire→wire 链（组合反例）必须融合到最终保留节点 ──
+
+static void test_chainedWiresErased() {
+	InferGraph graph;
+	graph.addNode(makeId("a"));
+	graph.addNode(makeId("b"));
+	graph.addNode(makeWire("w1"));
+	graph.addNode(makeWire("w2"));
+
+	// a → w1 → w2 → b（connectRaw 允许连接器与连接器相连，合法构图）
+	graph.connectRaw("a", "y", "w1", "in");
+	graph.connectRaw("w1", "out_0", "w2", "in");
+	graph.connectRaw("w2", "out_0", "b", "x");
+
+	auto snap = graph.freeze();
+	CHECK(snap->loweringStats().erasedConnectors == 2, "both chained wires erased");
+	CHECK(snap->runtimeNodeCount() == 2, "runtime view: 2 business nodes");
+	CHECK(snap->runtimeEdgeCount() == 1, "runtime view: single fused edge a→b");
+
+	graph.feedInput("t1", "a", "x", floatTensor(9.0f));
+	graph.submit("t1", "b", "y");
+	CHECK(graph.wait("t1"), "chained wires should complete (no dangling edge)");
+	CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status Succeeded");
+	auto r = graph.takeOutputTensor("t1", "b", "y");
+	CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "value should traverse the wire chain");
+}
+
+// ── 8. 链终止于保留连接器：w1 擦除后直连 Broadcast(2)，bc 保留 ──
+
+static void test_chainThroughKeptConnector() {
+	InferGraph graph;
+	graph.addNode(makeId("a"));
+	graph.addNode(makeId("b"));
+	graph.addNode(makeId("c"));
+	graph.addNode(makeWire("w1"));
+	graph.addNode(makeWire("bc", 2)); // Broadcast(2)：1→2 分发，不擦除
+
+	graph.connectRaw("a", "y", "w1", "in");
+	graph.connectRaw("w1", "out_0", "bc", "in");
+	graph.connectRaw("bc", "out_0", "b", "x");
+	graph.connectRaw("bc", "out_1", "c", "x");
+
+	auto snap = graph.freeze();
+	CHECK(snap->loweringStats().erasedConnectors == 1, "only w1 erased (bc kept)");
+	CHECK(snap->runtimeNodeCount() == 4, "runtime keeps bc (4 nodes)");
+	CHECK(snap->runtimeEdgeCount() == 3, "fused a→bc + bc's two out-edges");
+
+	graph.feedInput("t1", "a", "x", floatTensor(6.0f));
+	graph.submit("t1", {{"b", "y", 1}, {"c", "y", 1}});
+	CHECK(graph.wait("t1"), "chain through kept broadcast should complete");
+	auto rb = graph.takeOutputTensor("t1", "b", "y");
+	auto rc = graph.takeOutputTensor("t1", "c", "y");
+	CHECK(std::abs(rb.item<float>() - 6.0f) < 1e-6f, "downstream 1 gets value through fused chain");
+	CHECK(std::abs(rc.item<float>() - 6.0f) < 1e-6f, "downstream 2 gets value through kept broadcast");
+}
+
+// ── 9. 纯 wire 环：融合边追踪不得挂起，环上融合边丢弃 ──
+
+static void test_wireOnlyCycleDropsFusedEdge() {
+	InferGraph graph;
+	graph.addNode(makeId("x"));
+	graph.addNode(makeWire("w1"));
+	graph.addNode(makeWire("w2"));
+
+	// x → w1 → w2 → w1：外部入边进入纯 wire 环
+	graph.connectRaw("x", "y", "w1", "in");
+	graph.connectRaw("w1", "out_0", "w2", "in");
+	graph.connectRaw("w2", "out_0", "w1", "in");
+
+	auto snap = graph.freeze(); // 不得挂起
+	CHECK(snap->loweringStats().erasedConnectors == 2, "both cycle wires erased");
+	CHECK(snap->runtimeNodeCount() == 1, "runtime view: only x");
+	CHECK(snap->runtimeEdgeCount() == 0, "fused edge into wire-only cycle is dropped");
+
+	// x 自产自销：声明 x.y，验证无悬空边、无静默滞留
+	graph.feedInput("t1", "x", "x", floatTensor(3.0f));
+	graph.submit("t1", "x", "y");
+	CHECK(graph.wait("t1"), "task should succeed on the sole retained node");
+	CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status Succeeded");
+	auto r = graph.takeOutputTensor("t1", "x", "y");
+	CHECK(std::abs(r.item<float>() - 3.0f) < 1e-6f, "x's own output readable");
+}
+
 int main() {
 	test_autoWireErased();
 	test_broadcastN2NotErased();
@@ -281,6 +372,11 @@ int main() {
 	test_cycleTtlStillBounded();
 	test_bindingProtectionKeepsWire();
 	test_errorPropagationThroughLoweredEdge();
+
+	// 组合语义：链式 wire / 链终止于保留连接器 / 纯 wire 环
+	test_chainedWiresErased();
+	test_chainThroughKeptConnector();
+	test_wireOnlyCycleDropsFusedEdge();
 
 	if (g_failures == 0) {
 		std::printf("All %d checks passed\n", g_checks);
