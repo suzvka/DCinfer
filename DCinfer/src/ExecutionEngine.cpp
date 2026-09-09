@@ -1,6 +1,7 @@
 #include "ExecutionEngine.h"
 #include "GraphRuntimeState.h"
 #include "Graph/internal/TaskExecutionState.h"
+#include "Graph/internal/TimerService.h"
 #include "GraphStore.h"
 #include "OutputZone.h"
 #include "SignalStore.h"
@@ -9,7 +10,6 @@
 #include "NodeException.h"
 #include "Node/internal/ExecutionPipeline.h"
 
-#include <thread>
 #include <chrono>
 
 namespace DC {
@@ -25,7 +25,7 @@ ExecutionEngine::TaskGate::~TaskGate() {
 }
 
 // ════════════════════════════════════════════
-// 构造
+// 构造 / 析构
 // ════════════════════════════════════════════
 
 ExecutionEngine::ExecutionEngine(const PoolConfig& computeCfg,
@@ -34,7 +34,21 @@ ExecutionEngine::ExecutionEngine(const PoolConfig& computeCfg,
 	: _sharedGroups(std::make_shared<GroupSemaphoreRegistry>()),
 	  _computePool(computeCfg, _sharedGroups),
 	  _operatorPool(operatorCfg, _sharedGroups),
-	  _systemPool(systemCfg, _sharedGroups) {}
+	  _systemPool(systemCfg, _sharedGroups),
+	  _timer(std::make_unique<TimerService>()) {}
+
+ExecutionEngine::~ExecutionEngine() {
+	// 先将活动门控表整体移出（锁外释放）：门控析构触发的 _exhaustedCheck
+	// 可能经 _terminate 重入本表，锁内 clear 会自死锁。
+	// 成员随后逆序析构：定时器线程最先停止（早于池 shutdown），
+	// 之后线程池 join 全部 worker，状态成员最后释放。
+	decltype(_activeGates) leftover;
+	{
+		std::lock_guard lk(_activeGatesMutex);
+		leftover = std::move(_activeGates);
+	}
+	leftover.clear();
+}
 
 // ════════════════════════════════════════════
 // 线程池分发
@@ -65,11 +79,13 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 					[this, node, nodeName, taskId, gate, remainingHops, state] {
 		auto& errors = state->errors;
 		NodeResult result;
+		// task 态取自 task 执行域（原 Node 内嵌态），执行闸按节点名定位：
+		// 节点本身只读（const），可变状态全部在 task 域；lambda 持
+		// shared_ptr 副本，终止清理不会回收在飞执行态。
+		// taskExec 就地复用（终止后输出判定共用同一句柄），
+		// 不再重复走 findTaskState 加锁查找
+		auto taskExec = state->exec->taskState(taskId);
 		try {
-			// task 态取自 task 执行域（原 Node 内嵌态），执行闸按节点名定位：
-			// 节点本身只读（const），可变状态全部在 task 域；lambda 持
-			// shared_ptr 副本，终止清理不会回收在飞执行态
-			auto taskExec = state->exec->taskState(taskId);
 			auto& exec = taskExec->ensure(nodeName, node->schema());
 			result = ExecutionPipeline::execute(taskId, *node, exec,
 												state->exec->gateFor(nodeName));
@@ -86,12 +102,11 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 			return;
 
 		// 完成判定与原节点完成事件语义一致：只要产生了任何输出即视为成功传播。
-		// 部分输出场景（如 Routing 连接器仅路由到一个输出口）允许继续传播；
+		// 部分输出场景（如用户自定义路由节点仅产出一个输出口）允许继续传播；
 		// 完全无输出的节点记录错误并跳过传播。
 		bool hasAnyOutput = false;
 		{
-			auto execState = state->exec->findTaskState(taskId);
-			auto* ns = execState ? execState->find(nodeName) : nullptr;
+			auto* ns = taskExec->find(nodeName);
 			if (ns) {
 				for (const auto& p : node->schema().outputs) {
 					if (ns->buffer.hasOutput(taskId, p.name)) {
@@ -144,8 +159,8 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 		_taskStates.emplace(taskId, TaskStatus::Running);
 	}
 
-	// 创建任务门控：任务 lambda 链、看门狗与 cancel() 共享；
-	// 注册到活动表供 cancel() 定位，_terminate 时移除
+	// 创建任务门控：任务 lambda 链、超时触发路径与 cancel() 共享；
+	// 注册到活动表供 cancel() 定位与 _onWatchdogFired 身份校验，_terminate 时移除
 	auto gate = std::make_shared<TaskGate>();
 	gate->engine = this;
 	gate->state = state; // 与图对象共享图运行时状态（在飞任务保活）
@@ -155,46 +170,9 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 		_activeGates[taskId] = gate;
 	}
 
-	// 超时看门狗（std::jthread + stop_token，生命周期由 ExecutionEngine 管理）
-	if (timeout.count() > 0) {
-		auto deadline = std::chrono::steady_clock::now() + timeout;
-		auto watchdog = std::jthread(
-			[this, taskId, timeout, deadline, gate, state](
-				std::stop_token stoken) {
-				auto& errors = state->errors;
-				auto& output = state->output;
-				auto& graph = state->graph->runtimeView();
-				// 轮询 sleep，支持 stop_token 提前取消
-				while (!stoken.stop_requested()
-					   && std::chrono::steady_clock::now() < deadline) {
-					std::this_thread::sleep_for(std::chrono::milliseconds(100));
-				}
-				if (stoken.stop_requested())
-					return; // task 正常完成，_terminate 已请求停止
-
-				if (!gate->terminated.exchange(true, std::memory_order_acq_rel)) {
-					std::string reason = "task timed out (" + std::to_string(timeout.count())
-										 + "ms) without meeting output declarations";
-					errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit", reason);
-					_diagnoseAbnormal(taskId, reason, state);
-					_terminate(taskId, state, TaskStatus::TimedOut);
-				}
-			});
-
-		// 注册到看门狗表：_watchdogs 无其他同步，须与 _terminate 的回收、
-		// 并发 submit 互斥。同 taskId 重复提交时，旧看门狗移出后在锁外
-		// 回收，避免在锁内 join。
-		std::jthread replaced;
-		{
-			std::lock_guard lk(_watchdogsMutex);
-			if (auto it = _watchdogs.find(taskId); it != _watchdogs.end()) {
-				replaced = std::move(it->second);
-				_watchdogs.erase(it);
-			}
-			_watchdogs.emplace(taskId, std::move(watchdog));
-		}
-		// replaced（若存在）在此析构：request_stop + join，位于锁外
-	}
+	// 超时看门狗：引擎级共享 TimerService 条目（无 per-task 线程；
+	// 到点处理与仲裁链见 _onWatchdogFired）
+	_scheduleWatchdog(taskId, timeout, state, gate);
 
 	// 扫描全图（运行时视图），对所有已就绪的节点提交执行任务（执行完成后再传播下游）。
 	// 就绪查询仅针对已有 task 态条目（feedInput 时创建）：无条目 = 无暂存输入 = 未就绪
@@ -303,12 +281,16 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		if (gate->terminated.load(std::memory_order_acquire))
 			return;
 
+		// 下游 task 态：惰性创建（原 Node 内嵌 TaskBuffer 的 set 输入语义）。
+		// dstExec/dstNs 就地复用（isReady 判定共用同一执行态），不再重复走
+		// findTaskState + find 加锁查找；ensure 产出条目由 unique_ptr 承载
+		// 地址稳定，dstExec 副本保证其存活至本轮传播结束
+		std::shared_ptr<TaskExecutionState> dstExec;
+		NodeExecState* dstNs = nullptr;
 		try {
-			// 下游 task 态：惰性创建（原 Node 内嵌 TaskBuffer 的 set 输入语义）；
-			// shared_ptr 先落局部量，防止临时量析构导致引用悬垂
-			auto dstExec = state->exec->taskState(taskId);
-			auto& dstNs = dstExec->ensure(edge.dstNode, dst->schema());
-			dstNs.buffer.setInput(taskId, edge.dstPort, std::move(data), dst->schema());
+			dstExec = state->exec->taskState(taskId);
+			dstNs = &dstExec->ensure(edge.dstNode, dst->schema());
+			dstNs->buffer.setInput(taskId, edge.dstPort, std::move(data), dst->schema());
 		} catch (const NodeException& e) {
 			errors.recordError(taskId, edge.dstNode, "ExecutionEngine::_propagateFrom",
 							   "NodeException in setInput for port '" + edge.dstPort
@@ -317,9 +299,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		}
 
 		// 下游就绪 → 提交执行 + 完成后继续传播（数据冒泡）
-		auto dstExec = state->exec->findTaskState(taskId);
-		auto* dstNs = dstExec ? dstExec->find(edge.dstNode) : nullptr;
-		if (dstNs && dst->isReady(taskId, dstNs->buffer)) {
+		if (dst->isReady(taskId, dstNs->buffer)) {
 			_submitNodeRun(dst, edge.dstNode, taskId, gate, remainingHops - 1, state);
 		}
 	}
@@ -350,27 +330,10 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		it->second = terminalStatus;
 	}
 
-	// ① 取消并回收超时看门狗（若存在）
-	//    持锁移出、锁外回收：与 submit 的注册及并发 _terminate 互斥，
-	//    join 不在锁内，避免阻塞其他线程的注册/回收。
-	//    若调用线程正是该看门狗自身（超时路径），join 自身将抛
-	//    resource_deadlock_would_occur，并因自 noexcept 析构逃逸触发
-	//    std::terminate——此时移交退役列表，由引擎析构统一 join。
-	std::jthread finished;
-	{
-		std::lock_guard lk(_watchdogsMutex);
-		if (auto it = _watchdogs.find(taskId); it != _watchdogs.end()) {
-			if (it->second.get_id() == std::this_thread::get_id())
-				_retiredWatchdogs.push_back(std::move(it->second));
-			else
-				finished = std::move(it->second);
-			_watchdogs.erase(it);
-		}
-	}
-	if (finished.joinable()) {
-		finished.request_stop();
-		finished.join();
-	}
+	// ① 失效超时条目（若存在）
+	//    引擎级 TimerService：O(1) 作废，无线程可回收——原 per-task 看门狗
+	//    的 join 回收与 _retiredWatchdogs 自 join 补丁随之移除。
+	_cancelWatchdog(taskId);
 
 	// ② 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
 	//    锁内拷贝、锁外调用：避免回调重入死锁
@@ -447,6 +410,72 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
 	// 若未配置看门狗（timeout=0），调用方需自行处理 wait() 超时。
 	_diagnoseAbnormal(taskId, "propagation chain exhausted with unsatisfied output declarations",
 					  state);
+}
+
+// ════════════════════════════════════════════
+// 超时定时器（引擎级共享 TimerService）
+// ════════════════════════════════════════════
+
+void ExecutionEngine::_scheduleWatchdog(const TaskId& taskId,
+										std::chrono::milliseconds timeout,
+										const std::shared_ptr<GraphRuntimeState>& state,
+										const std::shared_ptr<TaskGate>& gate) {
+	if (timeout.count() <= 0)
+		return; // 不限时：与原实现一致，不设防
+
+	// 同 ID 残留条目先失效：活动 ID 重复提交已在 _taskStates 校验拒绝，
+	// 此处兜底已终止 ID 复用路径上的旧条目
+	_cancelWatchdog(taskId);
+
+	auto deadline = std::chrono::steady_clock::now() + timeout;
+	// 回调捕获本提交 gate 与 state 共享句柄：图组件存活期由引用计数保证
+	//（同原看门狗线程体）；到点处理见 _onWatchdogFired
+	uint64_t handle = _timer->schedule(deadline, [this, taskId, timeout, state, gate] {
+		_onWatchdogFired(taskId, timeout, state, gate);
+	});
+
+	std::lock_guard lk(_timerHandlesMutex);
+	_timerHandles[taskId] = handle;
+}
+
+void ExecutionEngine::_cancelWatchdog(const TaskId& taskId) {
+	uint64_t handle = 0;
+	{
+		std::lock_guard lk(_timerHandlesMutex);
+		auto it = _timerHandles.find(taskId);
+		if (it == _timerHandles.end())
+			return;
+		handle = it->second;
+		_timerHandles.erase(it);
+	}
+	// 锁外调用：_timerHandlesMutex 与 timer 内部锁不嵌套持有
+	_timer->cancel(handle);
+}
+
+void ExecutionEngine::_onWatchdogFired(const TaskId& taskId,
+									   std::chrono::milliseconds timeout,
+									   const std::shared_ptr<GraphRuntimeState>& state,
+									   const std::shared_ptr<TaskGate>& gate) {
+	// ① 提交唯一性校验：仅当本提交的 gate 仍是活动门控时才继续。
+	//    同 ID 复用后注册的是新 gate，旧条目到点在此失配退出——
+	//    无 per-task 线程可 join，这道校验取代原 join 带来的唯一性保证。
+	{
+		std::lock_guard lk(_activeGatesMutex);
+		auto it = _activeGates.find(taskId);
+		if (it == _activeGates.end() || it->second != gate)
+			return;
+	}
+
+	// ② gate 仲裁：与 cancel()/正常完成竞争唯一终止权（原看门狗语义）
+	if (gate->terminated.exchange(true, std::memory_order_acq_rel))
+		return;
+
+	// ③ 诊断 + 终止（顺序与原看门狗线程体一致）
+	std::string reason = "task timed out (" + std::to_string(timeout.count())
+						 + "ms) without meeting output declarations";
+	state->errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit", reason);
+	_diagnoseAbnormal(taskId, reason, state);
+	_terminate(taskId, state, TaskStatus::TimedOut);
 }
 
 // ════════════════════════════════════════════

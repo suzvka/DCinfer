@@ -7,15 +7,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <vector>
 
 namespace DC {
 
@@ -25,6 +24,7 @@ class OutputZone;
 class SignalStore;
 class ErrorTracker;
 struct GraphRuntimeState;
+class TimerService; // 定义见 Graph/internal/TimerService.h（引擎内部组件，仅 .cpp 可见）
 
 /// @brief 推理图执行引擎：事件驱动的数据流传播与调度。
 ///
@@ -60,17 +60,10 @@ public:
 
 	/// @brief  析构：先在全部状态成员存活时释放残余活动门控。
 	///         若留到成员析构阶段，门控析构触发的 _exhaustedCheck 将访问
-	///         已析构的 _watchdogs/_blockedSkips 等状态。
-	~ExecutionEngine() {
-		// 先将活动门控表整体移出（锁外释放）：门控析构触发的 _exhaustedCheck
-		// 可能经 _terminate 重入本表，锁内 clear 会自死锁。
-		decltype(_activeGates) leftover;
-		{
-			std::lock_guard lk(_activeGatesMutex);
-			leftover = std::move(_activeGates);
-		}
-		leftover.clear();
-	}
+	///         已析构的 _blockedSkips 等状态。
+	/// @note   定义于 .cpp（TimerService 以不完整类型持有）；
+	///         成员逆序析构：定时器线程最先停止 → 线程池 → 状态成员。
+	~ExecutionEngine();
 
 	ExecutionEngine(const ExecutionEngine&) = delete;
 	ExecutionEngine& operator=(const ExecutionEngine&) = delete;
@@ -131,7 +124,7 @@ public:
 private:
 	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
 	//
-	// 每个飞行中的任务 lambda（含后续传播链）与超时看门狗各持有一份
+	// 每个飞行中的任务 lambda（含后续传播链）与超时定时器回调各持有一份
 	// shared_ptr<TaskGate>。当最后一个持有者析构时，若 task 未被终止，
 	// 则触发 _exhaustedCheck。
 	struct TaskGate {
@@ -167,6 +160,24 @@ private:
 	void _exhaustedCheck(const TaskId& taskId,
 						 const std::shared_ptr<GraphRuntimeState>& state);
 
+	// ── 超时定时器（引擎级共享 TimerService，取代 per-task 看门狗线程）──
+
+	/// @brief  注册超时条目（timeout <= 0 不设防，与原 per-task 看门狗语义一致）
+	/// @note   回调捕获本提交的 gate：到点先校验 _activeGates 中仍是本提交的
+	///         gate（同 ID 复用后旧条目失配退出——无线程可 join，这道校验
+	///         取代原 join 带来的提交唯一性保证），再走既有 gate 仲裁
+	void _scheduleWatchdog(const TaskId& taskId, std::chrono::milliseconds timeout,
+						   const std::shared_ptr<GraphRuntimeState>& state,
+						   const std::shared_ptr<TaskGate>& gate);
+
+	/// @brief  失效 task 的超时条目（_terminate 调用；O(1) 作废，无线程 join）
+	void _cancelWatchdog(const TaskId& taskId);
+
+	/// @brief  定时器到点：提交唯一性校验 → gate 仲裁 → 诊断 + 终止（原看门狗线程体）
+	void _onWatchdogFired(const TaskId& taskId, std::chrono::milliseconds timeout,
+						  const std::shared_ptr<GraphRuntimeState>& state,
+						  const std::shared_ptr<TaskGate>& gate);
+
 	// ── 运行时诊断 ──
 
 	/// @brief  异常终止前的诊断：将未满足声明、信号阻塞节点等信息写入 ErrorTracker。
@@ -183,10 +194,11 @@ private:
 
 	// ── 成员 ──
 	// 声明顺序即析构顺序约束：
-	//   状态成员最先声明 → 最后析构；线程池最后声明 → 最先析构。
-	// 析构顺序：池(shutdown/join worker) → 共享表 → 状态 → 在飞看门狗(join) → 退役看门狗(join)。
-	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated/_watchdogs
-	// 等状态、以及向池提交任务时，所有对象均存活。
+	//   状态成员最先声明 → 最后析构；线程池与定时器最后声明 → 最先析构。
+	// 析构顺序：定时器(stop/join timer 线程) → 池(shutdown/join worker) → 共享表 → 状态。
+	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated
+	// 等状态、以及向池提交任务时，所有对象均存活；定时器先于池停止，
+	// 池关闭期间不再可能有超时触发访问状态成员。
 	// （图组件生命周期由 GraphRuntimeState shared_ptr 保证，不依赖本表顺序。）
 	// task 状态表：Running → 终态（Succeeded/Failed/TimedOut/Cancelled）。
 	// submit 时活动 ID 拒绝重复提交；已终止 ID 复用时清除旧状态。
@@ -199,20 +211,6 @@ private:
 	// _exhaustedCheck 访问的引擎状态成员（本表及上方互斥锁）仍然存活。
 	std::unordered_map<TaskId, std::shared_ptr<TaskGate>> _activeGates;
 	std::mutex _activeGatesMutex;
-
-	// 看门狗退役列表：超时路径中，看门狗线程会在 _terminate 内尝试回收自身，
-	// 在自身线程 join 自身将抛 resource_deadlock_would_occur，并因自 noexcept
-	// 析构逃逸触发 std::terminate——此类 jthread 移入此列表，由引擎析构统一
-	// join（彼时看门狗 lambda 早已返回，join 立即完成）。
-	// 声明顺序约束：必须先于 _watchdogs——析构时先回收在飞看门狗（其
-	// _terminate 可能仍向本列表移交自身），最后才回收本列表。
-	std::vector<std::jthread> _retiredWatchdogs;
-
-	// 超时看门狗线程（per-task），在 _terminate 时回收。
-	// _watchdogsMutex 保护注册/回收：submit（提交方线程）与 _terminate
-	//（看门狗线程、池 worker 线程）对该 map 的访问无其他同步。
-	std::mutex _watchdogsMutex;
-	std::unordered_map<TaskId, std::jthread> _watchdogs;
 
 	// 信号阻塞追踪：记录每个 task 在传播过程中因信号阻塞而被跳过的节点名。
 	// 由 _propagateFrom 写入，_diagnoseAbnormal 读取，_terminate 清理。
@@ -231,6 +229,20 @@ private:
 	ThreadPool _computePool;
 	ThreadPool _operatorPool;
 	ThreadPool _systemPool;
+
+	// ── 共享超时定时器（引擎级；声明在成员列表最末 → 引擎析构时最先停止）──
+	//
+	// 取代 per-task 看门狗 jthread（原 submit 创建、_terminate 回收、
+	// _retiredWatchdogs 自 join 补丁）：每条带超时的 submit 只登记一个
+	// deadline 条目，终止路径 O(1) 作废，无线程创建/回收。
+	// _timerHandles：taskId → 存活条目句柄。submit 注册、_terminate 摘除；
+	// fire 触发经活动门控身份校验仲裁（见 _onWatchdogFired），
+	// 同 ID 复用后旧条目不得误杀新任务。
+	std::unordered_map<TaskId, uint64_t> _timerHandles;
+	std::mutex _timerHandlesMutex;
+
+	/// 引擎级共享超时定时器（定义见 Graph/internal/TimerService.h，仅 .cpp 可见）
+	std::unique_ptr<TimerService> _timer;
 };
 
 } // namespace DC
