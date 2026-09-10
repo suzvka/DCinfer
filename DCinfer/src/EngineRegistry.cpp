@@ -112,7 +112,7 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, 
 
 	NodeFactoryParams params;
 	params.nodeName = nodeName;
-	params.engineInstance = engineInstance;    // 引擎实例一律经共享句柄（engineConfig 仅用户配置，不再承载实例指针）
+	params.engineInstance = engineInstance; 
 	params.schema = std::move(schema);
 	params.modelPath = modelPath;
 
@@ -227,7 +227,6 @@ void EngineRegistry::releaseEngine(const std::string& engineType, const std::str
 
 void EngineRegistry::releaseAllEngines() {
 	// 语义同 releaseEngine：逐条目移除缓存，实例销毁由句柄引用计数决定。
-	// 旧实现在此处同步调用 releaseEngine 钩子，会悬空仍绑定实例的节点。
 	// 创建中（loading）条目跳过，待创建完成后由后续 release 处理。
 	std::lock_guard lk(_mutex);
 	for (auto it = _engineInstances.begin(); it != _engineInstances.end();) {

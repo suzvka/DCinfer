@@ -172,7 +172,6 @@ static void test_resolutionSemanticsPreserved() {
 
 	// 冻结后解析（GraphSignature 视图，无锁）
 	CHECK(graph.hasOutput("t1", "res"), "alias should resolve for hasOutput after freeze");
-	// 仅按别名寻址：端口名不再解析（统一寻址语义，冻结前后一致）
 	bool portNameRejected = false;
 	try {
 		graph.hasOutput("t1", "y");
@@ -183,7 +182,6 @@ static void test_resolutionSemanticsPreserved() {
 	auto r = graph.takeOutputTensor("t1", "res");
 	CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "alias retrieval after freeze should be 9.0");
 
-	// 跨节点同名端口：仅按别名寻址后无歧义 —— 端口名不解析，直接 NodeNotFound
 	InferGraph g2;
 	g2.addNode(makeId("a"));
 	g2.addNode(makeId("b"));

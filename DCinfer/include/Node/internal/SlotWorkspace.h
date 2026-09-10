@@ -15,8 +15,6 @@ struct NodeSchema; // 前向声明（定义见 Node.h）
 /// @brief 工作槽位管理器：封装 Node 的 _inputSlots / _outputSlots。
 ///
 /// RunContext 的 peek/pop/output 操作委托至此。
-/// 执行互斥（原 _executionGuard/_currentTaskId）已上提为 NodeExecutionGate，
-/// 本类只剩纯槽位数据。
 class SlotWorkspace {
 public:
 	using SlotMap = std::unordered_map<std::string, TensorSlot>;

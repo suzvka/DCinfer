@@ -83,7 +83,7 @@ Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::takeOutput",
 							 "node '" + nodeName + "' not found");
 	}
-	// 回退查 task 执行域的 per-node 缓冲（消息/异常语义与原 Node::takeOutput 一致）
+	// 回退查 task 执行域的 per-node 缓冲
 	auto taskExec = _state->exec->findTaskState(taskId);
 	auto* ns = taskExec ? taskExec->find(nodeName) : nullptr;
 	if (!ns)

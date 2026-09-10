@@ -78,11 +78,10 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 					[this, node, nodeName, taskId, gate, remainingHops, state] {
 		auto& errors = state->errors;
 		NodeResult result;
-		// task 态取自 task 执行域（原 Node 内嵌态），执行闸按节点名定位：
+		// task 态取自 task 执行域，执行闸按节点名定位：
 		// 节点本身只读（const），可变状态全部在 task 域；lambda 持
 		// shared_ptr 副本，终止清理不会回收在飞执行态。
 		// taskExec 就地复用（终止后输出判定共用同一句柄），
-		// 不再重复走 findTaskState 加锁查找
 		auto taskExec = state->exec->taskState(taskId);
 		try {
 			auto& exec = taskExec->ensure(nodeName, node->schema());
@@ -281,8 +280,6 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 			return;
 
 		// 下游 task 态：惰性创建（原 Node 内嵌 TaskBuffer 的 set 输入语义）。
-		// dstExec/dstNs 就地复用（isReady 判定共用同一执行态），不再重复走
-		// findTaskState + find 加锁查找；ensure 产出条目由 unique_ptr 承载
 		// 地址稳定，dstExec 副本保证其存活至本轮传播结束
 		std::shared_ptr<TaskExecutionState> dstExec;
 		NodeExecState* dstNs = nullptr;
@@ -352,8 +349,6 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		cb(taskId);
 	}
 
-	// ③（生命周期变更）不再清理 OutputZone：结果保留至下一次同 ID submit
-	//    或 releaseTask() —— 支持 submit → wait → takeOutput 的同步取结果用法
 
 	// ④ 清理该 task 的所有 task 级信号（防止泄漏）
 	signals.clearTask(taskId);
@@ -437,10 +432,9 @@ void ExecutionEngine::_scheduleWatchdog(const TaskId& taskId,
 										const std::shared_ptr<GraphRuntimeState>& state,
 										const std::shared_ptr<TaskGate>& gate) {
 	if (timeout.count() <= 0)
-		return; // 不限时：与原实现一致，不设防
+		return; 
 
 	// 同 ID 残留条目先失效：活动 ID 重复提交已在 _taskStates 校验拒绝，
-	// 此处兜底已终止 ID 复用路径上的旧条目
 	_cancelWatchdog(taskId);
 
 	auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -472,9 +466,6 @@ void ExecutionEngine::_onWatchdogFired(const TaskId& taskId,
 									   std::chrono::milliseconds timeout,
 									   const std::shared_ptr<GraphRuntimeState>& state,
 									   const std::shared_ptr<TaskGate>& gate) {
-	// ① 提交唯一性校验：仅当本提交的 gate 仍是活动门控时才继续。
-	//    同 ID 复用后注册的是新 gate，旧条目到点在此失配退出——
-	//    无 per-task 线程可 join，这道校验取代原 join 带来的唯一性保证。
 	{
 		std::lock_guard lk(_activeGatesMutex);
 		auto it = _activeGates.find(taskId);

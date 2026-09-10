@@ -242,7 +242,7 @@ struct NetError {
 ### 3.5 NetSync —— 核心 async→sync 桥（ADR-6）
 
 ```cpp
-/// 适配器开发者不再手写 promise/condvar；在 RunFn（System 池线程）内调用。
+
 /// submit 内可将任务投递到 transport 自持的 I/O 线程 / 事件循环。
 template <typename R>
 R DcNetSync::syncAwait(const std::function<void(std::function<void(R)>)>& submit);
@@ -503,28 +503,6 @@ DCEngines/OpenAI/
 
 **依赖现状（已核实 vcpkg.json）**：`nlohmann-json` 已在核心依赖树中——JSON 编解码
 零新增；`poco[netssl]`（M2.6 起）承载 HTTP/TLS 传输与测试 MockServer。
-
-**HTTP 客户端**（已决策：方案 C，POCO，跨平台）：
-
-- **A（备选）**：vcpkg feature（如 `dcnet`）→ `libcurl`。跨平台、线程安全、成熟稳定；
-  CMake 侧 `find_package(CURL)`。代价：一个 feature 依赖。
-- **B（已退役，Windows 首发 2026-08）**：`NetTransport_Http` 曾用 WinHTTP 实现
-  （零新增依赖，keep-alive、本地地址绕代理）。已知边界：`dwReceiveTimeout` 不覆盖
-  响应头等待；仅 Windows。随 POCO 迁移（M2.6）退役。
-- **C（已实现，2026-09）**：`NetTransport_Http` 用 POCO 实现（vcpkg `poco[netssl]`）
-  ——Windows/Linux/macOS 单一实现；`Poco::URI` 解析端点、
-  `HTTPClientSession`/`HTTPSClientSession`（keep-alive、独立 connect/send/receive
-  超时，不再有方案 B 的响应头等待盲区）；connect() 增加 TCP 就绪探测（方案 B 连接
-  惰性建立，拒连/DNS 失败延到首次 send；POCO 版把失败提前到 createEngine 配置期
-  报告，落实契约 §3.1“就绪探测”语义）。
-  MockServer 同步迁至 POCO `ServerSocket`（原 WinSock），测试设施跨平台。
-  TLS 双轨：Windows 经项目 overlay triplet（`cmake/triplets/x64-windows.cmake` 的
-  `POCO_ENABLE_NETSSL_WIN`）用 **NetSSL_Win/SChannel**（系统 TLS，免 OpenSSL
-  构建链），POSIX 用 **NetSSL/OpenSSL**（overlay port `cmake/overlay-ports/poco`）；
-  两者 `HTTPSClientSession` API 一致，业务代码零条件编译。证书校验策略
-  （默认上下文，严格校验）见 §12 安全展望。
-  已知平台差异：POCO/Windows 的 WSAPoll 不上报 connect 失败，带超时探测下
-  拒绝连接表现为 Timeout（仍为可重试 ExecutionFailed）；POSIX 报 Unreachable。
 
 **CMake 接线（已实现）**：根 `CMakeLists.txt` 以 `_dcinfer_option()` 注册
 `DCINFER_BUILD_DCNET`（旧 `BUILD_DCNET` 兼容映射；默认 OFF，与 vcpkg feature

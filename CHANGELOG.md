@@ -52,7 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   线程池停止（原看门狗晚于池析构，存在池关闭期间触发超时的窗口）；
   每 task 成本从"一线程 + 周期轮询"降为"一个堆条目"。
   同 ID 复用后旧条目到点时经活动门控身份校验失配退出，不会误杀新任务
-  （该校验取代原 per-task join 带来的提交唯一性保证）。
   公开 API（`submit` / `wait` / `cancel` / `waitForResult` 等）签名与语义不变
 - **exportNode 子图驱动简化**：RunFn 内不再经引擎级 `setTaskCompleteCallback` +
   手动条件变量捕获输出，改为 `submit → wait → 逐绑定 takeOutput`——

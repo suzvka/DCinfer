@@ -15,7 +15,6 @@ using TaskId = std::string; ///< 与 Node::TaskId / ExecutionEngine::TaskId 同�
 
 /// @brief 一次 task 的执行态：按节点名惰性容纳 NodeExecState。
 ///
-/// 惰性创建沿用原 TaskBuffer::_ensureTaskExists 的按需语义：
 /// 未被 feedInput/传播触及的节点不产生条目。
 class TaskExecutionState {
 public:
@@ -88,7 +87,7 @@ public:
 		return it != _tasks.end() ? it->second : nullptr;
 	}
 
-	/// @brief  清除指定 task 的全部节点执行态（等价原逐节点 terminateTask）
+	/// @brief  清除指定 task 的全部节点执行态
 	void clearTaskState(const TaskId& taskId) {
 		std::lock_guard lk(_mutex);
 		_tasks.erase(taskId);

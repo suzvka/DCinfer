@@ -153,7 +153,6 @@ TEST(bearerTokenInjected) {
 	// 敏感信息不回显：失败/错误路径均不包含 token（此处仅验证正常路径头注入）
 }
 
-// ── 输入错误不再被吞掉：非法 params JSON → InvalidInput ──
 TEST(invalidParamsRejected) {
 	MockHttpServer server;
 	server.start([&](const std::string&, const std::string&, int& status) {

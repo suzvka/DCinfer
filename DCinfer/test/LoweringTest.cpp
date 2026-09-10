@@ -1,6 +1,6 @@
 // LoweringTest：Broadcast(1) lowering 验收
 // 验证：1:1 wire 从运行时视图擦除（源图不变）；值/错误/取消传播语义不变；
-//       TTL 只统计运行时顶点（wire 不再消耗 hop）；绑定防护与多出边防护。
+//       TTL 只统计运行时顶点；绑定防护与多出边防护。
 
 #include "InferGraph.h"
 #include "Connector.h"
@@ -154,8 +154,6 @@ static void test_broadcastN2NotErased() {
 	CHECK(std::abs(rb.item<float>() - 5.0f) < 1e-6f, "downstream 1 gets copy");
 	CHECK(std::abs(rc.item<float>() - 5.0f) < 1e-6f, "downstream 2 gets copy");
 }
-
-// ── 3. TTL 语义：wire 不再消耗 hop（maxHops 只统计运行时顶点）──
 
 static void test_ttlCountsRuntimeVertices() {
 	// 3 源节点链（a → wire → c）：旧语义需要 3 hops（c 完成后 pf 检查需要 >0），

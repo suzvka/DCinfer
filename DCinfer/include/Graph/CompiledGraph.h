@@ -42,9 +42,7 @@ public:
 /// - 执行引擎与飞行任务经本快照读取拓扑与签名（GraphRuntimeState::graph）；
 /// - 保留源图视角：DCIr 序列化、exportNode、nodeCount/edges 等内省
 ///   均反映源图；运行时视图（runtimeView）为 lowering 后形态。
-///
-/// 拓扑演进官方路径：回到 GraphBuilder 重新 compile 产生新快照，
-/// 旧图任务排空后由调用方替换。
+
 class CompiledGraph {
 public:
 	/// @brief  冻结的源图拓扑。

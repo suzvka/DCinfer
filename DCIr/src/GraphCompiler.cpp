@@ -590,7 +590,7 @@ void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
 		return;
 	}
 
-	// ── .json 序列化（原有逻辑）──
+	// ── .json 序列化 ──
 	auto json = graphToJson(graph);
 	std::string out = json.dump(2);
 

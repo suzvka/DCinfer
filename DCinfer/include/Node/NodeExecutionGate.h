@@ -8,13 +8,10 @@ namespace DC {
 
 /// @brief 节点级执行闸：同一节点同一时刻只允许一个 task 进入执行流水线。
 ///
-/// 原 SlotWorkspace 内嵌的执行互斥(_executionGuard + _currentTaskId)上提后的
-/// 独立归宿。生命周期语义:
+/// 生命周期语义:
 /// - 图路径:由 TaskExecutionDomain 在冻结期按节点集合预建(结构此后不变,
 ///   运行期只翻标志位),与 CompiledGraph 同生命周期;
 /// - 单节点路径(NetServerAdapter / 测试):由 NodeExecutor 持有,随载体走。
-///
-/// 语义与原实现一致:tryAcquire 失败即"节点正被另一任务占用"(Reentrant);
 /// currentTask 的写入仅发生在持有租约期间。
 class NodeExecutionGate {
 public:

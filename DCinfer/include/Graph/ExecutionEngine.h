@@ -158,12 +158,10 @@ private:
 	void _exhaustedCheck(const TaskId& taskId,
 						 const std::shared_ptr<GraphRuntimeState>& state);
 
-	// ── 超时定时器（引擎级共享 TimerService，取代 per-task 看门狗线程）──
+	// ── 超时定时器（引擎级共享 TimerService）──
 
-	/// @brief  注册超时条目（timeout <= 0 不设防，与原 per-task 看门狗语义一致）
-	/// @note   回调捕获本提交的 gate：到点先校验 _activeGates 中仍是本提交的
-	///         gate（同 ID 复用后旧条目失配退出——无线程可 join，这道校验
-	///         取代原 join 带来的提交唯一性保证），再走既有 gate 仲裁
+	/// @brief  注册超时条目（timeout <= 0 不设防）
+	/// @note   回调捕获本提交的 gate：到点先校验 _activeGates 
 	void _scheduleWatchdog(const TaskId& taskId, std::chrono::milliseconds timeout,
 						   const std::shared_ptr<GraphRuntimeState>& state,
 						   const std::shared_ptr<TaskGate>& gate);
@@ -196,14 +194,12 @@ private:
 	// 析构顺序：定时器(stop/join timer 线程) → 池(shutdown/join worker) → 共享表 → 状态。
 	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated
 	// 等状态、以及向池提交任务时，所有对象均存活；定时器先于池停止，
-	// 池关闭期间不再可能有超时触发访问状态成员。
 	// （图组件生命周期由 GraphRuntimeState shared_ptr 保证，不依赖本表顺序。）
 	// task 状态表：Running → 终态（Succeeded/Failed/TimedOut/Cancelled）。
 	// 终态发布（status 迁移）与"结果可读"是两个完成点：resultsReady 在
 	// _terminate 完成声明输出抢救（步骤⑥）后置位，wait() 谓词绑定它，
 	// 保证 wait 返回后经 takeOutput 必能读到声明输出。
 	// submit 时活动 ID 拒绝重复提交；已终止 ID 复用时清除旧记录（含 resultsReady）。
-	// status 字段同时承担原 _terminatedTasks 的传播拦截与 _isTerminated 职责。
 	struct TaskStateRecord {
 		TaskStatus status = TaskStatus::Running;
 		bool resultsReady = false;
@@ -234,16 +230,13 @@ private:
 
 	// ── 共享超时定时器（引擎级；声明在成员列表最末 → 引擎析构时最先停止）──
 	//
-	// 取代 per-task 看门狗 jthread（原 submit 创建、_terminate 回收、
-	// _retiredWatchdogs 自 join 补丁）：每条带超时的 submit 只登记一个
-	// deadline 条目，终止路径 O(1) 作废，无线程创建/回收。
+	// 每条带超时的 submit 只登记一个 deadline 条目，终止路径 O(1) 作废，无线程创建/回收。
 	// _timerHandles：taskId → 存活条目句柄。submit 注册、_terminate 摘除；
 	// fire 触发经活动门控身份校验仲裁（见 _onWatchdogFired），
-	// 同 ID 复用后旧条目不得误杀新任务。
 	std::unordered_map<TaskId, uint64_t> _timerHandles;
 	std::mutex _timerHandlesMutex;
 
-	/// 引擎级共享超时定时器（定义见 Graph/internal/TimerService.h，仅 .cpp 可见）
+	/// 引擎级共享超时定时器
 	std::unique_ptr<TimerService> _timer;
 };
 

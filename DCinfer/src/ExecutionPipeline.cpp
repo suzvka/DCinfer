@@ -9,8 +9,7 @@ namespace DC {
 
 namespace {
 
-/// @brief 触发 onError 引擎复位（尽力而为）：onError 自身抛异常时吞掉，
-///        不传播次生异常——原失败经调用方 rethrow / NodeResult 继续传播。
+/// @brief 触发 onError 引擎复位（尽力而为）：onError 自身抛异常时吞掉
 void safeTriggerOnError(EngineAdapter& engine) {
 	try {
 		engine.onError();

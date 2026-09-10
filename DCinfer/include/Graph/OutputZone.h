@@ -45,7 +45,6 @@ struct OutputBinding {
 ///
 /// 语义（Build → Freeze → Execute 拆分后）：
 /// - 图级输出绑定已迁入 GraphSignature（冻结快照，构建期在 GraphBuilder）——
-///   本类不再持有绑定面，仅承载逐 task 的可变状态；
 /// - declare() 声明 task 的期望产出
 /// - append() 写入 artifact（数据 + 审计信息）
 /// - accumulateAndCheck() 累加计数并检查所有声明是否满足

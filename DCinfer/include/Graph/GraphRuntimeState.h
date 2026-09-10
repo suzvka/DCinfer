@@ -35,7 +35,6 @@ struct GraphRuntimeState {
 	ErrorTracker errors;  ///< 异步执行诊断收集
 
 	/// task 执行域：task → {per-node IO 缓冲 + 工作槽位} + 节点执行闸表。
-	/// 原 Node 内嵌 task 态的迁入地（task 态归 task 域，Node 退化为纯 plan 对象）。
 	/// 仅模块内使用（ExecutionEngine / InferGraph），故以不透明类型持有。
 	std::unique_ptr<TaskExecutionDomain> exec;
 };

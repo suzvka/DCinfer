@@ -14,7 +14,7 @@ namespace DC {
 /// @brief 图构建器：Build → Freeze → Execute 生命周期中的唯一构建面。
 ///
 /// 承接拓扑构建 API（addNode/connect/bindInput/bindOutput...）与构建期的
-/// 输出绑定累积（原 OutputZone 的绑定面）。compile() 产出不可变
+/// 输出绑定累积。compile() 产出不可变
 /// CompiledGraph 快照并移交拓扑所有权：冻结后所有构建 API 抛
 /// GraphException(Frozen)——"执行期可变拓扑"从数据竞争隐患变为确定性错误。
 ///
