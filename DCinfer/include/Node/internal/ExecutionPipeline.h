@@ -13,10 +13,9 @@ class SlotWorkspace;   // 前向声明
 class EngineAdapter;   // 前向声明
 struct NodeExecState;  // 节点 task 执行态（buffer + workspace 一致性由其构造保证）
 
-/// @brief 无状态的 7 步执行流水线编排器 + 唯一执行入口。
+/// @brief 无状态的执行流水线编排器 + 唯一执行入口。
 ///
-///
-/// 所有依赖通过参数注入，无状态，独立可测。task 态（buffer/workspace）
+/// 所有依赖通过参数注入（含 task 态 buffer/workspace），无状态，独立可测。
 struct ExecutionPipeline {
 	using TaskId = std::string;
 	using RunFn = std::function<NodeResult(class Node::RunContext&)>;

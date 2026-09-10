@@ -17,7 +17,6 @@ struct OutputAudit {
 	std::string nodeName; // dc.node
 	std::string portName; // dc.port
 	std::string taskId;   // dc.task_id
-	// 后续扩展: outputId, timestamp, iteration, lineage, dtype, shape, device
 };
 
 // ── 输出声明：某 task 期望哪个节点的哪个端口产出多少次 ──
@@ -42,8 +41,8 @@ struct OutputBinding {
 
 /// @brief OutputZone：append-only 输出区，聚合纯任务态（声明/累加/artifact）。
 ///
-/// 语义（Build → Freeze → Execute 拆分后）：
-/// - 图级输出绑定已迁入 GraphSignature（冻结快照，构建期在 GraphBuilder）——
+/// 语义：
+/// - 图级输出绑定位于 GraphSignature（冻结快照，构建期在 GraphBuilder）
 /// - declare() 声明 task 的期望产出
 /// - append() 写入 artifact（数据 + 审计信息）
 /// - accumulateAndCheck() 累加计数并检查所有声明是否满足
@@ -61,13 +60,13 @@ public:
 				 const std::string& portName, size_t count = 1);
 	bool hasDeclaration(const TaskId& taskId) const;
 
-	// ── 累加与检查（RuleEngine — 当前仅做数量检查）──
+	// ── 累加与检查 ──
 
 	/// @brief  累加指定端口的产出计数，返回 true 表示所有声明均已满足
 	bool accumulateAndCheck(const std::string& nodeName, const std::string& portName,
 							const TaskId& taskId);
 
-	/// @brief  静态检查所有声明是否满足（不累加，供 _onExhausted 使用）
+	/// @brief  静态检查所有声明是否满足（不累加，供 _exhaustedCheck 使用）
 	bool checkAllSatisfied(const TaskId& taskId) const;
 
 	/// @brief  查询指定 task 中尚未满足的声明列表（诊断用）

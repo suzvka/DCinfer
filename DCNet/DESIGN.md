@@ -5,11 +5,7 @@
 > 本地引擎一致的方式接入 DCinfer 图运行时（EngineDescriptor 家族）。
 > 协议级适配器（如 OpenAI 兼容）位于 `DCEngines`，基于本框架契约实现。
 >
-> 状态：**M0–M2.6 已实现**（对接契约 + NetError 归一化 + HTTP 传输 + 张量/文本
-> JSON 格式；协议适配器 `DCEngines/OpenAI` 已随框架交付）。
-> **M-server（服务端 / 入站组件，节点服务化）已立项并交付初版**（2026-09；
-> 立项裁决见 §2.5 ADR-7，入站契约见 §3.6，wire 逆向映射见 §6.1）。
-> 本文档仍为权威约定，实现与文档不一致处以实现为准并回改文档。
+> 本文档为权威约定，实现与文档不一致处以实现为准并回改文档。
 
 ---
 
@@ -124,8 +120,7 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 4. **子进程仅限外来运行时 / 崩溃隔离**（FreeToken LocalSpawn 先例），非 DCNet
    出站算子默认形态。
 5. **真正需要"监听"的场景**（`DCNet.Native` 接收端 / 本地代理端点）属服务端组件，
-   单独设计，不属于出站算子职责。（已按 §2.5 ADR-7 单列 `M-server` 立项：
-   节点服务化已落地；`DCNet.Native` 接收端仍待 M3。）
+   单独设计，不属于出站算子职责（见 §2.5 ADR-7：节点服务化）。
 
 判定矩阵：
 
@@ -136,14 +131,13 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 | Python / 外来运行时 / 崩溃隔离 | 子进程（FreeToken 先例） | 无法内嵌，进程即边界 |
 | 附着既有服务（RemoteAttach） | 纯客户端，无任何监听 | 服务端在别处（本端被远程驱动的场景见 ADR-7 / M-server） |
 
-### 2.5 ADR-7：服务端 / 入站组件立项裁决（M-server，节点服务化）
+### 2.5 ADR-7：服务端 / 入站组件（节点服务化）
 
-**问题**：「监听 / 服务端」是 §2.4 ADR-6(5) 承认但未排期的缺口。需求：把本地
-DCinfer 节点暴露为可被现有出站 `send→recv` 远程驱动的监听服务（节点服务化），
-补齐分布式部署中「算力端被图端驱动」的闭环。工作单列 `M-server`，不与 M3 捆绑。
+**问题**：把本地 DCinfer 节点暴露为可被现有出站 `send→recv` 远程驱动的监听服务
+（节点服务化），补齐分布式部署中「算力端被图端驱动」的闭环。
 
-**结论**：立项采纳，单列 `M-server`，不与 M3（`DCNet.Native`）捆绑；最小形态以
-现有 `DCNet.Tensor`（HTTP + 张量/文本 JSON）承载，零新增依赖（POCO 已在）。
+**结论**：单列独立服务端组件，不与出站协议（`DCNet.Native`）捆绑；以现有
+`DCNet.Tensor`（HTTP + 张量/文本 JSON）承载，零新增依赖（POCO 已在）。
 设计决策点裁决如下：
 
 | # | 决策点 | 裁决 |
@@ -154,7 +148,7 @@ DCinfer 节点暴露为可被现有出站 `send→recv` 远程驱动的监听服
 | 4 | `bind` 错误出口 | **配置期抛 `NodeException`**（对齐 `createEngine` 先例与 DESIGN.md §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（不崩溃、不静默丢弃） |
 | 5 | RunContext 生命周期 / 并发隔离 | **一请求一节点实例**（`EngineRegistry::createNode` 每请求构造，实例级隔离）；引擎实例按 `engineType + localModelRef` 缓存复用，本地执行互斥串行（引擎单任务语义）；**server codec 不暴露 `RunContext`**，以「端口名 ↔ 张量」为界 |
 | 6 | 装配入口命名 | 采用 **`registerDcNetServerAdapter(reg, DcNetServerAdapterDesc)`**；本地模型标识命名 **`localModelRef`**，避免与 modelPath=远端端点的全局约定冲突 |
-| 7 | 服务端配置结构 | **派生独立结构 `NetServerEndpoint`**（listenHost/port/basePath/requestPath/authToken/backlog/maxInFlight/requestTimeout；TLS 服务端证书占位），不复用出站 `NetEndpoint` 全套 |
+| 7 | 服务端配置结构 | **派生独立结构 `NetServerEndpoint`**（listenHost/port/basePath/requestPath/authToken/backlog/maxInFlight/requestTimeout），不复用出站 `NetEndpoint` 全套 |
 
 **wire 逆向映射原则（语义一致性）**：归一化两段式的第一段由服务端产出 wire
 应答；本地执行结果状态 → HTTP 状态码的映射归核心统一维护（ADR-4），即
@@ -166,8 +160,7 @@ DCinfer 节点暴露为可被现有出站 `send→recv` 远程驱动的监听服
 RemoteAuth → InternalError 仅覆盖鉴权路径；未列举状态码 → RemoteMalformed →
 ExecutionFailed），按「本地执行失败 → 5xx」应答 500 → 对端 ExecutionFailed。
 若集成实测要求严格一致，可选扩表方案：新增已知错误体 code → RemoteMalformed
-（finalize 为 ExecutionFailed + dcnet 诊断）——**暂不采纳**，重开条件：集成
-对拍实测需要。
+（finalize 为 ExecutionFailed + dcnet 诊断）——**暂不采纳**。
 
 **输入边界 schema 校验**：服务端在执行前对请求张量按节点本地 schema 校验端口名 /
 类型 / 形状（-1 动态维），违例 → 400 → 对端 InvalidInput（§6.1；镜像出站
@@ -239,15 +232,6 @@ struct NetError {
 **归一化原则：只做"翻译"，不做"发明"。** 图级语义（status）与本地引擎节点一致；
 网络/远端细节全部收进 message 与诊断，不新增图级状态。完整映射表见 §6。
 
-### 3.5 NetSync —— 核心 async→sync 桥（ADR-6）
-
-```cpp
-
-/// submit 内可将任务投递到 transport 自持的 I/O 线程 / 事件循环。
-template <typename R>
-R DcNetSync::syncAwait(const std::function<void(std::function<void(R)>)>& submit);
-```
-
 ### 3.4 本地形状规则（端口 Schema）
 
 复用 `Node::Port` 既有能力（`DCinfer/include/Node/Node.h`），由
@@ -272,6 +256,15 @@ static Node::Schema chatSchema() {
                   NodePort::optional<std::vector<char>>("usage", {}) };
     return s;
 }
+```
+
+### 3.5 NetSync —— 核心 async→sync 桥（ADR-6）
+
+```cpp
+
+/// submit 内可将任务投递到 transport 自持的 I/O 线程 / 事件循环。
+template <typename R>
+R DcNetSync::syncAwait(const std::function<void(std::function<void(R)>)>& submit);
 ```
 
 ### 3.6 服务端契约（M-server；ADR-7）
@@ -327,12 +320,10 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 |---|---|---|
 | `DCNet.Tensor`（HTTP 传输 + 张量/文本格式） | 对方是任意"张量进/张量出"的远端服务 | 对方须接受我们的 JSON 报文格式 |
 | `DCEngine::OpenAI`（协议适配器，DCEngines） | 对方是 OpenAI 兼容服务 | 文本级 Data 端口，无 tensor 保真 |
-| `DCNet.Native`（展望 M3） | 远端也跑 DCinfer SDK | 双方接受我们的 wire format + 版本协商 |
 | 自定义适配器 | 对方是私有协议 / 云 API | 我们写几百行适配，对方零改动 |
 
 关键判断：**"对方不是 DCinfer"从来不是问题——对接责任始终在我们这一侧，且每个
-协议只写一次**。原生协议只在"双方都是 DCinfer"时才值得启用（可传输 tensor 元数据、
-形状锚定、结构化错误，是文本级 HTTP 的增益），锦上添花而非门槛。
+协议只写一次**。
 
 ---
 
@@ -348,26 +339,19 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | `converter` | 不需要（文本经 `TensorType::Data` 承载）；tensor 级原生协议另行评估 |
 | `RunFn` | 见 §5.1 请求流程 |
 | `synchronize` | 留空（阻塞式 HTTP 同步返回） |
-| `preRun` | 留空（v1）；warmup / 健康预检为预留位 |
+| `preRun` | 留空 |
 | `postRun` | 留空（响应已在 RunFn 内解析） |
-| `onError` | 留空（重连 / 实例状态重置属 M3 规划，见 §5.2） |
+| `onError` | 留空 |
 | `releaseEngine` | 留空（transport 随实例共享句柄析构释放连接） |
 
 ### 5.1 RunFn 请求流程
 
-1. `ctx.engine()` 取 transport（缺失直接失败；健康预检 / 重连属 M3 规划）
+1. `ctx.engine()` 取 transport（缺失直接失败）
 2. codec.encodeRequest：读输入端口 → 拼对方请求报文
 3. transport.send / transport.recv（超时控制）
 4. 非成功 → NetError → 核心归一化 → `ctx.failure(...)`
 5. codec.decodeResponse：校验本地形状规则 → 写输出端口
 6. `ctx.success()`；耗时等指标按需输出
-
-### 5.2 崩溃恢复 / 重连（M3 规划；当前 onError 未启用）
-
-- 请求级失败只上报 `NodeResult::failure`，不触发重连（避免抖动）；
-- `onError` 钩子负责实例级恢复：close → 重新 connect → 重新就绪探测；
-- 超过 `maxRestarts` → 实例标记不可用，后续 RunFn 直接失败并给出明确错误信息
-  （状态机同 FreeToken DESIGN.md §9）。
 
 ---
 
@@ -460,31 +444,30 @@ DCNet/
 │   ├── NetTransport.h             # 传输抽象接口（§3.1）
 │   ├── NetCodec.h                 # 协议映射接口（§3.2，含 requestPath/schema 声明）
 │   ├── NetSync.h                  # 核心 async→sync 桥（§3.5）
-│   ├── NetTransport_Http.h        # 内置 HTTP transport（POCO，跨平台，§9 方案 C）★已实现
-│   ├── NetCodec_Tensor.h          # 内置数据格式工厂：张量/文本 JSON codec ★已实现
-│   ├── DcNetHttp.h                # registerDcNetHttp 接线（HTTP 传输 + 任意 codec）★已实现
-│   ├── MockServer.h               # 测试基础设施：极简 mock HTTP 服务（POCO，跨平台）★已实现
-│   ├── NetServerEndpoint.h        # 服务端监听端点配置（M-server，ADR-7）★已实现
-│   ├── NetServerCodec.h           # 服务端协议映射接口（M-server，ADR-7）★已实现
-│   ├── NetListener.h              # 监听端生命周期抽象（M-server，ADR-7）★已实现
-│   ├── NetServerAdapter.h         # registerDcNetServerAdapter 接线（M-server）★已实现
-│   └── NetPort.h                  # 本地形状规则声明辅助（§3.4，规划中；当前直接用 NodePort）
+│   ├── NetTransport_Http.h        # 内置 HTTP transport（POCO，跨平台）
+│   ├── NetCodec_Tensor.h          # 内置数据格式工厂：张量/文本 JSON codec
+│   ├── DcNetHttp.h                # registerDcNetHttp 接线（HTTP 传输 + 任意 codec）
+│   ├── MockServer.h               # 测试基础设施：极简 mock HTTP 服务（POCO，跨平台）
+│   ├── NetServerEndpoint.h        # 服务端监听端点配置（M-server，ADR-7）
+│   ├── NetServerCodec.h           # 服务端协议映射接口（M-server，ADR-7）
+│   ├── NetListener.h              # 监听端生命周期抽象（M-server，ADR-7）
+│   └── NetServerAdapter.h         # registerDcNetServerAdapter 接线（M-server）
 ├── src/
 │   ├── NetAdapter.cpp             # 组装 EngineDescriptor（§5）
+│   ├── NetEndpoint.cpp            # 端点描述串解析（URL → host/port/basePath/TLS）
 │   ├── NetError.cpp               # 归一化映射表（纯函数）
-│   ├── NetTransport_Http.cpp      # HTTP 后端（POCO；单一实现覆盖 Windows/POSIX）★已实现
-│   ├── NetCodec_Tensor.cpp        # 张量 JSON codec（数值 base64 + Data 文本直传）★已实现
-│   ├── DcNetHttp.cpp              # registerDcNetHttp 接线 ★已实现
-│   ├── NetBase64.h                # 内部 base64 工具（仅头）★已实现
-│   ├── NetWire.h                  # 内部共享：入站 wire 错误体/状态短语（M-server）★已实现
-│   ├── NetListener_Http.cpp       # HTTP 监听器（POCO ServerSocket；闸门/drain）★已实现
-│   ├── NetServerAdapter.cpp       # registerDcNetServerAdapter 装配（M-server）★已实现
-│   └── NetTransport_Native.cpp    # DCNet.Native 二进制帧后端（可选，M3）
+│   ├── NetTransport_Http.cpp      # HTTP 后端（POCO；单一实现覆盖 Windows/POSIX）
+│   ├── NetCodec_Tensor.cpp        # 张量 JSON codec（数值 base64 + Data 文本直传）
+│   ├── DcNetHttp.cpp              # registerDcNetHttp 接线
+│   ├── NetBase64.h                # 内部 base64 工具（仅头）
+│   ├── NetWire.h                  # 内部共享：入站 wire 错误体/状态短语（M-server）
+│   ├── NetListener_Http.cpp       # HTTP 监听器（POCO ServerSocket；闸门/drain）
+│   └── NetServerAdapter.cpp       # registerDcNetServerAdapter 装配（M-server）
 └── test/
     ├── NetErrorTest.cpp           # 映射表纯单测（含入站 wire 逆向映射 §6.1）
     ├── NetAdapterTest.cpp         # 契约实现测试（FakeTransport，不依赖真实远端）
-    ├── ServerAdapterTest.cpp      # 节点服务化端到端：本地执行 vs 远程驱动对拍 + 闸门 ★已实现
-    └── HttpTransportTest.cpp      # 真实 HTTP：传输/归一化/张量/文本端到端 ★已实现
+    ├── ServerAdapterTest.cpp      # 节点服务化端到端：本地执行 vs 远程驱动对拍 + 闸门
+    └── HttpTransportTest.cpp      # 真实 HTTP：传输/归一化/张量/文本端到端
 ```
 
 协议级适配器（基于 DCNet 契约开发，位于 DCEngines）：
@@ -493,7 +476,7 @@ DCNet/
 DCEngines/OpenAI/
 ├── include/DCEngine/OpenAiEngine.h   # registerOpenAiEngine / OpenAiOptions
 ├── src/OpenAiEngine.cpp              # OpenAI 兼容 chat codec（NetCodec 契约）+ 注册接线
-├── test/OpenAiEngineTest.cpp         # chat 端到端（MockHttpServer，复用 DCNet 测试设施）★已实现
+├── test/OpenAiEngineTest.cpp         # chat 端到端（MockHttpServer，复用 DCNet 测试设施）
 └── CMakeLists.txt                    # 静态库 DCEngine_OpenAI（DCEngine::OpenAI）
 ```
 
@@ -501,10 +484,10 @@ DCEngines/OpenAI/
 
 ## 9. 依赖与构建接线
 
-**依赖现状（已核实 vcpkg.json）**：`nlohmann-json` 已在核心依赖树中——JSON 编解码
-零新增；`poco[netssl]`（M2.6 起）承载 HTTP/TLS 传输与测试 MockServer。
+**依赖现状**：`nlohmann-json` 已在核心依赖树中——JSON 编解码
+零新增；`poco[netssl]` 承载 HTTP/TLS 传输与测试 MockServer。
 
-**CMake 接线（已实现）**：根 `CMakeLists.txt` 以 `_dcinfer_option()` 注册
+**CMake 接线**：根 `CMakeLists.txt` 以 `_dcinfer_option()` 注册
 `DCINFER_BUILD_DCNET`（旧 `BUILD_DCNET` 兼容映射；默认 OFF，与 vcpkg feature
 'net' 对应）；`DCNet/CMakeLists.txt` 提供静态库 `DCNet::DCNet`（依赖
 `DCinfer::DCinfer` + `nlohmann_json` + POCO，含安装导出），测试随
@@ -513,7 +496,7 @@ DCEngines/OpenAI/
 DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`modelPath` 字段承载
 远端端点，`GraphCompiler` JSON/.dcg 序列化无需改动（引擎节点路径已支持）。
 
-**外部消费注意事项（已由 DCinfer-test 实测，2026 回馈）**：
+**外部消费注意事项**：
 
 - vcpkg manifest 模式只安装清单声明的包：外部 `add_subdirectory` 消费方必须在
   自己的 `vcpkg.json` 声明 `nlohmann-json` 与 `poco[netssl]`（DCNet 及
@@ -525,8 +508,7 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
   `DCEngine::OpenAI`（DCEngines/OpenAI，依赖 `DCNet::DCNet`）；
 - 外部开发者接入"对方服务"的完整最小范例见 `DCinfer-test/src/net_smoke.cpp`
   （自定义 transport + codec → `registerDcNetAdapter` → `createNode` 组图）；
-  直接对接 OpenAI 兼容服务用 `DCEngine::OpenAI` 的 `registerOpenAiEngine`
-  （原 `makeChatCodec` / `"DCNet.HttpChat"` 已于 2026-08 迁移，见 §11 M2.5）。
+  直接对接 OpenAI 兼容服务用 `DCEngine::OpenAI` 的 `registerOpenAiEngine`。
 
 ---
 
@@ -550,36 +532,6 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 
 ---
 
-## 11. 里程碑
-
-| 阶段 | 内容 | 产出 | 状态 |
-|---|---|---|---|
-| M0 | 模块骨架 + CMake 接线 + NetError 归一化映射表 + 纯单测 | 可编译静态库，映射表测试通过（零依赖） | ✅ 完成 |
-| M1 | 契约接口（NetTransport/NetCodec/NetEndpoint）+ 契约测试 | 接口冻结；FakeTransport 契约测试 + 外部消费方 net_smoke | ✅ 完成 |
-| M2 | `DCNet.Tensor` 传输框架首发（WinHTTP transport + 张量/文本 JSON 格式 + 归一化） | 契约第一个真实实现；MockServer + HttpTransportTest；net_mnist 端到端验收（预测 7） | ✅ 完成 |
-| M2.5 | 协议适配器外置：OpenAI 兼容 chat codec 迁至 DCEngines（DCNet 收缩为张量传输框架） | `DCEngine::OpenAI` + OpenAiEngineTest；`makeChatCodec` / `"DCNet.HttpChat"` 退役 | ✅ 完成（2026-08） |
-| M2.6 | 传输层 POCO 化：`NetTransport_Http` + MockServer 迁至 POCO（vcpkg `poco[netssl]`），移除 WinHTTP/WinSock | 单一实现覆盖 Windows/POSIX；connect() 就绪探测；HTTPS 经 NetSSL | ✅ 完成（2026-09） |
-| M3 | `DCNet.Native` 可选协议 + 重连策略（onError） | 示例 + CI 接线 | 待办 |
-| M-server | 服务端/入站组件（节点服务化，ADR-7）：监听端 + server codec + 装配入口 + wire 逆向映射 | `registerDcNetServerAdapter` + 端到端对拍测试（本地执行 vs 远程驱动）；不依赖 M3，独立推进 | ✅ 初版完成（2026-09） |
-
-实际工作量：M0–M2 约 1100 行 C++（含测试），外加外部消费方 net_smoke/net_mnist 约 500 行。
-
----
-
-## 12. 展望（非 v1 范围）
-
-- **流式输出**：`stream: true` + SSE 解析；需与 DCinfer 节点输出模型配合
-  （"流式端口"约定另行设计）；
-- **DCNet.Native 细节**：tensor 元数据（type/typeSize/shape 含 -1）、形状锚定、
-  结构化错误码、批次传输；协议版本协商；
-- **安全**：TLS（mTLS）、鉴权（API key 轮换 / 细粒度授权）、局域网拓扑（服务发现）；
-  （服务端 Bearer token 校验已随 M-server 落地，见 ADR-7；mTLS 与
-  服务端证书配置后置）
-- **多模态**：随上游服务支持再扩展（embedding 端口已预留）；
-- **观测**：连接池指标、重连计数、端到端延迟注入 `ErrorTracker` / 日志。
-
----
-
 ## 附：设计决策记录
 
 | 编号 | 决策 | 备选 | 理由 |
@@ -590,24 +542,4 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 | ADR-4 | 错误归一化归核心统一执行 | 各适配器自行映射 | 图级语义保证一致；纯函数可单测 |
 | ADR-5 | System affinity + 阻塞式 + 不加锁 | 自建并发控制 | 复用既有线程池与限流；与 README 分工一致 |
 | ADR-6 | 默认不派生；核心 async→sync 桥；transport 级可选 worker；子进程仅限外来运行时 | 默认子进程 / 默认子线程 | 池已吸收阻塞；节点串行（Reentrant）；契约保持同步接口 |
-| ADR-7 | 服务端/入站组件单列 M-server（节点服务化）：独立服务组件、一请求一节点实例、wire 逆向映射归核心 | 与 M3 捆绑 | 只增不改；语义一致性需映射归核心统一维护 |
-
----
-
-## 附：事实核查记录
-
-- `Node::Port` 静态构造器（in/optional/anchored/out）：`DCinfer/include/Node/Node.h`
-- `NodeStatus` 枚举：`DCinfer/include/Node/Node.h`
-- `EngineDescriptor`（含 `ExecutionPhases` 执行相位）：`DCinfer/include/Graph/EngineRegistry.h`
-- `registerOperator`（无状态轻量路径）：`DCinfer/include/Graph/EngineRegistry.h`
-- `ErrorTracker` 诊断通道：`DCinfer/include/Graph/ErrorTracker.h`
-- 文本 Data 端口约定（typeSize 不校验）：FreeToken `DCEngines/FreeToken/DESIGN.md` §7
-- 本地引擎适配器形态参照：`DCEngines/OnnxRuntime/src/OnnxEngine.cpp`
-- 协议级适配器（基于 DCNet 契约）参照：`DCEngines/OpenAI/src/OpenAiEngine.cpp`
-- 内置数据格式工厂（张量/文本 codec）：`DCNet/include/DCNet/NetCodec_Tensor.h`
-- 形状 -1 动态维序列化直通：`DCIr/include/Ir/GraphCompiler.h`
-- 依赖现状（nlohmann-json 已内置）：`vcpkg.json`
-- 服务端闸门与对拍实现：`DCNet/src/NetListener_Http.cpp` / `DCNet/src/NetServerAdapter.cpp`；
-  对拍测试 `DCNet/test/ServerAdapterTest.cpp`（语义一致性 / 闸门 / 生命周期全覆盖）
-- `tryExecute` 异常语义（图级错误记录）：`DCinfer/src/ExecutionEngine.cpp` `_submitNodeRun`（NodeException catch → recordError）；
-  槽位校验拒绝：`DCinfer/src/TensorSlot.cpp` store()（ValidatorRegistry abort）
+| ADR-7 | 服务端/入站组件单列 M-server（节点服务化）：独立服务组件、一请求一节点实例、wire 逆向映射归核心 | 与原生协议阶段（DCNet.Native）捆绑 | 只增不改；语义一致性需映射归核心统一维护 |

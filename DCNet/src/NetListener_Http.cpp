@@ -1,4 +1,4 @@
-// HTTP/1.1 监听器（POCO ServerSocket；MockServer 的对外契约演进，DESIGN.md §3.6）
+// HTTP/1.1 监听器（POCO ServerSocket；DESIGN.md §3.6）
 //
 // 闸门顺序（DESIGN.md §6.1）：accept → 读请求 → 过载 429 → 方法 405 → 鉴权 401 →
 // 路径 404 → 业务 handler → 应答。连接中途断开无应答（对端自行归一化超时）。

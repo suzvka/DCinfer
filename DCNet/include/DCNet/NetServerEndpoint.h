@@ -9,7 +9,7 @@ namespace DC::Net {
 ///
 /// 出站 NetEndpoint 的服务端镜像：出站结构为请求导向，无服务端证书 /
 /// backlog / 连接数配置，故独立成结构而非复用（ADR-7）。
-/// TLS 服务端证书配置（mTLS）：占位，随 M-server 后续设计补齐。
+/// TLS 服务端证书（mTLS）暂不支持。
 struct NetServerEndpoint {
 	// ── 监听地址 ──
 	std::string listenHost = "127.0.0.1"; ///< 监听地址（"0.0.0.0" 对外开放）

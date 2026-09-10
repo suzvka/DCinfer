@@ -59,8 +59,6 @@ void ThreadPool::_workerLoop() {
 
 			if (!_running.load(std::memory_order_acquire))
 				break;
-			if (_taskQueue.empty())
-				continue;
 
 			task = std::move(_taskQueue.front());
 			_taskQueue.pop();

@@ -106,7 +106,7 @@ public:
 
 	// ── task 完成回调 ──
 
-	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 步骤② 触发，
+	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 步骤① 触发，
 	///         先于结果就绪发布——回调可安全读取 task 缓冲中尚存的输出）
 	///         线程安全：与 _terminate 的读取之间以互斥锁同步
 	/// @note   回调内不得对同一 taskId 调用 wait()：回调先于 resultsReady
@@ -120,9 +120,8 @@ private:
 	// ── 任务门控：在飞计数驱动耗尽检测 ──
 	//
 	// 每次节点执行 lambda 提交前 inflight+1、lambda 收尾（RAII）时 -1；
-	// 归零且 task 未终止时由最后完成的 lambda 触发 _exhaustedCheck——取代原
-	// "最后一个持有者析构"方案（活动门控表强持有 gate 至 _terminate，
-	// 传播耗尽时析构实际不会发生，耗尽检测依赖看门狗收尾）。
+	// 归零且 task 未终止时由最后完成的 lambda 触发 _exhaustedCheck
+	// （活动门控表强持有 gate 至 _terminate，析构时机的耗尽检测不可用）。
 	struct TaskGate {
 		std::atomic<bool> terminated{false};
 		/// 在飞节点执行 lambda 计数（submit 入口与传播下游提交时 +1）
@@ -183,7 +182,7 @@ private:
 	// （图组件生命周期由 GraphRuntimeState shared_ptr 保证，不依赖本表顺序。）
 	// task 状态表：Running → 终态（Succeeded/Failed/Cancelled）。
 	// 终态发布（status 迁移）与"结果可读"是两个完成点：resultsReady 在
-	// _terminate 完成声明输出抢救（步骤⑥）后置位，wait() 谓词绑定它，
+	// _terminate 完成声明输出抢救（步骤④）后置位，wait() 谓词绑定它，
 	// 保证 wait 返回后经 takeOutput 必能读到声明输出。
 	// submit 时活动 ID 拒绝重复提交；已终止 ID 复用时清除旧记录（含 resultsReady）。
 	struct TaskStateRecord {

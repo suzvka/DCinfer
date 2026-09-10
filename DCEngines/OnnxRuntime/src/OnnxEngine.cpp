@@ -356,10 +356,6 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 	desc.phases.synchronize = [](void* /*engine*/) {
 		// no-op: Ort::Session::Run() blocks until completion
 	};
-	desc.phases.preRun = nullptr;
-	desc.phases.postRun = nullptr;
-	desc.releaseEngine = nullptr; // shared_ptr 自动释放
-	desc.phases.onError = nullptr;
 
 	reg.registerEngine(desc);
 }

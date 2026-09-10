@@ -4,8 +4,6 @@
 //   - 端到端：OpenAI 节点（chat codec）走 /chat/completions 往返
 //     （prompt/system/params → response；model / stream / messages 断言）
 //   - 失败路径：远端 500 → NetError 归一化（ExecutionFailed / remote:server_error）
-//
-// 迁移自 DCNet/test/HttpTransportTest.cpp 的 chat 端到端（2026-08）。
 
 #include "DCEngine/OpenAiEngine.h"
 #include "NodeExecutor.h"

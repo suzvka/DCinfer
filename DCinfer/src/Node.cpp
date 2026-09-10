@@ -95,10 +95,6 @@ void Node::setCompletionCallback(CompletionFn fn) {
 	_onComplete = std::move(fn);
 }
 
-bool Node::hasCompletionCallback() const {
-	return static_cast<bool>(_onComplete);
-}
-
 // ── 信号绑定 ──
 
 void Node::bindSignal(std::shared_ptr<SignalStore> store, std::string name) {

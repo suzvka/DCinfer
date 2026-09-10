@@ -24,7 +24,7 @@ struct GraphSignature; ///< 与 GraphSignature.h 中的 struct 定义保持一�
 /// 父级查询 isBlocked 时内部尚未 submit，声明不可知；而 exportNode 的
 /// RunFn 每次执行都会声明全部输出绑定，故绑定集合与内部实际声明一致。
 ///
-/// 复杂度 O(V+E)/次，第一版不做缓存（signal version 失效缓存列为后续优化）。
+/// 复杂度 O(V+E)/次。
 /// @param  store      图拓扑（冻结快照或构建期存储）
 /// @param  signature  图级签名（输出绑定来源）
 /// @param  taskId     查询的 task（taskId 空间贯穿父子边界）

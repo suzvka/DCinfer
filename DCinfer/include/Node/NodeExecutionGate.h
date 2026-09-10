@@ -41,11 +41,6 @@ public:
 		_currentTaskId.reset();
 	}
 
-	/// @brief  当前执行中的 task ID(诊断用;可能读到正在变更的值)
-	std::optional<std::string> currentTask() const {
-		return _currentTaskId;
-	}
-
 private:
 	std::atomic_flag _guard = ATOMIC_FLAG_INIT;
 	std::optional<std::string> _currentTaskId;

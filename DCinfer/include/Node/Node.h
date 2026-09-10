@@ -212,7 +212,6 @@ public:
 
 	// ── 完成回调 ──
 	void setCompletionCallback(CompletionFn fn);
-	bool hasCompletionCallback() const;
 
 	// ── 执行依赖访问器（task 态已归 task 域，pipeline 经此注入）──
 
@@ -286,60 +285,6 @@ private:
 	const Node::Schema& _schema;
 	std::string _type;
 	std::string _name;
-};
-
-// ── NodeBuilder：流式 API ──
-
-/// @brief Node 构造语法糖，链式调用替代冗长的 make_unique<Node>(...) + setConnector(true) 模式。
-///
-/// 用法：
-///   auto node = NodeBuilder("Connector.Broadcast", "bc")
-///       .schema(bcSchema)
-///       .runFn(Connector::broadcastRunFn())
-///       .affinity(ThreadPoolAffinity::System)
-///       .connector()
-///       .build();
-class NodeBuilder {
-public:
-	NodeBuilder(std::string type, std::string name)
-		: _type(std::move(type)), _name(std::move(name)) {}
-
-	NodeBuilder& schema(Node::Schema s) { _schema = std::move(s); return *this; }
-	NodeBuilder& runFn(Node::RunFn fn) { _fn = std::move(fn); return *this; }
-	NodeBuilder& affinity(ThreadPoolAffinity a) { _affinity = a; return *this; }
-	NodeBuilder& connector(bool v = true) { _isConnector = v; return *this; }
-	NodeBuilder& tag(std::string t) { _tag = std::move(t); return *this; }
-	NodeBuilder& modelPath(std::string path) { _modelPath = std::move(path); return *this; }
-	NodeBuilder& engine(std::shared_ptr<EngineInstance> instance, const EngineDescriptor* desc = nullptr) {
-		_engineInstance = std::move(instance);
-		_engineDesc = desc;
-		return *this;
-	}
-
-	std::unique_ptr<Node> build() {
-		auto node = std::make_unique<Node>(_type, _name, std::move(_schema), std::move(_fn), _affinity);
-		if (_isConnector)
-			node->setConnector(true);
-		if (!_tag.empty())
-			node->setTag(std::move(_tag));
-		if (!_modelPath.empty())
-			node->setModelPath(std::move(_modelPath));
-		if (_engineInstance || _engineDesc)
-			node->bindEngine(_engineInstance, _engineDesc);
-		return node;
-	}
-
-private:
-	std::string _type;
-	std::string _name;
-	Node::Schema _schema;
-	Node::RunFn _fn;
-	ThreadPoolAffinity _affinity = ThreadPoolAffinity::Operator;
-	std::shared_ptr<EngineInstance> _engineInstance = nullptr;
-	const EngineDescriptor* _engineDesc = nullptr;
-	bool _isConnector = false;
-	std::string _tag;
-	std::string _modelPath;
 };
 
 } // namespace DC

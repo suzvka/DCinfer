@@ -27,7 +27,7 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
 							 "node '" + nodeName + "' not found");
 	try {
-		// 输入写入 task 执行域的 per-node 缓冲（原 Node 内嵌 TaskBuffer）；
+		// 输入写入 task 执行域的 per-node 缓冲；
 		// shared_ptr 先落局部量，防止临时量析构导致引用悬垂
 		auto ts = _state->exec->taskState(taskId);
 		auto& ns = ts->ensure(nodeName, n->schema());
@@ -179,7 +179,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		if (port) inSchema.inputs.push_back(*port);
 	}
 
-	// ② 从 OutputZone 推导输出 Schema（跳过连接器）
+	// ② 从输出绑定推导输出 Schema（跳过连接器）
 	Node::Schema outSchema;
 	for (auto& b : _outputBindingsView()) {
 		auto* n = _topology().node(b.nodeName);
@@ -213,7 +213,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			declarations.push_back({ob.nodeName, ob.portName, 1});
 		}
 
-		// 驱动子图（不设执行超时：时间语义归节点实现方；由 TTL 与宿主护栏兜底）。
+		// 驱动子图（无执行超时：时间语义归节点实现方，由 TTL 与宿主护栏兜底）。
 		// wait 返回即 task 已终止：_terminate 已把声明输出抢救至 OutputZone，
 		// 此后声明输出必可经 takeOutput 取出
 		submit(tid, std::move(declarations), maxHops);

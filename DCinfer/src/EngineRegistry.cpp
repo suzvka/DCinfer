@@ -206,7 +206,7 @@ EngineHandle EngineRegistry::getOrCreateEngine(const std::string& engineType, co
 	// 保留原 error 用于重抛。
 	if (error) {
 		promise.set_exception(error);
-		std::rethrow_exception(error); // 保持旧行为：创建异常透传给首个调用者
+		std::rethrow_exception(error); // 创建异常透传给首个调用者
 	}
 	promise.set_value(handle);
 	return handle;

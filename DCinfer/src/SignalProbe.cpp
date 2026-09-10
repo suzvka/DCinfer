@@ -19,7 +19,7 @@ bool canSatisfyDeclarations(const GraphStore& store, const GraphSignature& signa
 	// 且父级查询 isBlocked 时内部尚未 submit，task 级声明不可用。
 	const auto& outputBindings = signature.outputs;
 	if (outputBindings.empty())
-		return true; // 防御：无输出绑定，放行（宿主护栏兜底）
+		return true; // 无输出绑定：无从判定，放行（宿主护栏兜底）
 
 	std::unordered_set<std::string> targets;
 	targets.reserve(outputBindings.size());
@@ -29,7 +29,7 @@ bool canSatisfyDeclarations(const GraphStore& store, const GraphSignature& signa
 	// 起点：输入绑定中未被阻塞的节点
 	const auto& bindings = signature.inputs;
 	if (bindings.empty())
-		return true; // 防御：无输入绑定，放行
+		return true; // 无输入绑定：无从判定，放行
 
 	// 按源节点分组的邻接表（每次查询构建，O(E)）
 	const auto& edges = store.edges();

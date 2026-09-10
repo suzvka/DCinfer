@@ -14,7 +14,6 @@
 #include "DCtype.h"
 
 namespace DC {
-// Todo：无拷贝移动写入
 
 // TensorData: 存储张量的底层数据容器
 // - 支持两种内部表示：稀疏块视图（_dataMain / _dataDimSets，称为 "view"）
@@ -473,8 +472,6 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	auto current = getCurrentShape();
 	if (current == targetShape)
 		return *this;
-	if (targetShape.empty()) {
-	}
 	for (size_t i = 0; i < current.size(); ++i) {
 		if (targetShape[i] < current[i]) {
 			throw std::invalid_argument(

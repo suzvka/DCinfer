@@ -432,9 +432,6 @@ void testInputZoneRoundTrip() {
 		CHECK(bindings[1].portName == "a", "second binding port should be a");
 		CHECK(bindings[2].nodeName == "n2", "third binding node should be n2");
 		CHECK(bindings[2].portName == "b", "third binding port should be b");
-
-		// InputZone::isBound 验证
-		// 需要访问 InputZone，间接通过 bindInput 已测
 	}
 	END_TEST();
 }

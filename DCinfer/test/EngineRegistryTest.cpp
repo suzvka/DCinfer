@@ -517,7 +517,7 @@ static void runTests() {
 		if (g_lifecycleReleaseCount != 0)
 			throw std::runtime_error("releaseAllEngines must not destroy node-held instances");
 
-		// 节点继续执行成功（旧实现此处 EngineAdapter 指针已悬空）
+		// 节点继续执行成功（实例经共享句柄保活）
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 1.0f;
 		NodeExecutor exec(*node);
@@ -617,7 +617,7 @@ static void runTests() {
 		g_failCalls = 0;
 		registerFailingEngine(reg, "Failing");
 
-		// 首个调用者：createEngine 异常透传（保持旧行为）
+		// 首个调用者：createEngine 异常透传
 		bool threw = false;
 		try {
 			reg.getOrCreateEngine("Failing", "models/fail.onnx");

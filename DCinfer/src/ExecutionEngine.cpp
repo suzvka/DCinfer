@@ -77,9 +77,8 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 	_dispatchToPool(node->affinity(),
 					[this, node, nodeName, taskId, gate, remainingHops, state] {
 		// 在飞计数收尾（RAII）：任何退出路径均经本析构递减；归零且 task
-		// 未终止时由最后完成的 lambda 触发耗尽检测——取代原"最后持有者
-		// 析构"方案（活动门控表强持有 gate 至 _terminate，耗尽时析构
-		// 实际不发生，原依赖看门狗收尾）。
+		// 未终止时由最后完成的 lambda 触发耗尽检测（活动门控表强持有
+		// gate 至 _terminate，析构时机的耗尽检测不可用）。
 		struct RunDone {
 			std::shared_ptr<TaskGate> gate;
 			ExecutionEngine* engine;
@@ -227,7 +226,6 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 									 const std::shared_ptr<GraphRuntimeState>& state) {
 	auto& graph = state->graph->runtimeView();
 	auto& output = state->output;
-	auto& signals = *state->signals;
 	auto& errors = state->errors;
 	// 调用前提：节点已由 _submitNodeRun 执行成功（失败路径已记录错误并跳过传播），
 	// 输出已写入 TaskBuffer 输出槽位，本函数在池线程内就地执行。
@@ -311,7 +309,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		if (gate->terminated.load(std::memory_order_acquire))
 			return;
 
-		// 下游 task 态：惰性创建（原 Node 内嵌 TaskBuffer 的 set 输入语义）。
+		// 下游 task 态：惰性创建（写入缓冲，不触发执行）。
 		// 地址稳定，dstExec 副本保证其存活至本轮传播结束
 		std::shared_ptr<TaskExecutionState> dstExec;
 		NodeExecState* dstNs = nullptr;
@@ -357,7 +355,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	{
 		std::lock_guard lk(_terminationMutex);
 		// 防止重复终止（幂等）：仅 Running → 终态迁移一次有效。
-		// 此处仅发布终态（T1），结果可读（T2）由步骤⑥' 后置发布
+		// 此处仅发布终态（T1），结果可读（T2）由步骤⑤ 后置发布
 		auto it = _taskStates.find(taskId);
 		if (it == _taskStates.end() || it->second.status != TaskStatus::Running)
 			return;
@@ -375,17 +373,16 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		cb(taskId);
 	}
 
-
-	// ④ 清理该 task 的所有 task 级信号（防止泄漏）
+	// ② 清理该 task 的所有 task 级信号（防止泄漏）
 	signals.clearTask(taskId);
 
-	// ⑤ 清理信号阻塞追踪记录
+	// ③ 清理信号阻塞追踪记录
 	{
 		std::lock_guard lk(_blockedSkipsMutex);
 		_blockedSkips.erase(taskId);
 	}
 
-	// ⑥ 抢救结果 + 清理 task 执行态：
+	// ④ 抢救结果 + 清理 task 执行态：
 	//    终止路径在打卡满足后直接返回，声明端口的数据仍留在 task 缓冲。
 	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → takeOutput 可取，
 	//    含取消路径的部分结果），再整体清除该 task 的节点执行态。
@@ -402,7 +399,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	}
 	state->exec->clearTaskState(taskId);
 
-	// ⑥' 发布"结果可读"：声明输出已全部抢救进 OutputZone。wait() 谓词绑定
+	// ⑤ 发布"结果可读"：声明输出已全部抢救进 OutputZone。wait() 谓词绑定
 	//     本标志且先于 notify 生效——此后返回的等待者必能取到结果，
 	//     消除"终态已发布、结果未抢救"的窗口（终态/可读/清理三完成点中，
 	//     wait 绑定中间点；notify 仍最后发出）。
@@ -412,7 +409,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 			it->second.resultsReady = true;
 	}
 
-	// ⑦ 移除活动门控并通知同步等待者（结果仍保留，供 wait 后 takeOutput 取用）
+	// ⑥ 移除活动门控并通知同步等待者（结果仍保留，供 wait 后 takeOutput 取用）
 	{
 		std::lock_guard lk(_activeGatesMutex);
 		_activeGates.erase(taskId);
@@ -443,7 +440,7 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
 
 	// 声明未满足：传播链已耗尽。区分两类结局——
 	// ① 存在 Error 级诊断（节点自报失败）：实现方拥有时间/失败解释权，
-	//    任务终止为 Failed（节点失败闭环，不再依赖看门狗/任务挂起）。
+	//    任务终止为 Failed（节点失败闭环）。
 	// ② 仅有 Warning 或无诊断（如信号阻塞停滞）：保持挂起，宿主 wait(t)+cancel 解围。
 	auto errors = state->errors.taskErrors(taskId);
 	bool hasError = false;
@@ -519,7 +516,7 @@ void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string&
 bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
 	// timeout <= 0 视为无限等待（宿主护栏：只放弃等待，不作为执行超时语义）。
 	// 谓词绑定"终态 + 结果可读"：_terminate 先发布终态、后抢救声明输出
-	// （步骤⑥），仅查终态会让等待者早于结果就绪返回，破坏
+	// （步骤④），仅查终态会让等待者早于结果就绪返回，破坏
 	// "wait 返回即可读"契约。
 	// 未知 taskId（从未提交或已 releaseTask）不可终止，立即返回 false，
 	// 防止无限等待模式下误拼写 taskId 挂死。

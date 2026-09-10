@@ -57,10 +57,6 @@ public:
 		_graph.feedInput(taskId, nodeName, portName, std::move(data));
 	}
 
-	// ── 输出声明 ──
-
-	// （已合并到 submit：输出声明作为 submit 的第一个参数，消除 temporal coupling）
-
 	// ── 异步提交 ──
 
 	/// @brief  单输出便捷提交：声明输出 + 异步启动

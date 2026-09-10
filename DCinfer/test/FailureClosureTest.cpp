@@ -1,7 +1,7 @@
 // 失败闭环 + 提交期拓扑守卫 单元测试
-// 无执行超时（看门狗已移除）语义下的行为契约：
-//   ② 节点自报失败 → 传播耗尽 → 任务 Failed（宿主无需 wait+cancel 干预）
-//   ③ 声明目标拓扑不可达 → submit 立即抛 GraphException(UnreachableDeclaration)
+// 无执行超时语义下的行为契约：
+//   ① 节点自报失败 → 传播耗尽 → 任务 Failed（宿主无需 wait+cancel 干预）
+//   ② 声明目标拓扑不可达 → submit 立即抛 GraphException(UnreachableDeclaration)
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -68,10 +68,10 @@ static Node::RunFn failRunFn() {
 }
 
 // ════════════════════════════════════════════
-// ② 失败闭环
+// ① 失败闭环
 // ════════════════════════════════════════════
 
-// 1. 唯一声明来源的节点失败 → 传播耗尽 → 任务 Failed（无需看门狗/取消）
+// 1. 唯一声明来源的节点失败 → 传播耗尽 → 任务 Failed
 static void testFailureClosesTaskAsFailed() {
 	TEST("failure closure: sole declared source fails → task ends Failed") {
 		TestHarness harness;
@@ -85,7 +85,7 @@ static void testFailureClosesTaskAsFailed() {
 		CHECK(result.status == TaskStatus::Failed, "declaration unmet + error diagnostic → Failed");
 		CHECK(harness.graph().taskStatus("t1") == TaskStatus::Failed, "taskStatus should be Failed");
 
-		// 失败原因归因到真实节点（非 "<watchdog>"）
+		// 失败原因归因到真实节点
 		bool failRecorded = false;
 		for (const auto& e : harness.taskErrors("t1")) {
 			if (e.nodeName == "fail" && e.level == DiagnosticLevel::Error)
@@ -121,7 +121,7 @@ static void testParallelBranchPartialFailure() {
 		CHECK(result.status == TaskStatus::Failed,
 			  "id_c fails → overall declaration unmet → Failed (id_b alone insufficient)");
 
-		// 正常分支的部分输出经步骤⑥抢救，仍可读
+		// 正常分支的部分输出经终止清理抢救，仍可读
 		CHECK(harness.hasOutput("t1", "id_b", "y"), "successful branch output should be readable");
 		CHECK(!harness.hasOutput("t1", "id_c", "y"), "failed branch must not produce output");
 	}
@@ -129,7 +129,7 @@ static void testParallelBranchPartialFailure() {
 }
 
 // ════════════════════════════════════════════
-// ③ 提交期拓扑守卫
+// ② 提交期拓扑守卫
 // ════════════════════════════════════════════
 
 // 3. 声明目标拓扑不可达（孤立节点/断链）→ submit 立即抛错

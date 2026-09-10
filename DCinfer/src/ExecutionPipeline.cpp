@@ -33,7 +33,7 @@ NodeResult ExecutionPipeline::execute(
 	const auto& fn = node.runFn();
 	const auto& onComplete = node.completionCallback();
 
-	// ⓪ 就绪预检：必选输入未就绪则拒绝执行（原 Node::tryExecute 语义）
+	// ⓪ 就绪预检：必选输入未就绪则拒绝执行
 	if (!node.isReady(taskId, buffer)) {
 		throw NodeException(NodeException::ErrorType::NotReady, "ExecutionPipeline::execute",
 							"task '" + taskId + "' is not ready");

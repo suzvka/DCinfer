@@ -1,9 +1,7 @@
 // OpenAI 兼容远端引擎适配器：POST {basePath}/chat/completions
 // 端口：prompt/system/params（Data）→ response（Data）
 //
-// 基于 DCNet 传输框架（HttpTransport + NetCodec 契约 + NetError 归一化），
-// 自 NetCodec_Chat.cpp 迁移（2026-08，DCNet 收缩为张量传输框架后
-// 协议级适配器归 DCEngines，与 OnnxRuntime 对称并列）。
+// 基于 DCNet 传输框架（HttpTransport + NetCodec 契约 + NetError 归一化）。
 
 #include "DCEngine/OpenAiEngine.h"
 

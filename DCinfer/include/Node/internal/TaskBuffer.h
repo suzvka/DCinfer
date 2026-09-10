@@ -18,7 +18,6 @@ struct NodeSchema; // 前向声明（定义见 Node.h）
 
 /// @brief 线程安全的 task 级 I/O 缓冲区管理器。
 ///
-/// 封装原 Node 中的 _taskInputs / _taskOutputs / _bufferMutex，
 /// 提供线程安全的 setInput / takeOutput / isReady / 生命周期管理。
 /// 所有需要 Schema 信息的操作通过参数传入，避免头文件循环依赖。
 class TaskBuffer {

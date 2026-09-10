@@ -70,9 +70,8 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	p.type = TensorMeta::stringToType(j.at("tensorType").get<std::string>());
 	p.typeSize = static_cast<size_t>(j.at("typeSize").get<int64_t>());
 	for (auto& dim : j.at("shape")) {
-		// 直接以 int64_t 保留（含 -1 动态维度）。
-		// 修复前此处 static_cast<size_t> 会把 JSON -1 转为 0xFFFFFFFFFFFFFFFF，
-		// 与序列化端 int64_t 直写不对称，roundtrip 后内存 shape 变为巨大值。
+		// 直接以 int64_t 保留（含 -1 动态维度）：禁止 static_cast<size_t> 等
+		// 有符号/无符号转换——JSON -1 会被转为巨大值，破坏 roundtrip 对称性。
 		p.shape.push_back(dim.get<int64_t>());
 	}
 	p.required = j.value("required", true);
@@ -492,20 +491,8 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 		// 3. 构建图（baseDir = 临时目录，相对路径 models/xxx 自动解析）
 		compileString(graph, json, archive->tempDir());
 
-		// 4. 引擎已加载模型，清理临时文件
-		//    （逐个删除 models/ 下的文件，最后删除临时目录）
-		// ⚠ 与引擎实例缓存的生命周期交互（详见 GraphCompiler.h 头注释）：
-		//    - 实例缓存键为「engineType + 解压后的临时绝对路径」，引擎实例
-		//      （如 Ort::Session）在 createEngine 时已完成模型加载，驻留内存，
-		//      删除临时文件不影响已加载实例的运行。
-		//    - 但缓存键指向的文件路径此后永久失效：重复编译同一 .dcg 会解压
-		//      到新的临时目录（键不同），产生新的实例缓存条目，旧条目成为
-		//      永不命中的孤儿，直到 releaseAllEngines() 才释放。
-		//    - 因此重复编译需注意：要么保持实例缓存不清空（图可继续运行），
-		//      要么定期 releaseAllEngines() 清理孤儿条目后重新编译
-		//      （重新编译会重新解压，加载不会因旧文件删除而失败）。
-		//    - 惰性加载引擎（createEngine 不读模型、Run 时才读）将因临时文件
-		//      已删除而在运行期失败，不受本约束保护。
+		// 4. 引擎已加载模型，清理临时文件（逐个删除 models/ 下的文件，最后删除临时目录）。
+		//    与引擎实例缓存的生命周期交互（含惰性加载引擎的边界）详见 GraphCompiler.h 头注释。
 		std::error_code ec;
 		for (auto& entry : std::filesystem::recursive_directory_iterator(archive->tempDir(), ec)) {
 			if (entry.is_regular_file()) {
@@ -515,7 +502,7 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 		return;
 	}
 
-	// ── .json 反序列化（原有逻辑）──
+	// ── .json 反序列化 ──
 
 	// 读取文件内容
 	std::ifstream ifs(p, std::ios::binary);

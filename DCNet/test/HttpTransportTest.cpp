@@ -4,7 +4,7 @@
 //   - 传输层：成功 2xx / 404 / 500 / 连接拒绝 / 超时 → NetError 归一化
 //   - 端到端：DCNet.Tensor 节点（张量 JSON codec，数值）真实 HTTP 往返 + 张量还原
 //   - 端到端：DCNet.Tensor 节点（张量 JSON codec，Data 文本）真实 HTTP 往返 + 文本还原
-// 注：OpenAI chat 端到端已随适配器迁至 DCEngines/OpenAI（OpenAiEngineTest）。
+// 注：OpenAI chat 端到端见 DCEngines/OpenAI（OpenAiEngineTest）。
 
 #include "DCNet/DcNetHttp.h"
 #include "NodeExecutor.h"

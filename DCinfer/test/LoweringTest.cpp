@@ -372,7 +372,7 @@ static void test_wireOnlyCycleDropsFusedEdge() {
 	CHECK(runtimeNodes.size() == 1, "runtime view: only x");
 	CHECK(runtimeEdges.empty(), "fused edge into wire-only cycle is dropped");
 
-	// DirectConnect 守卫回归（守卫已随 connectRaw 退出公共面，此处保底）
+	// DirectConnect 守卫回归（connectRaw 拒绝业务节点直连）
 	bool directRejected = false;
 	try {
 		GraphStore gs;

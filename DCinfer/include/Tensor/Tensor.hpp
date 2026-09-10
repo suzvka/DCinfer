@@ -10,9 +10,6 @@
 #include "TensorMods.h"
 
 namespace DC {
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// DC::Tensor 栈占用：248 字节。
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 /// @brief 推理框架的核心张量对象，作为输入/输出数据的统一载体。
 /// @brief 提供类型安全的创建、索引访问、形状变换和数据序列化能力。
@@ -211,7 +208,7 @@ private:
 	template <typename T>
 	T readScalar(const Shape& path) const;
 
-	// 拷贝数据和元信息
+	// 接管数据与元信息（move 语义）
 	void moveFrom(Tensor&& other) noexcept;
 
 	TensorData::Shape indexShape(const Shape& shape, bool isRead) const;

@@ -30,22 +30,8 @@ TensorSlot::Shape TensorSlot::shape() const {
 	return _rule.shape;
 }
 
-TensorSlot::Shape TensorSlot::dataShape() const {
-	// 优先从运行时数据获取形状（仅 DCTensor 类型有意义）
-	if (auto* t = peek<Tensor>()) {
-		return t->shape();
-	}
-	if (_defaultData) {
-		return _defaultData->shape();
-	}
-	return {};
-}
-
 bool TensorSlot::isInput() const {
 	return _config.position == Config::Position::Input;
-}
-bool TensorSlot::isOutput() const {
-	return _config.position == Config::Position::Output;
 }
 
 bool TensorSlot::hasData() const {
@@ -61,10 +47,6 @@ TensorSlot& TensorSlot::setDefaultProvider(DefaultProvider fn) {
 	return *this;
 }
 
-bool TensorSlot::hasDefaultProvider() const {
-	return static_cast<bool>(_defaultProvider);
-}
-
 void TensorSlot::resolveDefaultIfNeeded(const SlotMap& peers) {
 	if (_blob.has_value() || !_defaultProvider)
 		return;
@@ -72,13 +54,6 @@ void TensorSlot::resolveDefaultIfNeeded(const SlotMap& peers) {
 	if (t) {
 		store(Value(std::move(t)));
 	}
-}
-
-const Tensor& TensorSlot::defaultTensor() const {
-	if (!_defaultData) {
-		abort(ErrorType::NotData, "No default data");
-	}
-	return *_defaultData;
 }
 
 const Tensor& TensorSlot::view() const {
@@ -102,17 +77,6 @@ SlotDataType TensorSlot::storedType() const {
 	return SlotDataTypeUnknown;
 }
 
-const void* TensorSlot::rawPtr() const {
-	if (_blob.has_value()) {
-		return _blob->ptr;
-	}
-	// 默认数据视为 DCTensor
-	if (_defaultData) {
-		return _defaultData.get();
-	}
-	return nullptr;
-}
-
 void TensorSlot::clear() {
 	if (_blob.has_value() && _blob->deleter && _blob->ptr) {
 		_blob->deleter(_blob->ptr);
@@ -122,23 +86,12 @@ void TensorSlot::clear() {
 	_defaultProvider = nullptr;
 }
 
-void TensorSlot::clearData() {
-	if (_blob.has_value() && _blob->deleter && _blob->ptr) {
-		_blob->deleter(_blob->ptr);
-	}
-	_blob.reset();
-}
-
-const TensorSlot::Config& TensorSlot::config() const {
-	return _config;
-}
-
 TensorSlot::Config TensorSlot::CreateConfig() {
 	return Config();
 }
 
 void TensorSlot::abort(ErrorType errorType, const std::string& message) const {
-	std::string source = "TensorSlotBase";
+	std::string source = "TensorSlot";
 	if (!_rule.name.empty()) {
 		source += " (" + _rule.name + ")";
 	}

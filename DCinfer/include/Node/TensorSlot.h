@@ -81,9 +81,6 @@ public:
 	/// @param peers 同节点所有输入槽位的映射，供工厂查阅锚定数据。
 	void resolveDefaultIfNeeded(const SlotMap& peers);
 
-	/// @brief  是否设置了 DefaultProvider。
-	bool hasDefaultProvider() const;
-
 	/// @brief  槽位名称。
 	const std::string& name() const;
 	/// @brief  期望的张量逻辑类型。
@@ -92,19 +89,12 @@ public:
 	size_t typeSize() const;
 	/// @brief  期望形状。
 	Shape shape() const;
-	/// @brief  运行时数据的实际形状（若为 DCTensor）。
-	Shape dataShape() const;
 
 	/// @brief  是否为输入槽位。
 	bool isInput() const;
-	/// @brief  是否为输出槽位。
-	bool isOutput() const;
 
 	/// @brief  是否已设置默认数据。
 	bool hasDefaultData() const;
-	/// @brief  获取默认数据的只读引用。
-	/// @throws TensorException(NotData) 若无默认数据。
-	const Tensor& defaultTensor() const;
 
 	/// @brief  槽位的张量逻辑类型是否与 T 匹配。
 	template <typename T>
@@ -138,16 +128,10 @@ public:
 	bool hasData() const;
 	/// @brief  当前存储数据的 SlotDataType 标签。
 	SlotDataType storedType() const;
-	/// @brief  原始数据指针（不担保类型）。
-	const void* rawPtr() const;
 
 	/// @brief  清空运行时数据与默认数据。
 	void clear();
-	/// @brief  仅清空运行时数据，保留默认数据。
-	void clearData();
 
-	/// @brief  获取槽位配置的只读引用。
-	const Config& config() const;
 	/// @brief  工厂：创建默认 Config。
 	static Config CreateConfig();
 

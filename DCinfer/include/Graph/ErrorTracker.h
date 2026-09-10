@@ -20,7 +20,7 @@ enum class DiagnosticLevel {
 
 /// @brief 单条 task 级诊断记录，包含节点名、来源和详细信息
 struct TaskError {
-	DiagnosticLevel level = DiagnosticLevel::Error; ///< 诊断级别（默认 Error，向后兼容）
+	DiagnosticLevel level = DiagnosticLevel::Error; ///< 诊断级别（默认 Error）
 	std::string nodeName;  ///< 发生错误的节点名
 	std::string source;    ///< 异常来源（如 "InferGraph::_propagateFrom"）
 	std::string message;   ///< 错误详情

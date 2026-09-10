@@ -44,9 +44,9 @@ struct DcNetListener {
 	virtual int port() const = 0;
 };
 
-/// @brief HTTP/1.1 监听器（POCO ServerSocket，跨平台；MockServer 的对外契约演进）。
+/// @brief HTTP/1.1 监听器（POCO ServerSocket，跨平台）。
 /// v1 边界：仅 Content-Length 请求体（不支持 chunked）；逐请求应答后关闭连接；
-/// 服务端证书 / TLS 监听随 mTLS 需求另行设计。
+/// 服务端 TLS 监听暂不支持。
 std::unique_ptr<DcNetListener> makeHttpListener();
 
 } // namespace DC::Net

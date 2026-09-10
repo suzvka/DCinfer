@@ -7,10 +7,10 @@ namespace DC {
 
 class SignalStore;
 
-/// @brief 信号阻塞门：将信号判断逻辑从 Node 中解耦。
+/// @brief 信号阻塞门：节点信号判断逻辑的独立封装。
 ///
 /// 与数据图正交解耦，任意时刻可读写。
-/// 未绑定时 isBlocked() 永远返回 false（向后兼容）。
+/// 未绑定时 isBlocked() 永远返回 false。
 class SignalGate {
 public:
 	SignalGate() = default;
