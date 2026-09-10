@@ -47,15 +47,6 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 	feedInput(taskId, nodeName, portName, Value(std::make_unique<Tensor>(std::move(data))));
 }
 
-void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portName, Value data) {
-	auto [nodeName, resolvedPort] = _resolveInputName(portName, "InferGraph::feedBoundInput");
-	feedInput(taskId, nodeName, resolvedPort, std::move(data));
-}
-
-void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portName, Tensor data) {
-	feedBoundInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
-}
-
 void InferGraph::submitBound(const TaskId& taskId, uint32_t maxHops) {
 	std::vector<OutputDeclaration> declarations;
 	for (const auto& ob : _outputBindingsView())
@@ -138,46 +129,6 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	return ns && ns->buffer.hasOutput(taskId, portName);
 }
 
-// ── 按公共别名的图级取用 ──
-
-Value InferGraph::takeOutput(const TaskId& taskId, const std::string& name) {
-	auto [nodeName, portName] = _resolveOutputName(name, "InferGraph::takeOutput");
-	return takeOutput(taskId, nodeName, portName);
-}
-
-Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& name) {
-	auto [nodeName, portName] = _resolveOutputName(name, "InferGraph::takeOutputTensor");
-	return takeOutputTensor(taskId, nodeName, portName);
-}
-
-bool InferGraph::hasOutput(const TaskId& taskId, const std::string& name) const {
-	auto [nodeName, portName] = _resolveOutputName(name, "InferGraph::hasOutput");
-	return hasOutput(taskId, nodeName, portName);
-}
-
-// ── 图级别名解析（仅按公共别名寻址）──
-
-std::pair<std::string, std::string>
-InferGraph::_resolveOutputName(const std::string& name, const char* api) const {
-	for (const auto& b : _outputBindingsView()) {
-		if (b.alias == name)
-			return {b.nodeName, b.portName};
-	}
-	throw GraphException(GraphException::ErrorType::NodeNotFound, api,
-						 "no output binding with alias '" + name
-							 + "' (call bindOutput(alias, nodeName, portName) first)");
-}
-
-std::pair<std::string, std::string>
-InferGraph::_resolveInputName(const std::string& name, const char* api) const {
-	for (const auto& b : _inputBindingsView()) {
-		if (b.alias == name)
-			return {b.nodeName, b.portName};
-	}
-	throw GraphException(GraphException::ErrorType::NodeNotFound, api,
-						 "no input binding with alias '" + name
-							 + "' (call bindInput(alias, nodeName, portName) first)");
-}
 
 
 // ════════════════════════════════════════════
@@ -262,10 +213,9 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			declarations.push_back({ob.nodeName, ob.portName, 1});
 		}
 
-		// 驱动子图（不设执行超时：时间语义归节点实现方；由 TTL 与宿主护栏兑底）。
-		// wait 返回即 task 已终止：_terminate 先抢救声明输出至 OutputZone（步骤⑥）
-		// 再唤醒等待者（步骤⑦），此后声明输出必可经 takeOutput 取出——
-		// 无需再经引擎级完成回调手动捕获（旧 _terminate 清理 OutputZone 时的残留）
+		// 驱动子图（不设执行超时：时间语义归节点实现方；由 TTL 与宿主护栏兜底）。
+		// wait 返回即 task 已终止：_terminate 已把声明输出抢救至 OutputZone，
+		// 此后声明输出必可经 takeOutput 取出
 		submit(tid, std::move(declarations), maxHops);
 		_engine->wait(tid, std::chrono::milliseconds(0)); // 内部路径：无限等待至子图 task 终止
 

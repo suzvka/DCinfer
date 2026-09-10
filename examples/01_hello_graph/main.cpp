@@ -32,20 +32,21 @@ int main() {
 	// 连接 adder.sum → pass.x（connect 自动插入广播连接器）
 	graph.connect("adder", "sum", "pass", "x");
 
-	// 标记图级输入输出端口（输出绑定带公共别名，作为图的对外契约）
+	// 标记图级输入输出端口（绑定构成图级签名：submitBound 声明来源 / 序列化契约）
 	// 注：connect() 面向业务节点间的 1→1 连线，自动插入广播连接器中转。
+	//     数据注入/取用统一按内部寻址 (nodeName, portName)。
 	graph.bindInput("a", "adder", "a");
 	graph.bindInput("b", "adder", "b");
 	graph.bindOutput("result", "pass", "y");   // 公共别名 result → 内部 pass.y
 
-	// ── 4. 注入数据（按绑定端口名，无需重复提供节点名）──
+	// ── 4. 注入数据（按内部节点名 + 端口名定位）──
 	auto tensorA = DC::Tensor::Create<float>();
 	tensorA = 3.0f;
 	auto tensorB = DC::Tensor::Create<float>();
 	tensorB = 4.0f;
 
-	graph.feedBoundInput("task1", "a", std::move(tensorA));
-	graph.feedBoundInput("task1", "b", std::move(tensorB));
+	graph.feedInput("task1", "adder", "a", std::move(tensorA));
+	graph.feedInput("task1", "adder", "b", std::move(tensorB));
 
 	// ── 5. 提交（以全部 bindOutput 绑定作为输出声明，无需重复声明）──
 	// 结果在任务终止后仍保留，无需注册回调即可在 wait 之后读取。
@@ -61,8 +62,8 @@ int main() {
 		return 1;
 	}
 
-	// ── 7. 按公共别名取结果（无需知道内部节点名/端口名；取出即消耗）──
-	auto output = graph.takeOutputTensor("task1", "result");
+	// ── 7. 按内部寻址取结果（取出即消耗）──
+	auto output = graph.takeOutputTensor("task1", "pass", "y");
 	std::cout << "3.0 + 4.0 = " << output.item<float>() << std::endl;
 
 	return 0;

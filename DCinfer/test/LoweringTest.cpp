@@ -216,7 +216,7 @@ static void test_cycleTtlStillBounded() {
 
 	// maxHops=6：新语义下预算 6 → a 执行 ≥3 次（旧语义每业务 hop 耗 2，只能 2 次）。
 	// 声明真实存在节点 a 的端口但 count 极大（1000），6 跳内不可能满足——
-	// 避免首次环回即满足声明提前 Succeeded，由 TTL 兑底终止（本用例验证的就是 TTL 行为）。
+	// 避免首次环回即满足声明提前 Succeeded，由 TTL 兜底终止（本用例验证的就是 TTL 行为）。
 	graph.feedInput("t1", "a", "x", floatTensor(0.0f));
 	graph.submit("t1", "a", "y", 1000, /*maxHops=*/6);
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "cycle should terminate by TTL");

@@ -9,7 +9,6 @@
 
 #include <chrono>
 #include <functional>
-#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -89,8 +88,9 @@ public:
 	/// @brief  图级输入绑定（强制公共别名）
 	///
 	/// 别名是图对外契约的一部分：内部节点/端口重构后，只要别名映射不变，
-	/// 调用方代码无需改动。feedBoundInput 仅按别名寻址，
-	/// 天然消除跨节点同名端口的注入歧义。
+	/// 调用方代码无需改动。绑定构成图级签名，随冻结快照固化，供
+	/// submitBound 推导输出声明与序列化（DCIr）使用；运行期数据注入/取用
+	/// 一律按 (nodeName, portName) 内部寻址（feedInput / takeOutput）。
 	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一）
 	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
@@ -103,8 +103,8 @@ public:
 
 	/// @brief  图级输出绑定（强制公共别名）
 	///
-	/// 绑定后即可用 takeOutput(taskId, alias) / takeOutputTensor(taskId, alias)
-	/// 按公共名取结果，无需向调用方暴露内部节点名与端口名。
+	/// 绑定构成图级签名的一部分：submitBound 以此为输出声明来源，
+	/// 结果仍按内部寻址取用（takeOutput / takeOutputTensor）。
 	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
 	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
@@ -124,14 +124,6 @@ public:
 
 	/// @brief  便捷接口：直接传入 DC::Tensor
 	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
-
-	/// @brief  便捷注入：按 bindInput 声明的公共别名定位，无需重复提供节点名。
-	/// @throws GraphException(NodeNotFound) 无此别名的绑定（需先 bindInput）
-	/// @throws GraphException(FeedFailed)   底层注入失败
-	void feedBoundInput(const TaskId& taskId, const std::string& portName, Value data);
-
-	/// @brief  便捷注入：DC::Tensor 重载
-	void feedBoundInput(const TaskId& taskId, const std::string& portName, Tensor data);
 
 	// ── 执行驱动 ──
 
@@ -176,19 +168,8 @@ public:
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	Tensor takeOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
-	/// @brief  消费式取出：按公共别名定位，无需内部节点名
-	/// @throws GraphException(NodeNotFound) 无此别名的输出绑定
-	Value takeOutput(const TaskId& taskId, const std::string& name);
-
-	/// @brief  消费式取出 Tensor：按公共别名定位
-	/// @throws 同 2 参 takeOutput
-	Tensor takeOutputTensor(const TaskId& taskId, const std::string& name);
-
 	/// @brief  检查输出区中是否有结果
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
-
-	/// @brief  检查结果是否存在（按公共别名）
-	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
 	/// @brief  便捷提交：以全部 bindOutput 绑定作为输出声明（各 count=1）。
 	///         已 bindOutput 的端口无需在 submit 时重复声明。
@@ -355,15 +336,6 @@ private:
 	const std::vector<OutputBinding>& _outputBindingsView() const {
 		return _state->graph ? _state->graph->signature().outputs : _builder->outputBindings();
 	}
-
-	/// @brief  解析图级输出别名 → (nodeName, portName)（仅按别名寻址）
-	/// @return (nodeName, portName)
-	std::pair<std::string, std::string>
-	_resolveOutputName(const std::string& name, const char* api) const;
-
-	/// @brief  解析图级输入别名 → (nodeName, portName)（仅按别名寻址）
-	std::pair<std::string, std::string>
-	_resolveInputName(const std::string& name, const char* api) const;
 
 	// ── 内部组件 ──
 	// 图状态（graph/output/signals/errors）聚合为共享的 GraphRuntimeState：

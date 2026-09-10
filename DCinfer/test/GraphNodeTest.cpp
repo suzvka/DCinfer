@@ -235,13 +235,13 @@ void testThreeLevelNesting() {
 }
 
 // ════════════════════════════════════════════
-// 测试 4: 子图循环截断（TTL 兑底，无执行超时）
+// 测试 4: 子图循环截断（TTL 兜底，无执行超时）
 // ════════════════════════════════════════════
 
 void testSubgraphLoopTTL() {
 	TEST("subgraph loop: TTL inside subgraph bounds iterations (no execution timeout)") {
 		// 子图：包含无限循环（声明很大的 count；子图内部无执行超时，
-		// 由 TTL=3 截断——时间语义归节点实现方，构图循环靠拓扑兑底）。
+		// 由 TTL=3 截断——时间语义归节点实现方，构图循环靠拓扑兜底）。
 		// 注意：父图仅用等待护栏（awaitCompletion 默认 5s），不设 submit 超时。
 		InferGraph subGraph;
 

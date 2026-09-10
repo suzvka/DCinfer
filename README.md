@@ -119,18 +119,19 @@ cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake 
 示例代码（[examples/01_hello_graph](examples/01_hello_graph/main.cpp)）展示标准任务生命周期：
 
 ```cpp
-graph.bindInput("a", "adder", "a");        // 图级输入绑定（强制公共别名）
+graph.bindInput("a", "adder", "a");        // 图级输入绑定（图级签名 / 序列化契约）
 graph.bindOutput("result", "pass", "y");   // 公共别名绑定图级输出（result → pass.y）
-graph.feedBoundInput("task1", "a", ...);   // 按别名注入（无需重复节点名）
+graph.feedInput("task1", "adder", "a", ...); // 内部寻址注入 (nodeName, portName)
 graph.submitBound("task1");                // 以 bindOutput 绑定作为输出声明
 if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
-    auto result = graph.takeOutputTensor("task1", "result");  // 按别名取结果（无需内部节点名）
+    auto result = graph.takeOutputTensor("task1", "pass", "y"); // 内部寻址取结果
 }
 ```
 
 输出在任务终止后仍保留；`takeOutput` / `takeOutputTensor` 为消费式取出
-（按公共别名定位，取出即不可重复读取）。图级注入与取用统一**仅按公共别名寻址**
-（`bindInput(alias, node, port)` / `bindOutput(alias, node, port)`）。
+（取出即不可重复读取）。数据注入、输出声明与结果取用统一**仅按内部寻址**
+`(nodeName, portName)`；`bindInput` / `bindOutput` 的别名构成图级签名（随冻结快照
+固化，供 `submitBound` 推导输出声明与序列化使用），不参与运行时寻址。
 `waitForResult(taskId)` 默认无限等待直至终止，可能阻塞的场景改用显式超时重载
 `waitForResult(taskId, 5s)` 或从其他线程 `cancel()`。执行超时由节点实现方自行负责
 （引擎不设执行超时；节点内部超时失败经 `NodeResult` + `Diagnostic` 自报，任务终止为

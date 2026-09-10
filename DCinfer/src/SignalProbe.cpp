@@ -19,7 +19,7 @@ bool canSatisfyDeclarations(const GraphStore& store, const GraphSignature& signa
 	// 且父级查询 isBlocked 时内部尚未 submit，task 级声明不可用。
 	const auto& outputBindings = signature.outputs;
 	if (outputBindings.empty())
-		return true; // 防御：无输出绑定，放行（宿主护栏兑底）
+		return true; // 防御：无输出绑定，放行（宿主护栏兜底）
 
 	std::unordered_set<std::string> targets;
 	targets.reserve(outputBindings.size());
@@ -80,7 +80,7 @@ bool canSatisfyDeclarations(const GraphStore& store, const GraphSignature& signa
 bool canSatisfyTopologically(const GraphRuntimeView& view,
 							 const std::vector<std::string>& startNodes,
 							 const std::unordered_set<std::string>& targetNodes) {
-	// 无声明目标或无可判别的起点：无从判定，放行（由宿主护栏兑底）。
+	// 无声明目标或无可判别的起点：无从判定，放行（由宿主护栏兜底）。
 	if (targetNodes.empty() || startNodes.empty())
 		return true;
 

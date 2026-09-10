@@ -11,8 +11,7 @@ namespace DC {
 struct InputBinding {
 	std::string nodeName;
 	std::string portName;
-	std::string alias;  ///< 公共别名（空 = 未设置；别名是图对外契约的一部分，
-	                    ///           内部 node:port 可重构而别名保持稳定）
+	std::string alias;  ///< 公共别名（必填；构成图级签名的一部分）
 };
 
 /// @brief InputZone：图级输入端口声明区（纯结构，无 task 级状态）
@@ -26,10 +25,9 @@ struct InputBinding {
 class InputZone {
 public:
 	/// @brief  标记 node:port 为图级输入口
-	/// @param  alias  公共别名（构建面强制非空，见 GraphBuilder::bindInput）；
-	///                feedBoundInput 仅按别名解析
+	/// @param  alias  公共别名（必填；构成图级签名）
 	void bind(const std::string& nodeName, const std::string& portName,
-			  const std::string& alias = {});
+			  const std::string& alias);
 
 	/// @brief  检查是否已绑定为图级输入
 	bool isBound(const std::string& nodeName, const std::string& portName) const;

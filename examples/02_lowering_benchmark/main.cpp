@@ -73,11 +73,12 @@ int main(int argc, char** argv) {
 		auto in = Tensor::Create<float>();
 		in = static_cast<float>(t);
 		auto start = Clock::now();
-		graph.feedBoundInput(taskId, "in", std::move(in));
+		graph.feedInput(taskId, "id_0", "x", std::move(in));                // 内部寻址注入
 		graph.submitBound(taskId);
 		graph.waitForResult(taskId);
 		totalMs += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-		lastResult = graph.takeOutputTensor(taskId, "out").item<float>();
+		lastResult =
+			graph.takeOutputTensor(taskId, "id_" + std::to_string(chainLength - 1), "y").item<float>();
 	}
 
 	std::cout << "tasks=" << taskCount << " avg latency=" << totalMs / taskCount << " ms\n";

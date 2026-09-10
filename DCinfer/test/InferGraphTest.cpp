@@ -905,44 +905,46 @@ void testCancelRunningTask() {
 }
 
 // ════════════════════════════════════════════
-// 图 API 便捷绑定：feedBoundInput / submitBound
+// 图级签名：bindInput/bindOutput + submitBound（内部寻址注入/取用）
 // ════════════════════════════════════════════
 
 void testBoundInputOutputApi() {
-	TEST("graph API: feedBoundInput / submitBound follow bindInput/bindOutput") {
+	TEST("graph API: bindInput/bindOutput signature + submitBound") {
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
 
-		graph.bindInput("x", "inc", "x");
-		graph.bindOutput("y", "inc", "y");
+		graph.bindInput("x", "inc", "x");   // 图级签名（序列化契约）
+		graph.bindOutput("y", "inc", "y");  // submitBound 输出声明来源
 
 		auto in = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 		*in = 41.0f;
-		graph.feedBoundInput("t1", "x", std::move(*in));
-		graph.submitBound("t1");
+		graph.feedInput("t1", "inc", "x", std::move(*in)); // 内部寻址注入
+		graph.submitBound("t1");                           // 绑定签名驱动声明
 		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "bound flow should complete");
-		auto out = graph.takeOutputTensor("t1", "inc", "y");
+		auto out = graph.takeOutputTensor("t1", "inc", "y"); // 内部寻址取用
 		CHECK(std::abs(out.item<float>() - 42.0f) < 1e-6f, "bound result should be 42.0");
 
-		// 错误路径：未绑定的端口名
+		// 错误路径：注入未注册节点抛 NodeNotFound（内部寻址唯一寻址方式）
+		InferGraph graph2;
+		graph2.addNode(std::make_unique<Node>("Builtin", "a", incSchema(), incRunFn()));
 		bool noSuch = false;
 		try {
 			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 			*v = 1.0f;
-			graph.feedBoundInput("t1", "no_such_port", std::move(*v));
-		} catch (const GraphException&) {
-			noSuch = true;
+			graph2.feedInput("t1", "no_such_node", "x", std::move(*v));
+		} catch (const GraphException& e) {
+			noSuch = (e.getErrorType() == GraphException::ErrorType::NodeNotFound);
 		}
-		CHECK(noSuch, "unbound port name should throw");
+		CHECK(noSuch, "feedInput to unknown node should throw NodeNotFound");
 
-		// 错误路径：绑定名跨节点歧义
-		InferGraph graph2;
-		graph2.addNode(std::make_unique<Node>("Builtin", "a", incSchema(), incRunFn()));
-		graph2.addNode(std::make_unique<Node>("Builtin", "b", incSchema(), incRunFn()));
-		graph2.bindInput("x", "a", "x");
+		// 错误路径：绑定名唯一性仍在 bindInput 构建期校验
+		InferGraph graph3;
+		graph3.addNode(std::make_unique<Node>("Builtin", "a", incSchema(), incRunFn()));
+		graph3.addNode(std::make_unique<Node>("Builtin", "b", incSchema(), incRunFn()));
+		graph3.bindInput("x", "a", "x");
 		bool ambiguous = false;
 		try {
-			graph2.bindInput("x", "b", "x"); // 同名别名重复 → 构建期拒绝（寻址仅按别名，天然无歧义）
+			graph3.bindInput("x", "b", "x"); // 同名别名重复 → 构建期拒绝
 		} catch (const GraphException&) {
 			ambiguous = true;
 		}
@@ -952,45 +954,44 @@ void testBoundInputOutputApi() {
 }
 
 // ════════════════════════════════════════════
-// 图级公共别名：bindInput/bindOutput 三参重载 + 按别名注入/取用
+// 图级签名：bindInput/bindOutput + 内部寻址注入/取用（含跨节点同名端口）
 // ════════════════════════════════════════════
 
 void testAliasBindingApi() {
-	TEST("graph API: public aliases decouple callers from internal topology") {
+	TEST("graph API: bindings form graph signature; IO uses internal addressing") {
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
 
-		// 输入/输出均带公共别名
+		// 输入/输出绑定构成图级签名（submitBound 声明来源 / 序列化契约）
 		graph.bindInput("num", "inc", "x");
 		graph.bindOutput("result", "inc", "y");
 
 		auto in = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 		*in = 5.0f;
-		graph.feedBoundInput("t1", "num", std::move(*in)); // 按别名注入
+		graph.feedInput("t1", "inc", "x", std::move(*in)); // 内部寻址注入
 		graph.submitBound("t1");
-		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "alias-bound flow should complete");
-		CHECK(graph.hasOutput("t1", "result"), "alias should resolve for hasOutput");
-		auto out = graph.takeOutputTensor("t1", "result"); // 按别名取，无需内部节点名
-		CHECK(std::abs(out.item<float>() - 6.0f) < 1e-6f, "alias result should be 6.0");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "bound flow should complete");
+		CHECK(graph.hasOutput("t1", "inc", "y"), "output should resolve by internal addressing");
+		auto out = graph.takeOutputTensor("t1", "inc", "y"); // 内部寻址取用
+		CHECK(std::abs(out.item<float>() - 6.0f) < 1e-6f, "result should be 6.0");
 
-		// 2 参取用重载：同一公共别名在后续任务（t2）上继续生效
+		// 同一签名驱动后续任务（t2）
 		auto in2 = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 		*in2 = 7.0f;
-		graph.feedBoundInput("t2", "num", std::move(*in2));
+		graph.feedInput("t2", "inc", "x", std::move(in2));
 		graph.submitBound("t2");
 		CHECK(graph.waitForResult("t2").status != TaskStatus::Running, "second task should complete");
-		auto out2 = graph.takeOutputTensor("t2", "result"); // 按公共别名取（寻址仅按别名）
-		CHECK(std::abs(out2.item<float>() - 8.0f) < 1e-6f, "alias retrieval for second task should be 8.0");
+		auto out2 = graph.takeOutputTensor("t2", "inc", "y");
+		CHECK(std::abs(out2.item<float>() - 8.0f) < 1e-6f, "second result should be 8.0");
 
-		// 跨节点同名端口：唯一别名消除注入歧义（同名端口仍歧义，但别名不歧义）
+		// 跨节点同名端口：内部寻址按 (nodeName, portName) 精确注入，天然无歧义
 		InferGraph graph2;
 		graph2.addNode(std::make_unique<Node>("Builtin", "a", incSchema(), incRunFn()));
 		graph2.addNode(std::make_unique<Node>("Builtin", "b", incSchema(), incRunFn()));
 		graph2.bindInput("first", "a", "x");
 		graph2.bindInput("second", "b", "x");
 
-		// 别名唯一性校验：输入别名重复（构建期 API：需在首次运行期调用前完成，
-		// feedBoundInput 触发惰性冻结后构建面关闭，另见 FreezeBoundaryTest）
+		// 别名唯一性校验：输入别名重复（构建期拒绝）
 		bool dupIn = false;
 		try {
 			graph2.bindInput("first", "b", "x");
@@ -1009,15 +1010,16 @@ void testAliasBindingApi() {
 		}
 		CHECK(dupOut, "duplicate output alias should throw DuplicateBinding");
 
+		// 同名端口 "x" 存在于 a 与 b：内部寻址分别注入，无歧义
 		{
 			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 			*v = 1.0f;
-			graph2.feedBoundInput("t1", "first", std::move(*v));
+			graph2.feedInput("t1", "a", "x", std::move(*v));
 		}
 		{
 			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 			*v = 2.0f;
-			graph2.feedBoundInput("t1", "second", std::move(*v));
+			graph2.feedInput("t1", "b", "x", std::move(*v));
 		}
 	}
 	END_TEST();
@@ -1097,9 +1099,9 @@ void testWaitSemantics() {
 
 // 用裸 InferGraph（不经 TestHarness）：TestHarness 经完成回调捕获输出，
 // 会遮蔽 wait→takeOutput 窗口，测不到"wait 返回即可读"契约本身。
-// 成功路径下输出计数满足即进入 _terminate，声明输出完全依赖步骤⑥的
-// 抢救搬运进 OutputZone——每次迭代都经过"终态先发布、结果后搬运"序点。
-// 竞态窗口本质窄，本测试为回归护栏：修复后 wait 谓词绑定 resultsReady，
+// 成功路径下输出计数满足即进入 _terminate，声明输出依赖终止前的
+// 抢救搬运进入 OutputZone——每次迭代都经过"终态先发布、结果后搬运"序点。
+// 竞态窗口本质窄，本测试为回归护栏：wait 谓词绑定 resultsReady，
 // 通过是确定性的。
 void testWaitReturnsReadableResults() {
 	TEST("lifecycle: wait returns only after declared outputs are readable") {

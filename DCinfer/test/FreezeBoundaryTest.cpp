@@ -1,6 +1,6 @@
 // FreezeBoundaryTest：Build → Freeze → Execute 边界验收
 // 验证：惰性冻结建立"执行期拓扑不可变"不变量；冻结后构建 API 抛 Frozen；
-//       冻结前后内省一致；别名解析语义与冻结前完全一致。
+//       冻结前后内省一致；数据 IO 语义与绑定签名在冻结前后完全一致。
 
 #include "InferGraph.h"
 #include "GraphBuilder.h"
@@ -149,51 +149,36 @@ static void test_lazyFreezeOnFirstSubmit() {
 	CHECK(throwsFrozen([&] { graph.bindOutput("y", "b", "y"); }), "bindOutput after submit throws Frozen");
 }
 
-// ── 4. 冻结后别名/端口名解析语义与冻结前一致 ──
+// ── 4. 冻结前后数据 IO 语义一致（内部寻址）+ 绑定签名随快照固化 ──
 
-static void test_resolutionSemanticsPreserved() {
+static void test_ioSemanticsConsistentAcrossFreeze() {
 	InferGraph graph;
 	graph.addNode(makeId("a"));
-	graph.bindInput("num", "a", "x");   // 公共别名
-	graph.bindOutput("res", "a", "y");  // 公共别名
+	graph.bindInput("num", "a", "x");   // 图级签名（供 submitBound / 序列化）
+	graph.bindOutput("res", "a", "y");
 
-	// 冻结前解析（构建期视图）
-	bool preAliasUnknown = false;
-	try {
-		graph.feedBoundInput("t0", "no_such", floatTensor(0.0f));
-	} catch (const GraphException& e) {
-		preAliasUnknown = (e.getErrorType() == GraphException::ErrorType::NodeNotFound);
-	}
-	CHECK(preAliasUnknown, "unknown bound name throws NodeNotFound (pre-freeze)");
+	// 冻结前：内部寻址注入 → submitBound（签名驱动声明）→ 内部寻址取用
+	graph.feedInput("t0", "a", "x", floatTensor(9.0f));
+	graph.submitBound("t0");
+	CHECK(graph.waitForResult("t0").status != TaskStatus::Running,
+		  "bound flow should complete (lazy freeze)");
+	auto r0 = graph.takeOutputTensor("t0", "a", "y");
+	CHECK(std::abs(r0.item<float>() - 9.0f) < 1e-6f, "result before freeze should be 9.0");
 
-	graph.feedBoundInput("t1", "num", floatTensor(9.0f)); // 按别名注入
+	// 冻结后（首次 submit 已惰性编译）：同一寻址方式照常工作
+	graph.feedInput("t1", "a", "x", floatTensor(9.0f));
 	graph.submitBound("t1");
-	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "bound flow should complete (lazy freeze)");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running,
+		  "frozen graph should complete the same way");
+	CHECK(graph.hasOutput("t1", "a", "y"), "internal addressing resolves after freeze");
+	auto r1 = graph.takeOutputTensor("t1", "a", "y");
+	CHECK(std::abs(r1.item<float>() - 9.0f) < 1e-6f, "result after freeze should be 9.0");
 
-	// 冻结后解析（GraphSignature 视图，无锁）
-	CHECK(graph.hasOutput("t1", "res"), "alias should resolve for hasOutput after freeze");
-	bool portNameRejected = false;
-	try {
-		graph.hasOutput("t1", "y");
-	} catch (const GraphException& e) {
-		portNameRejected = (e.getErrorType() == GraphException::ErrorType::NodeNotFound);
-	}
-	CHECK(portNameRejected, "bare port name no longer resolves after freeze (alias-only addressing)");
-	auto r = graph.takeOutputTensor("t1", "res");
-	CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "alias retrieval after freeze should be 9.0");
-
-	InferGraph g2;
-	g2.addNode(makeId("a"));
-	g2.addNode(makeId("b"));
-	g2.bindInput("fa", "a", "x");
-	g2.bindInput("fb", "b", "x");
-	bool portNameUnresolved = false;
-	try {
-		g2.feedBoundInput("t1", "x", floatTensor(0.0f)); // 端口名 "x" 不再被解析
-	} catch (const GraphException& e) {
-		portNameUnresolved = (e.getErrorType() == GraphException::ErrorType::NodeNotFound);
-	}
-	CHECK(portNameUnresolved, "bare port name throws NodeNotFound (use alias)");
+	// 绑定签名随冻结快照固化（submitBound 声明来源 / 序列化契约保持有效）
+	CHECK(graph.inputBindings().size() == 1 && graph.inputBindings()[0].alias == "num",
+		  "input signature preserved across freeze");
+	CHECK(graph.outputBindings().size() == 1 && graph.outputBindings()[0].alias == "res",
+		  "output signature preserved across freeze");
 }
 
 // ── 5. 取消/诊断等运行期 API 在冻结图上照常工作 ──
@@ -232,7 +217,7 @@ int main() {
 	test_introspectionConsistency();
 	test_constructionRejectedAfterExplicitFreeze();
 	test_lazyFreezeOnFirstSubmit();
-	test_resolutionSemanticsPreserved();
+	test_ioSemanticsConsistentAcrossFreeze();
 	test_runtimeLifecycleOnFrozenGraph();
 
 	if (g_failures == 0) {
