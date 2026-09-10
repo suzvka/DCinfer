@@ -182,8 +182,9 @@ public:
 	const std::string& name() const { return _meta.name; }
 	const Schema& schema() const { return _meta.schema; }
 
-	// ── 线程池归属与分组 ──
+	// ── 线程池归属与元数据 ──
 	ThreadPoolAffinity affinity() const { return _meta.affinity; }
+	/// @brief  自由标签（纯序列化元数据，随 DCIr JSON/.dcg 往返；无调度语义）
 	void setTag(std::string tag) { _meta.tag = std::move(tag); }
 	const std::string& tag() const { return _meta.tag; }
 	bool isConnector() const { return _meta.isConnector; }

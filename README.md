@@ -119,9 +119,9 @@ cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake 
 示例代码（[examples/01_hello_graph](examples/01_hello_graph/main.cpp)）展示标准任务生命周期：
 
 ```cpp
-graph.bindInput("adder", "a");             // 标记图级输入端口
+graph.bindInput("a", "adder", "a");        // 图级输入绑定（强制公共别名）
 graph.bindOutput("result", "pass", "y");   // 公共别名绑定图级输出（result → pass.y）
-graph.feedBoundInput("task1", "a", ...);   // 按绑定名注入（无需重复节点名）
+graph.feedBoundInput("task1", "a", ...);   // 按别名注入（无需重复节点名）
 graph.submitBound("task1");                // 以 bindOutput 绑定作为输出声明
 if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
     auto result = graph.takeOutputTensor("task1", "result");  // 按别名取结果（无需内部节点名）
@@ -129,10 +129,11 @@ if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
 ```
 
 输出在任务终止后仍保留；`takeOutput` / `takeOutputTensor` 为消费式取出
-（按公共别名或绑定端口名定位，取出即不可重复读取）。`waitForResult(taskId)`
-默认无限等待直至终止，可能阻塞的场景改用显式超时重载 `waitForResult(taskId, 5s)`
-或从其他线程 `cancel()`。复用已终止的 taskId 合法；活动任务重复提交会抛出明确错误；
-支持 `cancel()` / `taskStatus()` / `releaseTask()`。
+（按公共别名定位，取出即不可重复读取）。图级注入与取用统一**仅按公共别名寻址**
+（`bindInput(alias, node, port)` / `bindOutput(alias, node, port)`）。
+`waitForResult(taskId)` 默认无限等待直至终止，可能阻塞的场景改用显式超时重载
+`waitForResult(taskId, 5s)` 或从其他线程 `cancel()`。复用已终止的 taskId 合法；
+活动任务重复提交会抛出明确错误；支持 `cancel()` / `taskStatus()` / `releaseTask()`。
 
 ### 默认构建内容
 

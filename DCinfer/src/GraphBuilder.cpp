@@ -18,21 +18,10 @@ Node& GraphBuilder::connect(const std::string& srcNode, const std::string& srcPo
 	return _store->connect(srcNode, srcPort, dstNode, dstPort);
 }
 
-void GraphBuilder::connectRaw(const std::string& srcNode, const std::string& srcPort,
-							  const std::string& dstNode, const std::string& dstPort) {
-	_ensureMutable();
-	_store->connectRaw(srcNode, srcPort, dstNode, dstPort);
-}
-
-size_t GraphBuilder::connectAll(const std::string& srcNode, const std::string& dstNode) {
-	_ensureMutable();
-	return _store->connectAll(srcNode, dstNode);
-}
-
 void GraphBuilder::bindInput(const std::string& nodeName, const std::string& portName,
 							 const std::string& alias) {
 	_ensureMutable();
-	_ensureAliasUnique(alias, _store->inputBindings(), "GraphBuilder::bindInput");
+	_ensureAliasValid(alias, _store->inputBindings(), "GraphBuilder::bindInput");
 	_store->bindInput(nodeName, portName, alias);
 }
 
@@ -44,7 +33,7 @@ void GraphBuilder::bindOutput(const std::string& nodeName, const std::string& po
 		if (b.nodeName == nodeName && b.portName == portName)
 			return;
 	}
-	_ensureAliasUnique(alias, _outputBindings, "GraphBuilder::bindOutput");
+	_ensureAliasValid(alias, _outputBindings, "GraphBuilder::bindOutput");
 	_outputBindings.push_back({nodeName, portName, alias});
 }
 

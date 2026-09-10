@@ -18,6 +18,7 @@ public:
 		NoDeclaration,       ///< submit 时未声明输出期望
 		DuplicateTask,       ///< 同一 taskId 的活动任务被重复提交
 		DuplicateBinding,    ///< 图级绑定别名重复（别名必须是图的唯一公共名）
+		InvalidBinding,      ///< 图级绑定缺别名（别名是绑定的必填公共名）
 		FeedFailed,          ///< feedInput 时调用 Node::setInput 失败
 		Frozen,              ///< 图已冻结（compile/首次提交后拓扑不可变，构建 API 拒绝）
 		ExecutionFailed,     ///< 线程池中 Node::tryExecute 抛出 NodeException
@@ -65,6 +66,9 @@ private:
 			break;
 		case ErrorType::DuplicateBinding:
 			errorStr = "Duplicate Binding";
+			break;
+		case ErrorType::InvalidBinding:
+			errorStr = "Invalid Binding";
 			break;
 		case ErrorType::FeedFailed:
 			errorStr = "Feed Failed";

@@ -115,17 +115,12 @@ static void test_constructionRejectedAfterExplicitFreeze() {
 
 	CHECK(throwsFrozen([&] { graph.addNode(makeId("c")); }), "addNode after freeze throws Frozen");
 	CHECK(throwsFrozen([&] { graph.connect("a", "y", "a", "x"); }), "connect after freeze throws Frozen");
-	CHECK(throwsFrozen([&] { graph.connectRaw("a", "y", "a", "x"); }),
-		  "connectRaw after freeze throws Frozen");
-	CHECK(throwsFrozen([&] { graph.connectAll("a", "a"); }), "connectAll after freeze throws Frozen");
-	CHECK(throwsFrozen([&] { graph.bindInput("a", "x"); }), "bindInput after freeze throws Frozen");
+	CHECK(throwsFrozen([&] { graph.bindInput("x", "a", "x"); }), "bindInput after freeze throws Frozen");
 	CHECK(throwsFrozen([&] { graph.bindInput("alias", "a", "x"); }),
 		  "bindInput(alias) after freeze throws Frozen");
-	CHECK(throwsFrozen([&] { graph.bindOutput("a", "y"); }), "bindOutput after freeze throws Frozen");
+	CHECK(throwsFrozen([&] { graph.bindOutput("y", "a", "y"); }), "bindOutput after freeze throws Frozen");
 	CHECK(throwsFrozen([&] { graph.bindOutput("alias", "a", "y"); }),
 		  "bindOutput(alias) after freeze throws Frozen");
-	CHECK(throwsFrozen([&] { graph.declareSubgraph("grp", {"a"}); }),
-		  "declareSubgraph after freeze throws Frozen");
 }
 
 // ── 3. 惰性冻结：submit 触发编译；运行期正常，构建面关闭 ──
@@ -140,7 +135,7 @@ static void test_lazyFreezeOnFirstSubmit() {
 
 	graph.feedInput("t1", "a", "x", floatTensor(41.0f)); // 惰性冻结在此触发
 	graph.submit("t1", "b", "y");
-	CHECK(graph.wait("t1"), "task should complete after lazy freeze");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete after lazy freeze");
 
 	// 冻结后：运行期 API 照常（信号、状态、结果读取）
 	graph.setSignal("gate", false);
@@ -151,8 +146,7 @@ static void test_lazyFreezeOnFirstSubmit() {
 
 	// 冻结后：构建 API 一律拒绝（包括 submit 之后的新构建意图）
 	CHECK(throwsFrozen([&] { graph.addNode(makeId("c")); }), "addNode after submit throws Frozen");
-	CHECK(throwsFrozen([&] { graph.bindOutput("b", "y"); }), "bindOutput after submit throws Frozen");
-	CHECK(throwsFrozen([&] { graph.connectAll("a", "b"); }), "connectAll after submit throws Frozen");
+	CHECK(throwsFrozen([&] { graph.bindOutput("y", "b", "y"); }), "bindOutput after submit throws Frozen");
 }
 
 // ── 4. 冻结后别名/端口名解析语义与冻结前一致 ──
@@ -174,28 +168,34 @@ static void test_resolutionSemanticsPreserved() {
 
 	graph.feedBoundInput("t1", "num", floatTensor(9.0f)); // 按别名注入
 	graph.submitBound("t1");
-	CHECK(graph.wait("t1"), "bound flow should complete (lazy freeze)");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "bound flow should complete (lazy freeze)");
 
 	// 冻结后解析（GraphSignature 视图，无锁）
 	CHECK(graph.hasOutput("t1", "res"), "alias should resolve for hasOutput after freeze");
-	// 2 参重载接受唯一绑定端口名（冻结后同样生效；此时尚未消费，两者均可见）
-	CHECK(graph.hasOutput("t1", "y"), "unique bound port name resolves after freeze");
+	// 仅按别名寻址：端口名不再解析（统一寻址语义，冻结前后一致）
+	bool portNameRejected = false;
+	try {
+		graph.hasOutput("t1", "y");
+	} catch (const GraphException& e) {
+		portNameRejected = (e.getErrorType() == GraphException::ErrorType::NodeNotFound);
+	}
+	CHECK(portNameRejected, "bare port name no longer resolves after freeze (alias-only addressing)");
 	auto r = graph.takeOutputTensor("t1", "res");
 	CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "alias retrieval after freeze should be 9.0");
 
-	// 跨节点同名端口歧义：别名不歧义、端口名歧义（语义与冻结前一致）
+	// 跨节点同名端口：仅按别名寻址后无歧义 —— 端口名不解析，直接 NodeNotFound
 	InferGraph g2;
 	g2.addNode(makeId("a"));
 	g2.addNode(makeId("b"));
 	g2.bindInput("fa", "a", "x");
 	g2.bindInput("fb", "b", "x");
-	bool ambiguous = false;
+	bool portNameUnresolved = false;
 	try {
-		g2.feedBoundInput("t1", "x", floatTensor(0.0f)); // 两个节点同有绑定端口 x
+		g2.feedBoundInput("t1", "x", floatTensor(0.0f)); // 端口名 "x" 不再被解析
 	} catch (const GraphException& e) {
-		ambiguous = (e.getErrorType() == GraphException::ErrorType::FeedFailed);
+		portNameUnresolved = (e.getErrorType() == GraphException::ErrorType::NodeNotFound);
 	}
-	CHECK(ambiguous, "ambiguous bound port name throws FeedFailed after freeze");
+	CHECK(portNameUnresolved, "bare port name throws NodeNotFound (use alias)");
 }
 
 // ── 5. 取消/诊断等运行期 API 在冻结图上照常工作 ──
@@ -211,10 +211,11 @@ static void test_runtimeLifecycleOnFrozenGraph() {
 	graph.submit("t1", "b", "y"); // 无看门狗 + gate 阻塞 → 任务挂起
 	graph.setSignal("gate", false);
 
-	CHECK(graph.wait("t1", std::chrono::milliseconds(80)) == false, "blocked task should not complete");
+	CHECK(graph.waitForResult("t1", std::chrono::milliseconds(80)).status == TaskStatus::Running,
+		  "blocked task should not complete");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task running while blocked");
 	CHECK(graph.cancel("t1"), "cancel on frozen graph should work");
-	CHECK(graph.wait("t1"), "wait should wake after cancel");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "wait should wake after cancel");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Cancelled, "status should be Cancelled");
 	CHECK(graph.taskErrors("t1").empty(), "no errors expected on clean cancel");
 

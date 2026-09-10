@@ -152,14 +152,6 @@ void testBuildGraph() {
 		}
 		CHECK(badConnect, "connect with bad src port should throw");
 
-		// 业务节点直连应被 connectRaw() 拒绝
-		bool directRejected = false;
-		try {
-			harness.connectRaw("add1", "s", "id1", "x");
-		} catch (const GraphException&) {
-			directRejected = true;
-		}
-		CHECK(directRejected, "direct connect between non-connectors should be rejected");
 	}
 	END_TEST();
 }
@@ -209,9 +201,9 @@ void testBroadcastConnectorInGraph() {
 		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 
 		// 接线：add1 → bc → [id_a, id_b]
-		harness.connectRaw("add1", "s", "bc", "in");
-		harness.connectRaw("bc", "out_0", "id_a", "x");
-		harness.connectRaw("bc", "out_1", "id_b", "x");
+		harness.connect("add1", "s", "bc", "in");
+		harness.connect("bc", "out_0", "id_a", "x");
+		harness.connect("bc", "out_1", "id_b", "x");
 
 		// 注入
 		harness.feedInput("t1", "add1", "a", makeFloatTensor(10.0f));
@@ -229,55 +221,6 @@ void testBroadcastConnectorInGraph() {
 		auto rb = harness.getOutputTensor("t1", "id_b", "y");
 		CHECK(std::abs(ra.item<float>() - 30.0f) < 1e-6f, "id_a value");
 		CHECK(std::abs(rb.item<float>() - 30.0f) < 1e-6f, "id_b value");
-	}
-	END_TEST();
-}
-
-void testConnectAll() {
-	TEST("connectAll auto-matches output ports to input ports") {
-		TestHarness harness;
-
-		auto bcSchema = Connector::broadcastSchema(2);
-		auto bcRunFn = Connector::broadcastRunFn();
-		auto bcNode =
-			std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn, ThreadPoolAffinity::System);
-		bcNode->setConnector(true);
-		harness.addNode(std::move(bcNode));
-
-		// 创建一个有两个输入端口的节点，命名为与 Connector 输出同名的 Schema
-		Node::Schema dualInSchema;
-		dualInSchema.inputs = {{"out_0", TensorType::Float, sizeof(float), {}},
-							   {"out_1", TensorType::Float, sizeof(float), {}}};
-		dualInSchema.outputs = {{"sum", TensorType::Float, sizeof(float), {}}};
-
-		auto dualRunFn = [](Node::RunContext& ctx) -> Node::Result {
-			const auto& aNT = ctx.peek("out_0");
-			const auto& bNT = ctx.peek("out_1");
-			const auto* a = aNT.as<Tensor>();
-			const auto* b = bNT.as<Tensor>();
-			if (!a || !b)
-				return ctx.failure(Node::Status::InvalidInput, "not Tensor");
-			float sum = a->item<float>() + b->item<float>();
-			auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
-			*t = sum;
-			ctx.output("sum", Value(std::move(t)));
-			return ctx.success();
-		};
-
-		harness.addNode(std::make_unique<Node>("Builtin", "adder", dualInSchema, dualRunFn));
-
-		size_t matched = harness.connectAll("bc", "adder");
-		CHECK(matched == 2, "connectAll should match 2 ports");
-		CHECK(harness.edgeCount() == 2, "edgeCount should be 2");
-
-		// 验证数据流
-		harness.feedInput("t1", "bc", "in", makeFloatTensor(5.0f));
-		harness.submit("t1", "adder", "sum");
-		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
-
-		CHECK(harness.hasOutput("t1", "adder", "sum"), "adder should have output");
-		auto r = harness.getOutputTensor("t1", "adder", "sum");
-		CHECK(std::abs(r.item<float>() - 10.0f) < 1e-6f, "sum should be 5+5=10");
 	}
 	END_TEST();
 }
@@ -302,7 +245,7 @@ void testSerializationAccessors() {
 		harness.addNode(std::make_unique<Node>("ONNX", "test1", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "test2", identitySchema(), identityRunFn()));
 		harness.connect("test1", "y", "test2", "x");
-		harness.bindOutput("test2", "y");
+		harness.bindOutput("y", "test2", "y");
 
 		// 遍历
 		auto names = harness.graph().nodeNames();
@@ -454,9 +397,9 @@ void testPartialBlockKeepsOtherPath() {
 			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
-		harness.connectRaw("id_a", "y", "bc", "in");
-		harness.connectRaw("bc", "out_0", "id_b", "x");
-		harness.connectRaw("bc", "out_1", "id_c", "x");
+		harness.connect("id_a", "y", "bc", "in");
+		harness.connect("bc", "out_0", "id_b", "x");
+		harness.connect("bc", "out_1", "id_c", "x");
 
 		b.bindSignal(harness.signalStore(), "enable_b");
 		harness.setSignal("enable_b", false);
@@ -642,9 +585,9 @@ void testTaskScopedSignalWithPartialBlock() {
 			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
-		harness.connectRaw("id_a", "y", "bc", "in");
-		harness.connectRaw("bc", "out_0", "id_b", "x");
-		harness.connectRaw("bc", "out_1", "id_c", "x");
+		harness.connect("id_a", "y", "bc", "in");
+		harness.connect("bc", "out_0", "id_b", "x");
+		harness.connect("bc", "out_1", "id_c", "x");
 
 		// id_b 绑定信号
 		b.bindSignal(harness.signalStore(), "enable_b");
@@ -750,105 +693,6 @@ static Node::RunFn delayedRunFn(ConcurrencyDetector* detector, int delayMs = 50)
 	};
 }
 
-void testSubgraphSerializesExecution() {
-	TEST("subgraph serializes execution: two independent nodes never run concurrently") {
-		TestHarness harness;
-
-		ConcurrencyDetector detector;
-
-		// 两个独立节点（无数据依赖），相同 affinity
-		harness.addNode(std::make_unique<Node>("Builtin", "sg_a", identitySchema(),
-			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
-		harness.addNode(std::make_unique<Node>("Builtin", "sg_b", identitySchema(),
-			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
-
-		// 声明子图：两个节点互斥
-		harness.graph().declareSubgraph("sg", {"sg_a", "sg_b"});
-
-		// 同时注入两个 task
-		harness.feedInput("t1", "sg_a", "x", makeFloatTensor(1.0f));
-		harness.feedInput("t2", "sg_b", "x", makeFloatTensor(2.0f));
-
-		// 同时提交
-		harness.submit("t1", "sg_a", "y", 1, std::chrono::milliseconds(3000));
-		harness.submit("t2", "sg_b", "y", 1, std::chrono::milliseconds(3000));
-
-		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
-		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
-
-		// 核心断言：最大并发度不超过 1
-		CHECK(detector.maxConcurrent.load() <= 1,
-			  "subgraph nodes must not run concurrently (maxConcurrent="
-				  + std::to_string(detector.maxConcurrent.load()) + ")");
-	}
-	END_TEST();
-}
-
-void testSubgraphDoesNotAffectOthers() {
-	TEST("subgraph does not affect nodes outside the group") {
-		TestHarness harness;
-
-		ConcurrencyDetector detector;
-
-		// 子图内节点
-		harness.addNode(std::make_unique<Node>("Builtin", "sg_a", identitySchema(),
-			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
-		// 子图外节点（同 affinity，但不在子图中）
-		harness.addNode(std::make_unique<Node>("Builtin", "free", identitySchema(),
-			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
-
-		// 只把 sg_a 放入子图（单节点子图，不影响 free）
-		harness.graph().declareSubgraph("sg", {"sg_a"});
-
-		harness.feedInput("t1", "sg_a", "x", makeFloatTensor(1.0f));
-		harness.feedInput("t2", "free", "x", makeFloatTensor(2.0f));
-
-		harness.submit("t1", "sg_a", "y", 1, std::chrono::milliseconds(3000));
-		harness.submit("t2", "free", "y", 1, std::chrono::milliseconds(3000));
-
-		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
-		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
-
-		// 两个节点应该都有输出（自由节点不受子图约束）
-		CHECK(harness.hasOutput("t1", "sg_a", "y"), "sg_a should have output");
-		CHECK(harness.hasOutput("t2", "free", "y"), "free should have output");
-	}
-	END_TEST();
-}
-
-void testSubgraphAllowsMixedAffinity() {
-	TEST("subgraph allows mixed affinity: cross-pool nodes serialize via shared group semaphore") {
-		TestHarness harness;
-
-		ConcurrencyDetector detector;
-
-		// 两个独立节点（无数据依赖），分属不同线程池（Compute / Operator）
-		harness.addNode(std::make_unique<Node>("Builtin", "sg_a", identitySchema(),
-			delayedRunFn(&detector, 30), ThreadPoolAffinity::Compute));
-		harness.addNode(std::make_unique<Node>("Builtin", "sg_b", identitySchema(),
-			delayedRunFn(&detector, 30), ThreadPoolAffinity::Operator));
-
-		// 混合 affinity 子图：不再抛异常，跨池共享信号量实现全局互斥
-		harness.graph().declareSubgraph("sg", {"sg_a", "sg_b"});
-
-		// 同时注入两个 task（不同池本可并行；互斥后必须串行）
-		harness.feedInput("t1", "sg_a", "x", makeFloatTensor(1.0f));
-		harness.feedInput("t2", "sg_b", "x", makeFloatTensor(2.0f));
-
-		harness.submit("t1", "sg_a", "y", 1, std::chrono::milliseconds(3000));
-		harness.submit("t2", "sg_b", "y", 1, std::chrono::milliseconds(3000));
-
-		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
-		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
-
-		// 核心断言：跨池互斥生效，最大并发度不超过 1
-		CHECK(detector.maxConcurrent.load() <= 1,
-			  "cross-pool subgraph nodes must not run concurrently (maxConcurrent="
-				  + std::to_string(detector.maxConcurrent.load()) + ")");
-	}
-	END_TEST();
-}
-
 // ════════════════════════════════════════════
 // GraphNode 状态代理：声明通路检测
 // ════════════════════════════════════════════
@@ -868,12 +712,12 @@ void testGraphNodeBranchBlocking() {
 		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
 			ThreadPoolAffinity::Operator));
 
-		sub.connectRaw("id_in", "y", "bc", "in");
-		sub.connectRaw("bc", "out_0", "idA", "x");
-		sub.connectRaw("bc", "out_1", "idB", "x");
+		sub.connect("id_in", "y", "bc", "in");
+		sub.connect("bc", "out_0", "idA", "x");
+		sub.connect("bc", "out_1", "idB", "x");
 
-		sub.bindInput("id_in", "x");
-		sub.bindOutput("idB", "y");
+		sub.bindInput("x", "id_in", "x");
+		sub.bindOutput("y", "idB", "y");
 
 		// idA 绑定信号并阻塞；idB 正常（旁路存在 → 子图不阻塞）
 		sub.node("idA")->bindSignal(sub.signalStore(), "enableA");
@@ -910,12 +754,12 @@ void testGraphNodeBranchBlocking() {
 		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
 			ThreadPoolAffinity::Operator));
 
-		sub.connectRaw("id_in", "y", "bc", "in");
-		sub.connectRaw("bc", "out_0", "idA", "x");
-		sub.connectRaw("bc", "out_1", "idB", "x");
+		sub.connect("id_in", "y", "bc", "in");
+		sub.connect("bc", "out_0", "idA", "x");
+		sub.connect("bc", "out_1", "idB", "x");
 
-		sub.bindInput("id_in", "x");
-		sub.bindOutput("idB", "y");
+		sub.bindInput("x", "id_in", "x");
+		sub.bindOutput("y", "idB", "y");
 
 		// 两条分支全部阻塞（唯一通路切断）→ 子图边界应答阻塞
 		sub.node("idA")->bindSignal(sub.signalStore(), "enableA");
@@ -956,8 +800,8 @@ void testGraphNodeBranchBlocking() {
 		InferGraph sub;
 		sub.addNode(std::make_unique<Node>("Builtin", "idC", identitySchema(), identityRunFn(),
 			ThreadPoolAffinity::Operator));
-		sub.bindInput("idC", "x");
-		sub.bindOutput("idC", "y");
+		sub.bindInput("x", "idC", "x");
+		sub.bindOutput("y", "idC", "y");
 		sub.node("idC")->bindSignal(sub.signalStore(), "enableC");
 		sub.setSignal("enableC", false);
 
@@ -966,36 +810,6 @@ void testGraphNodeBranchBlocking() {
 
 		sub.setSignal("enableC", true);
 		CHECK(!gn->isBlocked("t1"), "signal restore -> GraphNode not blocked");
-	}
-	END_TEST();
-}
-
-void testSubgraphDataflowCorrect() {
-	TEST("subgraph serial chain: data propagates correctly through A→B→C") {
-		TestHarness harness;
-
-		// 串行链：A → B → C（全部 Operator affinity）
-		harness.addNode(std::make_unique<Node>("Builtin", "A", incSchema(), incRunFn(),
-			ThreadPoolAffinity::Operator));
-		harness.addNode(std::make_unique<Node>("Builtin", "B", incSchema(), incRunFn(),
-			ThreadPoolAffinity::Operator));
-		harness.addNode(std::make_unique<Node>("Builtin", "C", incSchema(), incRunFn(),
-			ThreadPoolAffinity::Operator));
-
-		harness.connect("A", "y", "B", "x");
-		harness.connect("B", "y", "C", "x");
-
-		// 声明子图
-		harness.graph().declareSubgraph("chain", {"A", "B", "C"});
-
-		// 注入初始值 0 → +1 → +1 → +1 = 3
-		harness.feedInput("t1", "A", "x", makeFloatTensor(0.0f));
-		harness.submit("t1", "C", "y", 1, std::chrono::milliseconds(3000));
-		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
-
-		CHECK(harness.hasOutput("t1", "C", "y"), "C should have output");
-		auto result = harness.getOutputTensor("t1", "C", "y");
-		CHECK(std::abs(result.item<float>() - 3.0f) < 1e-6f, "result should be 3.0 (0+1+1+1)");
 	}
 	END_TEST();
 }
@@ -1014,7 +828,7 @@ void testOutputSurvivesWait() {
 		graph.feedInput("t1", "id1", "x", makeFloatTensor(7.0f));
 		graph.submit("t1", "id1", "y");
 
-		CHECK(graph.wait("t1"), "task should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete");
 		CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status should be Succeeded");
 
 		// 核心断言：wait 返回后无需回调即可取结果
@@ -1060,7 +874,7 @@ void testTaskIdReuseAfterCompletion() {
 		graph.feedInput("t1", "add1", "a", makeFloatTensor(3.0f));
 		graph.feedInput("t1", "add1", "b", makeFloatTensor(4.0f));
 		graph.submit("t1", "add1", "s");
-		CHECK(graph.wait("t1"), "first run should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "first run should complete");
 		auto r1 = graph.takeOutputTensor("t1", "add1", "s");
 		CHECK(std::abs(r1.item<float>() - 7.0f) < 1e-6f, "first result should be 7.0");
 
@@ -1068,7 +882,7 @@ void testTaskIdReuseAfterCompletion() {
 		graph.feedInput("t1", "add1", "a", makeFloatTensor(10.0f));
 		graph.feedInput("t1", "add1", "b", makeFloatTensor(20.0f));
 		graph.submit("t1", "add1", "s");
-		CHECK(graph.wait("t1"), "reused taskId should complete normally");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "reused taskId should complete normally");
 		CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "reused task status should be Succeeded");
 		auto r2 = graph.takeOutputTensor("t1", "add1", "s");
 		CHECK(std::abs(r2.item<float>() - 30.0f) < 1e-6f, "second result should be 30.0");
@@ -1093,7 +907,7 @@ void testDuplicateActiveSubmitRejected() {
 		}
 		CHECK(rejected, "duplicate submit while running should throw DuplicateTask");
 
-		CHECK(graph.wait("t1"), "original task should still complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "original task should still complete");
 		CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "original task should succeed");
 	}
 	END_TEST();
@@ -1116,7 +930,7 @@ void testCancelRunningTask() {
 		CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task should be running while blocked");
 
 		CHECK(graph.cancel("t1"), "cancel should succeed on active task");
-		CHECK(graph.wait("t1"), "wait should wake up after cancel");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "wait should wake up after cancel");
 		CHECK(graph.taskStatus("t1") == TaskStatus::Cancelled, "status should be Cancelled");
 		CHECK(!graph.cancel("t1"), "cancel on terminated task should return false (idempotent)");
 
@@ -1127,7 +941,7 @@ void testCancelRunningTask() {
 		graph.setSignal("gate", true);
 		graph.feedInput("t1", "id_a", "x", makeFloatTensor(9.0f));
 		graph.submit("t1", "id_b", "y");
-		CHECK(graph.wait("t1"), "re-submitted task after cancel should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "re-submitted task after cancel should complete");
 		auto r = graph.takeOutputTensor("t1", "id_b", "y");
 		CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "re-run result should be 9.0");
 	}
@@ -1143,14 +957,14 @@ void testBoundInputOutputApi() {
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
 
-		graph.bindInput("inc", "x");
-		graph.bindOutput("inc", "y");
+		graph.bindInput("x", "inc", "x");
+		graph.bindOutput("y", "inc", "y");
 
 		auto in = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 		*in = 41.0f;
 		graph.feedBoundInput("t1", "x", std::move(*in));
 		graph.submitBound("t1");
-		CHECK(graph.wait("t1"), "bound flow should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "bound flow should complete");
 		auto out = graph.takeOutputTensor("t1", "inc", "y");
 		CHECK(std::abs(out.item<float>() - 42.0f) < 1e-6f, "bound result should be 42.0");
 
@@ -1169,17 +983,14 @@ void testBoundInputOutputApi() {
 		InferGraph graph2;
 		graph2.addNode(std::make_unique<Node>("Builtin", "a", incSchema(), incRunFn()));
 		graph2.addNode(std::make_unique<Node>("Builtin", "b", incSchema(), incRunFn()));
-		graph2.bindInput("a", "x");
-		graph2.bindInput("b", "x");
+		graph2.bindInput("x", "a", "x");
 		bool ambiguous = false;
 		try {
-			auto v = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
-			*v = 1.0f;
-			graph2.feedBoundInput("t1", "x", std::move(*v));
+			graph2.bindInput("x", "b", "x"); // 同名别名重复 → 构建期拒绝（寻址仅按别名，天然无歧义）
 		} catch (const GraphException&) {
 			ambiguous = true;
 		}
-		CHECK(ambiguous, "ambiguous bound name should throw");
+		CHECK(ambiguous, "duplicate alias rejected at build time");
 	}
 	END_TEST();
 }
@@ -1201,7 +1012,7 @@ void testAliasBindingApi() {
 		*in = 5.0f;
 		graph.feedBoundInput("t1", "num", std::move(*in)); // 按别名注入
 		graph.submitBound("t1");
-		CHECK(graph.wait("t1"), "alias-bound flow should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "alias-bound flow should complete");
 		CHECK(graph.hasOutput("t1", "result"), "alias should resolve for hasOutput");
 		auto out = graph.takeOutputTensor("t1", "result"); // 按别名取，无需内部节点名
 		CHECK(std::abs(out.item<float>() - 6.0f) < 1e-6f, "alias result should be 6.0");
@@ -1211,9 +1022,9 @@ void testAliasBindingApi() {
 		*in2 = 7.0f;
 		graph.feedBoundInput("t2", "num", std::move(*in2));
 		graph.submitBound("t2");
-		CHECK(graph.wait("t2"), "second task should complete");
-		auto out2 = graph.takeOutputTensor("t2", "y"); // 按唯一绑定端口名取
-		CHECK(std::abs(out2.item<float>() - 8.0f) < 1e-6f, "port-name retrieval should be 8.0");
+		CHECK(graph.waitForResult("t2").status != TaskStatus::Running, "second task should complete");
+		auto out2 = graph.takeOutputTensor("t2", "result"); // 按公共别名取（寻址仅按别名）
+		CHECK(std::abs(out2.item<float>() - 8.0f) < 1e-6f, "alias retrieval for second task should be 8.0");
 
 		// 跨节点同名端口：唯一别名消除注入歧义（同名端口仍歧义，但别名不歧义）
 		InferGraph graph2;
@@ -1267,7 +1078,7 @@ void testTakeOutputDestructive() {
 
 		graph.feedInput("t1", "id1", "x", makeFloatTensor(9.0f));
 		graph.submit("t1", "id1", "y");
-		CHECK(graph.wait("t1"), "task should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete");
 
 		CHECK(graph.hasOutput("t1", "id1", "y"), "output should exist before take");
 		auto first = graph.takeOutputTensor("t1", "id1", "y");
@@ -1307,12 +1118,12 @@ void testWaitSemantics() {
 		graph.submit("t1", "id_b", "y");
 
 		// 显式超时：只放弃等待，不取消任务（任务仍 Running）
-		CHECK(!graph.wait("t1", std::chrono::milliseconds(80)), "explicit timeout should return false while blocked");
+		CHECK(graph.waitForResult("t1", std::chrono::milliseconds(80)).status == TaskStatus::Running, "explicit timeout leaves task running");
 		auto running = graph.waitForResult("t1", std::chrono::milliseconds(80));
 		CHECK(running.status == TaskStatus::Running, "waitForResult timeout should report Running");
 
 		// 未知 taskId：立即返回（无限等待模式下防误拼写挂死）
-		CHECK(!graph.wait("never_submitted"), "unknown taskId should return false immediately");
+		CHECK(graph.waitForResult("never_submitted").status == TaskStatus::Unknown, "unknown taskId reports Unknown immediately");
 		auto unknown = graph.waitForResult("never_submitted");
 		CHECK(unknown.status == TaskStatus::Unknown, "unknown taskId waitForResult should be Unknown");
 
@@ -1444,7 +1255,7 @@ void testWaitReturnsReadableResults() {
 			std::string tid = "wt" + std::to_string(i);
 			graph.feedInput(tid, "id_a", "x", makeFloatTensor(static_cast<float>(i)));
 			graph.submit(tid, "id_b", "y");
-			CHECK(graph.wait(tid, std::chrono::milliseconds(2000)), "wait should succeed");
+			CHECK(graph.waitForResult(tid, std::chrono::milliseconds(2000)).status != TaskStatus::Running, "wait should succeed");
 			auto r = graph.takeOutputTensor(tid, "id_b", "y");
 			CHECK(std::abs(r.item<float>() - static_cast<float>(i)) < 1e-6f,
 				  "declared output must be readable immediately after wait returns");
@@ -1466,13 +1277,13 @@ void testMultiDeclarationReadableAfterWait() {
 											 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		graph.addNode(std::move(bcNode));
-		graph.connectRaw("id_a", "y", "bc", "in");
-		graph.connectRaw("bc", "out_0", "id_b", "x");
-		graph.connectRaw("bc", "out_1", "id_c", "x");
+		graph.connect("id_a", "y", "bc", "in");
+		graph.connect("bc", "out_0", "id_b", "x");
+		graph.connect("bc", "out_1", "id_c", "x");
 
 		graph.feedInput("t1", "id_a", "x", makeFloatTensor(50.0f));
 		graph.submit("t1", {{"id_b", "y", 1}, {"id_c", "y", 1}});
-		CHECK(graph.wait("t1"), "task should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete");
 		auto rb = graph.takeOutputTensor("t1", "id_b", "y");
 		auto rc = graph.takeOutputTensor("t1", "id_c", "y");
 		CHECK(std::abs(rb.item<float>() - 50.0f) < 1e-6f, "id_b output readable after wait");
@@ -1486,7 +1297,6 @@ int main() {
 		testSimpleDataflow();
 		testBuildGraph();
 		testBroadcastConnectorInGraph();
-		testConnectAll();
 		testNodeQuery();
 		testSerializationAccessors();
 
@@ -1534,11 +1344,6 @@ int main() {
 		testTimeoutThenTaskIdReuse();
 		testCancelVsTimeoutRace();
 
-		// 子图（分组互斥）测试
-		testSubgraphSerializesExecution();
-		testSubgraphDoesNotAffectOthers();
-		testSubgraphAllowsMixedAffinity();
-		testSubgraphDataflowCorrect();
 		testGraphNodeBranchBlocking();
 
 		if (failures == 0) {

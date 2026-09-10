@@ -50,13 +50,10 @@ public:
 	/// @brief  查询指定任务是否已产出指定输出端口的数据。
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
-	/// @brief  消费式取出输出数据（调用后缓冲区该槽位清空；非破坏式读取见 peekOutput）。
+	/// @brief  消费式取出输出数据（调用后缓冲区该槽位清空，不可重复读取）。
 	/// @throws NodeException(TaskNotFound) 若任务不存在。
 	/// @throws NodeException(OutputNotProduced) 若输出端口为空。
 	Value takeOutput(const TaskId& taskId, const std::string& name);
-
-	/// @brief  只读查看输出（不消费，数据保留在缓冲区）。
-	const Value& peekOutput(const TaskId& taskId, const std::string& name) const;
 
 	/// @brief  批量消费所有输出。
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);

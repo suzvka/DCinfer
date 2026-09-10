@@ -86,38 +86,13 @@ public:
 		return _builder->connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
-	/// @brief  端口级接线原语（低层）：上游输出口 → 下游输入口，直接建边
-	///         约束：至少有一端是连接器（两个业务节点禁止直连）
-	/// @throws GraphException(NodeNotFound/PortNotFound/DirectConnect) 若接线不合法
-	/// @throws GraphException(Frozen) 若图已冻结
-	void connectRaw(const std::string& srcNode, const std::string& srcPort,
-					const std::string& dstNode, const std::string& dstPort) {
-		_ensureNotFrozen("InferGraph::connectRaw");
-		_builder->connectRaw(srcNode, srcPort, dstNode, dstPort);
-	}
-
-	/// @brief  快捷批量接线（低层）：自动匹配上游所有输出口到下游同名的输入口，
-	///         直接建边，不插入连接器
-	/// @return 成功匹配的端口对数
-	/// @throws GraphException(Frozen) 若图已冻结
-	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
-		_ensureNotFrozen("InferGraph::connectAll");
-		return _builder->connectAll(srcNode, dstNode);
-	}
-
-	/// @brief  标记输入：该节点的该端口为图级输入口，外部通过此口注入数据
-	/// @throws GraphException(Frozen) 若图已冻结
-	void bindInput(const std::string& nodeName, const std::string& portName) {
-		_ensureNotFrozen("InferGraph::bindInput");
-		_builder->bindInput(nodeName, portName);
-	}
-
-	/// @brief  带公共别名的图级输入绑定
+	/// @brief  图级输入绑定（强制公共别名）
 	///
 	/// 别名是图对外契约的一部分：内部节点/端口重构后，只要别名映射不变，
-	/// 调用方代码无需改动。feedBoundInput 优先按别名解析，可消除
-	/// 跨节点同名端口的注入歧义。
-	/// @param  alias  公共别名（须在全部输入绑定中唯一）
+	/// 调用方代码无需改动。feedBoundInput 仅按别名寻址，
+	/// 天然消除跨节点同名端口的注入歧义。
+	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一）
+	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
 	/// @throws GraphException(Frozen) 若图已冻结
 	void bindInput(const std::string& alias, const std::string& nodeName,
@@ -126,18 +101,12 @@ public:
 		_builder->bindInput(nodeName, portName, alias);
 	}
 
-	/// @brief  标记输出：该节点的该端口产出进入输出区（与边目的地互斥）
-	/// @throws GraphException(Frozen) 若图已冻结
-	void bindOutput(const std::string& nodeName, const std::string& portName) {
-		_ensureNotFrozen("InferGraph::bindOutput");
-		_builder->bindOutput(nodeName, portName);
-	}
-
-	/// @brief  带公共别名的图级输出绑定
+	/// @brief  图级输出绑定（强制公共别名）
 	///
 	/// 绑定后即可用 takeOutput(taskId, alias) / takeOutputTensor(taskId, alias)
 	/// 按公共名取结果，无需向调用方暴露内部节点名与端口名。
-	/// @param  alias  公共别名（须在全部输出绑定中唯一）
+	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
+	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
 	/// @throws GraphException(Frozen) 若图已冻结
 	void bindOutput(const std::string& alias, const std::string& nodeName,
@@ -145,19 +114,6 @@ public:
 		_ensureNotFrozen("InferGraph::bindOutput");
 		_builder->bindOutput(nodeName, portName, alias);
 	}
-
-	// ── 子图声明 ──
-
-	/// @brief  声明子图：将一组节点编入同名分组，在执行时互斥（同时只有一个执行）。
-	///
-	/// 子图不改变图拓扑，仅通过跨池共享的线程池分组信号量实现串行约束。
-	/// 组内节点可属于不同线程池（混合 affinity）：同一 tag 的分组信号量
-	/// 由 Compute / Operator / System 三个线程池共享，全局互斥。
-	///
-	/// @param  name       子图名（作为线程池分组 tag）
-	/// @param  nodeNames  属于该子图的节点名列表
-	/// @throws GraphException(NodeNotFound) 若任何节点不存在
-	void declareSubgraph(const std::string& name, std::initializer_list<std::string> nodeNames);
 
 	// ── 数据注入 ──
 
@@ -169,9 +125,9 @@ public:
 	/// @brief  便捷接口：直接传入 DC::Tensor
 	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
 
-	/// @brief  便捷注入：按 bindInput 声明的端口名定位，无需重复提供节点名。
-	/// @throws GraphException(NodeNotFound) 无此绑定端口（需先 bindInput）
-	/// @throws GraphException(FeedFailed)   绑定名跨节点歧义，或底层注入失败
+	/// @brief  便捷注入：按 bindInput 声明的公共别名定位，无需重复提供节点名。
+	/// @throws GraphException(NodeNotFound) 无此别名的绑定（需先 bindInput）
+	/// @throws GraphException(FeedFailed)   底层注入失败
 	void feedBoundInput(const TaskId& taskId, const std::string& portName, Value data);
 
 	/// @brief  便捷注入：DC::Tensor 重载
@@ -183,7 +139,7 @@ public:
 	/// @param  declarations  期望产出：{nodeName, portName, count} 列表
 	/// @throws GraphException(DuplicateTask) 若同 taskId 任务仍在执行
 	/// @note   复用已终止的 taskId 合法：上一轮的声明/结果/诊断随之清理。
-	///         输出在 task 终止后仍保留，供 wait → takeOutput 取用。
+	///         输出在 task 终止后仍保留，供 waitForResult → takeOutput 取用。
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
@@ -211,9 +167,8 @@ public:
 	// ── 结果获取（消费式：取出即消耗）──
 
 	/// @brief  消费式取出输出区中指定端口的结果（取出后内部清空，不可重复读取）
-	/// @note   结果在 task 终止（wait 返回）后仍然有效，直至下一次同 ID submit
-	///         或 releaseTask()——支持 submit → wait → takeOutput 的同步用法；
-	///         非破坏式预览见 NodeExecutor::peekOutput（底层接口）
+	/// @note   结果在 task 终止（waitForResult 返回）后仍然有效，直至下一次同 ID submit
+	///         或 releaseTask()——支持 submit → waitForResult → takeOutput 的同步用法；
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	Value takeOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
@@ -221,19 +176,18 @@ public:
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	Tensor takeOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
-	/// @brief  消费式取出：按公共别名或唯一绑定端口名定位，无需内部节点名
-	/// @throws GraphException(NodeNotFound) 无此别名/绑定端口
-	/// @throws GraphException(FeedFailed)   名称跨绑定歧义（用唯一别名消除）
+	/// @brief  消费式取出：按公共别名定位，无需内部节点名
+	/// @throws GraphException(NodeNotFound) 无此别名的输出绑定
 	Value takeOutput(const TaskId& taskId, const std::string& name);
 
-	/// @brief  消费式取出 Tensor：按公共别名或唯一绑定端口名定位
+	/// @brief  消费式取出 Tensor：按公共别名定位
 	/// @throws 同 2 参 takeOutput
 	Tensor takeOutputTensor(const TaskId& taskId, const std::string& name);
 
 	/// @brief  检查输出区中是否有结果
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
 
-	/// @brief  检查结果是否存在（按公共别名或唯一绑定端口名）
+	/// @brief  检查结果是否存在（按公共别名）
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
 	/// @brief  便捷提交：以全部 bindOutput 绑定作为输出声明（各 count=1）。
@@ -252,7 +206,7 @@ public:
 
 	/// @brief  请求取消活动中的 task（幂等；未知或已终止返回 false）。
 	///         协作式取消：在飞节点执行不被中断，传播链即刻停止，
-	///         wait()/waitForResult() 被唤醒，状态置 Cancelled。
+	///         waitForResult() 被唤醒，状态置 Cancelled。
 	bool cancel(const TaskId& taskId) { return _engine->cancel(taskId); }
 
 	/// @brief  同步等待 task 终止并返回结构化结果（无限等待直至终止）
@@ -344,28 +298,12 @@ public:
 	/// @brief  获取信号仓库指针，供 Node::bindSignal 使用。
 	std::shared_ptr<SignalStore> signalStore() { return _state->signals; }
 
-	// ── 同步等待与图导出 ──
-
-	/// @brief  同步等待 task 终止（无限等待；返回后可经 takeOutput 读取结果）
-	/// @return true 已终止；false taskId 未知（从未提交或已 releaseTask）
-	bool wait(const TaskId& taskId) {
-		return _engine->wait(taskId, std::chrono::milliseconds(0));
-	}
-
-	/// @brief  同步等待 task 终止（显式超时；timeout <= 0 视为无限等待）
-	/// @return true 在超时内终止，false 超时或 taskId 未知（任务仍在运行，未被取消）
-	bool wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
-		return _engine->wait(taskId, timeout);
-	}
+	// ── 图导出 ──
 
 	/// @brief  导出为可嵌入父图的包装 Node
 	///         子图复用本图的 ExecutionEngine（三层线程池）执行，与父图隔离
 	/// @note   前提：已调用 bindInput + bindOutput 定义了图接口
 	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活
-	///
-	/// @note   性能提示：若仅需将一组节点约束为串行执行（共享单线程），
-	///         优先使用 declareSubgraph()——零额外线程开销、零调度开销。
-	///         exportNode 适用于需要独立 InferGraph 实例的部署边界（如跨设备/跨进程）。
 	std::unique_ptr<Node> exportNode(const std::string& nodeName,
 									uint32_t maxHops = kDefaultMaxHops);
 
@@ -421,12 +359,12 @@ private:
 		return _state->graph ? _state->graph->signature().outputs : _builder->outputBindings();
 	}
 
-	/// @brief  解析图级输出名：公共别名优先，其次唯一绑定的端口名
+	/// @brief  解析图级输出别名 → (nodeName, portName)（仅按别名寻址）
 	/// @return (nodeName, portName)
 	std::pair<std::string, std::string>
 	_resolveOutputName(const std::string& name, const char* api) const;
 
-	/// @brief  解析图级输入名：公共别名优先，其次唯一绑定的端口名
+	/// @brief  解析图级输入别名 → (nodeName, portName)（仅按别名寻址）
 	std::pair<std::string, std::string>
 	_resolveInputName(const std::string& name, const char* api) const;
 

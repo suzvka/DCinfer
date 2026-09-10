@@ -212,24 +212,26 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	// 边：折叠连接器
 	root["edges"] = edgesToJson(graph);
 
-	// 输出绑定
+	// 输出绑定（alias 必填：图级绑定统一强制公共别名）
 	nlohmann::json bindingsArr = nlohmann::json::array();
 	for (auto& b : graph.outputBindings()) {
 		auto* boundNode = graph.node(b.nodeName);
 		if (boundNode && boundNode->isConnector()) continue; // 跳过连接器输出绑定
 		nlohmann::json jb;
+		jb["alias"] = b.alias;
 		jb["nodeName"] = b.nodeName;
 		jb["portName"] = b.portName;
 		bindingsArr.push_back(std::move(jb));
 	}
 	root["outputBindings"] = std::move(bindingsArr);
 
-	// 输入绑定
+	// 输入绑定（alias 必填：图级绑定统一强制公共别名）
 	nlohmann::json inputBindingsArr = nlohmann::json::array();
 	for (auto& b : graph.inputBindings()) {
 		auto* boundNode = graph.node(b.nodeName);
 		if (boundNode && boundNode->isConnector()) continue;
 		nlohmann::json jb;
+		jb["alias"] = b.alias;
 		jb["nodeName"] = b.nodeName;
 		jb["portName"] = b.portName;
 		inputBindingsArr.push_back(std::move(jb));
@@ -306,9 +308,10 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 			connNode->setConnector(true);
 			graph.addNode(std::move(connNode));
 
-			// src → conn.in
+			// src → conn.in；conn.out_i → dst_i（connect 自动包裹直通导线，
+			// 序列化折叠后不可见，round-trip 幂等不受影响）
 			try {
-				graph.connectRaw(key.srcNode, key.srcPort, connName, "in");
+				graph.connect(key.srcNode, key.srcPort, connName, "in");
 			} catch (const DC::GraphException& e) {
 				std::cerr << "GraphCompiler: warning — failed to connect '" << key.srcNode
 					<< "." << key.srcPort << "' → '" << connName << ".in': "
@@ -318,7 +321,7 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 			for (size_t i = 0; i < targets.size(); ++i) {
 				std::string outPort = "out_" + std::to_string(i);
 				try {
-					graph.connectRaw(connName, outPort, targets[i].dstNode, targets[i].dstPort);
+					graph.connect(connName, outPort, targets[i].dstNode, targets[i].dstPort);
 				} catch (const DC::GraphException& e) {
 					std::cerr << "GraphCompiler: warning — failed to connect '" << connName
 						<< "." << outPort << "' → '" << targets[i].dstNode
@@ -428,19 +431,21 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 		rebuildEdges(graph, root["edges"]);
 	}
 
-	// 输出绑定
+	// 输出绑定（alias 缺省回退 nodeName.portName：唯一且兼容旧版本序列化文件）
 	if (root.contains("outputBindings")) {
 		for (auto& b : root["outputBindings"]) {
 			graph.bindOutput(
+				b.value("alias", b.at("nodeName").get<std::string>() + "." + b.at("portName").get<std::string>()),
 				b.at("nodeName").get<std::string>(),
 				b.at("portName").get<std::string>());
 		}
 	}
 
-	// 输入绑定
+	// 输入绑定（alias 缺省回退 nodeName.portName：唯一且兼容旧版本序列化文件）
 	if (root.contains("inputBindings")) {
 		for (auto& b : root["inputBindings"]) {
 			graph.bindInput(
+				b.value("alias", b.at("nodeName").get<std::string>() + "." + b.at("portName").get<std::string>()),
 				b.at("nodeName").get<std::string>(),
 				b.at("portName").get<std::string>());
 		}

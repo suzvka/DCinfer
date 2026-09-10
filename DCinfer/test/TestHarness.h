@@ -17,7 +17,7 @@ namespace DC {
 /// @brief 多线程场景化测试夹具：封装 InferGraph + 同步等待机制
 ///
 /// 使用方式：
-///   1. 构建图：addNode / connect / connectRaw / connectAll
+///   1. 构建图：addNode / connect
 ///   2. 注入数据：feedInput
 ///   3. 声明输出并异步提交：submit（输出声明已融入 submit 参数）
 ///   4. 等待完成：awaitCompletion（由 _terminate 中的回调触发）
@@ -38,22 +38,13 @@ public:
 		return _graph.addNode(std::move(node));
 	}
 
-	void connectRaw(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
-					const std::string& dstPort) {
-		_graph.connectRaw(srcNode, srcPort, dstNode, dstPort);
-	}
-
-	size_t connectAll(const std::string& srcNode, const std::string& dstNode) {
-		return _graph.connectAll(srcNode, dstNode);
-	}
-
 	Node& connect(const std::string& srcNode, const std::string& srcPort, const std::string& dstNode,
 				  const std::string& dstPort) {
 		return _graph.connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
-	void bindOutput(const std::string& nodeName, const std::string& portName) {
-		_graph.bindOutput(nodeName, portName);
+	void bindOutput(const std::string& alias, const std::string& nodeName, const std::string& portName) {
+		_graph.bindOutput(alias, nodeName, portName);
 	}
 
 	// ── 数据注入 ──
@@ -102,10 +93,10 @@ public:
 
 	// ── 同步等待 ──
 
-	/// @brief  同步等待 task 完成（复用 InferGraph::wait）
-	/// @return true 在超时前完成，false 超时
+	/// @brief  同步等待 task 终止（复用 InferGraph::waitForResult）
+	/// @return true 已终止（任意终态），false 超时
 	bool awaitCompletion(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
-		return _graph.wait(taskId, timeout);
+		return _graph.waitForResult(taskId, timeout).status != TaskStatus::Running;
 	}
 
 	// ── 结果获取（从缓存读取）──
@@ -161,7 +152,7 @@ public:
 		return _graph;
 	}
 
-	/// @brief  获取底层 InferGraph 的可写引用（供 declareSubgraph 等变更操作）
+	/// @brief  获取底层 InferGraph 的可写引用（信号设置等运行期操作）
 	InferGraph& graph() {
 		return _graph;
 	}

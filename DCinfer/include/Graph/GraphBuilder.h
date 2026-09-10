@@ -44,28 +44,20 @@ public:
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort);
 
-	/// @brief  端口级接线原语（低层）：直接建边
-	///         约束：至少有一端是连接器（两个业务节点禁止直连）
-	/// @throws GraphException(NodeNotFound/PortNotFound/DirectConnect)
-	void connectRaw(const std::string& srcNode, const std::string& srcPort,
-					const std::string& dstNode, const std::string& dstPort);
-
-	/// @brief  快捷批量接线（低层）：自动匹配上游所有输出口到下游同名的输入口
-	/// @return 成功匹配的端口对数
-	size_t connectAll(const std::string& srcNode, const std::string& dstNode);
-
 	/// @brief  标记输入：该节点的该端口为图级输入口
-	/// @param  alias  可选公共别名（须在全部输入绑定中唯一）
+	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一）
+	/// @throws GraphException(InvalidBinding) 别名为空
 	/// @throws GraphException(DuplicateBinding) 别名重复
 	void bindInput(const std::string& nodeName, const std::string& portName,
-				   const std::string& alias = {});
+				   const std::string& alias);
 
 	/// @brief  标记输出：该节点的该端口产出进入输出区（与边目的地互斥）
-	/// @param  alias  可选公共别名（须在全部输出绑定中唯一）
+	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
+	/// @throws GraphException(InvalidBinding) 别名为空
 	/// @throws GraphException(DuplicateBinding) 别名重复
 	/// @note   重复绑定同一 node:port 为无操作
 	void bindOutput(const std::string& nodeName, const std::string& portName,
-					const std::string& alias = {});
+					const std::string& alias);
 
 	// ── 构建期内省（冻结前可用；compile 后返回空/零）──
 
@@ -92,12 +84,12 @@ private:
 	/// @brief  构建守卫：冻结后调用构建 API 抛 GraphException(Frozen)
 	void _ensureMutable() const;
 
-	/// @brief  别名唯一性校验（别名是图对外契约的公共名）
+	/// @brief  别名校验（别名是绑定的必填公共名）：拒绝空别名与重复别名
 	template <typename Bindings>
-	static void _ensureAliasUnique(const std::string& alias, const Bindings& bindings,
+	static void _ensureAliasValid(const std::string& alias, const Bindings& bindings,
 								   const char* api) {
 		if (alias.empty())
-			return;
+			throw GraphException(GraphException::ErrorType::InvalidBinding, api, "alias is required; bindInput/bindOutput take (alias, nodeName, portName)");
 		for (const auto& b : bindings) {
 			if (b.alias == alias)
 				throw GraphException(GraphException::ErrorType::DuplicateBinding, api,

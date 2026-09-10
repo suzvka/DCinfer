@@ -104,15 +104,6 @@ public:
 	/// @note   活动（Running）task 不可释放；释放后 status 返回 Unknown
 	void releaseTask(const TaskId& taskId);
 
-	// ── 分组限流 ──
-
-	/// @brief  注册分组限流（组信号量由所有线程池共享，注册一次全局生效）
-	/// @param  tag       分组标识
-	/// @param  limit     最大并发执行数
-	/// @note   组限流不区分线程池归属：信号量跨池共享、全局互斥，
-	///         公开 API 不暴露模型并不区分的 affinity 维度
-	void registerGroupLimit(const std::string& tag, size_t limit);
-
 	// ── task 完成回调 ──
 
 	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 步骤② 触发，
@@ -195,7 +186,7 @@ private:
 	// ── 线程池分发（消除重复的 affinity switch-case）──
 
 	/// @brief  fire-and-forget 提交到对应线程池
-	void _dispatchToPool(ThreadPoolAffinity affinity, const std::string& tag,
+	void _dispatchToPool(ThreadPoolAffinity affinity,
 						 std::function<void()> task);
 
 	// ── 成员 ──
@@ -235,9 +226,6 @@ private:
 
 	mutable std::mutex _completionMutex;
 	mutable std::condition_variable _completionCv;
-
-	// 跨池共享的组信号量注册表（注入三个线程池，实现混合 affinity 分组互斥）
-	std::shared_ptr<GroupSemaphoreRegistry> _sharedGroups;
 
 	ThreadPool _computePool;
 	ThreadPool _operatorPool;

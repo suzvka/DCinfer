@@ -90,7 +90,7 @@ void testBasicSwitch() {
 
 	DC::InferGraph graph;
 	graph.addNode(std::move(node));
-	graph.bindOutput("sw", "y");
+	graph.bindOutput("y", "sw", "y");
 
 	// cand 0 (mul1): 5.0 -> 5.0
 	std::optional<DC::Tensor> captured;
@@ -103,7 +103,7 @@ void testBasicSwitch() {
 	});
 	graph.feedInput("t1", "sw", "x", makeFloatTensor(5.0f));
 	graph.submit("t1", "sw", "y");
-	CHECK(graph.wait("t1", std::chrono::milliseconds(3000)), "t1 complete");
+	CHECK(graph.waitForResult("t1", std::chrono::milliseconds(3000)).status != DC::TaskStatus::Running, "t1 complete");
 	CHECK(captured.has_value(), "t1 has output");
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 5.0f) < 1e-5f, "mul1: 5*1=5");
@@ -114,7 +114,7 @@ void testBasicSwitch() {
 	captured.reset();
 	graph.feedInput("t2", "sw", "x", makeFloatTensor(5.0f));
 	graph.submit("t2", "sw", "y");
-	CHECK(graph.wait("t2", std::chrono::milliseconds(3000)), "t2 complete");
+	CHECK(graph.waitForResult("t2", std::chrono::milliseconds(3000)).status != DC::TaskStatus::Running, "t2 complete");
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 10.0f) < 1e-5f, "mul2: 5*2=10");
 
@@ -123,7 +123,7 @@ void testBasicSwitch() {
 	captured.reset();
 	graph.feedInput("t3", "sw", "x", makeFloatTensor(4.0f));
 	graph.submit("t3", "sw", "y");
-	CHECK(graph.wait("t3", std::chrono::milliseconds(3000)), "t3 complete");
+	CHECK(graph.waitForResult("t3", std::chrono::milliseconds(3000)).status != DC::TaskStatus::Running, "t3 complete");
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 12.0f) < 1e-5f, "mul3: 4*3=12");
 
@@ -178,7 +178,7 @@ void testGraphIntegration() {
 
 	graph.connect("src", "y", "sw", "x");
 	graph.connect("sw", "y", "dst", "x");
-	graph.bindOutput("dst", "y");
+	graph.bindOutput("y", "dst", "y");
 
 	std::optional<DC::Tensor> captured;
 	graph.setTaskCompleteCallback([&](const DC::InferGraph::TaskId& tid) {
@@ -192,7 +192,7 @@ void testGraphIntegration() {
 	// mul5: 3.0 -> id(3) -> mul5(15) -> add1(16)
 	graph.feedInput("t1", "src", "x", makeFloatTensor(3.0f));
 	graph.submit("t1", "dst", "y");
-	CHECK(graph.wait("t1", std::chrono::milliseconds(3000)), "t1 complete");
+	CHECK(graph.waitForResult("t1", std::chrono::milliseconds(3000)).status != DC::TaskStatus::Running, "t1 complete");
 	CHECK(captured.has_value(), "t1 has output");
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 16.0f) < 1e-5f, "pipeline mul5: (3*5)+1=16");
@@ -202,7 +202,7 @@ void testGraphIntegration() {
 	captured.reset();
 	graph.feedInput("t2", "src", "x", makeFloatTensor(3.0f));
 	graph.submit("t2", "dst", "y");
-	CHECK(graph.wait("t2", std::chrono::milliseconds(3000)), "t2 complete");
+	CHECK(graph.waitForResult("t2", std::chrono::milliseconds(3000)).status != DC::TaskStatus::Running, "t2 complete");
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 22.0f) < 1e-5f, "pipeline mul7: (3*7)+1=22");
 

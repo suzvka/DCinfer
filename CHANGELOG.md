@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **图级绑定统一为强制公共别名（消除同名重载的语义分叉）**：删除
+  `bindInput(nodeName, portName)` / `bindOutput(nodeName, portName)` 两参重载，
+  仅保留 `(alias, nodeName, portName)` —— 原两参/三参重载的第一参数含义不同
+  （节点名 vs 别名），是隐性歧义签名。新增 `GraphException::InvalidBinding`
+  （别名为空）；别名唯一性校验不变。连带收敛：`feedBoundInput` / `takeOutput` /
+  `takeOutputTensor` / `hasOutput` 的 name 参数统一**仅按公共别名寻址**，
+  删除“唯一绑定端口名回退”分支与跨绑定歧义 `FeedFailed` 错误。
+  DCIr 序列化格式同步：绑定 JSON 新增 `alias` 字段，反序列化对旧文件回退
+  `alias = portName`（行为等价于原回退路径）。
+  迁移：`bindInput("adder", "a")` → `bindInput("a", "adder", "a")`（别名取端口名同名即可）
+- **等待 API 统一为 `waitForResult` 单轨**：删除 `InferGraph::wait` 两个重载，
+  仅保留 `waitForResult(taskId)`（默认无限等待）与 `waitForResult(taskId, timeout)`
+  （超时未终止时 status 为 Running）。消除 `wait` 返回 bool 的双义
+  （false = 超时还是 taskId 未知不可辨）与 `timeout=0` 在 `wait`/`submit` 中
+  含义相反的隐性陷阱。`ExecutionEngine::wait` 保留（内部被 waitForResult 使用），
+  `exportNode` 内部同步等待改走引擎内部路径
+- **接线 API 收敛为 `connect` 单轨**：删除 `InferGraph::connectRaw` /
+  `connectAll` 与 `GraphBuilder::connectRaw` / `connectAll`。`connect` 的
+  “自动插入直通导线”语义覆盖全部常规构图；裸拓扑（纯 wire 链/环）仅存于
+  lowering 验证，改由 `GraphStore::connectRaw`（标注 internal）+
+  `buildRuntimeView` 单元级直测覆盖，`DirectConnect` 守卫不变量保留并有回归
+
+
 - **EngineDescriptor 执行钩子收编 `ExecutionPhases`（接口契约显式化）**：`preRun` /
   `synchronize` / `postRun` / `onError` 四个平铺钩子收编为嵌套结构
   `EngineDescriptor::ExecutionPhases phases`——类型名承载"顺序即契约"的相位语义；
@@ -46,6 +69,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   窗口说明；方法本体无变化
 
 ### Removed
+
+- **`InferGraph::declareSubgraph` 与 tag 分组调度机制**：子图互斥能力由
+  `exportNode`（独立引擎、部署边界）覆盖；连带摘除死代码链：
+  `ExecutionEngine::registerGroupLimit`、`ThreadPool::registerGroupLimit`、
+  `GroupSemaphoreRegistry` 跨池信号量表、`PoolConfig::groupLimits`、
+  分组信号量获取/释放与活跃计数、worker 轮询退避（`kThrottledRetryInterval`）、
+  `ThreadPool::submit` 的 nodeTag 参数与 `_dispatchToPool` 的 tag 参数。
+  `Node::tag` 保留为纯序列化元数据（DCIr JSON/.dcg 的 tag 字段往返），
+  无调度语义。纯 wire 环防挂起回归经 GraphStore 单元测试保留
+- **`NodeExecutor::peekOutput` / `TaskBuffer::peekOutput`**：零调用者的
+  非破坏式预览链路；消费式语义统一由 `takeOutput` 表达。图级 API 从未暴露
+  预览入口（`InferGraph.h` 注释引用同步删除）
 
 - `_retiredWatchdogs` 看门狗自 join 补丁与 `_watchdogs` 线程表（原超时路径在看门狗
   自身线程内 erase + join 自身 `jthread` 会抛 `resource_deadlock_would_occur`，

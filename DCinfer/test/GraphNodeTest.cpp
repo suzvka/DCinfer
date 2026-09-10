@@ -97,9 +97,9 @@ void testBasicGraphEmbedding() {
 		subGraph.connect("sub_add", "s", "sub_id", "x");
 
 		// 声明子图接口：输入 = sub_add 的两个端口，输出 = sub_id 的 y
-		subGraph.bindInput("sub_add", "a");
-		subGraph.bindInput("sub_add", "b");
-		subGraph.bindOutput("sub_id", "y");
+		subGraph.bindInput("a", "sub_add", "a");
+		subGraph.bindInput("b", "sub_add", "b");
+		subGraph.bindOutput("y", "sub_id", "y");
 
 		// 导出为 Node
 		auto graphNode = subGraph.exportNode("SubAdder");
@@ -116,9 +116,9 @@ void testBasicGraphEmbedding() {
 		                                     Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bcNode->setConnector(true);
 		parent.addNode(std::move(bcNode));
-		parent.connectRaw("source", "y", "source_bc", "in");
-		parent.connectRaw("source_bc", "out_0", "SubAdder", "a");
-		parent.connectRaw("source_bc", "out_1", "SubAdder", "b");
+		parent.connect("source", "y", "source_bc", "in");
+		parent.connect("source_bc", "out_0", "SubAdder", "a");
+		parent.connect("source_bc", "out_1", "SubAdder", "b");
 
 		parent.connect("SubAdder", "y", "sink", "x");
 
@@ -153,13 +153,13 @@ void testBranchSubgraph() {
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_a", identitySchema(), identityRunFn()));
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_b", identitySchema(), identityRunFn()));
 
-		subGraph.connectRaw("sub_src", "y", "sub_bc", "in");
-		subGraph.connectRaw("sub_bc", "out_0", "sub_a", "x");
-		subGraph.connectRaw("sub_bc", "out_1", "sub_b", "x");
+		subGraph.connect("sub_src", "y", "sub_bc", "in");
+		subGraph.connect("sub_bc", "out_0", "sub_a", "x");
+		subGraph.connect("sub_bc", "out_1", "sub_b", "x");
 
-		subGraph.bindInput("sub_src", "x");
+		subGraph.bindInput("x", "sub_src", "x");
 		// 只 bind 一个输出验证广播数据流
-		subGraph.bindOutput("sub_a", "y");
+		subGraph.bindOutput("y", "sub_a", "y");
 
 		auto graphNode = subGraph.exportNode("FanOutGraph");
 
@@ -192,8 +192,8 @@ void testThreeLevelNesting() {
 		// ═══ 最内层 GraphC: identity ═══
 		InferGraph graphC;
 		graphC.addNode(std::make_unique<Node>("Builtin", "c_id", identitySchema(), identityRunFn()));
-		graphC.bindInput("c_id", "x");
-		graphC.bindOutput("c_id", "y");
+		graphC.bindInput("x", "c_id", "x");
+		graphC.bindOutput("y", "c_id", "y");
 		auto nodeC = graphC.exportNode("LevelC");
 
 		// ═══ 中间层 GraphB: LevelC → identity ═══
@@ -201,8 +201,8 @@ void testThreeLevelNesting() {
 		graphB.addNode(std::move(nodeC));
 		graphB.addNode(std::make_unique<Node>("Builtin", "b_id", identitySchema(), identityRunFn()));
 		graphB.connect("LevelC", "y", "b_id", "x");
-		graphB.bindInput("LevelC", "x");
-		graphB.bindOutput("b_id", "y");
+		graphB.bindInput("x", "LevelC", "x");
+		graphB.bindOutput("y", "b_id", "y");
 		auto nodeB = graphB.exportNode("LevelB");
 
 		// ═══ 最外层 GraphA: LevelB → identity ═══
@@ -210,8 +210,8 @@ void testThreeLevelNesting() {
 		graphA.addNode(std::move(nodeB));
 		graphA.addNode(std::make_unique<Node>("Builtin", "a_id", identitySchema(), identityRunFn()));
 		graphA.connect("LevelB", "y", "a_id", "x");
-		graphA.bindInput("LevelB", "x");
-		graphA.bindOutput("a_id", "y");
+		graphA.bindInput("x", "LevelB", "x");
+		graphA.bindOutput("y", "a_id", "y");
 		auto nodeA = graphA.exportNode("LevelA");
 
 		// ═══ 父图测试 ═══
@@ -260,8 +260,8 @@ void testSubgraphTimeout() {
 
 		subGraph.addNode(std::make_unique<Node>("Builtin", "loop", incSchema, incRunFn));
 		subGraph.connect("loop", "y", "loop", "x");
-		subGraph.bindInput("loop", "x");
-		subGraph.bindOutput("loop", "y");
+		subGraph.bindInput("x", "loop", "x");
+		subGraph.bindOutput("y", "loop", "y");
 
 		// TTL=3，很小的跳数限制，子图内很快终止
 		auto graphNode = subGraph.exportNode("LoopGraph", 3);
@@ -295,16 +295,16 @@ void testChainedSubgraphs() {
 		// 两个独立子图实例，验证各自得出正确结果
 		InferGraph subGraph1;
 		subGraph1.addNode(std::make_unique<Node>("Builtin", "add_a", addSchema(), addRunFn()));
-		subGraph1.bindInput("add_a", "a");
-		subGraph1.bindInput("add_a", "b");
-		subGraph1.bindOutput("add_a", "s");
+		subGraph1.bindInput("a", "add_a", "a");
+		subGraph1.bindInput("b", "add_a", "b");
+		subGraph1.bindOutput("s", "add_a", "s");
 		auto node1 = subGraph1.exportNode("Adder1");
 
 		InferGraph subGraph2;
 		subGraph2.addNode(std::make_unique<Node>("Builtin", "add_b", addSchema(), addRunFn()));
-		subGraph2.bindInput("add_b", "a");
-		subGraph2.bindInput("add_b", "b");
-		subGraph2.bindOutput("add_b", "s");
+		subGraph2.bindInput("a", "add_b", "a");
+		subGraph2.bindInput("b", "add_b", "b");
+		subGraph2.bindOutput("s", "add_b", "s");
 		auto node2 = subGraph2.exportNode("Adder2");
 
 		TestHarness parent;
@@ -319,9 +319,9 @@ void testChainedSubgraphs() {
 		                                      Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bc1Node->setConnector(true);
 		parent.addNode(std::move(bc1Node));
-		parent.connectRaw("src1", "y", "bc1", "in");
-		parent.connectRaw("bc1", "out_0", "Adder1", "a");
-		parent.connectRaw("bc1", "out_1", "Adder2", "a");
+		parent.connect("src1", "y", "bc1", "in");
+		parent.connect("bc1", "out_0", "Adder1", "a");
+		parent.connect("bc1", "out_1", "Adder2", "a");
 
 		// src2 扇出到 Adder1.b 和 Adder2.b
 		auto bc2Schema = Connector::broadcastSchema(2);
@@ -329,9 +329,9 @@ void testChainedSubgraphs() {
 		                                      Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 		bc2Node->setConnector(true);
 		parent.addNode(std::move(bc2Node));
-		parent.connectRaw("src2", "y", "bc2", "in");
-		parent.connectRaw("bc2", "out_0", "Adder1", "b");
-		parent.connectRaw("bc2", "out_1", "Adder2", "b");
+		parent.connect("src2", "y", "bc2", "in");
+		parent.connect("bc2", "out_0", "Adder1", "b");
+		parent.connect("bc2", "out_1", "Adder2", "b");
 
 		parent.feedInput("t1", "src1", "x", makeFloatTensor(10.0f));
 		parent.feedInput("t1", "src2", "x", makeFloatTensor(20.0f));
@@ -358,9 +358,9 @@ void testSubgraphInputSchema() {
 		subGraph.addNode(std::make_unique<Node>("Builtin", "sub_id", identitySchema(), identityRunFn()));
 		subGraph.connect("sub_add", "s", "sub_id", "x");
 
-		subGraph.bindInput("sub_add", "a");
-		subGraph.bindInput("sub_add", "b");
-		subGraph.bindOutput("sub_id", "y");
+		subGraph.bindInput("a", "sub_add", "a");
+		subGraph.bindInput("b", "sub_add", "b");
+		subGraph.bindOutput("y", "sub_id", "y");
 
 		auto graphNode = subGraph.exportNode("TestNode");
 
@@ -419,9 +419,9 @@ void testInputZoneRoundTrip() {
 		graph.addNode(std::make_unique<Node>("Builtin", "n2", addSchema(), addRunFn()));
 
 		// bind multiple inputs
-		graph.bindInput("n1", "x");
-		graph.bindInput("n2", "a");
-		graph.bindInput("n2", "b");
+		graph.bindInput("x", "n1", "x");
+		graph.bindInput("a", "n2", "a");
+		graph.bindInput("b", "n2", "b");
 
 		auto& bindings = graph.inputBindings();
 		CHECK(bindings.size() == 3, "should have 3 input bindings");
@@ -470,7 +470,7 @@ void testWaitMechanism() {
 		// 回调先于 submit 设置：保证 _terminate 时回调必然就绪（避免时序竞态）
 		graph.submit("t1", "n1", "y", 1);
 
-		bool completed = graph.wait("t1", std::chrono::milliseconds(5000));
+		bool completed = graph.waitForResult("t1", std::chrono::milliseconds(5000)).status != TaskStatus::Running;
 		CHECK(completed, "wait should return true (completed within timeout)");
 
 		// 等待回调完成（捕获输出后再读取）
@@ -500,7 +500,7 @@ void testConcurrentTaskLifecycleStress() {
 		for (int t = 0; t < kThreads; ++t) {
 			auto name = "n" + std::to_string(t);
 			graph.addNode(std::make_unique<Node>("Builtin", name, identitySchema(), identityRunFn()));
-			graph.bindOutput(name, "y");
+			graph.bindOutput("y_" + name, name, "y");
 		}
 
 		std::atomic<int> anomalies{0};
@@ -520,7 +520,7 @@ void testConcurrentTaskLifecycleStress() {
 						graph.submit(tid, nodeName, "y", 1);
 						if (i % 2 == 0)
 							graph.cancel(tid); // 交错取消：终态为 Cancelled（或已完成的 Succeeded）
-						if (!graph.wait(tid, std::chrono::milliseconds(5000))) {
+						if (graph.waitForResult(tid, std::chrono::milliseconds(5000)).status == TaskStatus::Running) {
 							std::cerr << "\n  [stress] wait timeout: task=" << tid
 									  << " status=" << static_cast<int>(graph.taskStatus(tid))
 									  << " iter=" << i << std::endl;

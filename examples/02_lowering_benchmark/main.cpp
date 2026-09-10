@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
 		auto start = Clock::now();
 		graph.feedBoundInput(taskId, "in", std::move(in));
 		graph.submitBound(taskId);
-		graph.wait(taskId);
+		graph.waitForResult(taskId);
 		totalMs += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 		lastResult = graph.takeOutputTensor(taskId, "out").item<float>();
 	}

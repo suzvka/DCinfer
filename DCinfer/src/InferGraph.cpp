@@ -16,30 +16,6 @@ InferGraph::InferGraph(const PoolConfig& computeCfg,
 	  _engine(std::make_unique<ExecutionEngine>(computeCfg, operatorCfg, systemCfg)) {}
 
 // ════════════════════════════════════════════
-// 子图声明
-// ════════════════════════════════════════════
-
-void InferGraph::declareSubgraph(const std::string& name,
-								  std::initializer_list<std::string> nodeNames) {
-	_ensureNotFrozen("InferGraph::declareSubgraph");
-
-	// 1. 验证所有节点存在（affinity 可混合：组信号量跨池共享，全局互斥）
-	for (const auto& nname : nodeNames) {
-		auto* n = _topology().node(nname);
-		if (!n)
-			throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::declareSubgraph",
-								 "node '" + nname + "' not found");
-	}
-
-	// 2. 设置所有节点的 tag 为子图名（构建期专用：_ensureNotFrozen 已校验未冻结）
-	for (const auto& nname : nodeNames)
-		_builder->store().node(nname)->setTag(name);
-
-	// 3. 注册跨池分组限流（共享信号量，对三个线程池同时生效）
-	_engine->registerGroupLimit(name, 1);
-}
-
-// ════════════════════════════════════════════
 // 数据注入
 // ════════════════════════════════════════════
 
@@ -87,8 +63,7 @@ void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds tim
 		declarations.push_back({ob.nodeName, ob.portName, 1});
 	if (declarations.empty())
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submitBound",
-							 "no bound output ports; call bindOutput(nodeName, portName) "
-								 "or bindOutput(alias, nodeName, portName) first");
+							 "no output bindings; call bindOutput(alias, nodeName, portName) first");
 	submit(taskId, std::move(declarations), timeout, maxHops);
 }
 
@@ -181,69 +156,30 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& name) const 
 	return hasOutput(taskId, nodeName, portName);
 }
 
-// ── 名称解析：公共别名优先，其次唯一绑定的端口名 ──
+// ── 图级别名解析（仅按公共别名寻址）──
 
 std::pair<std::string, std::string>
 InferGraph::_resolveOutputName(const std::string& name, const char* api) const {
-	const auto& bindings = _outputBindingsView();
-	size_t aliasMatches = 0;
-	size_t portMatches = 0;
-	std::pair<std::string, std::string> resolved;
-	for (const auto& b : bindings) {
-		if (!b.alias.empty() && b.alias == name) {
-			if (++aliasMatches == 1)
-				resolved = {b.nodeName, b.portName};
-		}
+	for (const auto& b : _outputBindingsView()) {
+		if (b.alias == name)
+			return {b.nodeName, b.portName};
 	}
-	if (aliasMatches == 1)
-		return resolved;
-	for (const auto& b : bindings) {
-		if (b.portName == name) {
-			if (++portMatches == 1)
-				resolved = {b.nodeName, b.portName};
-		}
-	}
-	if (portMatches == 1)
-		return resolved;
-	if (aliasMatches > 1 || portMatches > 1)
-		throw GraphException(GraphException::ErrorType::FeedFailed, api,
-							 "'" + name + "' is ambiguous across output bindings; "
-								 "disambiguate with a unique alias or the 3-argument overload");
 	throw GraphException(GraphException::ErrorType::NodeNotFound, api,
-							 "no bound output port or alias named '" + name
-								 + "' (call bindOutput(nodeName, portName) first)");
+						 "no output binding with alias '" + name
+							 + "' (call bindOutput(alias, nodeName, portName) first)");
 }
 
 std::pair<std::string, std::string>
 InferGraph::_resolveInputName(const std::string& name, const char* api) const {
-	const auto& bindings = _inputBindingsView();
-	size_t aliasMatches = 0;
-	size_t portMatches = 0;
-	std::pair<std::string, std::string> resolved;
-	for (const auto& b : bindings) {
-		if (!b.alias.empty() && b.alias == name) {
-			if (++aliasMatches == 1)
-				resolved = {b.nodeName, b.portName};
-		}
+	for (const auto& b : _inputBindingsView()) {
+		if (b.alias == name)
+			return {b.nodeName, b.portName};
 	}
-	if (aliasMatches == 1)
-		return resolved;
-	for (const auto& b : bindings) {
-		if (b.portName == name) {
-			if (++portMatches == 1)
-				resolved = {b.nodeName, b.portName};
-		}
-	}
-	if (portMatches == 1)
-		return resolved;
-	if (aliasMatches > 1 || portMatches > 1)
-		throw GraphException(GraphException::ErrorType::FeedFailed, api,
-							 "bound input '" + name + "' is ambiguous across nodes; "
-								 "use feedInput(taskId, nodeName, ...) or a unique alias instead");
 	throw GraphException(GraphException::ErrorType::NodeNotFound, api,
-							 "no bound input port or alias named '" + name
-								 + "' (call bindInput(nodeName, portName) first)");
+						 "no input binding with alias '" + name
+							 + "' (call bindInput(alias, nodeName, portName) first)");
 }
+
 
 // ════════════════════════════════════════════
 // task 生命周期：状态 / 结构化等待 / 资源回收
@@ -332,7 +268,7 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 		// 再唤醒等待者（步骤⑦），此后声明输出必可经 takeOutput 取出——
 		// 无需再经引擎级完成回调手动捕获（旧 _terminate 清理 OutputZone 时的残留）
 		submit(tid, std::move(declarations), std::chrono::milliseconds(0), maxHops);
-		wait(tid);
+		_engine->wait(tid, std::chrono::milliseconds(0)); // 内部路径：无限等待至子图 task 终止
 
 		// 检查本 task 的错误诊断（task 级判定，不读全局 hasErrors/clearErrors）
 		auto errors = taskErrors(tid);

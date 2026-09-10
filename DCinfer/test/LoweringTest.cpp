@@ -5,6 +5,9 @@
 #include "InferGraph.h"
 #include "Connector.h"
 #include "GraphException.h"
+#include "GraphStore.h"
+#include "GraphLowering.h"
+#include "GraphSignature.h"
 
 #include <atomic>
 #include <chrono>
@@ -12,6 +15,8 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 using namespace DC;
 
@@ -110,7 +115,7 @@ static void test_autoWireErased() {
 	// 值传播：move 语义经直连边不变
 	graph.feedInput("t1", "a", "x", floatTensor(7.0f));
 	graph.submit("t1", "b", "y");
-	CHECK(graph.wait("t1"), "task should complete through lowered edge");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete through lowered edge");
 	auto r = graph.takeOutputTensor("t1", "b", "y");
 	CHECK(std::abs(r.item<float>() - 7.0f) < 1e-6f, "value should pass through unchanged");
 }
@@ -129,19 +134,21 @@ static void test_broadcastN2NotErased() {
 	bcNode->setConnector(true);
 	graph.addNode(std::move(bcNode));
 
-	graph.connectRaw("a", "y", "bc", "in");
-	graph.connectRaw("bc", "out_0", "b", "x");
-	graph.connectRaw("bc", "out_1", "c", "x");
+	graph.connect("a", "y", "bc", "in");
+	graph.connect("bc", "out_0", "b", "x");
+	graph.connect("bc", "out_1", "c", "x");
 	graph.bindOutput("ob", "b", "y");
 	graph.bindOutput("oc", "c", "y");
 
 	auto snap = graph.freeze();
-	CHECK(snap->loweringStats().erasedConnectors == 0, "N>1 broadcast must not be erased");
+	// 3 根直通包裹导线（connect 自动插入的 Broadcast(1)）被擦除；bc(N=2) 保留
+	CHECK(snap->loweringStats().erasedConnectors == 3, "wrapping wires erased, N>1 broadcast kept");
 	CHECK(snap->runtimeNodeCount() == 4, "runtime keeps the broadcast connector (4 nodes)");
+	CHECK(snap->runtimeEdgeCount() == 3, "fused a→bc + bc's two out-edges (3 edges)");
 
 	graph.feedInput("t1", "a", "x", floatTensor(5.0f));
 	graph.submit("t1", {{"b", "y", 1}, {"c", "y", 1}});
-	CHECK(graph.wait("t1"), "1→2 broadcast should complete");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "1→2 broadcast should complete");
 	auto rb = graph.takeOutputTensor("t1", "b", "y");
 	auto rc = graph.takeOutputTensor("t1", "c", "y");
 	CHECK(std::abs(rb.item<float>() - 5.0f) < 1e-6f, "downstream 1 gets copy");
@@ -161,7 +168,7 @@ static void test_ttlCountsRuntimeVertices() {
 
 	graph.feedInput("t1", "a", "x", floatTensor(3.0f));
 	graph.submit("t1", "c", "y", 1, std::chrono::milliseconds(2000), /*maxHops=*/2);
-	CHECK(graph.wait("t1"), "maxHops=2 suffices for 2-runtime-vertex chain (wire consumes no TTL)");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "maxHops=2 suffices for 2-runtime-vertex chain (wire consumes no TTL)");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status Succeeded");
 
 	// 反向固化：maxHops=1 时 2 顶点链 TTL 不足 → Failed（hops exhausted）
@@ -172,7 +179,7 @@ static void test_ttlCountsRuntimeVertices() {
 	g2.bindOutput("out", "c", "y");
 	g2.feedInput("t1", "a", "x", floatTensor(3.0f));
 	g2.submit("t1", "c", "y", 1, std::chrono::milliseconds(2000), /*maxHops=*/1);
-	g2.wait("t1");
+	g2.waitForResult("t1");
 	CHECK(g2.taskStatus("t1") == TaskStatus::Failed, "maxHops=1 exhausts TTL on 2-vertex chain");
 	bool ttlMsg = false;
 	for (const auto& e : g2.taskErrors("t1"))
@@ -214,7 +221,7 @@ static void test_cycleTtlStillBounded() {
 	// 由 TTL 兑底终止（本用例验证的就是 TTL 行为）。
 	graph.feedInput("t1", "a", "x", floatTensor(0.0f));
 	graph.submit("t1", "never", "y", 1, std::chrono::milliseconds(2000), /*maxHops=*/6);
-	CHECK(graph.wait("t1"), "cycle should terminate by TTL");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "cycle should terminate by TTL");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Failed, "cycle ends Failed (TTL exhausted)");
 	CHECK(aRuns.load() >= 3, "TTL budget stretches after lowering (a runs >= 3 times)");
 }
@@ -228,7 +235,7 @@ static void test_bindingProtectionKeepsWire() {
 		graph.addNode(makeId("a"));
 		graph.addNode(makeId("c"));
 		auto& w = graph.connect("a", "y", "c", "x");
-		graph.bindOutput(w.name(), "out_0");
+		graph.bindOutput("out_0", w.name(), "out_0");
 
 		auto snap = graph.freeze();
 		CHECK(snap->loweringStats().erasedConnectors == 0, "wire bound as output is kept");
@@ -236,7 +243,7 @@ static void test_bindingProtectionKeepsWire() {
 
 		graph.feedInput("t1", "a", "x", floatTensor(2.0f));
 		graph.submit("t1", w.name(), "out_0");
-		CHECK(graph.wait("t1"), "declaration on wire should be satisfied");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "declaration on wire should be satisfied");
 		auto r = graph.takeOutputTensor("t1", w.name(), "out_0");
 		CHECK(std::abs(r.item<float>() - 2.0f) < 1e-6f, "wire artifact value correct");
 	}
@@ -246,7 +253,7 @@ static void test_bindingProtectionKeepsWire() {
 		graph.addNode(makeId("a"));
 		graph.addNode(makeId("c"));
 		auto& w = graph.connect("a", "y", "c", "x");
-		graph.bindInput(w.name(), "in");
+		graph.bindInput("in", w.name(), "in");
 		graph.bindOutput("out", "c", "y");
 
 		auto snap = graph.freeze();
@@ -255,7 +262,7 @@ static void test_bindingProtectionKeepsWire() {
 
 		graph.feedInput("t1", w.name(), "in", floatTensor(4.0f));
 		graph.submit("t1", "c", "y");
-		CHECK(graph.wait("t1"), "wire-fed flow should complete");
+		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "wire-fed flow should complete");
 		auto r = graph.takeOutputTensor("t1", "c", "y");
 		CHECK(std::abs(r.item<float>() - 4.0f) < 1e-6f, "value should reach downstream via wire");
 	}
@@ -272,7 +279,7 @@ static void test_errorPropagationThroughLoweredEdge() {
 
 	graph.feedInput("t1", "fail", "x", floatTensor(1.0f));
 	graph.submit("t1", "down", "y", 1, std::chrono::milliseconds(500));
-	CHECK(graph.wait("t1"), "watchdog should terminate the stuck task");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "watchdog should terminate the stuck task");
 	CHECK(graph.taskStatus("t1") == TaskStatus::TimedOut, "upstream failure → declaration unmet → TimedOut");
 	bool failRecorded = false;
 	for (const auto& e : graph.taskErrors("t1"))
@@ -291,19 +298,20 @@ static void test_chainedWiresErased() {
 	graph.addNode(makeWire("w1"));
 	graph.addNode(makeWire("w2"));
 
-	// a → w1 → w2 → b（connectRaw 允许连接器与连接器相连，合法构图）
-	graph.connectRaw("a", "y", "w1", "in");
-	graph.connectRaw("w1", "out_0", "w2", "in");
-	graph.connectRaw("w2", "out_0", "b", "x");
+	// a → w1 → w2 → b：connect 包裹后源图为连续 Broadcast(1) 链（每跳包裹一根
+	// 直通导线），逐链融合至首个保留节点 —— 不产生指向已擦除节点的悬空边
+	graph.connect("a", "y", "w1", "in");
+	graph.connect("w1", "out_0", "w2", "in");
+	graph.connect("w2", "out_0", "b", "x");
 
 	auto snap = graph.freeze();
-	CHECK(snap->loweringStats().erasedConnectors == 2, "both chained wires erased");
+	CHECK(snap->loweringStats().erasedConnectors == 5, "all chained wires erased (w1,w2 + 3 wrapping)");
 	CHECK(snap->runtimeNodeCount() == 2, "runtime view: 2 business nodes");
 	CHECK(snap->runtimeEdgeCount() == 1, "runtime view: single fused edge a→b");
 
 	graph.feedInput("t1", "a", "x", floatTensor(9.0f));
 	graph.submit("t1", "b", "y");
-	CHECK(graph.wait("t1"), "chained wires should complete (no dangling edge)");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "chained wires should complete (no dangling edge)");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status Succeeded");
 	auto r = graph.takeOutputTensor("t1", "b", "y");
 	CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "value should traverse the wire chain");
@@ -319,19 +327,20 @@ static void test_chainThroughKeptConnector() {
 	graph.addNode(makeWire("w1"));
 	graph.addNode(makeWire("bc", 2)); // Broadcast(2)：1→2 分发，不擦除
 
-	graph.connectRaw("a", "y", "w1", "in");
-	graph.connectRaw("w1", "out_0", "bc", "in");
-	graph.connectRaw("bc", "out_0", "b", "x");
-	graph.connectRaw("bc", "out_1", "c", "x");
+	graph.connect("a", "y", "w1", "in");
+	graph.connect("w1", "out_0", "bc", "in");
+	graph.connect("bc", "out_0", "b", "x");
+	graph.connect("bc", "out_1", "c", "x");
 
 	auto snap = graph.freeze();
-	CHECK(snap->loweringStats().erasedConnectors == 1, "only w1 erased (bc kept)");
+	// w1 + 4 根包裹导线擦除；bc(N=2) 保留
+	CHECK(snap->loweringStats().erasedConnectors == 5, "w1 + wrapping wires erased (bc kept)");
 	CHECK(snap->runtimeNodeCount() == 4, "runtime keeps bc (4 nodes)");
 	CHECK(snap->runtimeEdgeCount() == 3, "fused a→bc + bc's two out-edges");
 
 	graph.feedInput("t1", "a", "x", floatTensor(6.0f));
 	graph.submit("t1", {{"b", "y", 1}, {"c", "y", 1}});
-	CHECK(graph.wait("t1"), "chain through kept broadcast should complete");
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "chain through kept broadcast should complete");
 	auto rb = graph.takeOutputTensor("t1", "b", "y");
 	auto rc = graph.takeOutputTensor("t1", "c", "y");
 	CHECK(std::abs(rb.item<float>() - 6.0f) < 1e-6f, "downstream 1 gets value through fused chain");
@@ -339,30 +348,42 @@ static void test_chainThroughKeptConnector() {
 }
 
 // ── 9. 纯 wire 环：融合边追踪不得挂起，环上融合边丢弃 ──
-
+//
+// connect() 无法构建裸环（对同一输入口的第二次 connect 会引入第二条入边，
+// 破坏“恰 1 入边”的擦除条件），故经 GraphStore::connectRaw 构建裸拓扑，
+// 直接验证 buildRuntimeView 的组合语义（回归：悬空边曾导致数据静默滞留）。
 static void test_wireOnlyCycleDropsFusedEdge() {
-	InferGraph graph;
-	graph.addNode(makeId("x"));
-	graph.addNode(makeWire("w1"));
-	graph.addNode(makeWire("w2"));
+	GraphStore store;
+	store.addNode(makeId("x"));
+	store.addNode(makeWire("w1"));
+	store.addNode(makeWire("w2"));
 
 	// x → w1 → w2 → w1：外部入边进入纯 wire 环
-	graph.connectRaw("x", "y", "w1", "in");
-	graph.connectRaw("w1", "out_0", "w2", "in");
-	graph.connectRaw("w2", "out_0", "w1", "in");
+	store.connectRaw("x", "y", "w1", "in");
+	store.connectRaw("w1", "out_0", "w2", "in");
+	store.connectRaw("w2", "out_0", "w1", "in");
 
-	auto snap = graph.freeze(); // 不得挂起
-	CHECK(snap->loweringStats().erasedConnectors == 2, "both cycle wires erased");
-	CHECK(snap->runtimeNodeCount() == 1, "runtime view: only x");
-	CHECK(snap->runtimeEdgeCount() == 0, "fused edge into wire-only cycle is dropped");
+	GraphSignature signature; // 无绑定：无输入/输出防护场景
+	std::unordered_map<std::string, const Node*> runtimeNodes;
+	std::vector<GraphStore::Edge> runtimeEdges;
+	GraphLoweringStats stats;
+	buildRuntimeView(store, signature, runtimeNodes, runtimeEdges, stats); // 不得挂起
 
-	// x 自产自销：声明 x.y，验证无悬空边、无静默滞留
-	graph.feedInput("t1", "x", "x", floatTensor(3.0f));
-	graph.submit("t1", "x", "y");
-	CHECK(graph.wait("t1"), "task should succeed on the sole retained node");
-	CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status Succeeded");
-	auto r = graph.takeOutputTensor("t1", "x", "y");
-	CHECK(std::abs(r.item<float>() - 3.0f) < 1e-6f, "x's own output readable");
+	CHECK(stats.erasedConnectors == 2, "both cycle wires erased");
+	CHECK(runtimeNodes.size() == 1, "runtime view: only x");
+	CHECK(runtimeEdges.empty(), "fused edge into wire-only cycle is dropped");
+
+	// DirectConnect 守卫回归（守卫已随 connectRaw 退出公共面，此处保底）
+	bool directRejected = false;
+	try {
+		GraphStore gs;
+		gs.addNode(makeId("p"));
+		gs.addNode(makeId("q"));
+		gs.connectRaw("p", "y", "q", "x");
+	} catch (const GraphException&) {
+		directRejected = true;
+	}
+	CHECK(directRejected, "direct connect between non-connectors should be rejected");
 }
 
 int main() {

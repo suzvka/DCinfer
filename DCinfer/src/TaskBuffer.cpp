@@ -93,21 +93,6 @@ Value TaskBuffer::takeOutput(const TaskId& taskId, const std::string& name) {
 	return result;
 }
 
-const Value& TaskBuffer::peekOutput(const TaskId& taskId, const std::string& name) const {
-	std::shared_lock lk(_mutex);
-	auto taskIt = _taskOutputs.find(taskId);
-	if (taskIt == _taskOutputs.end()) {
-		throw NodeException(NodeException::ErrorType::TaskNotFound, "TaskBuffer::peekOutput",
-							"task '" + taskId + "' not found");
-	}
-	auto& optVal = taskIt->second.at(name);
-	if (!optVal.has_value()) {
-		throw NodeException(NodeException::ErrorType::OutputNotProduced, "TaskBuffer::peekOutput",
-							"output '" + name + "' is empty");
-	}
-	return optVal.value();
-}
-
 std::unordered_map<std::string, TaskBuffer::TaskData> TaskBuffer::collectOutputs(const TaskId& taskId) {
 	std::unique_lock lk(_mutex);
 	std::unordered_map<std::string, TaskData> result;

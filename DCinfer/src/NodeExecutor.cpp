@@ -40,10 +40,6 @@ Value NodeExecutor::takeOutput(const TaskId& taskId, const std::string& name) {
 	return _impl->exec.buffer.takeOutput(taskId, name);
 }
 
-const Value& NodeExecutor::peekOutput(const TaskId& taskId, const std::string& name) const {
-	return _impl->exec.buffer.peekOutput(taskId, name);
-}
-
 std::unordered_map<std::string, Value> NodeExecutor::collectOutputs(const TaskId& taskId) {
 	return _impl->exec.buffer.collectOutputs(taskId);
 }

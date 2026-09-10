@@ -31,10 +31,9 @@ ExecutionEngine::TaskGate::~TaskGate() {
 ExecutionEngine::ExecutionEngine(const PoolConfig& computeCfg,
 								 const PoolConfig& operatorCfg,
 								 const PoolConfig& systemCfg)
-	: _sharedGroups(std::make_shared<GroupSemaphoreRegistry>()),
-	  _computePool(computeCfg, _sharedGroups),
-	  _operatorPool(operatorCfg, _sharedGroups),
-	  _systemPool(systemCfg, _sharedGroups),
+	: _computePool(computeCfg),
+	  _operatorPool(operatorCfg),
+	  _systemPool(systemCfg),
 	  _timer(std::make_unique<TimerService>()) {}
 
 ExecutionEngine::~ExecutionEngine() {
@@ -54,17 +53,17 @@ ExecutionEngine::~ExecutionEngine() {
 // 线程池分发
 // ════════════════════════════════════════════
 
-void ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity, const std::string& tag,
+void ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity,
 									  std::function<void()> task) {
 	switch (affinity) {
 	case ThreadPoolAffinity::Compute:
-		_computePool.submit(tag, std::move(task));
+		_computePool.submit(std::move(task));
 		break;
 	case ThreadPoolAffinity::Operator:
-		_operatorPool.submit(tag, std::move(task));
+		_operatorPool.submit(std::move(task));
 		break;
 	case ThreadPoolAffinity::System:
-		_systemPool.submit(tag, std::move(task));
+		_systemPool.submit(std::move(task));
 		break;
 	}
 }
@@ -75,7 +74,7 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 									 const std::shared_ptr<GraphRuntimeState>& state) {
 	// 捕获 state 共享句柄：图拓扑/输出区/信号/诊断的存活期由引用计数保证，
 	// 与图对象析构顺序无关（gate 与 lambda 各持一份）
-	_dispatchToPool(node->affinity(), node->tag(),
+	_dispatchToPool(node->affinity(),
 					[this, node, nodeName, taskId, gate, remainingHops, state] {
 		auto& errors = state->errors;
 		NodeResult result;
@@ -538,15 +537,6 @@ void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string&
 								 "(no task-level IO buffer was created)");
 		}
 	}
-}
-
-// ════════════════════════════════════════════
-// 分组限流
-// ════════════════════════════════════════════
-
-void ExecutionEngine::registerGroupLimit(const std::string& tag, size_t limit) {
-	// 组信号量由三个线程池共享，注册一次全局生效（跨池互斥）
-	_sharedGroups->setLimit(tag, limit);
 }
 
 // ════════════════════════════════════════════

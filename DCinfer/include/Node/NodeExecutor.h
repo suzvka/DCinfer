@@ -44,7 +44,6 @@ public:
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 	Value takeOutput(const TaskId& taskId, const std::string& name);
 	Tensor takeOutputTensor(const TaskId& taskId, const std::string& name);
-	const Value& peekOutput(const TaskId& taskId, const std::string& name) const;
 	std::unordered_map<std::string, Value> collectOutputs(const TaskId& taskId);
 	std::unordered_map<std::string, Tensor> collectOutputTensors(const TaskId& taskId);
 

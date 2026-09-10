@@ -67,22 +67,6 @@ void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPo
 	_edges.push_back({srcNode, srcPort, dstNode, dstPort});
 }
 
-size_t GraphStore::connectAll(const std::string& srcNode, const std::string& dstNode) {
-	auto* src = node(srcNode);
-	auto* dst = node(dstNode);
-	if (!src || !dst)
-		return 0;
-
-	size_t matched = 0;
-	for (const auto& outPort : src->schema().outputs) {
-		if (dst->schema().findInput(outPort.name)) {
-			_edges.push_back({srcNode, outPort.name, dstNode, outPort.name});
-			++matched;
-		}
-	}
-	return matched;
-}
-
 // ════════════════════════════════════════════
 // connect：自动插入广播连接器（1→1，零拷贝 move 直通）
 // ════════════════════════════════════════════

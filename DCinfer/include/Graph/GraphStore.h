@@ -49,24 +49,20 @@ public:
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort);
 
-	/// @brief  端口级接线原语（低层）：上游输出口 → 下游输入口，直接建边
-	///         约束：至少有一端是连接器（两个业务节点禁止直连，
-	///         须经 addNode 加入的连接器中转）
+	/// @brief  端口级接线原语（internal）：直接建边，不插入连接器。
+	///         仅供框架内部与测试构造裸拓扑（如 lowering 的纯 wire 链/环）使用；
+	///         常规构图一律走 connect()。
+	///         约束：至少有一端是连接器（两个业务节点禁止直连）
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	/// @throws GraphException(PortNotFound) 若端口不存在
 	/// @throws GraphException(DirectConnect) 若两个非连接器节点直连
 	void connectRaw(const std::string& srcNode, const std::string& srcPort,
 					const std::string& dstNode, const std::string& dstPort);
 
-	/// @brief  快捷批量接线（低层）：自动匹配上游所有输出口到下游同名的输入口，
-	///         直接建边，不插入连接器（调用方需保证拓扑合法）
-	/// @return 成功匹配的端口对数
-	size_t connectAll(const std::string& srcNode, const std::string& dstNode);
-
 	/// @brief  标记输入：该节点的该端口为图级输入口
-	/// @param  alias  可选公共别名（唯一性校验由 GraphBuilder 负责）
+	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一，唯一性由 GraphBuilder 负责）
 	void bindInput(const std::string& nodeName, const std::string& portName,
-				   const std::string& alias = {});
+				   const std::string& alias);
 
 	// ── 查找 ──
 

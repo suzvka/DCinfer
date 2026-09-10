@@ -33,10 +33,9 @@ int main() {
 	graph.connect("adder", "sum", "pass", "x");
 
 	// 标记图级输入输出端口（输出绑定带公共别名，作为图的对外契约）
-	// 注：connect() 面向业务节点间的 1→1 连线，自动插入广播连接器中转；
-	// connectRaw() 为低层原语，直接建边且要求两端至少一端是连接器。
-	graph.bindInput("adder", "a");
-	graph.bindInput("adder", "b");
+	// 注：connect() 面向业务节点间的 1→1 连线，自动插入广播连接器中转。
+	graph.bindInput("a", "adder", "a");
+	graph.bindInput("b", "adder", "b");
 	graph.bindOutput("result", "pass", "y");   // 公共别名 result → 内部 pass.y
 
 	// ── 4. 注入数据（按绑定端口名，无需重复提供节点名）──

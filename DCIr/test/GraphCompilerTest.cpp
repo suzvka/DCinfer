@@ -229,9 +229,10 @@ void testCompileStringBroadcast() {
 })";
 		InferGraph graph; GraphCompiler::compileString(graph, json);
 
-		// 3 业务节点 + 1 broadcast 连接器 = 4
-		CHECK(graph.nodeCount() == 4, "should have 4 nodes (3 biz + 1 bc)");
-		CHECK(graph.edgeCount() == 3, "should have 3 edges (src→bc.in, bc.out_0→id_a, bc.out_1→id_b)");
+		// 3 业务节点 + 1 broadcast 连接器 + 3 根包裹导线（重建经 connect 自动插入，
+		// 序列化折叠后不可见，lowering 擦除后运行时视图不变）= 7
+		CHECK(graph.nodeCount() == 7, "should have 7 nodes (3 biz + 1 bc + 3 wrapping wires)");
+		CHECK(graph.edgeCount() == 6, "should have 6 edges (3 connects × 2 edges each)");
 		CHECK(graph.outputBindings().size() == 2, "should have 2 output bindings");
 		CHECK(graph.node("add1") != nullptr, "add1 should exist");
 		CHECK(graph.node("id_a") != nullptr, "id_a should exist");
@@ -302,7 +303,7 @@ void testRoundTrip() {
 		harness.addNode(std::make_unique<Node>("ONNX", "test1", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "test2", identitySchema(), identityRunFn()));
 		harness.connect("test1", "y", "test2", "x");
-		harness.bindOutput("test2", "y");
+		harness.bindOutput("y", "test2", "y");
 		harness.node("test1")->setModelPath("models/test.onnx");
 
 		// 序列化
@@ -334,7 +335,7 @@ void testSerializeToJsonString() {
 	TEST("serialize - JSON output is valid and parsable") {
 		TestHarness harness;
 		harness.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
-		harness.bindOutput("n1", "y");
+		harness.bindOutput("y", "n1", "y");
 
 		std::string tmpFile = "test_serialize.json";
 		GraphCompiler::serialize(harness.graph(), tmpFile);
@@ -482,7 +483,7 @@ void testDcgRoundTrip() {
 		harness.addNode(std::move(n1));
 		harness.addNode(std::make_unique<Node>("Builtin", "dcg_n2", identitySchema(), identityRunFn()));
 		harness.connect("dcg_n1", "y", "dcg_n2", "x");
-		harness.bindOutput("dcg_n2", "y");
+		harness.bindOutput("y", "dcg_n2", "y");
 
 		// 序列化为 .dcg
 		std::string dcgFile = "test_dcg_roundtrip.dcg";
@@ -518,7 +519,7 @@ void testDcgSerializeNoModels() {
 	TEST("dcg serialize — graph without models") {
 		TestHarness harness;
 		harness.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
-		harness.bindOutput("n1", "y");
+		harness.bindOutput("y", "n1", "y");
 
 		std::string dcgFile = "test_dcg_nomodel.dcg";
 		GraphCompiler::serialize(harness.graph(), dcgFile);
@@ -550,7 +551,7 @@ void testDynamicShapeRoundTrip() {
 		s.inputs = {makePort("x", TensorType::Float, sizeof(float), Tensor::Shape{kDyn, 224, 224})};
 		s.outputs = {makePort("y", TensorType::Float, sizeof(float), Tensor::Shape{1, kDyn})};
 		harness.addNode(std::make_unique<Node>("Builtin", "dyn1", s, identityRunFn()));
-		harness.bindOutput("dyn1", "y");
+		harness.bindOutput("y", "dyn1", "y");
 
 		std::string tmpFile = "test_dynshape.json";
 		GraphCompiler::serialize(harness.graph(), tmpFile);
@@ -599,7 +600,7 @@ void testVoidPortRoundTrip() {
 		s.inputs = {makePort("in", TensorType::Void, 2, Tensor::Shape{kDyn})};
 		s.outputs = {makePort("out", TensorType::Void, 0, {})};
 		harness.addNode(std::make_unique<Node>("Builtin", "void1", s, identityRunFn()));
-		harness.bindOutput("void1", "out");
+		harness.bindOutput("out", "void1", "out");
 
 		std::string tmpFile = "test_void.json";
 		GraphCompiler::serialize(harness.graph(), tmpFile);
@@ -759,7 +760,7 @@ void testDcgRecompileAfterReleaseAllEngines() {
 		auto n1 = std::make_unique<Node>("DcgLifecycleEngine", "lc1", identitySchema(), identityRunFn());
 		n1->setModelPath(modelFile);
 		harness.addNode(std::move(n1));
-		harness.bindOutput("lc1", "y");
+		harness.bindOutput("y", "lc1", "y");
 		std::string dcgFile = "test_dcg_lifecycle.dcg";
 		GraphCompiler::serialize(harness.graph(), dcgFile);
 		std::remove(modelFile.c_str()); // dcg 自带模型，源文件可删
