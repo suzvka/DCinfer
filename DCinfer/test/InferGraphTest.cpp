@@ -304,7 +304,7 @@ void testCycleHopsExhaustion() {
 		harness.feedInput("t1", "inc", "x", makeFloatTensor(0.0f));
 
 		// 声明一个极大的 count，不可能在 5 跳内完成
-		harness.submit("t1", "inc", "y", 100, std::chrono::milliseconds(0), 5);
+		harness.submit("t1", "inc", "y", 100, 5);
 
 		CHECK(harness.awaitCompletion("t1"), "should complete (via TTL exhaustion, not hang)");
 
@@ -344,7 +344,7 @@ void testCycleMultiNode() {
 		harness.feedInput("t1", "A", "x", makeFloatTensor(0.0f));
 
 		// 每圈 3 节点 + 3 导线 = 6 跳，3 圈 = 18 跳 → TTL=19 刚好完成
-		harness.submit("t1", "C", "y", 3, std::chrono::milliseconds(0), 19);
+		harness.submit("t1", "C", "y", 3, 19);
 
 		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
 		CHECK(harness.hasOutput("t1", "C", "y"), "C should have output after 3 cycles");
@@ -374,7 +374,7 @@ void testBlockedNodeNotReceiving() {
 
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
 
-		harness.submit("t1", "id_a", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t1", "id_a", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete within timeout");
 
 		CHECK(harness.hasOutput("t1", "id_a", "y"), "id_a should have output");
@@ -406,7 +406,7 @@ void testPartialBlockKeepsOtherPath() {
 
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
 
-		harness.submit("t1", "id_c", "y", 1, std::chrono::milliseconds(2000));
+			harness.submit("t1", "id_c", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete within timeout");
 
 		CHECK(harness.hasOutput("t1", "id_c", "y"), "id_c should have output");
@@ -432,14 +432,14 @@ void testDynamicSignalToggle() {
 		// run 1: signal=true (conducting), full chain
 		harness.setSignal("gate", true);
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(5.0f));
-		harness.submit("t1", "id_c", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t1", "id_c", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
 		CHECK(harness.hasOutput("t1", "id_c", "y"), "id_c should have output when signal=true");
 
 		// run 2: signal=false (blocked), id_b and downstream don't run
 		harness.setSignal("gate", false);
 		harness.feedInput("t2", "id_a", "x", makeFloatTensor(5.0f));
-		harness.submit("t2", "id_a", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t2", "id_a", "y", 1);
 		CHECK(harness.awaitCompletion("t2"), "t2 should complete (id_a output declared)");
 		CHECK(harness.hasOutput("t2", "id_a", "y"), "id_a should have output");
 		CHECK(!harness.hasOutput("t2", "id_c", "y"), "id_c should NOT have output when blocked");
@@ -459,7 +459,7 @@ void testUnboundNodeNeverBlocked() {
 		CHECK(!b.isBlocked(), "unbound node should not be blocked");
 
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(42.0f));
-		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t1", "id_b", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
 		CHECK(harness.hasOutput("t1", "id_b", "y"), "id_b should have output");
 	}
@@ -489,14 +489,14 @@ void testTaskScopedSignalBlocksOnlyOneTask() {
 
 		// task1: 应该能跑通（task 级覆盖=true）
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
-		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t1", "id_b", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete (task-scoped signal=true overrides broadcast)");
 		CHECK(harness.hasOutput("t1", "id_b", "y"), "id_b should have output for t1");
 
 		// task2: 被广播阻塞（无 task 级覆盖）
 		harness.clearErrors();
 		harness.feedInput("t2", "id_a", "x", makeFloatTensor(20.0f));
-		harness.submit("t2", "id_a", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t2", "id_a", "y", 1);
 		CHECK(harness.awaitCompletion("t2"), "t2 should complete (id_a output declared)");
 		CHECK(!harness.hasOutput("t2", "id_b", "y"), "id_b should NOT have output for t2 (blocked by broadcast)");
 	}
@@ -522,14 +522,14 @@ void testTaskScopedSignalBlocksOnlyTargetTask() {
 
 		// task1: 不受影响
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(5.0f));
-		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t1", "id_b", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
 		CHECK(harness.hasOutput("t1", "id_b", "y"), "id_b should have output for t1");
 
 		// task2: 被 task 级信号阻塞
 		harness.clearErrors();
 		harness.feedInput("t2", "id_a", "x", makeFloatTensor(30.0f));
-		harness.submit("t2", "id_a", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t2", "id_a", "y", 1);
 		CHECK(harness.awaitCompletion("t2"), "t2 should complete (id_a output declared)");
 		CHECK(!harness.hasOutput("t2", "id_b", "y"), "id_b should NOT have output for t2 (task-scoped block)");
 	}
@@ -553,7 +553,7 @@ void testTaskSignalCleanupOnTerminate() {
 		// task1: 设置 task 级阻塞
 		harness.setSignal("gate", "t1", false);
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(7.0f));
-		harness.submit("t1", "id_a", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t1", "id_a", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
 		// t1 被阻塞，id_b 无输出
 		CHECK(!harness.hasOutput("t1", "id_b", "y"), "id_b should NOT have output for t1 (blocked)");
@@ -561,7 +561,7 @@ void testTaskSignalCleanupOnTerminate() {
 		// task2: 使用相同的 signal name "gate"，但不应受 t1 的 task 级信号影响
 		harness.clearErrors();
 		harness.feedInput("t2", "id_a", "x", makeFloatTensor(99.0f));
-		harness.submit("t2", "id_b", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t2", "id_b", "y", 1);
 		CHECK(harness.awaitCompletion("t2"), "t2 should complete");
 		CHECK(harness.hasOutput("t2", "id_b", "y"), "id_b should have output for t2 (t1 signal cleaned up)");
 
@@ -598,7 +598,7 @@ void testTaskScopedSignalWithPartialBlock() {
 		harness.setSignal("enable_b", "t1", false);
 
 		harness.feedInput("t1", "id_a", "x", makeFloatTensor(50.0f));
-		harness.submit("t1", "id_c", "y", 1, std::chrono::milliseconds(2000));
+		harness.submit("t1", "id_c", "y", 1);
 		CHECK(harness.awaitCompletion("t1"), "t1 should complete");
 
 		// id_c 应该有输出（未阻塞）
@@ -608,50 +608,6 @@ void testTaskScopedSignalWithPartialBlock() {
 
 		// id_b 被 task 级信号阻塞
 		CHECK(!harness.hasOutput("t1", "id_b", "y"), "id_b should NOT have output (task-scoped block)");
-	}
-	END_TEST();
-}
-
-// ── 看门狗超时（回归）──
-// 曾因看门狗线程在 _terminate 中 erase 自身 jthread（自 join → noexcept
-// 析构内抛 resource_deadlock_would_occur）触发 std::terminate 使进程崩溃。
-// 信号阻塞使输出声明永远无法满足，强制走看门狗超时路径。
-void testWatchdogTimeoutTerminates() {
-	TEST("watchdog timeout: blocked task terminated, no process crash") {
-		TestHarness harness;
-
-		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
-
-		harness.connect("id_a", "y", "id_b", "x");
-
-		// id_b 被信号阻塞 → 声明永远无法满足 → 看门狗超时必然触发
-		harness.node("id_b")->bindSignal(harness.signalStore(), "enable_b");
-		harness.setSignal("enable_b", false);
-
-		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
-
-		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(200));
-		CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
-			  "watchdog should terminate the task and notify waiters");
-
-		// 看门狗应记录超时错误（recordError 的第二个参数是 nodeName）
-		auto errors = harness.taskErrors("t1");
-		bool hasWatchdogError = false;
-		for (auto& e : errors) {
-			if (e.nodeName == "<watchdog>" || e.message.find("task timed out") != std::string::npos) {
-				hasWatchdogError = true;
-				break;
-			}
-		}
-		CHECK(hasWatchdogError, "watchdog timeout error should be recorded");
-
-		// 被阻塞节点不应产出
-		CHECK(!harness.hasOutput("t1", "id_b", "y"), "blocked node should not produce output");
-
-		// 看门狗终止的任务应处于 TimedOut 状态
-		CHECK(harness.graph().taskStatus("t1") == TaskStatus::TimedOut,
-			  "watchdog-terminated task should be TimedOut");
 	}
 	END_TEST();
 }
@@ -733,7 +689,7 @@ void testGraphNodeBranchBlocking() {
 		parent.connect("src", "y", "gn", "x");
 
 		parent.feedInput("t1", "src", "x", makeFloatTensor(42.0f));
-		parent.submit("t1", "gn", "y", 1, std::chrono::milliseconds(3000));
+		parent.submit("t1", "gn", "y", 1);
 		CHECK(parent.awaitCompletion("t1"), "t1 should complete via alternate path");
 		CHECK(parent.hasOutput("t1", "gn", "y"), "gn should have output");
 		auto r = parent.getOutputTensor("t1", "gn", "y");
@@ -777,7 +733,7 @@ void testGraphNodeBranchBlocking() {
 		parent.connect("src", "y", "gn", "x");
 
 		parent.feedInput("t1", "src", "x", makeFloatTensor(7.0f));
-		parent.submit("t1", "gn", "y", 1); // 无看门狗：阻塞期间 task 保持挂起
+		parent.submit("t1", "gn", "y", 1); // 阻塞期间 task 保持挂起，宿主 wait+cancel 解围
 		CHECK(!parent.awaitCompletion("t1", std::chrono::milliseconds(600)),
 			  "should NOT complete while path is blocked");
 		CHECK(!parent.hasOutput("t1", "gn", "y"), "blocked task should not produce output");
@@ -788,7 +744,7 @@ void testGraphNodeBranchBlocking() {
 
 		// 新 task：恢复后正常完成
 		parent.feedInput("t2", "src", "x", makeFloatTensor(7.0f));
-		parent.submit("t2", "gn", "y", 1, std::chrono::milliseconds(3000));
+		parent.submit("t2", "gn", "y", 1);
 		CHECK(parent.awaitCompletion("t2"), "t2 should complete after signal restore");
 		CHECK(parent.hasOutput("t2", "gn", "y"), "gn should have output for t2");
 		auto r = parent.getOutputTensor("t2", "gn", "y");
@@ -924,7 +880,7 @@ void testCancelRunningTask() {
 		graph.setSignal("gate", false); // id_b 永久阻塞，声明无法满足
 
 		graph.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
-		graph.submit("t1", "id_b", "y"); // 无看门狗：任务将一直挂起
+		graph.submit("t1", "id_b", "y"); // 信号阻塞 → 任务挂起，宿主 wait+cancel 解围
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task should be running while blocked");
@@ -1136,105 +1092,6 @@ void testWaitSemantics() {
 }
 
 // ════════════════════════════════════════════
-// 共享 Timer 超时（回归）：deadline 精确触发 / 旧条目不误杀复用任务 / cancel 竞态
-// ════════════════════════════════════════════
-
-// 超时触发不得早于请求的 deadline（共享 Timer 精确唤醒语义）
-void testTimeoutLowerBound() {
-	TEST("shared timer: timeout fires no earlier than the requested deadline") {
-		TestHarness harness;
-
-		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), delayedRunFn(nullptr, 500)));
-		harness.connect("id_a", "y", "id_b", "x");
-
-		harness.feedInput("t1", "id_a", "x", makeFloatTensor(10.0f));
-
-		auto start = std::chrono::steady_clock::now();
-		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(150));
-		CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
-			  "watchdog should terminate the task");
-		auto elapsed = std::chrono::steady_clock::now() - start;
-
-		CHECK(harness.graph().taskStatus("t1") == TaskStatus::TimedOut, "task should be TimedOut");
-		CHECK(elapsed >= std::chrono::milliseconds(150),
-			  "timeout must not fire before the requested deadline");
-	}
-	END_TEST();
-}
-
-// 同 ID 复用：上一轮超时条目到点后必须失配退出，不得终止新一轮任务
-void testTimeoutThenTaskIdReuse() {
-	TEST("shared timer: stale timeout entry must not kill a resubmitted task") {
-		TestHarness harness;
-
-		harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-		harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
-		harness.connect("id_a", "y", "id_b", "x");
-
-		// 第 1 轮：id_b 信号阻塞 → 声明无法满足 → 必然超时
-		harness.node("id_b")->bindSignal(harness.signalStore(), "enable_b");
-		harness.setSignal("enable_b", false);
-		harness.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
-		harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(120));
-		CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
-			  "round 1 should be terminated by timeout");
-		CHECK(harness.graph().taskStatus("t1") == TaskStatus::TimedOut,
-			  "round 1 should end as TimedOut");
-
-		// 第 2~5 轮：同 ID 复用、解除阻塞、不限时提交——
-		// 旧超时条目到点时经活动门控身份校验失配退出，不得误杀新任务
-		for (int i = 2; i <= 5; ++i) {
-			harness.setSignal("enable_b", true);
-			harness.feedInput("t1", "id_a", "x", makeFloatTensor(static_cast<float>(i)));
-			harness.submit("t1", "id_b", "y");
-			CHECK(harness.awaitCompletion("t1", std::chrono::milliseconds(3000)),
-				  "resubmitted task should complete normally");
-			CHECK(harness.graph().taskStatus("t1") == TaskStatus::Succeeded,
-				  "resubmitted task must not be killed by the stale timeout entry");
-		}
-
-		// 产出值校验：TestHarness 输出缓存为一次性消费式读取（取出后不重捕），
-		// 缓存条目在首轮复用（第 2 轮）就位后保持不变，故在此统一校验数值
-		auto r = harness.getOutputTensor("t1", "id_b", "y");
-		CHECK(std::abs(r.item<float>() - 2.0f) < 1e-6f,
-			  "first reused task result should be correct");
-	}
-	END_TEST();
-}
-
-// cancel 与超时竞争终止权：终态二选一，无崩溃、无双重终止
-void testCancelVsTimeoutRace() {
-	TEST("shared timer: cancel racing timeout yields exactly one terminal state") {
-		for (int round = 0; round < 10; ++round) {
-			TestHarness harness;
-
-			harness.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
-			harness.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
-			harness.connect("id_a", "y", "id_b", "x");
-
-			harness.node("id_b")->bindSignal(harness.signalStore(), "enable_b");
-			harness.setSignal("enable_b", false);
-
-			// 30ms 处请求取消，与 60ms 超时竞争；cancel 对未提交/已终止任务幂等
-			std::thread canceller([&harness] {
-				std::this_thread::sleep_for(std::chrono::milliseconds(30));
-				harness.graph().cancel("t1");
-			});
-
-			harness.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
-			harness.submit("t1", "id_b", "y", 1, std::chrono::milliseconds(60));
-			canceller.join();
-
-			auto st = harness.graph().taskStatus("t1");
-			CHECK(st == TaskStatus::Cancelled || st == TaskStatus::TimedOut,
-				  "final status must be exactly one of Cancelled/TimedOut");
-		}
-	}
-	END_TEST();
-}
-
-// ════════════════════════════════════════════
 // 结果就绪发布（回归）：wait 返回后声明输出必须已在 OutputZone
 // ════════════════════════════════════════════
 
@@ -1317,9 +1174,6 @@ int main() {
 		testTaskSignalCleanupOnTerminate();
 		testTaskScopedSignalWithPartialBlock();
 
-		// 看门狗超时（回归：曾因看门狗线程自 join 触发 std::terminate）
-		testWatchdogTimeoutTerminates();
-
 		// 任务生命周期（结果保留 / 复用 / 状态机 / 取消）
 		testOutputSurvivesWait();
 		testWaitForResult();
@@ -1338,11 +1192,6 @@ int main() {
 		// 结果就绪发布（回归：wait 谓词绑定 resultsReady）
 		testWaitReturnsReadableResults();
 		testMultiDeclarationReadableAfterWait();
-
-		// 共享 Timer 超时（deadline 精确触发 / 复用隔离 / cancel 竞态）
-		testTimeoutLowerBound();
-		testTimeoutThenTaskIdReuse();
-		testCancelVsTimeoutRace();
 
 		testGraphNodeBranchBlocking();
 

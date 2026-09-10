@@ -56,15 +56,14 @@ void InferGraph::feedBoundInput(const TaskId& taskId, const std::string& portNam
 	feedBoundInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
 }
 
-void InferGraph::submitBound(const TaskId& taskId, std::chrono::milliseconds timeout,
-							 uint32_t maxHops) {
+void InferGraph::submitBound(const TaskId& taskId, uint32_t maxHops) {
 	std::vector<OutputDeclaration> declarations;
 	for (const auto& ob : _outputBindingsView())
 		declarations.push_back({ob.nodeName, ob.portName, 1});
 	if (declarations.empty())
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "InferGraph::submitBound",
 							 "no output bindings; call bindOutput(alias, nodeName, portName) first");
-	submit(taskId, std::move(declarations), timeout, maxHops);
+	submit(taskId, std::move(declarations), maxHops);
 }
 
 // ════════════════════════════════════════════
@@ -263,11 +262,11 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 			declarations.push_back({ob.nodeName, ob.portName, 1});
 		}
 
-		// 驱动子图（不启用内部超时，由父图控制）。
+		// 驱动子图（不设执行超时：时间语义归节点实现方；由 TTL 与宿主护栏兑底）。
 		// wait 返回即 task 已终止：_terminate 先抢救声明输出至 OutputZone（步骤⑥）
 		// 再唤醒等待者（步骤⑦），此后声明输出必可经 takeOutput 取出——
 		// 无需再经引擎级完成回调手动捕获（旧 _terminate 清理 OutputZone 时的残留）
-		submit(tid, std::move(declarations), std::chrono::milliseconds(0), maxHops);
+		submit(tid, std::move(declarations), maxHops);
 		_engine->wait(tid, std::chrono::milliseconds(0)); // 内部路径：无限等待至子图 task 终止
 
 		// 检查本 task 的错误诊断（task 级判定，不读全局 hasErrors/clearErrors）

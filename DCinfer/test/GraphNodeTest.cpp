@@ -235,13 +235,14 @@ void testThreeLevelNesting() {
 }
 
 // ════════════════════════════════════════════
-// 测试 4: 超时处理
+// 测试 4: 子图循环截断（TTL 兑底，无执行超时）
 // ════════════════════════════════════════════
 
-void testSubgraphTimeout() {
-	TEST("subgraph timeout: long loop exceeds parent timeout") {
-		// 子图：包含无限循环（声明很大的 count，但会被 TTL=5 截断）
-		// 注意：子图本身不需要超时，父图的 wait 超时来截断
+void testSubgraphLoopTTL() {
+	TEST("subgraph loop: TTL inside subgraph bounds iterations (no execution timeout)") {
+		// 子图：包含无限循环（声明很大的 count；子图内部无执行超时，
+		// 由 TTL=3 截断——时间语义归节点实现方，构图循环靠拓扑兑底）。
+		// 注意：父图仅用等待护栏（awaitCompletion 默认 5s），不设 submit 超时。
 		InferGraph subGraph;
 
 		// 自增节点（反馈环）
@@ -273,7 +274,7 @@ void testSubgraphTimeout() {
 		parent.connect("source", "y", "LoopGraph", "x");
 
 		parent.feedInput("t1", "source", "x", makeFloatTensor(0.0f));
-		parent.submit("t1", "LoopGraph", "y", 1, std::chrono::milliseconds(5000));
+		parent.submit("t1", "LoopGraph", "y", 1);
 
 		CHECK(parent.awaitCompletion("t1"), "should complete (via TTL, not hang)");
 
@@ -487,14 +488,14 @@ void testWaitMechanism() {
 
 // ════════════════════════════════════════════
 // 测试 10: GraphRuntimeState 生命周期压力 — 并发 submit/cancel/wait/releaseTask
-// 验证共享图状态下 TaskGate/看门狗/状态表在交错生命周期操作下无崩溃/死锁
+// 验证共享图状态下 TaskGate/任务 lambda/状态表在交错生命周期操作下无崩溃/死锁
 // ════════════════════════════════════════════
 
 void testConcurrentTaskLifecycleStress() {
 	TEST("concurrent submit/cancel/wait/releaseTask stress (shared GraphRuntimeState)") {
 		InferGraph graph;
 		// 每线程独立节点：节点级互斥（Reentrant 丢弃）是既有设计，
-		// 本测试聚焦并发任务生命周期（TaskGate/看门狗/状态表/OutputZone）的安全性
+		// 本测试聚焦并发任务生命周期（TaskGate/任务 lambda/状态表/OutputZone）的安全性
 		constexpr int kThreads = 4;
 		constexpr int kIters = 150;
 		for (int t = 0; t < kThreads; ++t) {
@@ -551,7 +552,7 @@ int main() {
 		testBasicGraphEmbedding();
 		testBranchSubgraph();
 		testThreeLevelNesting();
-		testSubgraphTimeout();
+		testSubgraphLoopTTL();
 		testChainedSubgraphs();
 		testSubgraphInputSchema();
 		testEmptyInterfaceSubgraph();

@@ -13,7 +13,7 @@ class TaskExecutionDomain; // 定义见 Graph/internal/TaskExecutionState.h（�
 
 /// @brief 图运行时状态：异步飞行任务的共享生命周期锚点。
 ///
-/// InferGraph 与全部飞行中的任务 lambda / TaskGate / 超时看门狗共同持有
+/// InferGraph 与全部飞行中的任务 lambda / TaskGate 共同持有
 /// 本状态的 shared_ptr：图对象先行析构时，已提交任务所需的
 /// 冻结快照 / 输出区 / 信号 / 诊断组件仍然存活——异步任务的生命周期安全
 /// 由所有权直接保证，不再依赖成员声明顺序与析构顺序约定。

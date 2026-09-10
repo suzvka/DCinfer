@@ -24,7 +24,6 @@ class OutputZone;
 class SignalStore;
 class ErrorTracker;
 struct GraphRuntimeState;
-class TimerService; // 定义见 Graph/internal/TimerService.h（引擎内部组件，仅 .cpp 可见）
 
 /// @brief 推理图执行引擎：事件驱动的数据流传播与调度。
 ///
@@ -32,7 +31,7 @@ class TimerService; // 定义见 Graph/internal/TimerService.h（引擎内部组
 /// - 异步提交 task（submit）
 /// - 节点完成事件驱动的数据传播（_propagateFrom / _submitNodeRun）
 /// - task 生命周期管理（_terminate / _isTerminated）
-/// - 超时看门狗与耗尽检测
+/// - 传播耗尽检测（节点自报失败 → 终止为 Failed；纯信号停滞 → 宿主护栏）
 /// - 同步等待（wait）
 ///
 /// 不持有图拓扑、输出区、信号仓库、错误收集器——任务经
@@ -61,8 +60,7 @@ public:
 	/// @brief  析构：先在全部状态成员存活时释放残余活动门控。
 	///         若留到成员析构阶段，门控析构触发的 _exhaustedCheck 将访问
 	///         已析构的 _blockedSkips 等状态。
-	/// @note   定义于 .cpp（TimerService 以不完整类型持有）；
-	///         成员逆序析构：定时器线程最先停止 → 线程池 → 状态成员。
+	/// @note   定义于 .cpp（先移出并释放残余门控，再经成员逆序析构关闭线程池）。
 	~ExecutionEngine();
 
 	ExecutionEngine(const ExecutionEngine&) = delete;
@@ -75,16 +73,17 @@ public:
 	/// @brief  异步启动整张图的计算
 	/// @throws GraphException(NoDeclaration) 若提交时未携带输出声明
 	///         （InferGraph::submit 的 declarations / submitBound 已先行声明）
-	/// @note   state 为图运行时状态共享句柄：任务 lambda / TaskGate / 看门狗
-	///         各持一份，图对象先行析构时在飞任务所需的图组件仍存活
-	void submit(const TaskId& taskId, std::chrono::milliseconds timeout, uint32_t maxHops,
+	/// @throws GraphException(UnreachableDeclaration) 声明目标在运行时视图上
+	///         从已注入输入的节点集合纯拓扑不可达（构图/断链错误，提交期即暴露）
+	/// @note   state 为图运行时状态共享句柄：任务 lambda / TaskGate 各持一份，
+	///         图对象先行析构时在飞任务所需的图组件仍存活
+	void submit(const TaskId& taskId, uint32_t maxHops,
 				const std::shared_ptr<GraphRuntimeState>& state);
 
 	// ── 同步等待 ──
 
 	/// @brief  同步等待 task 终止
 	/// @param  timeout 等待超时；count() <= 0 视为无限等待
-	///         （与 submit 的执行超时 0=不限时约定一致）
 	/// @return true 在超时内终止且声明输出已就绪可读取（wait 返回后
 	///         takeOutput 必能取到已声明输出）；false 超时，或 taskId 未知
 	///         （从未提交/已释放，无限等待模式下立即返回）。任务未被取消。
@@ -93,7 +92,7 @@ public:
 	// ── task 状态与取消 ──
 
 	/// @brief  查询 task 当前状态
-	/// @return Unknown=从未提交；Running=执行中；Succeeded/Failed/TimedOut/Cancelled=已终止
+	/// @return Unknown=从未提交；Running=执行中；Succeeded/Failed/Cancelled=已终止
 	TaskStatus status(const TaskId& taskId) const;
 
 	/// @brief  请求取消活动中的 task（幂等；未知或已终止返回 false）。
@@ -118,16 +117,19 @@ public:
 	}
 
 private:
-	// ── 任务门控：shared_ptr 生命周期驱动耗尽检测 ──
+	// ── 任务门控：在飞计数驱动耗尽检测 ──
 	//
-	// 每个飞行中的任务 lambda（含后续传播链）与超时定时器回调各持有一份
-	// shared_ptr<TaskGate>。当最后一个持有者析构时，若 task 未被终止，
-	// 则触发 _exhaustedCheck。
+	// 每次节点执行 lambda 提交前 inflight+1、lambda 收尾（RAII）时 -1；
+	// 归零且 task 未终止时由最后完成的 lambda 触发 _exhaustedCheck——取代原
+	// "最后一个持有者析构"方案（活动门控表强持有 gate 至 _terminate，
+	// 传播耗尽时析构实际不会发生，耗尽检测依赖看门狗收尾）。
 	struct TaskGate {
 		std::atomic<bool> terminated{false};
+		/// 在飞节点执行 lambda 计数（submit 入口与传播下游提交时 +1）
+		std::atomic<uint32_t> inflight{0};
 		ExecutionEngine* engine = nullptr;
-		/// 图运行时状态共享句柄：TaskGate、任务 lambda、看门狗与 InferGraph
-		/// 共同持有，图对象先行析构时在飞任务所需的图组件仍存活
+		/// 图运行时状态共享句柄：TaskGate、任务 lambda 与 InferGraph 共同持有，
+		/// 图对象先行析构时在飞任务所需的图组件仍存活
 		std::shared_ptr<GraphRuntimeState> state;
 		TaskId taskId;
 
@@ -158,27 +160,11 @@ private:
 	void _exhaustedCheck(const TaskId& taskId,
 						 const std::shared_ptr<GraphRuntimeState>& state);
 
-	// ── 超时定时器（引擎级共享 TimerService）──
-
-	/// @brief  注册超时条目（timeout <= 0 不设防）
-	/// @note   回调捕获本提交的 gate：到点先校验 _activeGates 
-	void _scheduleWatchdog(const TaskId& taskId, std::chrono::milliseconds timeout,
-						   const std::shared_ptr<GraphRuntimeState>& state,
-						   const std::shared_ptr<TaskGate>& gate);
-
-	/// @brief  失效 task 的超时条目（_terminate 调用；O(1) 作废，无线程 join）
-	void _cancelWatchdog(const TaskId& taskId);
-
-	/// @brief  定时器到点：提交唯一性校验 → gate 仲裁 → 诊断 + 终止（原看门狗线程体）
-	void _onWatchdogFired(const TaskId& taskId, std::chrono::milliseconds timeout,
-						  const std::shared_ptr<GraphRuntimeState>& state,
-						  const std::shared_ptr<TaskGate>& gate);
-
 	// ── 运行时诊断 ──
 
 	/// @brief  异常终止前的诊断：将未满足声明、信号阻塞节点等信息写入 ErrorTracker。
 	///         必须在 _terminate 之前调用（_terminate 会清理 OutputZone 和 _blockedSkips）。
-	/// @param  reason  终止原因描述（如 "task timed out (5000ms)"）
+	/// @param  reason  终止原因描述（如 "propagation exhausted with failed node 'x'"）
 	void _diagnoseAbnormal(const TaskId& taskId, const std::string& reason,
 						   const std::shared_ptr<GraphRuntimeState>& state);
 
@@ -190,12 +176,12 @@ private:
 
 	// ── 成员 ──
 	// 声明顺序即析构顺序约束：
-	//   状态成员最先声明 → 最后析构；线程池与定时器最后声明 → 最先析构。
-	// 析构顺序：定时器(stop/join timer 线程) → 池(shutdown/join worker) → 共享表 → 状态。
+	//   状态成员最先声明 → 最后析构；线程池最后声明 → 最先析构。
+	// 析构顺序：池(shutdown/join worker) → 共享表 → 状态。
 	// 保证池 worker 上的任务 lambda 在 join 期间访问 _isTerminated
-	// 等状态、以及向池提交任务时，所有对象均存活；定时器先于池停止，
+	// 等状态、以及向池提交任务时，所有对象均存活。
 	// （图组件生命周期由 GraphRuntimeState shared_ptr 保证，不依赖本表顺序。）
-	// task 状态表：Running → 终态（Succeeded/Failed/TimedOut/Cancelled）。
+	// task 状态表：Running → 终态（Succeeded/Failed/Cancelled）。
 	// 终态发布（status 迁移）与"结果可读"是两个完成点：resultsReady 在
 	// _terminate 完成声明输出抢救（步骤⑥）后置位，wait() 谓词绑定它，
 	// 保证 wait 返回后经 takeOutput 必能读到声明输出。
@@ -227,17 +213,6 @@ private:
 	ThreadPool _computePool;
 	ThreadPool _operatorPool;
 	ThreadPool _systemPool;
-
-	// ── 共享超时定时器（引擎级；声明在成员列表最末 → 引擎析构时最先停止）──
-	//
-	// 每条带超时的 submit 只登记一个 deadline 条目，终止路径 O(1) 作废，无线程创建/回收。
-	// _timerHandles：taskId → 存活条目句柄。submit 注册、_terminate 摘除；
-	// fire 触发经活动门控身份校验仲裁（见 _onWatchdogFired），
-	std::unordered_map<TaskId, uint64_t> _timerHandles;
-	std::mutex _timerHandlesMutex;
-
-	/// 引擎级共享超时定时器
-	std::unique_ptr<TimerService> _timer;
 };
 
 } // namespace DC

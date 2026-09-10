@@ -132,8 +132,12 @@ if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
 （按公共别名定位，取出即不可重复读取）。图级注入与取用统一**仅按公共别名寻址**
 （`bindInput(alias, node, port)` / `bindOutput(alias, node, port)`）。
 `waitForResult(taskId)` 默认无限等待直至终止，可能阻塞的场景改用显式超时重载
-`waitForResult(taskId, 5s)` 或从其他线程 `cancel()`。复用已终止的 taskId 合法；
-活动任务重复提交会抛出明确错误；支持 `cancel()` / `taskStatus()` / `releaseTask()`。
+`waitForResult(taskId, 5s)` 或从其他线程 `cancel()`。执行超时由节点实现方自行负责
+（引擎不设执行超时；节点内部超时失败经 `NodeResult` + `Diagnostic` 自报，任务终止为
+`Failed`）；`waitForResult` 的超时仅是宿主护栏（放弃等待，不取消任务）。复用已终止的
+taskId 合法；活动任务重复提交会抛出明确错误；支持 `cancel()` / `taskStatus()` /
+`releaseTask()`。submit 时声明目标在拓扑上不可达会立即抛
+`GraphException(UnreachableDeclaration)`（构图/断链错误）。
 
 ### 默认构建内容
 

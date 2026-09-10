@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **移除执行时间看门狗（时间语义归节点实现方）**：`submit` / `submitBound` 不再接受
+  执行超时参数，`TaskStatus::TimedOut` 状态删除（破坏性 API 变更）。理由：通用执行
+  引擎跨平台无一致的时钟语义，且模型运行时长只有节点实现方有解释权（如 DCNet 的
+  `NetEndpoint::timeout` + `ctx.failure(ExecutionFailed, msg, Diagnostic)` 自报范式），
+  调度器设定无意义的超时。配套语义补齐：
+  - **节点失败闭环**：传播耗尽且存在 Error 级诊断时，任务终止为 `Failed`（不再依赖
+    看门狗/挂起）。实现：`TaskGate` 增加在飞计数 `inflight`，节点执行 lambda 提交即
+    +1、RAII 收尾 -1，归零触发 `_exhaustedCheck`——取代原“最后持有者析构”方案
+    （活动门控表强持有 gate 至 `_terminate`，该析构路径实际不触发）；纯信号停滞
+    （无 Error）保持挂起，由宿主 `waitForResult(timeout)` + `cancel()` 解围
+  - **提交期拓扑守卫**：`submit` 时对本次声明做纯拓扑可达性检测（忽略信号阻断，
+    避免误伤合法挂起构图），构图/断链错误无需再等待异步挂起与宿主兜底，
+    在提交时刻即抛 `GraphException(UnreachableDeclaration)`；
+    `SignalProbe` 新增 `canSatisfyTopologically`（纯拓扑版，原信号语义函数保留供
+    exportNode 使用）
+  - `waitForResult(taskId, timeout)` 保留但重新定位为**宿主护栏**：只放弃等待，
+    不参与图时间语义、不取消任务
+  - 删除 `TimerService`（引擎级共享定时器）及看门狗注册/失效/到点仲裁链；
+    `_timerHandles` / `_timer` 成员移除，`ExecutionEngine` 析构顺序简化（定时器先停约束消失）
 - **图级绑定统一为强制公共别名（消除同名重载的语义分叉）**：删除
   `bindInput(nodeName, portName)` / `bindOutput(nodeName, portName)` 两参重载，
   仅保留 `(alias, nodeName, portName)` —— 原两参/三参重载的第一参数含义不同

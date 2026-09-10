@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace DC {
 
@@ -32,6 +33,16 @@ public:
 		std::lock_guard lk(_mutex);
 		auto it = _nodes.find(nodeName);
 		return it != _nodes.end() ? it->second.get() : nullptr;
+	}
+
+	/// @brief  返回已创建执行态的节点名列表（已注入 input/传播触及的节点）
+	std::vector<std::string> nodeNames() {
+		std::lock_guard lk(_mutex);
+		std::vector<std::string> names;
+		names.reserve(_nodes.size());
+		for (const auto& [name, _] : _nodes)
+			names.push_back(name);
+		return names;
 	}
 
 private:

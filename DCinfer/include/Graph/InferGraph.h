@@ -138,30 +138,30 @@ public:
 	/// @brief  异步启动整张图的计算。输出声明直接作为 submit 参数，消除 temporal coupling。
 	/// @param  declarations  期望产出：{nodeName, portName, count} 列表
 	/// @throws GraphException(DuplicateTask) 若同 taskId 任务仍在执行
+	/// @throws GraphException(UnreachableDeclaration) 声明目标拓扑不可达（提交期即暴露）
 	/// @note   复用已终止的 taskId 合法：上一轮的声明/结果/诊断随之清理。
 	///         输出在 task 终止后仍保留，供 waitForResult → takeOutput 取用。
+	///         执行超时由节点实现方自行负责（失败经 NodeResult + Diagnostic 自报）。
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
-				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
 		_ensureFrozen();                     // 惰性冻结：首次提交即编译（此后拓扑不可变）
 		_ensureSubmittable(taskId);
 		_state->errors.clearTask(taskId);    // 上一轮诊断不残留（影响 taskStatus 归一化）
 		_state->output.clearTask(taskId);    // 复用同 ID：清掉上一轮声明/累加/结果
 		_state->output.declare(taskId, std::move(declarations));
-		_engine->submit(taskId, timeout, maxHops, _state);
+		_engine->submit(taskId, maxHops, _state);
 	}
 
 	/// @brief  单输出便捷重载（生命周期语义同上）
 	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 				size_t count = 1,
-				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = kDefaultMaxHops) {
 		_ensureFrozen();                     // 惰性冻结：首次提交即编译（此后拓扑不可变）
 		_ensureSubmittable(taskId);
 		_state->errors.clearTask(taskId);
 		_state->output.clearTask(taskId);
 		_state->output.declare(taskId, nodeName, portName, count);
-		_engine->submit(taskId, timeout, maxHops, _state);
+		_engine->submit(taskId, maxHops, _state);
 	}
 
 	// ── 结果获取（消费式：取出即消耗）──
@@ -194,13 +194,12 @@ public:
 	///         已 bindOutput 的端口无需在 submit 时重复声明。
 	/// @throws GraphException(NoDeclaration) 未 bindOutput 任何端口
 	void submitBound(const TaskId& taskId,
-					 std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 					 uint32_t maxHops = kDefaultMaxHops);
 
 	// ── task 生命周期（状态 / 取消 / 结构化等待 / 资源回收）──
 
 	/// @brief  查询 task 当前状态
-	/// @return Unknown=从未提交；Running=执行中；Succeeded/TimedOut/Cancelled=已终止；
+	/// @return Unknown=从未提交；Running=执行中；Succeeded/Failed/Cancelled=已终止；
 	///         Succeeded 但存在 Error 级诊断时归一化为 Failed（部分节点执行失败）
 	TaskStatus taskStatus(const TaskId& taskId) const;
 
@@ -368,7 +367,7 @@ private:
 
 	// ── 内部组件 ──
 	// 图状态（graph/output/signals/errors）聚合为共享的 GraphRuntimeState：
-	// 飞行任务经 TaskGate/任务 lambda/看门狗持有同一 shared_ptr，图组件的
+	// 飞行任务经 TaskGate/任务 lambda 持有同一 shared_ptr，图组件的
 	// 存活期由引用计数保证，不再依赖成员声明顺序约定。
 	// _builder 为构建期唯一可变面（compile 时拓扑所有权移交快照）；
 	// ExecutionEngine 保持与图同生命周期：engine 最后声明 → 最先析构，

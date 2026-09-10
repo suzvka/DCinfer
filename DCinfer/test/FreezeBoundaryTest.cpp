@@ -206,7 +206,7 @@ static void test_runtimeLifecycleOnFrozenGraph() {
 	b.bindSignal(graph.signalStore(), "gate");
 
 	graph.feedInput("t1", "a", "x", floatTensor(1.0f));
-	graph.submit("t1", "b", "y"); // 无看门狗 + gate 阻塞 → 任务挂起
+	graph.submit("t1", "b", "y"); // 无执行超时 + gate 阻塞 → 挂起，宿主 wait+cancel 解围
 	graph.setSignal("gate", false);
 
 	CHECK(graph.waitForResult("t1", std::chrono::milliseconds(80)).status == TaskStatus::Running,
@@ -215,7 +215,13 @@ static void test_runtimeLifecycleOnFrozenGraph() {
 	CHECK(graph.cancel("t1"), "cancel on frozen graph should work");
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "wait should wake after cancel");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Cancelled, "status should be Cancelled");
-	CHECK(graph.taskErrors("t1").empty(), "no errors expected on clean cancel");
+	// 新语义：传播耗尽时引擎写入 Warning 级停滞诊断（声明未满足/信号阻塞）；
+	// clean cancel 允许诊断保留，但不得有 Error 级记录
+	bool hasErrorLevel = false;
+	for (const auto& e : graph.taskErrors("t1"))
+		if (e.level == DiagnosticLevel::Error)
+			hasErrorLevel = true;
+	CHECK(!hasErrorLevel, "no error-level diagnostics expected on clean cancel");
 
 	// 释放后状态归零（运行期 API 不受冻结影响）
 	graph.releaseTask("t1");

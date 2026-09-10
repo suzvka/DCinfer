@@ -23,6 +23,7 @@ public:
 		Frozen,              ///< 图已冻结（compile/首次提交后拓扑不可变，构建 API 拒绝）
 		ExecutionFailed,     ///< 线程池中 Node::tryExecute 抛出 NodeException
 		PropagateFailed,     ///< 数据传播链中写下游输入失败
+		UnreachableDeclaration, ///< submit 时声明目标在拓扑上不可达（构图/断链错误）
 		Other                ///< 其他未分类的错误
 	};
 
@@ -81,6 +82,9 @@ private:
 			break;
 		case ErrorType::PropagateFailed:
 			errorStr = "Propagate Failed";
+			break;
+		case ErrorType::UnreachableDeclaration:
+			errorStr = "Unreachable Output Declaration";
 			break;
 		case ErrorType::Other:
 			errorStr = "Other";

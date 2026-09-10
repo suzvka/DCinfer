@@ -165,7 +165,7 @@ static void test_ttlCountsRuntimeVertices() {
 	graph.bindOutput("out", "c", "y");
 
 	graph.feedInput("t1", "a", "x", floatTensor(3.0f));
-	graph.submit("t1", "c", "y", 1, std::chrono::milliseconds(2000), /*maxHops=*/2);
+	graph.submit("t1", "c", "y", 1, /*maxHops=*/2);
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "maxHops=2 suffices for 2-runtime-vertex chain (wire consumes no TTL)");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status Succeeded");
 
@@ -176,7 +176,7 @@ static void test_ttlCountsRuntimeVertices() {
 	g2.connect("a", "y", "c", "x");
 	g2.bindOutput("out", "c", "y");
 	g2.feedInput("t1", "a", "x", floatTensor(3.0f));
-	g2.submit("t1", "c", "y", 1, std::chrono::milliseconds(2000), /*maxHops=*/1);
+	g2.submit("t1", "c", "y", 1, /*maxHops=*/1);
 	g2.waitForResult("t1");
 	CHECK(g2.taskStatus("t1") == TaskStatus::Failed, "maxHops=1 exhausts TTL on 2-vertex chain");
 	bool ttlMsg = false;
@@ -215,10 +215,10 @@ static void test_cycleTtlStillBounded() {
 	CHECK(graph.nodeCount() == 4, "source view keeps 4 nodes");
 
 	// maxHops=6：新语义下预算 6 → a 执行 ≥3 次（旧语义每业务 hop 耗 2，只能 2 次）。
-	// 声明一个永不产出的端口，避免首次环回即满足声明提前 Succeeded——
-	// 由 TTL 兑底终止（本用例验证的就是 TTL 行为）。
+	// 声明真实存在节点 a 的端口但 count 极大（1000），6 跳内不可能满足——
+	// 避免首次环回即满足声明提前 Succeeded，由 TTL 兑底终止（本用例验证的就是 TTL 行为）。
 	graph.feedInput("t1", "a", "x", floatTensor(0.0f));
-	graph.submit("t1", "never", "y", 1, std::chrono::milliseconds(2000), /*maxHops=*/6);
+	graph.submit("t1", "a", "y", 1000, /*maxHops=*/6);
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "cycle should terminate by TTL");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Failed, "cycle ends Failed (TTL exhausted)");
 	CHECK(aRuns.load() >= 3, "TTL budget stretches after lowering (a runs >= 3 times)");
@@ -276,9 +276,10 @@ static void test_errorPropagationThroughLoweredEdge() {
 	graph.bindOutput("out", "down", "y");
 
 	graph.feedInput("t1", "fail", "x", floatTensor(1.0f));
-	graph.submit("t1", "down", "y", 1, std::chrono::milliseconds(500));
-	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "watchdog should terminate the stuck task");
-	CHECK(graph.taskStatus("t1") == TaskStatus::TimedOut, "upstream failure → declaration unmet → TimedOut");
+	graph.submit("t1", "down", "y", 1);
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running,
+		  "failed upstream → propagation exhausted → task terminates");
+	CHECK(graph.taskStatus("t1") == TaskStatus::Failed, "upstream failure → declaration unmet → Failed");
 	bool failRecorded = false;
 	for (const auto& e : graph.taskErrors("t1"))
 		if (e.nodeName == "fail" && e.level == DiagnosticLevel::Error)

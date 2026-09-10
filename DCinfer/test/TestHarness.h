@@ -66,7 +66,6 @@ public:
 	/// @brief  单输出便捷提交：声明输出 + 异步启动
 	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 				size_t count = 1,
-				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
 		// 记录位置供回调捕获
 		{
@@ -74,12 +73,11 @@ public:
 			_declaredOutputs[taskId].emplace_back(nodeName, portName);
 		}
 		_setupCallback();
-		_graph.submit(taskId, nodeName, portName, count, timeout, maxHops);
+		_graph.submit(taskId, nodeName, portName, count, maxHops);
 	}
 
 	/// @brief  多输出提交：声明多个输出 + 异步启动
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
-				std::chrono::milliseconds timeout = std::chrono::milliseconds(0),
 				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
 		{
 			std::lock_guard lk(_declMutex);
@@ -88,7 +86,7 @@ public:
 			}
 		}
 		_setupCallback();
-		_graph.submit(taskId, std::move(declarations), timeout, maxHops);
+		_graph.submit(taskId, std::move(declarations), maxHops);
 	}
 
 	// ── 同步等待 ──

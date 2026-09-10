@@ -1,9 +1,9 @@
 #include "ExecutionEngine.h"
 #include "GraphRuntimeState.h"
 #include "Graph/internal/TaskExecutionState.h"
-#include "Graph/internal/TimerService.h"
 #include "GraphStore.h"
 #include "OutputZone.h"
+#include "SignalProbe.h"
 #include "SignalStore.h"
 #include "ErrorTracker.h"
 #include "GraphException.h"
@@ -33,14 +33,12 @@ ExecutionEngine::ExecutionEngine(const PoolConfig& computeCfg,
 								 const PoolConfig& systemCfg)
 	: _computePool(computeCfg),
 	  _operatorPool(operatorCfg),
-	  _systemPool(systemCfg),
-	  _timer(std::make_unique<TimerService>()) {}
+	  _systemPool(systemCfg) {}
 
 ExecutionEngine::~ExecutionEngine() {
 	// 先将活动门控表整体移出（锁外释放）：门控析构触发的 _exhaustedCheck
 	// 可能经 _terminate 重入本表，锁内 clear 会自死锁。
-	// 成员随后逆序析构：定时器线程最先停止（早于池 shutdown），
-	// 之后线程池 join 全部 worker，状态成员最后释放。
+	// 成员随后逆序析构：线程池先 shutdown/join，状态成员最后释放。
 	decltype(_activeGates) leftover;
 	{
 		std::lock_guard lk(_activeGatesMutex);
@@ -74,8 +72,27 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 									 const std::shared_ptr<GraphRuntimeState>& state) {
 	// 捕获 state 共享句柄：图拓扑/输出区/信号/诊断的存活期由引用计数保证，
 	// 与图对象析构顺序无关（gate 与 lambda 各持一份）
+	// 在飞计数 +1：submit 入口扫描与传播下游提交统一经本函数促发
+	gate->inflight.fetch_add(1, std::memory_order_acq_rel);
 	_dispatchToPool(node->affinity(),
 					[this, node, nodeName, taskId, gate, remainingHops, state] {
+		// 在飞计数收尾（RAII）：任何退出路径均经本析构递减；归零且 task
+		// 未终止时由最后完成的 lambda 触发耗尽检测——取代原"最后持有者
+		// 析构"方案（活动门控表强持有 gate 至 _terminate，耗尽时析构
+		// 实际不发生，原依赖看门狗收尾）。
+		struct RunDone {
+			std::shared_ptr<TaskGate> gate;
+			ExecutionEngine* engine;
+			TaskId taskId;
+			std::shared_ptr<GraphRuntimeState> state;
+			~RunDone() {
+				if (gate->inflight.fetch_sub(1, std::memory_order_acq_rel) == 1
+					&& !gate->terminated.load(std::memory_order_acquire)) {
+					engine->_exhaustedCheck(taskId, state);
+				}
+			}
+		} done{gate, this, taskId, state};
+
 		auto& errors = state->errors;
 		NodeResult result;
 		// task 态取自 task 执行域，执行闸按节点名定位：
@@ -94,7 +111,7 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 			return;
 		}
 
-		// 任务已终止（超时/取消/同 ID 复用竞态）→ 丢弃本轮结果，不传播。
+		// 任务已终止（取消/同 ID 复用竞态）→ 丢弃本轮结果，不传播。
 		// gate 级检查而非 taskId 级：复用后旧任务的 lambda 不得污染新任务。
 		if (gate->terminated.load(std::memory_order_acquire))
 			return;
@@ -129,8 +146,8 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 // 异步提交：事件驱动的数据传播
 // ════════════════════════════════════════════
 
-void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds timeout,
-							 uint32_t maxHops, const std::shared_ptr<GraphRuntimeState>& state) {
+void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
+							 const std::shared_ptr<GraphRuntimeState>& state) {
 	auto& output = state->output;
 	auto& graph = state->graph->runtimeView();
 
@@ -158,7 +175,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	}
 
 	// 创建任务门控：任务 lambda 链、超时触发路径与 cancel() 共享；
-	// 注册到活动表供 cancel() 定位与 _onWatchdogFired 身份校验，_terminate 时移除
+	// 注册到活动表供 cancel() 定位门控，_terminate 时移除
 	auto gate = std::make_shared<TaskGate>();
 	gate->engine = this;
 	gate->state = state; // 与图对象共享图运行时状态（在飞任务保活）
@@ -168,9 +185,24 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 		_activeGates[taskId] = gate;
 	}
 
-	// 超时看门狗：引擎级共享 TimerService 条目（无 per-task 线程；
-	// 到点处理与仲裁链见 _onWatchdogFired）
-	_scheduleWatchdog(taskId, timeout, state, gate);
+	// 提交期拓扑守卫：声明目标必须从"已注入输入的节点 ∪ 输入绑定节点"
+	// 纯拓扑可达。忽略信号——信号阻断属合法运行期状态，由宿主 wait+cancel
+	// 解围；构图/断链等确定性错误才在提交期立即暴露。
+	std::vector<std::string> starts;
+	if (auto taskExec = state->exec->findTaskState(taskId))
+		starts = taskExec->nodeNames(); // 已注入输入的节点
+	for (const auto& b : state->graph->signature().inputs)
+		starts.push_back(b.nodeName);
+	std::unordered_set<std::string> targets;
+	for (const auto& d : output.declarationsOf(taskId))
+		targets.insert(d.nodeName);
+	if (!starts.empty() && !targets.empty()
+		&& !canSatisfyTopologically(state->graph->runtimeView(), starts, targets)) {
+		throw GraphException(GraphException::ErrorType::UnreachableDeclaration,
+							 "ExecutionEngine::submit",
+							 "declared output is topologically unreachable from any fed input "
+							 "node (cycle/break in graph construction)");
+	}
 
 	// 扫描全图（运行时视图），对所有已就绪的节点提交执行任务（执行完成后再传播下游）。
 	// 就绪查询仅针对已有 task 态条目（feedInput 时创建）：无条目 = 无暂存输入 = 未就绪
@@ -211,7 +243,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 		return;
 	}
 
-	// [检查点 1] 入口：若本轮任务已终止（超时/取消/同 ID 复用竞态），直接返回。
+	// [检查点 1] 入口：若本轮任务已终止（取消/同 ID 复用竞态），直接返回。
 	// gate 级检查而非 taskId 级 _isTerminated：复用后旧 lambda 不得继续传播。
 	if (gate->terminated.load(std::memory_order_acquire)) {
 		return;
@@ -231,7 +263,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 	for (const auto& outPort : src->schema().outputs) {
 		if (!srcNs || !srcNs->buffer.hasOutput(taskId, outPort.name))
 			continue;
-		// 终止复查：打卡写入前再确认本轮未被终止（取消/超时可能在检查点 1 之后触发）
+		// 终止复查：打卡写入前再确认本轮未被终止（取消可能在检查点 1 之后触发）
 		if (gate->terminated.load(std::memory_order_acquire))
 			return;
 		if (output.accumulateAndCheck(nodeName, outPort.name, taskId)) {
@@ -320,7 +352,6 @@ bool ExecutionEngine::_resultsReady(const TaskId& taskId) const {
 void ExecutionEngine::_terminate(const TaskId& taskId,
 								 const std::shared_ptr<GraphRuntimeState>& state,
 								 TaskStatus terminalStatus) {
-	auto& graph = state->graph->runtimeView();
 	auto& output = state->output;
 	auto& signals = *state->signals;
 	{
@@ -333,12 +364,7 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 		it->second.status = terminalStatus;
 	}
 
-	// ① 失效超时条目（若存在）
-	//    引擎级 TimerService：O(1) 作废，无线程可回收——原 per-task 看门狗
-	//    的 join 回收与 _retiredWatchdogs 自 join 补丁随之移除。
-	_cancelWatchdog(taskId);
-
-	// ② 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
+	// ① 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
 	//    锁内拷贝、锁外调用：避免回调重入死锁
 	TaskCompleteCallback cb;
 	{
@@ -362,8 +388,8 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 	// ⑥ 抢救结果 + 清理 task 执行态：
 	//    终止路径在打卡满足后直接返回，声明端口的数据仍留在 task 缓冲。
 	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → takeOutput 可取，
-	//    含看门狗/取消路径的部分结果），再整体清除该 task 的节点执行态。
-	//    回调在②已先行触发，其消费过的端口 hasOutput=false 自然跳过。
+	//    含取消路径的部分结果），再整体清除该 task 的节点执行态。
+	//    回调在①已先行触发，其消费过的端口 hasOutput=false 自然跳过。
 	if (auto taskExec = state->exec->findTaskState(taskId)) {
 		for (const auto& decl : output.declarationsOf(taskId)) {
 			auto* ns = taskExec->find(decl.nodeName);
@@ -395,13 +421,12 @@ void ExecutionEngine::_terminate(const TaskId& taskId,
 }
 
 // ════════════════════════════════════════════
-// 耗尽检测：TaskGate 析构或超时触发
+// 耗尽检测：在飞 lambda 归零触发（TaskGate 析构仅作引擎析构兜底）
 // ════════════════════════════════════════════
 
 void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
 									  const std::shared_ptr<GraphRuntimeState>& state) {
 	auto& output = state->output;
-	auto& graph = state->graph->runtimeView();
 	// 已终止则跳过
 	if (_isTerminated(taskId)) {
 		return;
@@ -416,73 +441,30 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
 		return;
 	}
 
-	// 声明未满足：传播链已耗尽但输出声明未达成。
-	// 写入诊断警告，但不主动终止——留给看门狗（若已配置）处理真正的死锁。
-	// 若未配置看门狗（timeout=0），调用方需自行处理 wait() 超时。
+	// 声明未满足：传播链已耗尽。区分两类结局——
+	// ① 存在 Error 级诊断（节点自报失败）：实现方拥有时间/失败解释权，
+	//    任务终止为 Failed（节点失败闭环，不再依赖看门狗/任务挂起）。
+	// ② 仅有 Warning 或无诊断（如信号阻塞停滞）：保持挂起，宿主 wait(t)+cancel 解围。
+	auto errors = state->errors.taskErrors(taskId);
+	bool hasError = false;
+	for (const auto& e : errors) {
+		if (e.level == DiagnosticLevel::Error) {
+			hasError = true;
+			break;
+		}
+	}
+	if (hasError) {
+		_diagnoseAbnormal(taskId,
+						  "propagation chain exhausted with error-level diagnostics "
+						  "(node-reported failure)",
+						  state);
+		_terminate(taskId, state, TaskStatus::Failed);
+		return;
+	}
+
+	// 无 Error：不主动终止，保持挂起，宿主护栏接管
 	_diagnoseAbnormal(taskId, "propagation chain exhausted with unsatisfied output declarations",
 					  state);
-}
-
-// ════════════════════════════════════════════
-// 超时定时器（引擎级共享 TimerService）
-// ════════════════════════════════════════════
-
-void ExecutionEngine::_scheduleWatchdog(const TaskId& taskId,
-										std::chrono::milliseconds timeout,
-										const std::shared_ptr<GraphRuntimeState>& state,
-										const std::shared_ptr<TaskGate>& gate) {
-	if (timeout.count() <= 0)
-		return; 
-
-	// 同 ID 残留条目先失效：活动 ID 重复提交已在 _taskStates 校验拒绝，
-	_cancelWatchdog(taskId);
-
-	auto deadline = std::chrono::steady_clock::now() + timeout;
-	// 回调捕获本提交 gate 与 state 共享句柄：图组件存活期由引用计数保证
-	//（同原看门狗线程体）；到点处理见 _onWatchdogFired
-	uint64_t handle = _timer->schedule(deadline, [this, taskId, timeout, state, gate] {
-		_onWatchdogFired(taskId, timeout, state, gate);
-	});
-
-	std::lock_guard lk(_timerHandlesMutex);
-	_timerHandles[taskId] = handle;
-}
-
-void ExecutionEngine::_cancelWatchdog(const TaskId& taskId) {
-	uint64_t handle = 0;
-	{
-		std::lock_guard lk(_timerHandlesMutex);
-		auto it = _timerHandles.find(taskId);
-		if (it == _timerHandles.end())
-			return;
-		handle = it->second;
-		_timerHandles.erase(it);
-	}
-	// 锁外调用：_timerHandlesMutex 与 timer 内部锁不嵌套持有
-	_timer->cancel(handle);
-}
-
-void ExecutionEngine::_onWatchdogFired(const TaskId& taskId,
-									   std::chrono::milliseconds timeout,
-									   const std::shared_ptr<GraphRuntimeState>& state,
-									   const std::shared_ptr<TaskGate>& gate) {
-	{
-		std::lock_guard lk(_activeGatesMutex);
-		auto it = _activeGates.find(taskId);
-		if (it == _activeGates.end() || it->second != gate)
-			return;
-	}
-
-	// ② gate 仲裁：与 cancel()/正常完成竞争唯一终止权（原看门狗语义）
-	if (gate->terminated.exchange(true, std::memory_order_acq_rel))
-		return;
-
-	// ③ 诊断 + 终止（顺序与原看门狗线程体一致）
-	std::string reason = "task timed out (" + std::to_string(timeout.count())
-						 + "ms) without meeting output declarations";
-	state->errors.recordError(taskId, "<watchdog>", "ExecutionEngine::submit", reason);
-	_diagnoseAbnormal(taskId, reason, state);
-	_terminate(taskId, state, TaskStatus::TimedOut);
 }
 
 // ════════════════════════════════════════════
@@ -535,7 +517,7 @@ void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string&
 // ════════════════════════════════════════════
 
 bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
-	// timeout <= 0 视为无限等待（与 submit 的执行超时 0=不限时约定一致）。
+	// timeout <= 0 视为无限等待（宿主护栏：只放弃等待，不作为执行超时语义）。
 	// 谓词绑定"终态 + 结果可读"：_terminate 先发布终态、后抢救声明输出
 	// （步骤⑥），仅查终态会让等待者早于结果就绪返回，破坏
 	// "wait 返回即可读"契约。
@@ -573,7 +555,7 @@ bool ExecutionEngine::cancel(const TaskId& taskId) {
 	if (!gate)
 		return false; // 未知或已终止（幂等）
 	if (gate->terminated.exchange(true, std::memory_order_acq_rel))
-		return false; // 已被正常路径/看门狗终止
+		return false; // 已被正常路径终止
 	// 传播链在下个检查点停止；缓冲与信号由 _terminate 照常清理
 	_terminate(taskId, gate->state, TaskStatus::Cancelled);
 	return true;
