@@ -67,7 +67,7 @@ DCNet 是**张量网络传输框架**，与 `DCEngines` 的本地引擎适配器
 
 ### 2.2 ADR-2：用 EngineDescriptor，不用 registerOperator
 
-- `EngineRegistry::registerOperator`（`EngineRegistry.h` L135-143）是无状态轻量路径，
+- `EngineRegistry::registerOperator`（`EngineRegistry.h`）是无状态轻量路径，
   承载不了连接池、健康检查、重连等实例状态；
 - DCNet 网络算子有连接生命周期，且"与 ONNX 适配器形态类似"本身就指向
   `EngineDescriptor` 形态（`createEngine` / 端口推导 / `factory` / 运行时钩子）。
@@ -150,7 +150,7 @@ DCinfer 节点暴露为可被现有出站 `send→recv` 远程驱动的监听服
 |---|---|---|
 | 1 | 组件形态归属 | **独立服务端组件**：`DcNetListener` + `registerDcNetServerAdapter`（不注册 EngineDescriptor，不动出站契约，§8 只增不改）；ADR-6(5)「单独设计」落于此 |
 | 2 | 鉴权分级 | **P1 仅 Bearer token**：`NetServerEndpoint::authToken` 非空时启用 Authorization 头校验（镜像出站 `authToken` 注入语义，裸 key / `Bearer` 前缀等价）；mTLS 与服务端证书配置后置 |
-| 3 | `RemoteMalformed` 的 wire 取值 | **415**（未列举状态码 → 对端兜底 RemoteMalformed → InternalError）；错误体 `malformed_frame` 仅为诊断细化 |
+| 3 | `RemoteMalformed` 的 wire 取值 | **415**（未列举状态码 → 对端兜底 RemoteMalformed → ExecutionFailed + dcnet 诊断）；错误体 `malformed_frame` 仅为诊断细化 |
 | 4 | `bind` 错误出口 | **配置期抛 `NodeException`**（对齐 `createEngine` 先例与 DESIGN.md §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（不崩溃、不静默丢弃） |
 | 5 | RunContext 生命周期 / 并发隔离 | **一请求一节点实例**（`EngineRegistry::createNode` 每请求构造，实例级隔离）；引擎实例按 `engineType + localModelRef` 缓存复用，本地执行互斥串行（引擎单任务语义）；**server codec 不暴露 `RunContext`**，以「端口名 ↔ 张量」为界 |
 | 6 | 装配入口命名 | 采用 **`registerDcNetServerAdapter(reg, DcNetServerAdapterDesc)`**；本地模型标识命名 **`localModelRef`**，避免与 modelPath=远端端点的全局约定冲突 |
@@ -162,11 +162,12 @@ DCinfer 节点暴露为可被现有出站 `send→recv` 远程驱动的监听服
 结果等于该失败在本地执行时的 status。鉴权 401/403、过载 429、wire 级垃圾报文
 415 无本地对应物，由监听/装配层直接应答（§6.1）。
 
-**已知解析限度**：非鉴权 `InternalError` 无忠实 wire 表示（对端仅 401/403 →
-RemoteAuth、未列举状态码 → RemoteMalformed 两条路映射到 InternalError），按
-「本地执行失败 → 5xx」应答 500 → 对端 ExecutionFailed。若集成实测要求严格
-一致，可选扩表方案：新增已知错误体 code → RemoteMalformed（finalize 为
-InternalError）——**暂不采纳**，重开条件：集成对拍实测需要。
+**已知解析限度**：非鉴权 `InternalError` 无忠实 wire 表示（对端 401/403 →
+RemoteAuth → InternalError 仅覆盖鉴权路径；未列举状态码 → RemoteMalformed →
+ExecutionFailed），按「本地执行失败 → 5xx」应答 500 → 对端 ExecutionFailed。
+若集成实测要求严格一致，可选扩表方案：新增已知错误体 code → RemoteMalformed
+（finalize 为 ExecutionFailed + dcnet 诊断）——**暂不采纳**，重开条件：集成
+对拍实测需要。
 
 **输入边界 schema 校验**：服务端在执行前对请求张量按节点本地 schema 校验端口名 /
 类型 / 形状（-1 动态维），违例 → 400 → 对端 InvalidInput（§6.1；镜像出站
@@ -249,7 +250,7 @@ R DcNetSync::syncAwait(const std::function<void(std::function<void(R)>)>& submit
 
 ### 3.4 本地形状规则（端口 Schema）
 
-复用 `Node::Port` 既有能力（`DCinfer/include/Node/Node.h` L50-92），由
+复用 `Node::Port` 既有能力（`DCinfer/include/Node/Node.h`），由
 `getInputPorts/getOutputPorts` 返回静态端口表：
 
 - 静态形状：`NodePort::in<float>("data", {1,3,224,224})`
@@ -337,7 +338,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 
 ## 5. 与 EngineDescriptor 的衔接
 
-每个协议族注册一个 engineType（如 `"DCNet.Tensor"` / `"OpenAI"`），组装 `EngineDescriptor`：
+每个协议族注册一个 engineType（如 `"DCNet.Tensor"` / `"OpenAI"`），组装 `EngineDescriptor`（执行钩子经 `ExecutionPhases phases` 嵌套携带；相位契约：preRun → RunFn → synchronize → postRun，任一相位失败 → onError）：
 
 | 钩子 | 实现 |
 |---|---|
@@ -346,22 +347,22 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | `factory` | 构造节点：`ThreadPoolAffinity::System` + RunFn + 绑定实例 |
 | `converter` | 不需要（文本经 `TensorType::Data` 承载）；tensor 级原生协议另行评估 |
 | `RunFn` | 见 §5.1 请求流程 |
-| `synchronize` | no-op（阻塞式 HTTP 同步返回） |
-| `preRun` | no-op（v1）；预留 warmup / 健康预检位 |
-| `postRun` | no-op（响应已在 RunFn 内解析） |
-| `onError` | 重连 / 实例状态重置（见 §5.2） |
-| `releaseEngine` | transport.close()，释放连接池 |
+| `synchronize` | 留空（阻塞式 HTTP 同步返回） |
+| `preRun` | 留空（v1）；warmup / 健康预检为预留位 |
+| `postRun` | 留空（响应已在 RunFn 内解析） |
+| `onError` | 留空（重连 / 实例状态重置属 M3 规划，见 §5.2） |
+| `releaseEngine` | 留空（transport 随实例共享句柄析构释放连接） |
 
 ### 5.1 RunFn 请求流程
 
-1. `ctx.engine()` 取 transport；检查 `alive()`，不健康先失败（可触发 onError 重连）
+1. `ctx.engine()` 取 transport（缺失直接失败；健康预检 / 重连属 M3 规划）
 2. codec.encodeRequest：读输入端口 → 拼对方请求报文
 3. transport.send / transport.recv（超时控制）
 4. 非成功 → NetError → 核心归一化 → `ctx.failure(...)`
 5. codec.decodeResponse：校验本地形状规则 → 写输出端口
 6. `ctx.success()`；耗时等指标按需输出
 
-### 5.2 崩溃恢复 / 重连
+### 5.2 崩溃恢复 / 重连（M3 规划；当前 onError 未启用）
 
 - 请求级失败只上报 `NodeResult::failure`，不触发重连（避免抖动）；
 - `onError` 钩子负责实例级恢复：close → 重新 connect → 重新就绪探测；
@@ -385,11 +386,11 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | HTTP 429 | RemoteRateLimited | true | `ExecutionFailed` | `remote:rate_limited` |
 | HTTP 5xx | RemoteServer | true | `ExecutionFailed` | `remote:server_error` |
 | 远端错误体 `{"error":{code,message}}` | 已知 code 精确映射（如 `invalid_api_key`→Auth、`rate_limit_exceeded`→RateLimited）；未知 code 按类别兜底 | 见 code | 见映射 | `remote:<code>` |
-| 报文不可解析 | RemoteMalformed | false | `InternalError` | `remote:malformed` |
+| 报文不可解析 | RemoteMalformed | false | `ExecutionFailed` | `remote:malformed` |
 
 出口统一：
 
-- 运行期：`Node::Result{status, message}`（`NodeStatus` 定义见 `Node.h` L125-131）；
+- 运行期：`Node::Result{status, message}`（`NodeStatus` 定义见 `Node.h`）；
 - 诊断：`ErrorTracker::recordError(taskId, nodeName, source, message)` 保留远端原始
   报文与本地归一化结果的对应关系；
 - 配置/编译期：非法端点、缺 transport/codec → 抛 `NodeException` / `GraphException`
@@ -415,15 +416,15 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | 入站失败 | wire 应答 | 对端归一化 |
 |---|---|---|
 | 鉴权失败 | 401 / 403 | RemoteAuth → `InternalError`（`remote:auth`） |
-| wire 级垃圾报文（codec decodeRequest 抛异常） | 415（未列举，[ADR-7 #3]） | RemoteMalformed → `InternalError`（`remote:malformed`） |
+| wire 级垃圾报文（codec decodeRequest 抛异常） | 415（未列举，[ADR-7 #3]） | RemoteMalformed → `ExecutionFailed`（`remote:malformed`） |
 | 过载（在途超 `maxInFlight`） | 429 | RemoteRateLimited → `ExecutionFailed`（retryable） |
-| 未知路径 / 非 POST | 404 / 405 | RemoteRejected → `InvalidInput` / RemoteMalformed → `InternalError` |
+| 未知路径 / 非 POST | 404 / 405 | RemoteRejected → `InvalidInput` / RemoteMalformed → `ExecutionFailed` |
 | 请求中止（对端已断开） | 无应答 | 对端自行归一化 `net:timeout` |
 
 > **解析限度（ADR-7）**：非鉴权 `InternalError` 无忠实 wire 表示（500 → 对端
 > ExecutionFailed），按「本地执行失败 → 5xx」采纳；严格一致的扩表方案
 > 见 ADR-7，暂不采纳。
-> **SchemaMismatch 备注**：本地当前无产出点（`Node.h` L125-131 预留），对端按 422
+> **SchemaMismatch 备注**：本地当前无产出点（`Node.h` 预留），对端按 422
 > 归一化为 InvalidInput 与本地形状违例现行行为一致；本地改产后本表无需变更
 > （`SchemaMismatch` 与 `InvalidInput` 同映 422/400 → InvalidInput，若需区分再扩表）。
 > 建议 `NetErrorTest` 的入站类用例与出站映射表同构维护（已落地：`wireRoundTripParity`）。
@@ -525,32 +526,11 @@ DCEngines/OpenAI/
   已知平台差异：POCO/Windows 的 WSAPoll 不上报 connect 失败，带超时探测下
   拒绝连接表现为 Timeout（仍为可重试 ExecutionFailed）；POSIX 报 Unreachable。
 
-**CMake 接线**（根 `CMakeLists.txt` 仿 `BUILD_IR` 块追加）：
-
-```cmake
-# DCNet：张量网络传输框架
-option(BUILD_DCNET "Build DCNet network adapters" ON)
-if (BUILD_DCNET)
-    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/DCNet/CMakeLists.txt)
-        add_subdirectory(DCNet)
-    endif()
-endif()
-```
-
-```cmake
-# DCNet/CMakeLists.txt（草案）
-add_library(DCNet STATIC)
-add_library(DCNet::DCNet ALIAS DCNet)
-target_compile_features(DCNet PUBLIC cxx_std_20)
-target_link_libraries(DCNet PUBLIC DCinfer::DCinfer nlohmann_json::nlohmann_json)
-# + libcurl（方案 A，经 vcpkg feature 注入）
-target_include_directories(DCNet PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-file(GLOB_RECURSE DCNET_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
-target_sources(DCNet PRIVATE ${DCNET_SRC})
-if (BUILD_TESTS)
-    add_subdirectory(test)
-endif()
-```
+**CMake 接线（已实现）**：根 `CMakeLists.txt` 以 `_dcinfer_option()` 注册
+`DCINFER_BUILD_DCNET`（旧 `BUILD_DCNET` 兼容映射；默认 OFF，与 vcpkg feature
+'net' 对应）；`DCNet/CMakeLists.txt` 提供静态库 `DCNet::DCNet`（依赖
+`DCinfer::DCinfer` + `nlohmann_json` + POCO，含安装导出），测试随
+`DCINFER_BUILD_TESTS` 启用。
 
 DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`modelPath` 字段承载
 远端端点，`GraphCompiler` JSON/.dcg 序列化无需改动（引擎节点路径已支持）。
@@ -561,8 +541,8 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
   自己的 `vcpkg.json` 声明 `nlohmann-json` 与 `poco[netssl]`（DCNet 及
   DCEngine::OpenAI 的 `find_package` 依赖），否则配置失败；
 - 不消费 DCNet 的零依赖消费方（如 DCinfer-test 的 `smoke/`）应显式
-  `set(BUILD_DCNET OFF CACHE BOOL "" FORCE)`，避免拉入 nlohmann-json
-  （`BUILD_ENGINE_OPENAI=ON` 会随 `DCNet::DCNet` 缺失自动跳过并告警）；
+  `set(DCINFER_BUILD_DCNET OFF CACHE BOOL "" FORCE)`，避免拉入 nlohmann-json
+  （`BUILD_ENGINE_OPENAI=ON` 缺 `DCNet::DCNet` 时 CMake 直接 FATAL_ERROR）；
 - 外部引用目标：`DCNet::DCNet`（静态库 alias，同构建树可用）；协议适配器
   `DCEngine::OpenAI`（DCEngines/OpenAI，依赖 `DCNet::DCNet`）；
 - 外部开发者接入"对方服务"的完整最小范例见 `DCinfer-test/src/net_smoke.cpp`
@@ -638,10 +618,10 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 
 ## 附：事实核查记录
 
-- `Node::Port` 静态构造器（in/optional/anchored/out）：`DCinfer/include/Node/Node.h` L50-92
-- `NodeStatus` 枚举：`DCinfer/include/Node/Node.h` L125-131
-- `EngineDescriptor` 钩子全集：`DCinfer/include/Graph/EngineRegistry.h` L55-94
-- `registerOperator`（无状态轻量路径）：`DCinfer/include/Graph/EngineRegistry.h` L135-143
+- `Node::Port` 静态构造器（in/optional/anchored/out）：`DCinfer/include/Node/Node.h`
+- `NodeStatus` 枚举：`DCinfer/include/Node/Node.h`
+- `EngineDescriptor`（含 `ExecutionPhases` 执行相位）：`DCinfer/include/Graph/EngineRegistry.h`
+- `registerOperator`（无状态轻量路径）：`DCinfer/include/Graph/EngineRegistry.h`
 - `ErrorTracker` 诊断通道：`DCinfer/include/Graph/ErrorTracker.h`
 - 文本 Data 端口约定（typeSize 不校验）：FreeToken `DCEngines/FreeToken/DESIGN.md` §7
 - 本地引擎适配器形态参照：`DCEngines/OnnxRuntime/src/OnnxEngine.cpp`
@@ -651,5 +631,5 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 - 依赖现状（nlohmann-json 已内置）：`vcpkg.json`
 - 服务端闸门与对拍实现：`DCNet/src/NetListener_Http.cpp` / `DCNet/src/NetServerAdapter.cpp`；
   对拍测试 `DCNet/test/ServerAdapterTest.cpp`（语义一致性 / 闸门 / 生命周期全覆盖）
-- `tryExecute` 异常语义（图级错误记录）：`DCinfer/src/ExecutionEngine.cpp` L63-71；
+- `tryExecute` 异常语义（图级错误记录）：`DCinfer/src/ExecutionEngine.cpp` `_submitNodeRun`（NodeException catch → recordError）；
   槽位校验拒绝：`DCinfer/src/TensorSlot.cpp` store()（ValidatorRegistry abort）

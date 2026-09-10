@@ -443,7 +443,7 @@ void testInputZoneRoundTrip() {
 // ════════════════════════════════════════════
 
 void testWaitMechanism() {
-	TEST("InferGraph::wait synchronization") {
+	TEST("InferGraph::waitForResult synchronization") {
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
 
@@ -471,7 +471,7 @@ void testWaitMechanism() {
 		graph.submit("t1", "n1", "y", 1);
 
 		bool completed = graph.waitForResult("t1", std::chrono::milliseconds(5000)).status != TaskStatus::Running;
-		CHECK(completed, "wait should return true (completed within timeout)");
+		CHECK(completed, "waitForResult should return non-Running (completed within timeout)");
 
 		// 等待回调完成（捕获输出后再读取）
 		{

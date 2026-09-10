@@ -23,7 +23,8 @@ auto node = EngineRegistry::instance().createNode(
 //   in  system（Data，可选）
 //   in  params（Data，可选：请求级采样参数 JSON，逐请求覆盖；
 //               非法 JSON → InvalidInput）
-//   out response（Data；响应缺 choices[0].message.content → RemoteMalformed）
+//   out response（Data；响应缺 choices[0].message.content → ExecutionFailed，
+//               附 dcnet 领域诊断 code=RemoteMalformed）
 ```
 
 ### 鉴权 / 超时 / 重试（云 API 接入）
@@ -46,7 +47,8 @@ auto node = EngineRegistry::instance().createNode(
 ```
 
 错误分类：非法 params JSON → `InvalidInput`；远端响应非 JSON 或缺
-`choices[0].message.content` → `RemoteMalformed`；网络/服务错误 → `ExecutionFailed`
+`choices[0].message.content` → `ExecutionFailed`（附 dcnet 领域诊断
+`code=RemoteMalformed`；核心枚举保持通用）；网络/服务错误 → `ExecutionFailed`
 （HTTP 语义经 `NetError` 归一化）。`content: ""` 是合法空内容，正常成功返回。
 
 请求路径：`{basePath}/chat/completions`（OpenAI 兼容协议面）。
@@ -55,11 +57,11 @@ auto node = EngineRegistry::instance().createNode(
 
 ```bash
 # OpenAI 适配器依赖 DCNet（HTTP 传输）；未启用 DCNet 时 CMake 直接 FATAL_ERROR（不再静默跳过）
-cmake -B build -S . -DBUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON
+cmake -B build -S . -DDCINFER_BUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON
 ```
 
 依赖：`DCinfer::DCinfer` + `DCNet::DCNet` + `nlohmann-json`
-（vcpkg feature `net` 已含 nlohmann-json 与 poco[netssl]，随 `BUILD_DCNET=ON` 自动安装）。
+（vcpkg feature `net` 已含 nlohmann-json 与 poco[netssl]，随 `DCINFER_BUILD_DCNET=ON` 自动安装）。
 
 ## 测试
 
@@ -67,8 +69,8 @@ cmake -B build -S . -DBUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON
 
 - chat 端到端：prompt/system/params → response，校验 model / messages / stream / 参数覆盖
 - 鉴权：Bearer Token 注入 Authorization 头（服务端可断言）
-- 错误分类：非法 params → InvalidInput；响应缺 content / 非 JSON → RemoteMalformed；
-  content="" 合法空内容成功返回
+- 错误分类：非法 params → InvalidInput；响应缺 content / 非 JSON → ExecutionFailed
+  （dcnet 诊断 code=RemoteMalformed）；content="" 合法空内容成功返回
 - 重试：500 一次后成功（maxRetries=1，服务端恰好收到 2 次请求）
 - 失败路径：远端 500 → NetError 归一化（`ExecutionFailed` / `remote:server_error`）
 

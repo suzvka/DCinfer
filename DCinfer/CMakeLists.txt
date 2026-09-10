@@ -75,7 +75,7 @@ file(GLOB_RECURSE DCINFER_SRC_FILES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c
 )
 target_sources(DCinfer PRIVATE ${DCINFER_SRC_FILES})
-# Tests are handled in DCinfer/test when BUILD_TESTS is enabled from the root CMakeLists
+# Tests are handled in DCinfer/test when DCINFER_BUILD_TESTS is enabled from the root CMakeLists
 
 # ── 安装与 find_package 支持 ──
 # 消费方式二选一：add_subdirectory()（BUILD_INTERFACE 源码路径）或安装后

@@ -36,15 +36,15 @@ namespace DC::Ir {
 ///   （DCinfer/include/Tensor/Tensor.hpp），本身即可表达 ONNX 动态维度 -1；
 ///   DCIr 序列化/反序列化对 shape 直接 int64_t 直通（JSON -1 ↔ 内存 -1），
 ///   roundtrip 稳定，不经过任何有符号/无符号转换。
-///   （历史缺陷：jsonToPort 曾以 static_cast<size_t> 读入维度，把 JSON -1
-///   转为 0xFFFFFFFFFFFFFFFF，与序列化端不对称——已修复并附测试。）
+///   （两侧均须 int64_t 直通，不得引入 static_cast<size_t> 等
+///   有符号/无符号转换——回归测试覆盖 -1 往返对称性。）
 /// - 已知边界（设计决策，非缺陷）：TensorData::Shape（TensorData.h）=
 ///   std::vector<size_t> 只能表达确定形状——data 层的数据必然有确定尺寸，
 ///   负数尺寸无意义；-1 动态维度仅存在于 Tensor/schema 的"形状声明"层
 ///   （Tensor::Shape = std::vector<int64_t>）。若以含 -1 的 schema shape
 ///   构造实际 TensorData（如 ORT onnxToDC 输出动态形状张量），维度会隐式
-///   转换为 size_t::max 且形状乘积溢出，属声明层与数据层的语义边界，
-///   按负责人决策不纳入核心库改造（2026-08 评审结论）。
+///   转换为 size_t::max 且形状乘积溢出，属声明层与数据层的语义边界
+///   （核心库保持现状，不改造数据层表达）。
 ///
 /// .dcg 与引擎实例缓存的生命周期：
 /// - compileFile(.dcg) 解压模型到临时目录 → createNode 加载（实例缓存键 =

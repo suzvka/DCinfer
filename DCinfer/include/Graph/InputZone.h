@@ -26,7 +26,8 @@ struct InputBinding {
 class InputZone {
 public:
 	/// @brief  标记 node:port 为图级输入口
-	/// @param  alias  可选公共别名；feedBoundInput 优先按别名解析
+	/// @param  alias  公共别名（构建面强制非空，见 GraphBuilder::bindInput）；
+	///                feedBoundInput 仅按别名解析
 	void bind(const std::string& nodeName, const std::string& portName,
 			  const std::string& alias = {});
 

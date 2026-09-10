@@ -139,7 +139,7 @@ void ExecutionEngine::submit(const TaskId& taskId, std::chrono::milliseconds tim
 	if (!output.hasDeclaration(taskId)) {
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "ExecutionEngine::submit",
 							 "no output declarations for task '" + taskId
-								 + "'. Call declareOutput() before submit().");
+								 + "'; pass declarations via InferGraph::submit(...) / submitBound(...) first");
 	}
 
 	// 校验与登记：同一 taskId 活动期间禁止重复提交；已终止的 ID 允许复用

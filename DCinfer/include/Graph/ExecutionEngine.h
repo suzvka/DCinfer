@@ -73,7 +73,8 @@ public:
 	// ── 执行驱动 ──
 
 	/// @brief  异步启动整张图的计算
-	/// @throws GraphException(NoDeclaration) 若未事先调用 declareOutput
+	/// @throws GraphException(NoDeclaration) 若提交时未携带输出声明
+	///         （InferGraph::submit 的 declarations / submitBound 已先行声明）
 	/// @note   state 为图运行时状态共享句柄：任务 lambda / TaskGate / 看门狗
 	///         各持一份，图对象先行析构时在飞任务所需的图组件仍存活
 	void submit(const TaskId& taskId, std::chrono::milliseconds timeout, uint32_t maxHops,

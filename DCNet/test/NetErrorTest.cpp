@@ -210,7 +210,7 @@ TEST(wireRoundTripParity) {
 		CHECK(e.localStatus == Status::InvalidInput, "400+invalid_input → InvalidInput（与本地一致）");
 	}
 	{
-		// SchemaMismatch 预留行：本地当前不产出该值（Node.h L125-131 预留），
+		// SchemaMismatch 预留行：本地当前不产出该值（Node.h 预留），
 		// 对端按 422 归一化为 InvalidInput —— 与本地形状违例的现行行为一致；
 		// 本地改产后按需扩表维持一致（DESIGN.md §6.1 备注）。
 		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::SchemaMismatch),

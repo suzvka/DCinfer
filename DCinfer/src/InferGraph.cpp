@@ -139,7 +139,7 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	return ns && ns->buffer.hasOutput(taskId, portName);
 }
 
-// ── 按公共别名 / 唯一绑定端口名的图级取用 ──
+// ── 按公共别名的图级取用 ──
 
 Value InferGraph::takeOutput(const TaskId& taskId, const std::string& name) {
 	auto [nodeName, portName] = _resolveOutputName(name, "InferGraph::takeOutput");

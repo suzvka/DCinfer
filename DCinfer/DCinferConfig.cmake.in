@@ -1,11 +1,11 @@
 # DCinferConfig.cmake.in - DCinfer 核心库包配置模板
 #
 # 生成：configure_package_config_file()（见 DCinfer/CMakeLists.txt）
-# 提供：DCinfer::DCinfer 目标；版本文件支持 find_package(DCinfer 0.2) 形式。
+# 提供：DCinfer::DCinfer 目标；版本文件支持 find_package(DCinfer 0.3) 形式。
 
 @PACKAGE_INIT@
 
-# find_package(DCinfer 0.2) 版本匹配与消费方可见的版本变量
+# find_package(DCinfer 0.3) 版本匹配与消费方可见的版本变量
 set(DCinfer_VERSION "@DCINFER_PKG_VERSION@")
 
 include(CMakeFindDependencyMacro)

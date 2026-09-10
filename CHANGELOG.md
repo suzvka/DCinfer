@@ -63,11 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **执行引擎传播链去重**：`_submitNodeRun` / `_propagateFrom` 复用已持有的
   task 执行态句柄，消除每节点/每边传播中重复的 `findTaskState` + `find`
   加锁查找（每节点执行省 1 次、每边传播省 2 次锁获取，行为不变）
-- **`InferGraph::_ensureSubmittable` 注释澄清**：补充"必须先于
-  clearTask/declare 执行"的因果说明（该守卫保护在飞任务状态不被重复提交
-  破坏，引擎内校验发生在 facade 状态变更之后，二者非冗余）与已知 TOCTOU
-  窗口说明；方法本体无变化
-
 ### Removed
 
 - **`InferGraph::declareSubgraph` 与 tag 分组调度机制**：子图互斥能力由

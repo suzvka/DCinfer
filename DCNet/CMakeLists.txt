@@ -1,10 +1,10 @@
-# DCNet - 网络适配器算子集合
+# DCNet - 张量网络传输框架
 #
 # 依赖 DCinfer 核心库 + nlohmann-json + POCO（HTTP/TLS，跨平台，经 vcpkg 管理）。
 # 形态与 DCEngines/OnnxRuntime 一致：EngineDescriptor 家族，运行时注入。
 # 设计见 DCNet/DESIGN.md。
 #
-# 构建：cmake -B build -S . -DBUILD_DCNET=ON（默认 OFF，与 vcpkg feature 'net' 对应）
+# 构建：cmake -B build -S . -DDCINFER_BUILD_DCNET=ON（默认 OFF，与 vcpkg feature 'net' 对应）
 
 add_library(DCNet STATIC)
 add_library(DCNet::DCNet ALIAS DCNet)

@@ -114,7 +114,7 @@ jobs:
         run: >
           cmake -B build -S . -G Ninja
           -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
-          -DBUILD_DCNET=ON
+          -DDCINFER_BUILD_DCNET=ON
           -DBUILD_ENGINE_BUILTIN=ON
           -DBUILD_ENGINE_OPENAI=ON
 

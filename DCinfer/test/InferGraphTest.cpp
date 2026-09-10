@@ -1017,7 +1017,7 @@ void testAliasBindingApi() {
 		auto out = graph.takeOutputTensor("t1", "result"); // 按别名取，无需内部节点名
 		CHECK(std::abs(out.item<float>() - 6.0f) < 1e-6f, "alias result should be 6.0");
 
-		// 2 参重载也接受唯一绑定端口名（向后兼容）
+		// 2 参取用重载：同一公共别名在后续任务（t2）上继续生效
 		auto in2 = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 		*in2 = 7.0f;
 		graph.feedBoundInput("t2", "num", std::move(*in2));
