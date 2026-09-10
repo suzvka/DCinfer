@@ -200,13 +200,15 @@ EngineHandle EngineRegistry::getOrCreateEngine(const std::string& engineType, co
 				_engineInstances.erase(it); // 失败：清槽位，后续调用重试创建
 		}
 	}
-	if (error)
-		promise.set_exception(std::move(error));
-	else
-		promise.set_value(handle);
-
-	if (error)
+	// 注意：exception_ptr 移动后源对象按标准置空（libstdc++ 严格执行，MSVC 宽松）。
+	// 若此处 move 进 promise，后续 error 判定恒 false，异常在 GCC/Clang 上静默丢失
+	// （跟随者仍经共享状态收到异常，领导者反而拿不到）。必须拷贝进 promise，
+	// 保留原 error 用于重抛。
+	if (error) {
+		promise.set_exception(error);
 		std::rethrow_exception(error); // 保持旧行为：创建异常透传给首个调用者
+	}
+	promise.set_value(handle);
 	return handle;
 }
 

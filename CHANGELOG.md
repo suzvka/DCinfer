@@ -98,6 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **引擎创建异常在 GCC/Clang 上静默丢失（Linux CI 全红根因）**：
+  `EngineRegistry::getOrCreateEngine` 失败路径先 `promise.set_exception(std::move(error))`
+  再判定 `if (error)` 重抛——`std::exception_ptr` 移动后源对象按标准被置空
+  （libstdc++ 严格执行，MSVC 实现宽松、移动后源仍非空，故 Windows 侥幸通过）。
+  GCC/Clang 上领导者线程判定恒 false，创建异常不再透传（跟随者仍经 shared_future
+  收到异常，更隐蔽）。改为拷贝进 promise（`set_exception(error)`）后用原 `error` 重抛。
+  EngineRegistryTest Test 15 回归覆盖（此处自 03a8041 single-flight 重构引入，
+  修复后 Linux GCC/Clang 与 Windows MSVC 基础测试均 13/13 通过）
 - **lowering 悬空边（组合反例）**：`buildRuntimeView` 边融合原只向后回跳一层，
   wire→wire 链（`connectRaw` 允许连接器与连接器相连，合法构图）会产生指向已擦除
   节点的悬空边（如 `a→w1→w2→b` 被改写为 `a→w2`），下游不可达、数据静默滞留、
