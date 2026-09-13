@@ -1,17 +1,26 @@
 // FreezeBoundaryTest：Build → Freeze → Execute 边界验收
 // 验证：惰性冻结建立"执行期拓扑不可变"不变量；冻结后构建 API 抛 Frozen；
-//       冻结前后内省一致；数据 IO 语义与绑定签名在冻结前后完全一致。
+//       冻结前后内省一致；数据 IO 语义与绑定签名在冻结前后完全一致；
+//       冻结前泄漏的引用（Node& / 构建面）在冻结后修改被拒绝；
+//       并发首次冻结 / 并发首次运行 API / 冻结与内省并发均安全。
 
 #include "InferGraph.h"
 #include "GraphBuilder.h"
 #include "GraphException.h"
+#include "NodeException.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <latch>
 #include <memory>
 #include <string>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 using namespace DC;
 
@@ -61,6 +70,18 @@ static bool throwsFrozen(const std::function<void()>& fn) {
 		fn();
 	} catch (const GraphException& e) {
 		return e.getErrorType() == GraphException::ErrorType::Frozen;
+	} catch (...) {
+		return false;
+	}
+	return false;
+}
+
+// 冻结后经泄漏 Node 引用修改配置：抛 NodeException(Frozen)
+static bool throwsNodeFrozen(const std::function<void()>& fn) {
+	try {
+		fn();
+	} catch (const NodeException& e) {
+		return e.getErrorType() == NodeException::ErrorType::Frozen;
 	} catch (...) {
 		return false;
 	}
@@ -213,12 +234,211 @@ static void test_runtimeLifecycleOnFrozenGraph() {
 	CHECK(graph.taskStatus("t1") == TaskStatus::Unknown, "released task should be Unknown");
 }
 
+// ── 6. 冻结前泄漏的 Node&：冻结后修改配置被拒绝 ──
+
+static void test_leakedNodeSettersRejectedAfterFreeze() {
+	InferGraph graph;
+	auto& leakedNode = graph.addNode(makeId("a"));
+	Node* leakedPtr = graph.node("a"); // 构建期可写指针（冻结前获取）
+	CHECK(leakedPtr == &leakedNode, "writable node() resolves before freeze");
+
+	graph.freeze();
+
+	// 全部公开可变入口：冻结后经泄漏引用调用一律抛 NodeException(Frozen)
+	CHECK(throwsNodeFrozen([&] { leakedNode.setConnector(true); }),
+		  "setConnector after freeze throws NodeException(Frozen)");
+	CHECK(throwsNodeFrozen([&] { leakedNode.setTag("t"); }), "setTag after freeze throws NodeException(Frozen)");
+	CHECK(throwsNodeFrozen([&] { leakedNode.setModelPath("m.onnx"); }),
+		  "setModelPath after freeze throws NodeException(Frozen)");
+	CHECK(throwsNodeFrozen([&] { leakedNode.setBlockedOverride([](const Node::TaskId&) { return false; }); }),
+		  "setBlockedOverride after freeze throws NodeException(Frozen)");
+	CHECK(throwsNodeFrozen([&] { leakedNode.setReadyOverride([](const Node::TaskId&) { return false; }); }),
+		  "setReadyOverride after freeze throws NodeException(Frozen)");
+	CHECK(throwsNodeFrozen([&] {
+		leakedNode.setCompletionCallback([](const Node::TaskId&, const Node::Result&) {});
+	}), "setCompletionCallback after freeze throws NodeException(Frozen)");
+	CHECK(throwsNodeFrozen([&] { leakedNode.bindSignal(graph.signalStore(), "gate"); }),
+		  "bindSignal after freeze throws NodeException(Frozen)");
+	CHECK(throwsNodeFrozen([&] { leakedNode.bindEngine(nullptr, nullptr); }),
+		  "bindEngine after freeze throws NodeException(Frozen)");
+
+	// 同一节点经构建期可写指针修改：同样被拒绝（封印随节点对象走）
+	CHECK(throwsNodeFrozen([&] { leakedPtr->setConnector(true); }),
+		  "leaked writable pointer mutation rejected after freeze");
+
+	// facade 的可写 node() 入口在冻结后抛 GraphException(Frozen)
+	CHECK(throwsFrozen([&] { graph.node("a"); }), "writable node() after freeze throws GraphException(Frozen)");
+
+	// 负样本：未入图的独立节点永不封印，配置语义不变
+	auto standalone = makeId("solo");
+	standalone->setConnector(true);
+	standalone->setTag("solo-tag");
+	standalone->setReadyOverride([](const Node::TaskId&) { return true; });
+	CHECK(standalone->isConnector() && standalone->tag() == "solo-tag",
+		  "standalone node setters stay mutable (never sealed)");
+}
+
+// ── 7. 构建面冻结后：类型层无可变入口；const 内省委托快照 ──
+
+static void test_builderAccessorsAfterCompile() {
+	// 类型层不变量：store() 仅存在 const 重载——冻结前泄漏可变 GraphStore&
+	// 的路径在编译期不可达（若回归出非 const 重载，本断言失败）
+	static_assert(std::is_same_v<decltype(std::declval<GraphBuilder&>().store()), const GraphStore&>,
+				  "GraphBuilder::store() must be const-only (no mutable accessor)");
+
+	GraphBuilder builder;
+	builder.addNode(makeId("a"));
+	builder.addNode(makeId("b"));
+	builder.connect("a", "y", "b", "x"); // 自动插入 __wire（源图 3 节点）
+	builder.bindOutput("b", "y", "out");
+	auto snapshot = builder.compile();
+	CHECK(snapshot != nullptr, "compile returns snapshot");
+
+	// 冻结后 const 内省可用且与快照一致（不再空指针解引用）
+	CHECK(builder.nodeCount() == 3, "builder nodeCount after compile reads snapshot view");
+	CHECK(builder.nodeCount() == snapshot->store().nodeCount(), "builder introspection mirrors snapshot");
+	CHECK(std::as_const(builder).node("a") != nullptr, "builder const node() works after compile");
+	CHECK(builder.outputBindings().size() == 1 && builder.outputBindings()[0].alias == "out",
+		  "builder output bindings readable after compile");
+	CHECK(builder.edges().size() == 2, "builder edges readable after compile");
+
+	// 冻结后全部可变入口抛 Frozen
+	CHECK(throwsFrozen([&] { builder.addNode(makeId("c")); }), "builder addNode after compile throws Frozen");
+	CHECK(throwsFrozen([&] { builder.connect("a", "y", "a", "x"); }),
+		  "builder connect after compile throws Frozen");
+	CHECK(throwsFrozen([&] { builder.bindInput("a", "x", "in"); }),
+		  "builder bindInput after compile throws Frozen");
+	CHECK(throwsFrozen([&] { builder.bindOutput("b", "y", "x"); }),
+		  "builder bindOutput after compile throws Frozen");
+	CHECK(throwsFrozen([&] { builder.node("a"); }), "builder writable node() after compile throws Frozen");
+	CHECK(builder.compile() == snapshot, "compile idempotent under repeated calls");
+}
+
+// ── 8. 并发首次 freeze()：恰好一个快照，全部线程观察到同一实例 ──
+
+static void test_concurrentFirstFreezeSingleSnapshot() {
+	constexpr int kThreads = 8;
+	constexpr int kRounds = 30;
+	for (int round = 0; round < kRounds; ++round) {
+		InferGraph graph;
+		graph.addNode(makeId("a"));
+		graph.addNode(makeId("b"));
+		graph.connect("a", "y", "b", "x");
+
+		std::latch startGate(kThreads);
+		std::vector<std::shared_ptr<const CompiledGraph>> results(kThreads);
+		std::vector<std::string> errors(kThreads);
+		std::vector<std::thread> threads;
+		for (int t = 0; t < kThreads; ++t) {
+			threads.emplace_back([&, t] {
+				startGate.arrive_and_wait();
+				try {
+					results[t] = graph.freeze();
+				} catch (const std::exception& e) {
+					errors[t] = e.what();
+				}
+			});
+		}
+		for (auto& th : threads)
+			th.join();
+
+		bool noExceptions = true, allNonEmpty = true, sameSnapshot = true;
+		for (int t = 0; t < kThreads; ++t) {
+			if (!errors[t].empty())
+				noExceptions = false;
+			if (!results[t])
+				allNonEmpty = false;
+			else if (results[t] != results[0])
+				sameSnapshot = false;
+		}
+		CHECK(noExceptions, "concurrent freeze must not throw");
+		CHECK(allNonEmpty, "every freeze() call returns a snapshot");
+		CHECK(sameSnapshot, "concurrent first freeze yields exactly one snapshot instance");
+		CHECK(graph.nodeCount() == 3, "introspection consistent after concurrent freeze");
+
+		// 冻结后任务照常运行（快照 + 闸表完整就绪）
+		graph.feedInput("t1", "a", "x", floatTensor(5.0f));
+		graph.submit("t1", "b", "y");
+		CHECK(graph.waitForResult("t1").status == TaskStatus::Succeeded, "task works after concurrent freeze");
+	}
+}
+
+// ── 9. 并发首次运行 API：feedInput+submit 作为首操作竞争冻结 ──
+
+static void test_concurrentFirstRunApis() {
+	constexpr int kThreads = 8;
+	InferGraph graph;
+	for (int t = 0; t < kThreads; ++t)
+		graph.addNode(makeId("n" + std::to_string(t))); // 每线程独立节点（节点级互斥是既有设计）
+
+	std::latch startGate(kThreads);
+	std::atomic<int> anomalies{0};
+	std::vector<std::thread> threads;
+	for (int t = 0; t < kThreads; ++t) {
+		threads.emplace_back([&, t] {
+			const std::string nodeName = "n" + std::to_string(t);
+			const std::string tid = "t" + std::to_string(t);
+			startGate.arrive_and_wait();
+			try {
+				graph.feedInput(tid, nodeName, "x", floatTensor(static_cast<float>(t)));
+				graph.submit(tid, nodeName, "y");
+				if (graph.waitForResult(tid, std::chrono::milliseconds(10000)).status != TaskStatus::Succeeded)
+					++anomalies;
+			} catch (...) {
+				++anomalies;
+			}
+		});
+	}
+	for (auto& th : threads)
+		th.join();
+	CHECK(anomalies.load() == 0, "concurrent first run APIs complete on a single freeze");
+	CHECK(graph.nodeCount() == kThreads, "source view intact after concurrent first run");
+}
+
+// ── 10. 冻结与内省并发：读者只观察到未冻结或完整冻结状态 ──
+
+static void test_introspectionConcurrentWithFirstFreeze() {
+	InferGraph graph;
+	graph.addNode(makeId("a"));
+	graph.bindOutput("out", "a", "y");
+
+	std::atomic<bool> stop{false};
+	std::atomic<int> anomalies{0};
+	std::thread reader([&] {
+		try {
+			while (!stop.load(std::memory_order_relaxed)) {
+				auto snap = graph.freeze(); // 幂等；与首次提交并发
+				if (snap && snap->store().nodeCount() != 1)
+					++anomalies;
+				if (graph.nodeCount() != 1)
+					++anomalies;
+			}
+		} catch (...) {
+			++anomalies;
+		}
+	});
+
+	graph.feedInput("t1", "a", "x", floatTensor(3.0f));
+	graph.submitBound("t1");
+	CHECK(graph.waitForResult("t1").status == TaskStatus::Succeeded,
+		  "task completes while freeze is read concurrently");
+
+	stop.store(true, std::memory_order_relaxed);
+	reader.join();
+	CHECK(anomalies.load() == 0, "concurrent introspection observes consistent state");
+}
+
 int main() {
 	test_introspectionConsistency();
 	test_constructionRejectedAfterExplicitFreeze();
 	test_lazyFreezeOnFirstSubmit();
 	test_ioSemanticsConsistentAcrossFreeze();
 	test_runtimeLifecycleOnFrozenGraph();
+	test_leakedNodeSettersRejectedAfterFreeze();
+	test_builderAccessorsAfterCompile();
+	test_concurrentFirstFreezeSingleSnapshot();
+	test_concurrentFirstRunApis();
+	test_introspectionConcurrentWithFirstFreeze();
 
 	if (g_failures == 0) {
 		std::printf("All %d checks passed\n", g_checks);

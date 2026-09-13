@@ -20,6 +20,7 @@ public:
 		TypeMismatch, ///< 输入值与端口声明的类型不一致
 		OutputNotProduced, ///< RunFn 执行后未产出 Schema 声明的全部输出端口
 		InternalError, ///< 节点内部状态不一致或操作不合法
+		Frozen, ///< 节点所在图已冻结（compile 完成），配置面不可变
 		Other ///< 其他未分类的错误
 	};
 
@@ -69,6 +70,9 @@ private:
 			break;
 		case ErrorType::InternalError:
 			errorStr = "Internal Error";
+			break;
+		case ErrorType::Frozen:
+			errorStr = "Frozen";
 			break;
 		case ErrorType::Other:
 			errorStr = "Other";

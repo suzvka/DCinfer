@@ -55,8 +55,10 @@ private:
 /// @brief 图级 task 执行域：task → TaskExecutionState + 节点执行闸表。
 ///
 /// 生命周期与 GraphRuntimeState 一致（飞行任务经共享句柄保活）。
-/// - 闸表在 attachGraph（惰性冻结）时按源图节点集合一次性预建，此后
-///   结构不可变（与 CompiledGraph 同为冻结产物），运行期只翻标志位；
+/// - 闸表在惰性冻结事务（attachGraph）中按源图节点集合一次性预建，
+///   且在快照发布（GraphRuntimeState::_frozen release 置位）之前完成——
+///   并发读者只能观察到"尚未发布"或"闸表完整就绪"两种状态；
+///   此后结构不可变（与 CompiledGraph 同为冻结产物），运行期只翻标志位；
 /// - task 态条目按需惰性创建，终止/复用时整体清除。
 class TaskExecutionDomain {
 public:

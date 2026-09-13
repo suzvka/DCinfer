@@ -21,10 +21,27 @@ const Node* GraphStore::node(const std::string& name) const {
 }
 
 // ════════════════════════════════════════════
-// 图构建
+// 图构建（全部持锁 + 封印检查：冻结后抛 GraphException(Frozen)）
 // ════════════════════════════════════════════
 
+void GraphStore::seal() {
+	std::lock_guard lk(_mutex);
+	_sealed = true;
+}
+
+void GraphStore::_ensureMutable(const char* api) const {
+	if (_sealed)
+		throw GraphException(GraphException::ErrorType::Frozen, api,
+							 "topology is sealed; graph is immutable after freeze");
+}
+
 Node& GraphStore::addNode(std::unique_ptr<Node> node) {
+	std::lock_guard lk(_mutex);
+	_ensureMutable("GraphStore::addNode");
+	return _addNodeImpl(std::move(node));
+}
+
+Node& GraphStore::_addNodeImpl(std::unique_ptr<Node> node) {
 	if (!node || node->name().empty())
 		throw GraphException(GraphException::ErrorType::DuplicateNode, "GraphStore::addNode",
 							 "node name is empty");
@@ -41,6 +58,8 @@ Node& GraphStore::addNode(std::unique_ptr<Node> node) {
 
 void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPort,
 						 const std::string& dstNode, const std::string& dstPort) {
+	std::lock_guard lk(_mutex);
+	_ensureMutable("GraphStore::connectRaw");
 	auto* src = node(srcNode);
 	auto* dst = node(dstNode);
 	if (!src)
@@ -73,6 +92,8 @@ void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPo
 
 Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort,
 					   const std::string& dstNode, const std::string& dstPort) {
+	std::lock_guard lk(_mutex);
+	_ensureMutable("GraphStore::connect");
 	auto* src = node(srcNode);
 	auto* dst = node(dstNode);
 	if (!src)
@@ -93,7 +114,7 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 	auto wireNode = std::make_unique<Node>("Connector.Broadcast", wireName, Connector::broadcastSchema(1),
 										   Connector::broadcastRunFn(), ThreadPoolAffinity::System);
 	wireNode->setConnector(true);
-	auto& wireRef = addNode(std::move(wireNode));
+	auto& wireRef = _addNodeImpl(std::move(wireNode));
 
 	// 上游 → 广播
 	_edges.push_back({srcNode, srcPort, wireName, "in"});
@@ -105,6 +126,8 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 
 void GraphStore::bindInput(const std::string& nodeName, const std::string& portName,
 						   const std::string& alias) {
+	std::lock_guard lk(_mutex);
+	_ensureMutable("GraphStore::bindInput");
 	_inputZone.bind(nodeName, portName, alias);
 }
 

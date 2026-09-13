@@ -32,6 +32,7 @@ struct TensorConverter {
 struct EngineDescriptor;
 class EngineInstance;
 class SignalStore;
+class GraphBuilder;
 
 // ── 内部组件前向声明 ──
 class TaskBuffer;
@@ -175,6 +176,7 @@ public:
 	// ── 引擎绑定（引擎支持节点构造后绑定）──
 	/// 节点持有引擎实例共享句柄：节点存活 ⇒ 引擎实例存活，
 	/// releaseEngine/releaseAllEngines 移除缓存条目不影响已绑定节点。
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
 	void bindEngine(std::shared_ptr<EngineInstance> engineInstance, const EngineDescriptor* engineDesc = nullptr);
 
 	// ── 只读属性 ──
@@ -185,12 +187,23 @@ public:
 	// ── 线程池归属与元数据 ──
 	ThreadPoolAffinity affinity() const { return _meta.affinity; }
 	/// @brief  自由标签（纯序列化元数据，随 DCIr JSON/.dcg 往返；无调度语义）
-	void setTag(std::string tag) { _meta.tag = std::move(tag); }
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
+	void setTag(std::string tag) {
+		std::lock_guard lk(_mutationMutex);
+		_ensureMutable("Node::setTag");
+		_meta.tag = std::move(tag);
+	}
 	const std::string& tag() const { return _meta.tag; }
 	bool isConnector() const { return _meta.isConnector; }
-	void setConnector(bool v) { _meta.isConnector = v; }
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
+	void setConnector(bool v) {
+		std::lock_guard lk(_mutationMutex);
+		_ensureMutable("Node::setConnector");
+		_meta.isConnector = v;
+	}
 
 	// ── 信号绑定 ──
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
 	void bindSignal(std::shared_ptr<SignalStore> store, std::string name);
 	bool isBlocked() const;
 	bool isBlocked(const TaskId& taskId) const;
@@ -200,17 +213,33 @@ public:
 	/// @brief  注册 task 级阻塞状态委托；注册后 isBlocked(taskId) 转发至此回调。
 	///         未注册时回退 SignalGate 逻辑。典型用途：exportNode 产物的
 	///         子图节点按内部"声明通路可达性"应答父级。
-	void setBlockedOverride(std::function<bool(const TaskId&)> fn) { _blockedOverride = std::move(fn); }
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
+	void setBlockedOverride(std::function<bool(const TaskId&)> fn) {
+		std::lock_guard lk(_mutationMutex);
+		_ensureMutable("Node::setBlockedOverride");
+		_blockedOverride = std::move(fn);
+	}
 
 	/// @brief 注册 task 级就绪状态委托；注册后 isReady(taskId, buffer) 转发至此回调。
 	///         未注册时回退 TaskBuffer 逻辑。
-	void setReadyOverride(std::function<bool(const TaskId&)> fn) { _readyOverride = std::move(fn); }
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
+	void setReadyOverride(std::function<bool(const TaskId&)> fn) {
+		std::lock_guard lk(_mutationMutex);
+		_ensureMutable("Node::setReadyOverride");
+		_readyOverride = std::move(fn);
+	}
 
 	// ── 模型路径 ──
 	const std::string& modelPath() const { return _meta.modelPath; }
-	void setModelPath(std::string path) { _meta.modelPath = std::move(path); }
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
+	void setModelPath(std::string path) {
+		std::lock_guard lk(_mutationMutex);
+		_ensureMutable("Node::setModelPath");
+		_meta.modelPath = std::move(path);
+	}
 
 	// ── 完成回调 ──
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
 	void setCompletionCallback(CompletionFn fn);
 
 	// ── 执行依赖访问器（task 态已归 task 域，pipeline 经此注入）──
@@ -232,6 +261,7 @@ public:
 
 private:
 	friend class RunContext;
+	friend class GraphBuilder;
 
 	struct NodeMeta {
 		std::string type;
@@ -253,6 +283,34 @@ private:
 	// 状态委托回调（组合节点注册后覆盖默认 isBlocked/isReady 语义）
 	std::function<bool(const TaskId&)> _blockedOverride;
 	std::function<bool(const TaskId&)> _readyOverride;
+
+	// ── 冻结门（Build → Freeze 边界）──
+	//
+	// compile()（冻结）时由 GraphBuilder::_sealForExecution 置位：此后一切
+	// 配置入口抛 NodeException(Frozen)——“执行期节点配置不可变”由 API 边界
+	// 强制，而非依赖调用方自律。用互斥门而非裸原子布尔：封印与在飞 setter
+	// 互斥——通过校验的写完成于封印之前，封印后的调用确定被拒绝，同时关闭
+	// 与执行流水线（isReady 读 _readyOverride、ExecutionPipeline 读
+	// completionCallback）的竞争窗口。
+	//
+	// 未加入任何图的独立节点（NodeExecutor / NetServerAdapter 单节点路径）
+	// 永不封印，配置语义不变。
+	mutable std::mutex _mutationMutex;
+	bool _frozen = false;
+
+	/// @brief 冻结门校验（调用方须持有 _mutationMutex）；冻结后抛 NodeException(Frozen)
+	void _ensureMutable(const char* api) const {
+		if (_frozen)
+			throw NodeException(NodeException::ErrorType::Frozen, api,
+								"node '" + _meta.name +
+									"' is frozen (graph compiled); node configuration is immutable after freeze");
+	}
+
+	/// @brief 封印节点配置面（compile 时由 GraphBuilder 调用；一次性，不可回退）
+	void _sealForExecution() {
+		std::lock_guard lk(_mutationMutex);
+		_frozen = true;
+	}
 };
 
 // ── RunContext（方法定义在 Node.cpp，避免内联依赖组件完整类型）──

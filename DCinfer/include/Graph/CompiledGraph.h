@@ -38,8 +38,11 @@ public:
 /// > 图在执行期间不可变。
 ///
 /// - 拓扑（节点/边）与图级签名（输入/输出绑定）自此不可增删改——
-///   增删改 API 仅存在于构建期的 GraphBuilder，冻结后无入口；
-/// - 执行引擎与飞行任务经本快照读取拓扑与签名（GraphRuntimeState::graph）；
+///   增删改 API 仅存在于构建期的 GraphBuilder，且由三级封闭强制执行：
+///   构建面（GraphBuilder 互斥锁 + Frozen 守卫）、拓扑面（GraphStore 封印）、
+///   节点面（Node 冻结门）——冻结前泄漏的引用亦无法修改快照持有的对象；
+/// - 执行引擎与飞行任务经本快照读取拓扑与签名
+///   （GraphRuntimeState::snapshot() 发布协议读取）；
 /// - 保留源图视角：DCIr 序列化、exportNode、nodeCount/edges 等内省
 ///   均反映源图；运行时视图（runtimeView）为 lowering 后形态。
 

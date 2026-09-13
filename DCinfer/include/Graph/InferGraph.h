@@ -212,7 +212,7 @@ public:
 	///         只读访问用 const 重载。
 	Node* node(const std::string& name) {
 		_ensureNotFrozen("InferGraph::node");
-		return _builder->store().node(name);
+		return _builder->node(name);
 	}
 
 	/// @brief  获取节点指针（只读）
@@ -302,20 +302,24 @@ private:
 
 	/// @brief  惰性冻结：首次运行期调用时把构建面编译为不可变快照。
 	/// @return 冻结快照（幂等：已冻结时直接返回现有快照）
-	/// @note   快指针无锁（快照非空即已冻结）；竞态由 _freezeMutex 串行化，
-	///         compile 仅在首个 submit/feedInput 时执行一次
+	/// @note   快路径经发布协议无锁 acquire 读（未发布返回 nullptr）；
+	///         首次编译由 _freezeMutex 串行化，compile 仅在首个
+	///         submit/feedInput 时执行一次；attachGraph 先完成闸表等派生
+	///         状态、再一次性发布——并发读者只能观察到"尚未发布"或
+	///         "完整初始化"两种状态。
 	std::shared_ptr<const CompiledGraph> _ensureFrozen() const {
-		if (_state->graph)
-			return _state->graph;
+		if (auto snap = _state->snapshot())
+			return snap;
 		std::lock_guard lk(_freezeMutex);
-		if (!_state->graph)
-			_state->attachGraph(_builder->compile()); // 快照 + 节点执行闸表一并就位
-		return _state->graph;
+		if (auto snap = _state->snapshot())
+			return snap;
+		_state->attachGraph(_builder->compile()); // 快照 + 节点执行闸表一并就位
+		return _state->snapshot();
 	}
 
 	/// @brief  构建期守卫：冻结后调用构建 API 抛 GraphException(Frozen)
 	void _ensureNotFrozen(const char* api) const {
-		if (_state->graph)
+		if (_state->snapshot())
 			throw GraphException(GraphException::ErrorType::Frozen, api,
 								 "graph is frozen; topology is immutable after first submit/feedInput"
 								 " (rebuild a GraphBuilder and compile a new snapshot to evolve)"
@@ -324,17 +328,23 @@ private:
 
 	/// @brief  拓扑访问（源图视角）：冻结后读快照，构建期读 builder
 	const GraphStore& _topology() const {
-		return _state->graph ? _state->graph->store() : _builder->store();
+		if (auto snap = _state->snapshot())
+			return snap->store();
+		return _builder->store();
 	}
 
 	/// @brief  输入绑定视图：冻结后读 GraphSignature（无锁），构建期读 builder
 	const std::vector<InputBinding>& _inputBindingsView() const {
-		return _state->graph ? _state->graph->signature().inputs : _builder->inputBindings();
+		if (auto snap = _state->snapshot())
+			return snap->signature().inputs;
+		return _builder->inputBindings();
 	}
 
 	/// @brief  输出绑定视图：冻结后读 GraphSignature（无锁），构建期读 builder
 	const std::vector<OutputBinding>& _outputBindingsView() const {
-		return _state->graph ? _state->graph->signature().outputs : _builder->outputBindings();
+		if (auto snap = _state->snapshot())
+			return snap->signature().outputs;
+		return _builder->outputBindings();
 	}
 
 	// ── 内部组件 ──

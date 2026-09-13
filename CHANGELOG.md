@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **首次惰性冻结的数据竞争（冻结事务一次性发布）**：`GraphRuntimeState` 的冻结快照
+  由"公开可变成员 + 无同步读写"改为发布协议——快照所有权私有（`_graph`，仅冻结
+  线程写一次），全部派生状态（节点执行闸表）先完成，最后以 release 语义置位
+  `_frozen` 发布；读取方经 `snapshot()` acquire 读，只能观察到"尚未发布（nullptr）"
+  或"完整初始化"两种状态。此前 `_ensureFrozen` 快路径（以及 `_ensureNotFrozen` /
+  `_topology` / 绑定视图 / `ExecutionEngine` 六处读取）在锁外读同一普通
+  `shared_ptr`、锁内写——并发首次冻结构成 C++ 内存模型数据竞争；`attachGraph`
+  先发布 `graph` 再初始化闸表的顺序还可能提前暴露未完成初始化的状态。现在
+  并发首次 `freeze`/`feedInput`/`submit`（含 exportNode 子图由父图执行线程触发
+  的首次冻结）恰执行一次初始化且无竞争。
+- **冻结后仍可经泄漏引用修改拓扑/节点配置**：`Node` 新增冻结门——`compile()`
+  封印全部节点（`_sealForExecution`），此后 8 个公开可变入口（`bindEngine` /
+  `setTag` / `setConnector` / `bindSignal` / `setBlockedOverride` /
+  `setReadyOverride` / `setModelPath` / `setCompletionCallback`）抛
+  `NodeException(Frozen)`；`GraphStore` 新增封印（`seal`）——冻结后
+  `addNode`/`connect`/`connectRaw`/`bindInput` 抛 `GraphException(Frozen)`。
+  此前在冻结前保存的 `Node&` / `Node*`（含 `InferGraph::node()` 构建期可写指针）
+  可在冻结后静默修改影响调度/执行的配置，与执行流水线读取构成竞争。
+- **构建与冻结并发**：`GraphBuilder` 全部公开方法持内部互斥锁，构建 API 与
+  `compile()` 串行化——每个构建操作要么先于编译完成（纳入快照），要么在冻结后
+  确定抛 Frozen，消除"检查通过后被冻结插入"的 TOCTOU 窗口（原 `_ensureMutable`
+  读 `_snapshot` 与 `compile` 写无同步）；`compile()` 内部改为先封印（拓扑 +
+  节点配置）再只读遍历，签名构建 / lowering / 运行期读取不再可能与写入并发。
+- **构建器冻结后内省崩溃**：`GraphBuilder` 的 `store()/node()/nodeCount()/
+  edgeCount()/nodeNames()/edges()/inputBindings()/outputBindings()` 在
+  `compile()` 后曾空指针解引用（注释误称"返回空/零"，实际 `_store` 已被移走）——
+  现持锁并委托快照读取（源图视角与 facade `_topology` 一致）。
+
+### Changed
+
+- **破坏性 API 收窄**：移除 `GraphBuilder::store()` 非 const 重载（唯一使用点
+  `InferGraph::node()` 改走 `GraphBuilder::node()`）。冻结前泄漏可变
+  `GraphStore&` 的路径在编译期不可达；`store() const` 保留且冻结后返回快照持有的
+  源图。
+
 ## [0.4.0] - 2026-09-10
 
 ### Changed

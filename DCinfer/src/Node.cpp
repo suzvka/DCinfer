@@ -83,6 +83,8 @@ Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
 }
 
 void Node::bindEngine(std::shared_ptr<EngineInstance> engineInstance, const EngineDescriptor* engineDesc) {
+	std::lock_guard lk(_mutationMutex);
+	_ensureMutable("Node::bindEngine");
 	_meta.engineDescriptor = engineDesc;
 	_engine = std::make_unique<EngineAdapter>(std::move(engineInstance), engineDesc);
 }
@@ -92,12 +94,16 @@ Node::~Node() = default;
 // ── 回调注册 ──
 
 void Node::setCompletionCallback(CompletionFn fn) {
+	std::lock_guard lk(_mutationMutex);
+	_ensureMutable("Node::setCompletionCallback");
 	_onComplete = std::move(fn);
 }
 
 // ── 信号绑定 ──
 
 void Node::bindSignal(std::shared_ptr<SignalStore> store, std::string name) {
+	std::lock_guard lk(_mutationMutex);
+	_ensureMutable("Node::bindSignal");
 	_signal->bind(std::move(store), std::move(name));
 }
 

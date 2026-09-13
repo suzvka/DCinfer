@@ -544,6 +544,75 @@ void testConcurrentTaskLifecycleStress() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// 测试 11: 子图首次冻结可能由父图执行线程触发 — 与宿主线程 freeze 并发
+//
+// exportNode 产物的 blockedOverride 由父图执行线程调用，内部触发子图
+// 惰性冻结（_ensureFrozen）。本测试让宿主线程同时密集调用 freeze()，
+// 验证首次冻结的发布协议在"父图 worker + 宿主线程"并发下安全：
+// 恰好一个快照、无异常、任务结果正确（TSan 下为主导用例）。
+// ════════════════════════════════════════════
+
+void testSubgraphFirstFreezeFromParentWorker() {
+	TEST("subgraph first freeze raced by parent worker and host thread") {
+		constexpr int kRounds = 10;
+		for (int round = 0; round < kRounds; ++round) {
+			// 子图：尚未冻结（exportNode 不触发冻结）
+			InferGraph subGraph;
+			subGraph.addNode(std::make_unique<Node>("Builtin", "sub_id", identitySchema(), identityRunFn()));
+			subGraph.bindInput("x", "sub_id", "x");
+			subGraph.bindOutput("y", "sub_id", "y");
+			auto graphNode = subGraph.exportNode("SubId");
+
+			// 父图：source → SubId → sink
+			TestHarness parent;
+			parent.addNode(std::make_unique<Node>("Builtin", "source", identitySchema(), identityRunFn()));
+			parent.addNode(std::move(graphNode));
+			parent.addNode(std::make_unique<Node>("Builtin", "sink", identitySchema(), identityRunFn()));
+			parent.connect("source", "y", "SubId", "x");
+			parent.connect("SubId", "y", "sink", "x");
+
+			// 宿主线程：与父图执行（worker 经 blockedOverride 触发子图首次冻结）并发
+			std::atomic<bool> stop{false};
+			std::atomic<int> anomalies{0};
+			std::thread hostThread([&] {
+				try {
+					while (!stop.load(std::memory_order_relaxed)) {
+						auto snap = subGraph.freeze(); // 幂等；首次冻结与父图 worker 竞争
+						if (!snap || snap->store().nodeCount() != 1)
+							++anomalies;
+						if (subGraph.nodeCount() != 1)
+							++anomalies;
+					}
+				} catch (...) {
+					++anomalies;
+				}
+			});
+
+			parent.feedInput("t1", "source", "x", makeFloatTensor(21.0f));
+			parent.submit("t1", "sink", "y");
+			CHECK(parent.awaitCompletion("t1"), "parent should complete");
+			CHECK(parent.hasOutput("t1", "sink", "y"), "sink should have output");
+			auto r = parent.getOutputTensor("t1", "sink", "y");
+			CHECK(std::abs(r.item<float>() - 21.0f) < 1e-6f, "value should pass through subgraph");
+
+			stop.store(true, std::memory_order_relaxed);
+			hostThread.join();
+			CHECK(anomalies.load() == 0, "no anomalies under concurrent first freeze");
+
+			// 子图已冻结：构建面关闭（确定性错误而非静默修改）
+			bool frozenRejected = false;
+			try {
+				subGraph.addNode(std::make_unique<Node>("Builtin", "late", identitySchema(), identityRunFn()));
+			} catch (const GraphException& e) {
+				frozenRejected = e.getErrorType() == GraphException::ErrorType::Frozen;
+			}
+			CHECK(frozenRejected, "subgraph build API rejected after first freeze");
+		}
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testBasicGraphEmbedding();
@@ -556,6 +625,7 @@ int main() {
 		testInputZoneRoundTrip();
 		testWaitMechanism();
 		testConcurrentTaskLifecycleStress();
+		testSubgraphFirstFreezeFromParentWorker();
 
 		if (failures == 0) {
 			std::cout << "\nAll GraphNode tests passed!" << std::endl;

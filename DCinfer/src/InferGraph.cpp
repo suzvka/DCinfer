@@ -243,9 +243,11 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 	// blockedOverride：内部无通路满足输出声明时，子图节点向父级应答阻塞。
 	// isReady 保持边界缓冲语义（父级数据齐即可进入执行）。
+	// 注：本回调由父图执行线程调用——首次冻结可能在此触发（并发安全：
+	// 快照经发布协议一次性就位，见 GraphRuntimeState 发布协议）。
 	graphNode->setBlockedOverride([this](const Node::TaskId& tid) {
-		_ensureFrozen(); // 通路检测读图级签名（冻结快照）
-		return !canSatisfyDeclarations(_state->graph->store(), _state->graph->signature(), tid);
+		auto snap = _ensureFrozen(); // 通路检测读图级签名（冻结快照）
+		return !canSatisfyDeclarations(snap->store(), snap->signature(), tid);
 	});
 
 	return graphNode;

@@ -214,3 +214,45 @@ jobs:
       - name: Test
         run: |
           ctest --test-dir build/clang-release -C Release --output-on-failure
+
+  # ──────────────────────────────────────────────
+  # Linux / GCC + ThreadSanitizer — 并发正确性（冻结边界 / 任务生命周期）
+  # 说明：MSVC 无 TSan；若协程跨线程恢复引发 fiber 误报，先收敛到
+  # FreezeBoundaryTest 子集（冻结边界用例）再逐步扩围
+  # ──────────────────────────────────────────────
+  tsan:
+    name: Linux GCC ThreadSanitizer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false  # 核心测试零 vcpkg 依赖（镜像 README quick start 路径）
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++ pkg-config
+
+      - name: Configure (TSan)
+        run: >
+          cmake -B build-tsan -S . -G Ninja
+          -DBUILD_ENGINE_BUILTIN=ON
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build
+        run: cmake --build build-tsan -j
+
+      - name: Concurrency tests under TSan
+        run: >
+          ctest --test-dir build-tsan
+          -R "FreezeBoundaryTest|GraphNodeTest|InferGraphTest|LoweringTest"
+          --output-on-failure
+
+      - name: Freeze-boundary repeated (until-fail x3)
+        run: >
+          ctest --test-dir build-tsan
+          -R "FreezeBoundaryTest"
+          --repeat until-fail:3
+          --output-on-failure

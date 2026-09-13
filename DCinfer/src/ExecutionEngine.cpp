@@ -147,8 +147,11 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 
 void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 							 const std::shared_ptr<GraphRuntimeState>& state) {
+	// 快照经发布协议读取（acquire）：进入本函数前 facade 已 _ensureFrozen，
+	// 本地句柄同时把快照存活期钉在本次调用内（state 亦持有）
+	auto snap = state->snapshot();
 	auto& output = state->output;
-	auto& graph = state->graph->runtimeView();
+	auto& graph = snap->runtimeView();
 
 	// 校验：必须已声明输出
 	if (!output.hasDeclaration(taskId)) {
@@ -190,13 +193,13 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 	std::vector<std::string> starts;
 	if (auto taskExec = state->exec->findTaskState(taskId))
 		starts = taskExec->nodeNames(); // 已注入输入的节点
-	for (const auto& b : state->graph->signature().inputs)
+	for (const auto& b : snap->signature().inputs)
 		starts.push_back(b.nodeName);
 	std::unordered_set<std::string> targets;
 	for (const auto& d : output.declarationsOf(taskId))
 		targets.insert(d.nodeName);
 	if (!starts.empty() && !targets.empty()
-		&& !canSatisfyTopologically(state->graph->runtimeView(), starts, targets)) {
+		&& !canSatisfyTopologically(snap->runtimeView(), starts, targets)) {
 		throw GraphException(GraphException::ErrorType::UnreachableDeclaration,
 							 "ExecutionEngine::submit",
 							 "declared output is topologically unreachable from any fed input "
@@ -224,7 +227,10 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 									 std::shared_ptr<TaskGate> gate,
 									 uint32_t remainingHops,
 									 const std::shared_ptr<GraphRuntimeState>& state) {
-	auto& graph = state->graph->runtimeView();
+	// 快照经发布协议读取（acquire）；本地句柄钉住存活期，池线程不再
+	// 无同步读取共享成员
+	auto snap = state->snapshot();
+	auto& graph = snap->runtimeView();
 	auto& output = state->output;
 	auto& errors = state->errors;
 	// 调用前提：节点已由 _submitNodeRun 执行成功（失败路径已记录错误并跳过传播），
@@ -275,7 +281,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, TaskId taskId,
 	for (const auto& outPort : src->schema().outputs) {
 		if (!srcNs || !srcNs->buffer.hasOutput(taskId, outPort.name))
 			continue;
-		if (state->graph->signature().isOutputBound(nodeName, outPort.name)) {
+		if (snap->signature().isOutputBound(nodeName, outPort.name)) {
 			Value data = srcNs->buffer.takeOutput(taskId, outPort.name);
 			output.append(taskId, nodeName, outPort.name, std::move(data),
 						  {nodeName, outPort.name, taskId});
@@ -470,8 +476,10 @@ void ExecutionEngine::_exhaustedCheck(const TaskId& taskId,
 
 void ExecutionEngine::_diagnoseAbnormal(const TaskId& taskId, const std::string& reason,
 										const std::shared_ptr<GraphRuntimeState>& state) {
+	// 快照经发布协议读取（acquire）；本地句柄钉住存活期
+	auto snap = state->snapshot();
 	auto& output = state->output;
-	auto& graph = state->graph->runtimeView();
+	auto& graph = snap->runtimeView();
 	auto& errors = state->errors;
 	// ① 报告未满足的输出声明
 	auto unsatisfied = output.unsatisfiedDeclarations(taskId);
