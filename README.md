@@ -98,12 +98,16 @@ cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake 
 示例代码（[examples/01_hello_graph](examples/01_hello_graph/main.cpp)）展示标准任务生命周期：
 
 ```cpp
-graph.bindInput("a", "adder", "a");        // 图级输入绑定（签名元数据：序列化/内省）
-graph.bindOutput("result", "pass", "y");   // 图级输出绑定（别名 result → pass.y，供声明/序列化）
-graph.feedInput("task1", "adder", "a", ...); // 内部寻址注入 (nodeName, portName)
-graph.submitBound("task1");                // 以 bindOutput 绑定作为输出声明
-if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
-    auto result = graph.takeOutputTensor("task1", "pass", "y"); // 内部寻址取结果
+graph.bindInput("a", "adder", "a");        // 图公开输入别名
+graph.bindOutput("result", "pass", "y");   // 图公开输出别名
+
+auto api = graph.interface();              // 取接口即定型：冻结图并解析别名 → 坐标
+auto task = api.createTask();              // 任务句柄：析构自动释放已终止任务
+task.feed("a", tensorA);                   // 按公开别名喂数据
+task.feed("b", tensorB);
+auto result = task.run();                  // 同步运行（内部 submitBound + 等待终止）
+if (result.status == DC::TaskStatus::Succeeded) {
+    auto output = task.takeTensor("result"); // 按公开别名取结果（消费式）
 }
 ```
 
@@ -113,18 +117,31 @@ if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
 
 ### 寻址模型
 
-运行时数据注入与取用（`feedInput` / `takeOutput` / `takeOutputTensor` / `hasOutput`/ `submit` 声明）按 `(nodeName, portName)` 复合坐标寻址。
+面向宿主：`graph.interface()` 冻结图并一次性解析公开绑定后，只按公开别名喂数据 / 取结果
+（可用别名见 `api.inputAliases()` / `api.outputAliases()`；未知别名抛错并列出全部可用别名）：
 
 ```cpp
-// 启动时：从签名取坐标（图换版本、内部重构不影响宿主代码）
-std::unordered_map<std::string, std::pair<std::string, std::string>> addr;
-for (const auto& b : graph.inputBindings()) addr[b.alias] = {b.nodeName, b.portName};
-// 运行时：别名仅用于宿主侧查表，寻址仍是唯一坐标
-auto [n, p] = addr.at("prompt");
-graph.feedInput(tid, n, p, data);
+auto api = graph.interface();       // 取接口即定型
+auto task = api.createTask();
+task.feed("prompt", input);         // 公开别名 → 内部坐标（一次性解析）
+auto result = task.run();           // 同步运行
+auto output = task.take("answer");  // 消费式取出
 ```
 
-输出在任务终止后仍保留；`takeOutput` / `takeOutputTensor` 为消费式取出。
+内核唯一按 `(nodeName, portName)` 复合坐标寻址（`feedInput` / `takeOutput` / `takeOutputTensor` / `hasOutput` / `submit` 声明）。
+异步提交、多输出声明、信号控制等高级用法直接使用 `InferGraph` 运行期 API，按坐标操作：
+
+```cpp
+graph.feedInput(tid, "llm", "input", data);
+graph.submit(tid, "llm", "output");
+auto r = graph.takeOutputTensor(tid, "llm", "output");
+graph.releaseTask(tid); // 消费结果后释放（长跑/循环进程必须；单次进程可省）
+```
+
+坐标层生命周期同样可作用域化：[TaskScope](examples/04_task_scope/main.cpp)
+（feed 链式注入 → `run()` 同步一发，析构"取消并释放"）。
+
+输出在任务终止后仍保留；`take` / `takeOutput` / `takeOutputTensor` 为消费式取出。
 `waitForResult(taskId)` 默认无限等待直至终止，执行超时由节点实现方自行负责；
 复用已终止的taskId 合法；活动任务重复提交会抛出明确错误；
 submit 时声明目标在拓扑上不可达会立即抛构图/断链错误。

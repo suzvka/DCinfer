@@ -3,9 +3,9 @@
 // 展示完整的 DCinfer 使用流程：
 //   1. 注册算子
 //   2. 构建图（Add → Identity）
-//   3. 注入数据
-//   4. 提交并等待
-//   5. 获取结果
+//   3. 取公开接口
+//   4. 按别名注入数据并提交
+//   5. 按别名获取结果
 //
 // 预期输出：3 + 4 = 7
 
@@ -32,28 +32,26 @@ int main() {
 	// 连接 adder.sum → pass.x（connect 自动插入广播连接器）
 	graph.connect("adder", "sum", "pass", "x");
 
-	// 标记图级输入输出端口（绑定构成图级签名：submitBound 声明来源 / 序列化与内省元数据）
-	// 注：connect() 面向业务节点间的 1→1 连线，自动插入广播连接器中转。
-	//     寻址模型（单栈）：数据注入/取用唯一按 (nodeName, portName) 复合坐标。
+	// 声明图公开接口：别名 → 内部端口（绑定构成图级签名：submitBound 声明来源 / 序列化与内省元数据）
 	graph.bindInput("a", "adder", "a");
 	graph.bindInput("b", "adder", "b");
-	graph.bindOutput("result", "pass", "y");   // 图级输出别名 result → 内部 pass.y（元数据）
+	graph.bindOutput("result", "pass", "y");   // 图级输出别名 result → 内部 pass.y
 
-	// ── 4. 注入数据（按内部节点名 + 端口名定位）──
+	// ── 4. 取公开接口：冻结图并一次性解析别名 → 坐标 ──
+	auto api = graph.interface();
+	auto task = api.createTask(); // 任务句柄：析构自动释放已终止任务
+
+	// ── 5. 按公开别名注入数据 ──
 	auto tensorA = DC::Tensor::Create<float>();
 	tensorA = 3.0f;
 	auto tensorB = DC::Tensor::Create<float>();
 	tensorB = 4.0f;
 
-	graph.feedInput("task1", "adder", "a", std::move(tensorA));
-	graph.feedInput("task1", "adder", "b", std::move(tensorB));
+	task.feed("a", std::move(tensorA));
+	task.feed("b", std::move(tensorB));
 
-	// ── 5. 提交（以全部 bindOutput 绑定作为输出声明，无需重复声明）──
-	// 结果在任务终止后仍保留，无需注册回调即可在 wait 之后读取。
-	graph.submitBound("task1");
-
-	// ── 6. 等待完成并获取结构化结果 ──
-	auto result = graph.waitForResult("task1");
+	// ── 6. 同步运行并获取结构化结果（内部 submitBound + 等待终止）──
+	auto result = task.run();
 	if (result.status != DC::TaskStatus::Succeeded) {
 		std::cerr << "Error: task ended with status " << static_cast<int>(result.status)
 				  << std::endl;
@@ -62,8 +60,8 @@ int main() {
 		return 1;
 	}
 
-	// ── 7. 按内部寻址取结果（取出即消耗）──
-	auto output = graph.takeOutputTensor("task1", "pass", "y");
+	// ── 7. 按公开别名取结果（取出即消耗）──
+	auto output = task.takeTensor("result");
 	std::cout << "3.0 + 4.0 = " << output.item<float>() << std::endl;
 
 	return 0;

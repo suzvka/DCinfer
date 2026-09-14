@@ -3,6 +3,7 @@
 #include "Node.h"
 #include "GraphRuntimeState.h"
 #include "GraphBuilder.h"
+#include "GraphInterface.h"
 #include "ExecutionEngine.h"
 #include "GraphException.h"
 #include "TaskStatus.h"
@@ -31,16 +32,6 @@ namespace DC {
 //   - SignalStore     信号仓库
 //
 // Node 不知下游，Connector 即 Node。Graph 对一切顶点统一处理。
-//
-// ── 寻址模型（单栈）──
-//
-// 运行时数据注入与取用（feedInput / takeOutput / takeOutputTensor / hasOutput
-// / submit 声明）唯一按 (nodeName, portName) 复合坐标寻址：坐标唯一可判定，
-// 无名称解析、无回退。bindInput / bindOutput 的 alias 是图级签名的序列化/
-// 内省元数据，不参与运行时寻址——这是刻意决策：历史别名寻址方案（0.3.0）因
-// 跨绑定歧义被否决，勿恢复"第二条寻址路径"。宿主保持契约稳定的推荐姿势：
-// 经 inputBindings()/outputBindings() 内省取坐标，而非硬编码内部名
-// （见 README「寻址模型」节与 docs/addressing-model.md）。
 
 class InferGraph {
 public:
@@ -98,11 +89,9 @@ public:
 	/// @brief  图级输入绑定（强制公共别名）
 	///
 	/// 绑定构成图级签名，随冻结快照固化：供内省、序列化（DCIr）与
-	/// submitBound 声明推导使用。alias 是序列化/内省元数据，**不参与运行时寻址**——
-	/// 运行期数据注入/取用一律按 (nodeName, portName) 内部坐标
-	/// （feedInput / takeOutput），无别名解析、无回退（见类注释「寻址模型（单栈）」）。
-	/// 宿主保持契约稳定的推荐姿势：经 inputBindings() 内省取坐标，而非硬编码
-	/// 内部名（见 README「寻址模型」节）。
+	/// submitBound 声明推导使用。alias 不参与运行时寻址——运行期数据注入/取用
+	/// 一律按 (nodeName, portName) 内部坐标（feedInput / takeOutput）；
+	/// 按公开别名操作见 interface()。
 	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一）
 	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
@@ -116,8 +105,8 @@ public:
 	/// @brief  图级输出绑定（强制公共别名）
 	///
 	/// 绑定构成图级签名的一部分：submitBound 以此为输出声明来源，
-	/// 结果仍按内部寻址取用（takeOutput / takeOutputTensor）。
-	/// alias 是序列化/内省元数据，**不参与运行时寻址**（见类注释「寻址模型（单栈）」）。
+	/// 结果仍按内部寻址取用（takeOutput / takeOutputTensor）；
+	/// alias 不参与运行时寻址，按公开别名操作见 interface()。
 	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
 	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
@@ -127,6 +116,15 @@ public:
 		_ensureNotFrozen("InferGraph::bindOutput");
 		_builder->bindOutput(nodeName, portName, alias);
 	}
+
+	// ── 公开接口（按别名操作）──
+
+	/// @brief  取图公开接口：冻结图并一次性解析公开绑定（alias → (nodeName, portName)）。
+	///         返回的 GraphInterface 按公开别名喂数据 / 取结果，内部仍转发
+	///         坐标寻址运行期 API；绑定坐标存在性在创建时校验（fail-fast）。
+	/// @return GraphInterface 值对象（别名列表随冻结签名固定）
+	/// @throws GraphException(NodeNotFound/PortNotFound) 若绑定坐标不存在
+	GraphInterface interface();
 
 	// ── 数据注入 ──
 

@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **自定义节点教程示例 `examples/03_custom_node`**：NodePort 工厂声明 Schema →
   `ctx.input<Tensor>` 类型化读取 → `registerOperator` 注册 → 建图执行的完整
   可运行教程；README 新增"常见问题"段（自定义节点入口 + 任务资源释放）。
+- **图公开接口 `GraphInterface`（按别名喂数据 / 取结果）**：`graph.interface()`
+  冻结图并一次性解析公开绑定（alias → (nodeName, portName)）后返回；
+  `api.createTask()` 取得任务句柄（析构自动释放已终止任务、不取消在飞任务），
+  `task.feed(alias, data)` / `task.run()`（同步）/ `task.take(alias)` 只按公开
+  别名操作；未知别名抛 `GraphException(InvalidBinding)` 并列出全部可用别名；
+  绑定坐标在创建接口时校验（NodeNotFound / PortNotFound）。内核寻址不变——
+  `feedInput` / `takeOutput` 等仍唯一按 (nodeName, portName) 坐标。
+- **内核坐标层作用域句柄 `TaskScope`（RAII）**：`DC::TaskScope{graph, taskId}`
+  以 feed 链式注入 + `run()` 同步一发（submitBound → 等待 → 收割全部绑定输出
+  → 释放），或走显式异步路径（`submit` / `wait` / `cancel` / `status` /
+  `take` 转发 InferGraph 生命周期 API）；析构"取消并释放"——未终止时先
+  `cancel`（同步终止、不阻塞）再 `releaseTask`，退出作用域不留残余状态 /
+  结果 / 诊断（已终止 / 未知 ID 幂等）。别名层对应便捷路径见
+  `GraphInterface::Task`（示例见 examples/04_task_scope）。
 
 ### Fixed
 
@@ -59,9 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   复合坐标寻址，无名称解析、无回退；删除 `feedBoundInput`（0.3.0 引入、
   0.4.0 收窄的别名寻址路径），`feedInput` / `takeOutput` / `takeOutputTensor` /
   `hasOutput` 统一仅按内部坐标寻址。`alias` 定位为图级签名的序列化/内省元数据，
-  不参与运行时寻址（取代 0.4.0 条目中的别名寻址描述；决策记录见
-  `docs/addressing-model.md`）。宿主契约稳定的推荐姿势：经
-  `inputBindings()`/`outputBindings()` 内省取坐标，不硬编码内部名。
+  不参与运行时寻址（取代 0.4.0 条目中的别名寻址描述）。
 - **破坏性 API 收窄**：移除 `GraphBuilder::store()` 非 const 重载（唯一使用点
   `InferGraph::node()` 改走 `GraphBuilder::node()`）。冻结前泄漏可变
   `GraphStore&` 的路径在编译期不可达；`store() const` 保留且冻结后返回快照持有的
