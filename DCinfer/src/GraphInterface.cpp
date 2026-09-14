@@ -136,19 +136,56 @@ void GraphInterface::Task::_releaseIfTerminated() noexcept {
 		_iface->_graph->releaseTask(_taskId);
 }
 
-void GraphInterface::Task::feed(const std::string& alias, Value data) {
+GraphInterface::Task& GraphInterface::Task::feed(const std::string& alias, Value data) {
 	const auto& b = _iface->_resolveInput(alias, "GraphInterface::Task::feed");
 	_iface->_graph->feedInput(_taskId, b.nodeName, b.portName, std::move(data));
+	return *this;
 }
 
-void GraphInterface::Task::feed(const std::string& alias, Tensor data) {
+GraphInterface::Task& GraphInterface::Task::feed(const std::string& alias, Tensor data) {
 	const auto& b = _iface->_resolveInput(alias, "GraphInterface::Task::feed");
 	_iface->_graph->feedInput(_taskId, b.nodeName, b.portName, std::move(data));
+	return *this;
+}
+
+// ── 执行：同步与异步同级（全部转发 InferGraph 运行期 API）──
+
+void GraphInterface::Task::submit() {
+	_iface->_graph->submitBound(_taskId, InferGraph::kDefaultMaxHops);
 }
 
 TaskResult GraphInterface::Task::run() {
-	_iface->_graph->submitBound(_taskId);
+	return run(std::chrono::milliseconds(0)); // 0 = 无限等待（引擎约定）
+}
+
+TaskResult GraphInterface::Task::run(std::chrono::milliseconds timeout) {
+	submit();
+	return wait(timeout);
+}
+
+TaskResult GraphInterface::Task::wait() {
 	return _iface->_graph->waitForResult(_taskId);
+}
+
+TaskResult GraphInterface::Task::wait(std::chrono::milliseconds timeout) {
+	return _iface->_graph->waitForResult(_taskId, timeout);
+}
+
+TaskStatus GraphInterface::Task::status() const {
+	return _iface->_graph->taskStatus(_taskId);
+}
+
+bool GraphInterface::Task::cancel() {
+	return _iface->_graph->cancel(_taskId);
+}
+
+bool GraphInterface::Task::has(const std::string& alias) const {
+	const auto& b = _iface->_resolveOutput(alias, "GraphInterface::Task::has");
+	return _iface->_graph->hasOutput(_taskId, b.nodeName, b.portName);
+}
+
+std::vector<TaskError> GraphInterface::Task::errors() const {
+	return _iface->_graph->taskErrors(_taskId);
 }
 
 Value GraphInterface::Task::take(const std::string& alias) {

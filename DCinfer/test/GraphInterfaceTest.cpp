@@ -333,6 +333,87 @@ static void testRunWithoutOutputBindings() {
 	CHECK(threw, "run() without output bindings should throw NoDeclaration");
 }
 
+// ═══════════════════════════════════════════════════════════
+// 统一任务句柄：同步与异步同级（submit / wait / status / cancel）
+// ═══════════════════════════════════════════════════════════
+
+// ── 必败算子（触发 Error 级诊断）──
+
+static Node::RunFn failRunFn() {
+	return [](Node::RunContext& ctx) -> Node::Result {
+		return ctx.failure(Node::Status::InvalidInput, "boom");
+	};
+}
+
+static void testAsyncSubmitWaitStatusCancel() {
+	InferGraph graph;
+	graph.addNode(std::make_unique<Node>("Builtin", "slow", incSchema(), slowIncRunFn()));
+	graph.bindInput("num", "slow", "x");
+	graph.bindOutput("result", "slow", "y");
+	auto api = graph.interface();
+
+	auto task = api.createTask();
+	CHECK(task.status() == TaskStatus::Unknown, "fresh handle should be Unknown");
+
+	task.feed("num", floatTensor(10.0f)).submit(); // 链式组装 + 异步启动
+	CHECK(task.status() == TaskStatus::Running, "submitted task should be Running");
+
+	auto done = task.wait(); // 异步配套：同步等待终止
+	CHECK(done.status == TaskStatus::Succeeded, "async path should complete");
+	CHECK(task.status() == TaskStatus::Succeeded, "status should be Succeeded after wait");
+	CHECK(task.has("result"), "output should exist after completion");
+	CHECK(std::abs(task.takeTensor("result").item<float>() - 11.0f) < 1e-6f,
+		  "async result should be 11");
+}
+
+static void testRunWithTimeout() {
+	InferGraph graph;
+	graph.addNode(std::make_unique<Node>("Builtin", "slow", incSchema(), slowIncRunFn()));
+	graph.bindInput("num", "slow", "x");
+	graph.bindOutput("result", "slow", "y");
+	auto api = graph.interface();
+
+	auto task = api.createTask();
+	task.feed("num", floatTensor(2.0f));
+	// 慢算子 200ms > 超时 50ms：返回 Running 而不取消任务
+	auto timedOut = task.run(std::chrono::milliseconds(50));
+	CHECK(timedOut.status == TaskStatus::Running, "run(timeout) should return Running on timeout");
+
+	auto done = task.wait(); // 任务未被取消：继续等待可完成
+	CHECK(done.status == TaskStatus::Succeeded, "task should still complete after timeout");
+	CHECK(std::abs(task.takeTensor("result").item<float>() - 3.0f) < 1e-6f,
+		  "result should be 3 after timeout recovery");
+}
+
+static void testCancelAsyncTask() {
+	InferGraph graph;
+	graph.addNode(std::make_unique<Node>("Builtin", "slow", incSchema(), slowIncRunFn()));
+	graph.bindInput("num", "slow", "x");
+	graph.bindOutput("result", "slow", "y");
+	auto api = graph.interface();
+
+	auto task = api.createTask();
+	task.feed("num", floatTensor(1.0f)).submit();
+	CHECK(task.cancel(), "cancel on running task should return true");
+	auto r = task.wait();
+	CHECK(r.status == TaskStatus::Cancelled, "cancelled task should end Cancelled");
+	CHECK(!task.cancel(), "second cancel on terminated task should return false");
+}
+
+static void testFailedTaskReportsErrors() {
+	InferGraph graph;
+	graph.addNode(std::make_unique<Node>("Builtin", "bad", incSchema(), failRunFn()));
+	graph.bindInput("num", "bad", "x");
+	graph.bindOutput("result", "bad", "y");
+	auto api = graph.interface();
+
+	auto task = api.createTask();
+	task.feed("num", floatTensor(1.0f));
+	auto r = task.run();
+	CHECK(r.status == TaskStatus::Failed, "failed node should normalize to Failed");
+	CHECK(!task.errors().empty(), "errors() should report node diagnostics");
+}
+
 // ════════════════════════════════════════════
 // 内核 API 保持坐标唯一寻址（alias 不可用）
 // ════════════════════════════════════════════
@@ -376,6 +457,10 @@ int main() {
 		testBindingValidationAtCreation();
 		testTaskHandleLifecycle();
 		testRunWithoutOutputBindings();
+		testAsyncSubmitWaitStatusCancel();
+		testRunWithTimeout();
+		testCancelAsyncTask();
+		testFailedTaskReportsErrors();
 		testCoreRemainsCoordinateOnly();
 
 		if (failures == 0)

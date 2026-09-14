@@ -24,13 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   别名操作；未知别名抛 `GraphException(InvalidBinding)` 并列出全部可用别名；
   绑定坐标在创建接口时校验（NodeNotFound / PortNotFound）。内核寻址不变——
   `feedInput` / `takeOutput` 等仍唯一按 (nodeName, portName) 坐标。
-- **内核坐标层作用域句柄 `TaskScope`（RAII）**：`DC::TaskScope{graph, taskId}`
-  以 feed 链式注入 + `run()` 同步一发（submitBound → 等待 → 收割全部绑定输出
-  → 释放），或走显式异步路径（`submit` / `wait` / `cancel` / `status` /
-  `take` 转发 InferGraph 生命周期 API）；析构"取消并释放"——未终止时先
-  `cancel`（同步终止、不阻塞）再 `releaseTask`，退出作用域不留残余状态 /
-  结果 / 诊断（已终止 / 未知 ID 幂等）。别名层对应便捷路径见
-  `GraphInterface::Task`（示例见 examples/04_task_scope）。
+- **统一任务句柄 `GraphInterface::Task` 同步/异步同级**：新增 `submit()`（异步
+  启动，不等待）、`wait()` / `wait(timeout)`、`status()`、`cancel()`、
+  `has(alias)`、`errors()` 与 `run(timeout)`；`feed` 支持链式返回 `Task&`。
+  同步 `run()` 与异步 `submit + wait` 是同一句柄上的同级表达——宿主层仅一套
+  API（两种节奏演示见 examples/04_task_lifecycle），无需 taskId / 坐标。
+  原 `TaskScope` 的能力（超时 run / 取消 / 状态查询 / 结构化等待）全部并入。
+
+### Removed
+
+- **内核坐标层作用域句柄 `TaskScope` 下线**：其能力已并入
+  `GraphInterface::Task`（同步/异步同级）；examples/04_task_scope 迁往
+  examples/04_task_lifecycle。需显式 taskId / 坐标级精细控制的宿主场景
+  改为直接使用 `InferGraph` 坐标运行期 API（限框架/扩展作者）。
 
 ### Fixed
 

@@ -423,10 +423,8 @@ transport 内部自持 I/O 线程 / 事件循环（异步 SDK、流式、多路�
 
 - 节点归属 `ThreadPoolAffinity::System`（README：System Pool 承担 I/O、网络传输），
   阻塞式 HTTP 调用天然适合；
-- 适配器内不加锁：连接池线程安全由 transport 实现保证（如 libcurl easy handle
+- 适配器内不加锁：连接线程安全由 transport 实现保证（POCO HTTPClientSession
   每线程独立创建 / 互斥保护共享连接）；
-- 并发上限控制用既有 `registerGroupLimit(tag, N)`（组信号量跨池共享、全局互斥），
-  适配器不自行串行化；
 - transport 内部 `std::mutex` 仅保护状态字段（连接、健康、重连计数），不保护请求路径。
 
 ---
@@ -501,12 +499,12 @@ DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`m
 - vcpkg manifest 模式只安装清单声明的包：外部 `add_subdirectory` 消费方必须在
   自己的 `vcpkg.json` 声明 `nlohmann-json` 与 `poco[netssl]`（DCNet 及
   DCEngine::OpenAI 的 `find_package` 依赖），否则配置失败；
-- 不消费 DCNet 的零依赖消费方（如 DCinfer-test 的 `smoke/`）应显式
+- 不消费 DCNet 的零依赖消费方应显式
   `set(DCINFER_BUILD_DCNET OFF CACHE BOOL "" FORCE)`，避免拉入 nlohmann-json
   （`BUILD_ENGINE_OPENAI=ON` 缺 `DCNet::DCNet` 时 CMake 直接 FATAL_ERROR）；
 - 外部引用目标：`DCNet::DCNet`（静态库 alias，同构建树可用）；协议适配器
   `DCEngine::OpenAI`（DCEngines/OpenAI，依赖 `DCNet::DCNet`）；
-- 外部开发者接入"对方服务"的完整最小范例见 `DCinfer-test/src/net_smoke.cpp`
+- 接入"对方服务"的最小范例见 `DCNet/test/NetAdapterTest.cpp`
   （自定义 transport + codec → `registerDcNetAdapter` → `createNode` 组图）；
   直接对接 OpenAI 兼容服务用 `DCEngine::OpenAI` 的 `registerOpenAiEngine`。
 

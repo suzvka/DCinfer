@@ -47,8 +47,7 @@ int main() {
 	auto tensorB = DC::Tensor::Create<float>();
 	tensorB = 4.0f;
 
-	task.feed("a", std::move(tensorA));
-	task.feed("b", std::move(tensorB));
+	task.feed("a", std::move(tensorA)).feed("b", std::move(tensorB)); // feed 链式：一次注入全部输入
 
 	// ── 6. 同步运行并获取结构化结果（内部 submitBound + 等待终止）──
 	auto result = task.run();

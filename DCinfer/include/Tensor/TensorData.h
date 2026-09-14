@@ -16,7 +16,7 @@
 namespace DC {
 
 // TensorData: 存储张量的底层数据容器
-// - 支持两种内部表示：稀疏块视图（_dataMain / _dataDimSets，称为 "view"）
+// - 支持两种内部表示：稀疏块视图（_dataMain / _dataCatalog，称为 "view"）
 //   与连续稠密缓存（_dataCache，称为 "cache"）。
 // - view 表示为：按除最后一维外的坐标索引到一个字节块（DataBlock），
 //   每个块内按 _typeSize 解释元素；最后一维为块内元素数量（元素字节数 = _typeSize）。
@@ -197,7 +197,7 @@ private:
 	// 构建稠密缓存：根据当前稀疏数据块映射和维度集合，构建一个完整的连续字节缓冲区（dataCache）表示稠密张量。未覆盖的元素填充为零。
 	void buildCache();
 
-	// 从稠密缓存物化为稀疏块映射：根据当前稠密缓存和形状，重建稀疏数据块映射（data）和维度集合（dataDimSets）。这会清空现有的稀疏结构，并将所有元素视为存在于一个完整的块中。
+	// 从稠密缓存物化为稀疏块映射：根据当前稠密缓存和形状，重建稀疏数据块映射（_dataMain）和维度集合（_dataCatalog）。这会清空现有的稀疏结构，并将所有元素视为存在于一个完整的块中。
 	void buildView();
 
 	// 校验 _typeSize。

@@ -115,31 +115,46 @@ if (result.status == DC::TaskStatus::Succeeded) {
 [examples/03_custom_node](examples/03_custom_node/main.cpp) 开始——完整可运行教程；
 其他常见问题见[常见问题](#常见问题)。
 
-### 寻址模型
+### 寻址模型与 API 分层
 
-面向宿主：`graph.interface()` 冻结图并一次性解析公开绑定后，只按公开别名喂数据 / 取结果
-（可用别名见 `api.inputAliases()` / `api.outputAliases()`；未知别名抛错并列出全部可用别名）：
+**宿主层只有一套 API**：`graph.interface()` 冻结图并一次性解析公开绑定后，
+`GraphInterface::Task` 按公开别名操作，同步与异步同级——`run()` 等价于
+`submit()` 后 `wait()` 的同步组合（可用别名见 `api.inputAliases()` /
+`api.outputAliases()`；未知别名抛错并列出全部可用别名）：
 
 ```cpp
 auto api = graph.interface();       // 取接口即定型
+
+// 同步一发
 auto task = api.createTask();
-task.feed("prompt", input);         // 公开别名 → 内部坐标（一次性解析）
-auto result = task.run();           // 同步运行
-auto output = task.take("answer");  // 消费式取出
+task.feed("a", x).feed("b", y);    // feed 链式：公开别名 → 内部坐标（一次性解析）
+auto result = task.run();           // submit + 无限等待
+if (result.status == DC::TaskStatus::Succeeded)
+    auto output = task.take("answer"); // 消费式取出
+
+// 异步（同一句柄，同级表达）
+task.feed("a", x).feed("b", y).submit(); // 异步启动（不等待）
+// …… 此处可做其他工作 ……
+auto r = task.wait(5s);             // 显式超时；超时返回 Running，不取消任务
+if (r.status == DC::TaskStatus::Succeeded)
+    auto output = task.take("answer");
 ```
 
-内核唯一按 `(nodeName, portName)` 复合坐标寻址（`feedInput` / `takeOutput` / `takeOutputTensor` / `hasOutput` / `submit` 声明）。
-异步提交、多输出声明、信号控制等高级用法直接使用 `InferGraph` 运行期 API，按坐标操作：
+任务句柄同时提供 `status()` / `cancel()` / `has(alias)` / `errors()`；
+终态任务随析构自动释放（无需 `releaseTask`），在飞任务不受析构影响。
+两种节奏的完整演示见 [examples/04_task_lifecycle](examples/04_task_lifecycle/main.cpp)。
+
+**坐标层仅供扩展作者**：内核唯一按 `(nodeName, portName)` 复合坐标寻址
+（`feedInput` / `takeOutput` / `takeOutputTensor` / `hasOutput` / `submit` 声明）。
+宿主默认不需要接触 taskId 与坐标；只有框架/运行时扩展作者（动态多输出声明、
+taskId 复用、引擎嵌入、精细资源控制）才直接驱动 `InferGraph` 坐标运行期 API：
 
 ```cpp
 graph.feedInput(tid, "llm", "input", data);
 graph.submit(tid, "llm", "output");
 auto r = graph.takeOutputTensor(tid, "llm", "output");
-graph.releaseTask(tid); // 消费结果后释放（长跑/循环进程必须；单次进程可省）
+graph.releaseTask(tid); // 坐标层手工管理；消费结果后释放
 ```
-
-坐标层生命周期同样可作用域化：[TaskScope](examples/04_task_scope/main.cpp)
-（feed 链式注入 → `run()` 同步一发，析构"取消并释放"）。
 
 输出在任务终止后仍保留；`take` / `takeOutput` / `takeOutputTensor` 为消费式取出。
 `waitForResult(taskId)` 默认无限等待直至终止，执行超时由节点实现方自行负责；
@@ -215,9 +230,16 @@ ctest --test-dir build -C Release
 
 **循环提交大量短任务，内存持续增长？**
 
-任务终止后状态、输出结果与诊断记录由运行时保留（供 `waitForResult` 之后取用），
-默认不自动回收。"大量短任务"场景请在消费结果后调用 `releaseTask(taskId)`
-（循环示范见 [examples/02_lowering_benchmark](examples/02_lowering_benchmark/main.cpp)）。
+高层默认写法无需关注：任务句柄析构自动回收已终止任务（循环示范见
+[examples/02_lowering_benchmark](examples/02_lowering_benchmark/main.cpp)）。
+仅当直接使用坐标层 `InferGraph` 运行期 API 且复用同一 taskId 时，才需在消费结果后
+调用 `releaseTask(taskId)`。
+
+**我应该用 `interface()` 还是直接操作 `InferGraph`？**
+
+宿主一律用 `interface()` 高层任务句柄——同步 `run()` 与异步 `submit()+wait()` 同级，
+见「寻址模型与 API 分层」。只有框架/运行时扩展作者（动态多输出声明、taskId 复用、
+引擎嵌入）才直接驱动 `InferGraph` 坐标 API。
 
 **如何编写自定义节点/算子？**
 

@@ -131,8 +131,6 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	return ns && ns->buffer.hasOutput(taskId, portName);
 }
 
-
-
 // ════════════════════════════════════════════
 // task 生命周期：状态 / 结构化等待 / 资源回收
 // ════════════════════════════════════════════
