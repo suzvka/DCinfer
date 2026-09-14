@@ -11,3 +11,4 @@ endif()
 
 add_subdirectory(01_hello_graph)
 add_subdirectory(02_lowering_benchmark)
+add_subdirectory(03_custom_node)

@@ -18,10 +18,8 @@ static Node::Schema addSchema() {
 
 static Node::RunFn addRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& aVal = ctx.peek("a");
-		const auto& bVal = ctx.peek("b");
-		const auto* a = aVal.as<Tensor>();
-		const auto* b = bVal.as<Tensor>();
+		const auto* a = ctx.input<Tensor>("a");
+		const auto* b = ctx.input<Tensor>("b");
 		if (!a || !b)
 			return ctx.failure(Node::Status::InvalidInput, "Add: inputs must be DC::Tensor");
 
@@ -46,10 +44,8 @@ static Node::Schema mulSchema() {
 
 static Node::RunFn mulRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& aVal = ctx.peek("a");
-		const auto& bVal = ctx.peek("b");
-		const auto* a = aVal.as<Tensor>();
-		const auto* b = bVal.as<Tensor>();
+		const auto* a = ctx.input<Tensor>("a");
+		const auto* b = ctx.input<Tensor>("b");
 		if (!a || !b)
 			return ctx.failure(Node::Status::InvalidInput, "Mul: inputs must be DC::Tensor");
 
@@ -74,8 +70,7 @@ static Node::Schema identitySchema() {
 
 static Node::RunFn identityRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& xVal = ctx.peek("x");
-		const auto* x = xVal.as<Tensor>();
+		const auto* x = ctx.input<Tensor>("x");
 		if (!x)
 			return ctx.failure(Node::Status::InvalidInput, "Identity: input must be DC::Tensor");
 

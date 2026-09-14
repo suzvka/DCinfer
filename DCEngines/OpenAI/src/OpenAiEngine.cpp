@@ -69,14 +69,12 @@ public:
 		j["model"] = _model;
 
 		nlohmann::json messages = nlohmann::json::array();
-		const auto& sysVal = ctx.peek("system");
-		if (const auto* t = sysVal.as<Tensor>(); t) {
+		if (const auto* t = ctx.input<Tensor>("system"); t) {
 			const std::string sys = textOf(*t);
 			if (!sys.empty())
 				messages.push_back({{"role", "system"}, {"content", sys}});
 		}
-		const auto& promptVal = ctx.peek("prompt");
-		const auto* pt = promptVal.as<Tensor>();
+		const auto* pt = ctx.input<Tensor>("prompt");
 		if (!pt)
 			throw std::runtime_error("chat codec: 'prompt' not a Tensor");
 		messages.push_back({{"role", "user"}, {"content", textOf(*pt)}});
@@ -86,8 +84,7 @@ public:
 		// params 端口（可选）：请求级采样参数 JSON，逐请求覆盖。
 		// 非法 JSON / 非对象 → DcCodecInputError（标准 RunFn 映射为 InvalidInput），
 		// 与"未提供 params"（空 Tensor，静默跳过）严格区分。
-		const auto& paramsVal = ctx.peek("params");
-		if (const auto* t = paramsVal.as<Tensor>(); t) {
+		if (const auto* t = ctx.input<Tensor>("params"); t) {
 			const std::string text = textOf(*t);
 			if (!text.empty()) {
 				nlohmann::json overrides;

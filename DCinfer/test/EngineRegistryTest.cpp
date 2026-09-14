@@ -14,8 +14,8 @@ using namespace DC;
 // ── Mock schema ──
 static Node::Schema mockSchema() {
 	Node::Schema s;
-	s.inputs = {{"in", Tensor::TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"out", Tensor::TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("in")};
+	s.outputs = {Node::Port::out<float>("out")};
 	return s;
 }
 

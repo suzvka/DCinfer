@@ -266,16 +266,6 @@ public:
 		return _top;
 	}
 
-	/// @brief 通过 View 向张量写入元素值。
-	/// @tparam T 要写入的数据类型。
-	/// @param value 要写入的值。
-	/// @return 顶层张量引用。
-	template <typename T>
-	Tensor& item(const T& value = T()) {
-		_top.write(_shape, value);
-		return _top;
-	}
-
 	/// @brief 从 View 读取标量值。
 	/// @tparam T 期望的 C++ 类型。
 	/// @return 标量值的副本。

@@ -224,8 +224,7 @@ static Node::RunFn onnxRunFn() {
 		inputValues.reserve(schema.inputs.size());
 
 		for (const auto& port : schema.inputs) {
-			const auto& val = ctx.peek(port.name);
-			const auto* tensor = val.as<Tensor>();
+			const auto* tensor = ctx.input<Tensor>(port.name);
 			if (!tensor)
 				return ctx.failure(Node::Status::InvalidInput,
 								   "OnnxRuntime: input '" + port.name + "' is not a DC::Tensor");

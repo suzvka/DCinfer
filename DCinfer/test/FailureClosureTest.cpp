@@ -44,8 +44,8 @@ static Value makeFloatTensor(float value) {
 
 static Node::Schema identitySchema() {
 	Node::Schema s;
-	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("x")};
+	s.outputs = {Node::Port::out<float>("y")};
 	return s;
 }
 

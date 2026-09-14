@@ -48,8 +48,8 @@ static Value makeFloatTensor(float value) {
 // ── 加法算子 Schema + RunFn ──
 static Node::Schema addSchema() {
 	Node::Schema s;
-	s.inputs = {{"a", TensorType::Float, sizeof(float), {}}, {"b", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("b")};
+	s.outputs = {Node::Port::out<float>("s")};
 	return s;
 }
 
@@ -73,8 +73,8 @@ static Node::RunFn addRunFn() {
 // ── 恒等算子 ──
 static Node::Schema identitySchema() {
 	Node::Schema s;
-	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("x")};
+	s.outputs = {Node::Port::out<float>("y")};
 	return s;
 }
 
@@ -93,8 +93,8 @@ static Node::RunFn identityRunFn() {
 // ── 增 1 算子（用于反馈环测试）──
 static Node::Schema incSchema() {
 	Node::Schema s;
-	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("x")};
+	s.outputs = {Node::Port::out<float>("y")};
 	return s;
 }
 

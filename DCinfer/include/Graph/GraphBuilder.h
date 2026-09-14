@@ -52,14 +52,14 @@ public:
 				  const std::string& dstNode, const std::string& dstPort);
 
 	/// @brief  标记输入：该节点的该端口为图级输入口
-	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一）
+	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一；不参与运行时寻址）
 	/// @throws GraphException(InvalidBinding) 别名为空
 	/// @throws GraphException(DuplicateBinding) 别名重复
 	void bindInput(const std::string& nodeName, const std::string& portName,
 				   const std::string& alias);
 
 	/// @brief  标记输出：该节点的该端口产出进入输出区（与边目的地互斥）
-	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
+	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一；不参与运行时寻址）
 	/// @throws GraphException(InvalidBinding) 别名为空
 	/// @throws GraphException(DuplicateBinding) 别名重复
 	/// @note   重复绑定同一 node:port 为无操作

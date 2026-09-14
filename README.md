@@ -30,7 +30,7 @@ DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在 
 - **构图与冻结可并发**：构建 API 与 `compile()` 由构建面互斥锁串行化，每个构建操作要么纳入快照、要么在冻结后确定抛 Frozen，无 TOCTOU 窗口。
 
 冻结时执行编译与 lowering：
-- **图级签名**：输入/输出绑定固化为不可变 `GraphSignature`，执行期别名解析无锁；
+- **图级签名**：输入/输出绑定固化为不可变 `GraphSignature`，执行期签名读取无锁（寻址坐标固定，无别名解析）；
 - **运行时视图**：语义等价于"边"的 `Broadcast(1)` 导线连接器被擦除，减少调度顶点、传播跳数与线程池提交（源图不变——序列化与内省仍反映源图；成环 TTL 只统计运行时顶点）；
 - **拓扑演进**：重建图并重新编译产生新快照，旧图任务排空后替换。
 
@@ -124,8 +124,8 @@ cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake 
 示例代码（[examples/01_hello_graph](examples/01_hello_graph/main.cpp)）展示标准任务生命周期：
 
 ```cpp
-graph.bindInput("a", "adder", "a");        // 图级输入绑定（图级签名 / 序列化契约）
-graph.bindOutput("result", "pass", "y");   // 公共别名绑定图级输出（result → pass.y）
+graph.bindInput("a", "adder", "a");        // 图级输入绑定（签名元数据：序列化/内省）
+graph.bindOutput("result", "pass", "y");   // 图级输出绑定（别名 result → pass.y，供声明/序列化）
 graph.feedInput("task1", "adder", "a", ...); // 内部寻址注入 (nodeName, portName)
 graph.submitBound("task1");                // 以 bindOutput 绑定作为输出声明
 if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
@@ -133,10 +133,32 @@ if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
 }
 ```
 
+编写自定义节点/算子（Schema 声明 → RunFn → 注册 → 执行）从
+[examples/03_custom_node](examples/03_custom_node/main.cpp) 开始——完整可运行教程；
+其他常见问题见[常见问题](#常见问题)。
+
+### 寻址模型（单栈）
+
+运行时数据注入与取用（`feedInput` / `takeOutput` / `takeOutputTensor` / `hasOutput`
+/ `submit` 声明）唯一按 `(nodeName, portName)` 复合坐标寻址——坐标唯一可判定，
+无名称解析、无回退。`bindInput` / `bindOutput` 的别名是图级签名的序列化/内省元数据
+（随冻结快照固化，供 `submitBound` 推导输出声明、DCIr 序列化与内省使用），
+**不参与运行时寻址**；这是刻意决策而非能力缺口——历史别名寻址方案（0.3.0）
+因跨绑定歧义被否决（决策记录见 [docs/addressing-model.md](docs/addressing-model.md)）。
+
+宿主保持契约稳定的推荐姿势——内省驱动寻址，不硬编码内部名：
+
+```cpp
+// 启动时：从签名取坐标（图换版本、内部重构不影响宿主代码）
+std::unordered_map<std::string, std::pair<std::string, std::string>> addr;
+for (const auto& b : graph.inputBindings()) addr[b.alias] = {b.nodeName, b.portName};
+// 运行时：别名仅用于宿主侧查表，寻址仍是唯一坐标
+auto [n, p] = addr.at("prompt");
+graph.feedInput(tid, n, p, data);
+```
+
 输出在任务终止后仍保留；`takeOutput` / `takeOutputTensor` 为消费式取出
-（取出即不可重复读取）。数据注入、输出声明与结果取用统一**仅按内部寻址**
-`(nodeName, portName)`；`bindInput` / `bindOutput` 的别名构成图级签名（随冻结快照
-固化，供 `submitBound` 推导输出声明与序列化使用），不参与运行时寻址。
+（取出即不可重复读取）。
 `waitForResult(taskId)` 默认无限等待直至终止，可能阻塞的场景改用显式超时重载
 `waitForResult(taskId, 5s)` 或从其他线程 `cancel()`。执行超时由节点实现方自行负责
 （引擎不设执行超时；节点内部超时失败经 `NodeResult` + `Diagnostic` 自报，任务终止为
@@ -225,6 +247,37 @@ vcpkg 重型依赖，暂未纳入安装导出，仍以 `add_subdirectory` 消费
 
 ```bash
 ctest --test-dir build -C Release
+```
+
+---
+
+## 常见问题
+
+**循环提交大量短任务，内存持续增长？**
+
+任务终止后状态、输出结果与诊断记录由运行时保留（供 `waitForResult` 之后取用），
+默认不自动回收。"大量短任务"场景请在消费结果后调用 `releaseTask(taskId)`
+（循环示范见 [examples/02_lowering_benchmark](examples/02_lowering_benchmark/main.cpp)）。
+
+**如何编写自定义节点/算子？**
+
+完整流程见 [examples/03_custom_node](examples/03_custom_node/main.cpp)：
+NodePort 工厂声明 Schema → `registerOperator` 注册 → 建图执行。两个关键点：
+
+端口 Schema 用工厂声明（类型与 typeSize 单点书写，改型不漏改）——与聚合初始化等价：
+
+```cpp
+s.inputs = {Node::Port::in<float>("x")};                          // 工厂（推荐）
+// 等价：s.inputs = {{"x", Tensor::TensorType::Float, sizeof(float), {}}};
+```
+
+RunFn 内用类型化访问器读取输入（内建空值/类型校验，失败返回 nullptr），
+免手写 `peek → as<T> → 判空` 样板：
+
+```cpp
+const auto* x = ctx.input<Tensor>("x");
+if (!x)
+    return ctx.failure(Node::Status::InvalidInput, "x must be a Tensor");
 ```
 
 ---

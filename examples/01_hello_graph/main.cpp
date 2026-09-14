@@ -32,12 +32,12 @@ int main() {
 	// 连接 adder.sum → pass.x（connect 自动插入广播连接器）
 	graph.connect("adder", "sum", "pass", "x");
 
-	// 标记图级输入输出端口（绑定构成图级签名：submitBound 声明来源 / 序列化契约）
+	// 标记图级输入输出端口（绑定构成图级签名：submitBound 声明来源 / 序列化与内省元数据）
 	// 注：connect() 面向业务节点间的 1→1 连线，自动插入广播连接器中转。
-	//     数据注入/取用统一按内部寻址 (nodeName, portName)。
+	//     寻址模型（单栈）：数据注入/取用唯一按 (nodeName, portName) 复合坐标。
 	graph.bindInput("a", "adder", "a");
 	graph.bindInput("b", "adder", "b");
-	graph.bindOutput("result", "pass", "y");   // 公共别名 result → 内部 pass.y
+	graph.bindOutput("result", "pass", "y");   // 图级输出别名 result → 内部 pass.y（元数据）
 
 	// ── 4. 注入数据（按内部节点名 + 端口名定位）──
 	auto tensorA = DC::Tensor::Create<float>();

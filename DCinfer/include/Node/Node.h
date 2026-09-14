@@ -321,6 +321,17 @@ public:
 	void output(const std::string& name, Value tensor);
 	const Value* outputRaw(const std::string& name) const;
 
+	/// @brief  类型化输入访问器：peek + 类型标签校验 + 空值检查的组合，
+	///         替代手动 "peek → as<T> → 判空" 三步样板。
+	/// @param  name  输入端口名
+	/// @param  error 失败原因输出（可为 nullptr）；覆盖端口不存在、数据未到达、
+	///               类型标签不匹配（Value 持有其他原生类型）、空值
+	/// @return 类型化只读指针（生命周期随槽位，至本轮 RunFn 返回）；失败返回 nullptr
+	template <typename T>
+	const T* input(const std::string& name, std::string* error = nullptr) const {
+		return static_cast<const T*>(_inputChecked(name, ensureSlotType<T>(), error));
+	}
+
 	Node::Result success(std::string message = {}) const;
 	Node::Result failure(Node::Status status, std::string message) const;
 	Node::Result failure(Node::Status status, std::string message, Diagnostic diagnostic) const;
@@ -337,6 +348,10 @@ private:
 	friend struct ExecutionPipeline;
 	RunContext(SlotWorkspace& workspace, EngineAdapter& engine,
 			   const Node::Schema& schema, const std::string& type, const std::string& name);
+
+	/// @brief 类型化输入检查的非模板实现（定义在 Node.cpp）：成功返回原生指针，
+	///        失败返回 nullptr 并可选填充 error（模板 input<T> 薄包装）
+	const void* _inputChecked(const std::string& name, SlotDataType type, std::string* error) const;
 
 	SlotWorkspace& _workspace;
 	EngineAdapter& _engine;

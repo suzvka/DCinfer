@@ -24,13 +24,23 @@ namespace DC {
 //        │ compile()（惰性：首次运行期 API 自动触发；或显式 freeze()）
 //        v
 //   Freeze/Execute（执行期）── 构建面关闭（Frozen），运行期只读冻结快照：
-//   - CompiledGraph  不可变拓扑 + GraphSignature（图级绑定契约）
+//   - CompiledGraph  不可变拓扑 + GraphSignature（图级签名：绑定快照，序列化/内省元数据）
 //   - ExecutionEngine 执行调度与事件驱动数据传播
 //   - OutputZone      输出聚合（纯任务态）
 //   - ErrorTracker    错误收集
 //   - SignalStore     信号仓库
 //
 // Node 不知下游，Connector 即 Node。Graph 对一切顶点统一处理。
+//
+// ── 寻址模型（单栈）──
+//
+// 运行时数据注入与取用（feedInput / takeOutput / takeOutputTensor / hasOutput
+// / submit 声明）唯一按 (nodeName, portName) 复合坐标寻址：坐标唯一可判定，
+// 无名称解析、无回退。bindInput / bindOutput 的 alias 是图级签名的序列化/
+// 内省元数据，不参与运行时寻址——这是刻意决策：历史别名寻址方案（0.3.0）因
+// 跨绑定歧义被否决，勿恢复"第二条寻址路径"。宿主保持契约稳定的推荐姿势：
+// 经 inputBindings()/outputBindings() 内省取坐标，而非硬编码内部名
+// （见 README「寻址模型」节与 docs/addressing-model.md）。
 
 class InferGraph {
 public:
@@ -87,10 +97,12 @@ public:
 
 	/// @brief  图级输入绑定（强制公共别名）
 	///
-	/// 别名是图对外契约的一部分：内部节点/端口重构后，只要别名映射不变，
-	/// 调用方代码无需改动。绑定构成图级签名，随冻结快照固化，供
-	/// submitBound 推导输出声明与序列化（DCIr）使用；运行期数据注入/取用
-	/// 一律按 (nodeName, portName) 内部寻址（feedInput / takeOutput）。
+	/// 绑定构成图级签名，随冻结快照固化：供内省、序列化（DCIr）与
+	/// submitBound 声明推导使用。alias 是序列化/内省元数据，**不参与运行时寻址**——
+	/// 运行期数据注入/取用一律按 (nodeName, portName) 内部坐标
+	/// （feedInput / takeOutput），无别名解析、无回退（见类注释「寻址模型（单栈）」）。
+	/// 宿主保持契约稳定的推荐姿势：经 inputBindings() 内省取坐标，而非硬编码
+	/// 内部名（见 README「寻址模型」节）。
 	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一）
 	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
@@ -105,6 +117,7 @@ public:
 	///
 	/// 绑定构成图级签名的一部分：submitBound 以此为输出声明来源，
 	/// 结果仍按内部寻址取用（takeOutput / takeOutputTensor）。
+	/// alias 是序列化/内省元数据，**不参与运行时寻址**（见类注释「寻址模型（单栈）」）。
 	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
 	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用

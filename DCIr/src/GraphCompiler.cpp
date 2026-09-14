@@ -211,7 +211,7 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	// 边：折叠连接器
 	root["edges"] = edgesToJson(graph);
 
-	// 输出绑定（alias 必填：图级绑定统一强制公共别名）
+	// 输出绑定（alias 必填：签名元数据字段，不参与运行时寻址）
 	nlohmann::json bindingsArr = nlohmann::json::array();
 	for (auto& b : graph.outputBindings()) {
 		auto* boundNode = graph.node(b.nodeName);
@@ -224,7 +224,7 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	}
 	root["outputBindings"] = std::move(bindingsArr);
 
-	// 输入绑定（alias 必填：图级绑定统一强制公共别名）
+	// 输入绑定（alias 必填：签名元数据字段，不参与运行时寻址）
 	nlohmann::json inputBindingsArr = nlohmann::json::array();
 	for (auto& b : graph.inputBindings()) {
 		auto* boundNode = graph.node(b.nodeName);

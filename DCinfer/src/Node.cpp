@@ -135,6 +135,26 @@ const Value& Node::RunContext::peek(const std::string& name) const {
 	return _workspace.peekInput(name);
 }
 
+const void* Node::RunContext::_inputChecked(const std::string& name, SlotDataType type,
+											std::string* error) const {
+	try {
+		const Value& v = _workspace.peekInput(name);
+		if (v.innerType() != type) {
+			if (error)
+				*error = "input '" + name + "' type mismatch (slot holds a different native type)";
+			return nullptr;
+		}
+		const void* p = v.get();
+		if (!p && error)
+			*error = "input '" + name + "' is empty (no data delivered)";
+		return p;
+	} catch (const NodeException& e) {
+		if (error)
+			*error = e.what();
+		return nullptr;
+	}
+}
+
 Value Node::RunContext::pop(const std::string& name) {
 	return _workspace.popInput(name);
 }

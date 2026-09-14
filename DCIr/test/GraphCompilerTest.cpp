@@ -48,11 +48,13 @@ struct CerrCapture {
 	std::string str() const { return oss.str(); }
 };
 
-/// @brief 构造端口（MSVC 对嵌套 braced-init-list + 隐式整型转换解析不稳，显式构造）
-static Node::Port makePort(std::string name, TensorType type, size_t typeSize, Tensor::Shape shape = {}) {
+/// @brief 构造 Void 端口（FP16 等未知元素类型：无 C++ 类型载体，
+///        NodePort::in/out 工厂不适用；MSVC 对嵌套 braced-init-list +
+///        隐式整型转换解析不稳，故保留显式构造辅助）
+static Node::Port voidPort(std::string name, size_t typeSize, Tensor::Shape shape = {}) {
 	Node::Port p;
 	p.name = std::move(name);
-	p.type = type;
+	p.type = TensorType::Void;
 	p.typeSize = typeSize;
 	p.shape = std::move(shape);
 	return p;
@@ -81,10 +83,10 @@ static void registerTestEngine(const std::string& type, bool createSuccess,
 	};
 	if (withPortHooks) {
 		desc.getInputPorts = [](const EngineInstance&) -> std::vector<Node::Port> {
-			return {makePort("in", TensorType::Float, sizeof(float), {1, 2})};
+			return {Node::Port::in<float>("in", {1, 2})};
 		};
 		desc.getOutputPorts = [](const EngineInstance&) -> std::vector<Node::Port> {
-			return {makePort("out", TensorType::Float, sizeof(float), {3, 4})};
+			return {Node::Port::out<float>("out", {3, 4})};
 		};
 	}
 	reg.registerEngine(desc);
@@ -92,8 +94,8 @@ static void registerTestEngine(const std::string& type, bool createSuccess,
 
 static Node::Schema identitySchema() {
 	Node::Schema s;
-	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("x")};
+	s.outputs = {Node::Port::out<float>("y")};
 	return s;
 }
 
@@ -109,9 +111,8 @@ static Node::RunFn identityRunFn() {
 
 static Node::Schema addSchema() {
 	Node::Schema s;
-	s.inputs = {{"a", TensorType::Float, sizeof(float), {}},
-				{"b", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("b")};
+	s.outputs = {Node::Port::out<float>("s")};
 	return s;
 }
 
@@ -548,8 +549,8 @@ void testDynamicShapeRoundTrip() {
 
 		TestHarness harness;
 		Node::Schema s;
-		s.inputs = {makePort("x", TensorType::Float, sizeof(float), Tensor::Shape{kDyn, 224, 224})};
-		s.outputs = {makePort("y", TensorType::Float, sizeof(float), Tensor::Shape{1, kDyn})};
+		s.inputs = {Node::Port::in<float>("x", Tensor::Shape{kDyn, 224, 224})};
+		s.outputs = {Node::Port::out<float>("y", Tensor::Shape{1, kDyn})};
 		harness.addNode(std::make_unique<Node>("Builtin", "dyn1", s, identityRunFn()));
 		harness.bindOutput("y", "dyn1", "y");
 
@@ -597,8 +598,8 @@ void testVoidPortRoundTrip() {
 
 		TestHarness harness;
 		Node::Schema s;
-		s.inputs = {makePort("in", TensorType::Void, 2, Tensor::Shape{kDyn})};
-		s.outputs = {makePort("out", TensorType::Void, 0, {})};
+		s.inputs = {voidPort("in", 2, Tensor::Shape{kDyn})};
+		s.outputs = {voidPort("out", 0, {})};
 		harness.addNode(std::make_unique<Node>("Builtin", "void1", s, identityRunFn()));
 		harness.bindOutput("out", "void1", "out");
 

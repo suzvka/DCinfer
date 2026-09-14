@@ -10,13 +10,13 @@ namespace DC {
 struct InputBinding {
 	std::string nodeName;
 	std::string portName;
-	std::string alias;  ///< 公共别名（必填；构成图级签名的一部分）
+	std::string alias;  ///< 公共别名（必填；序列化/内省元数据，不参与运行时寻址）
 };
 
 /// @brief InputZone：图级输入端口声明区（纯结构，无 task 级状态）
 ///
 /// 语义：
-/// - bind() 标记 node:port 为图级输入口，外部通过此口注入数据
+/// - bind() 标记 node:port 为图级输入口（签名元数据；运行时注入仍按坐标寻址）
 /// - 与输出绑定（GraphSignature）对称，构成图的完整外部签名
 /// - 不存储数据，数据注入仍通过 feedInput 透传给节点
 ///

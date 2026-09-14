@@ -4,6 +4,8 @@
 #include "Graph/internal/TaskExecutionState.h"
 #include "SignalProbe.h"
 
+#include <unordered_map>
+
 namespace DC {
 
 // ════════════════════════════════════════════
@@ -170,22 +172,45 @@ void InferGraph::releaseTask(const TaskId& taskId) {
 // ════════════════════════════════════════════
 
 std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32_t maxHops) {
+	// 单栈命名法则：端口名在导出时扁平化为子图接口端口名（父图按该名寻址），
+	// 接口层端口名必须唯一——同名端口（跨节点同名/同一端口重复绑定）拒绝导出。
+	// 运行时寻址 (nodeName, portName) 在普通拓扑下天然消歧，仅此扁平化时刻需要
+	// 唯一性；不校验会让同名端口静默折叠到同一槽位（数据串扰）。
+
 	// ① 从 InputZone 推导输入 Schema
 	Node::Schema inSchema;
+	std::unordered_map<std::string, std::string> inPortSource; // 端口名 → 来源 "node.port"
 	for (auto& b : _inputBindingsView()) {
 		auto* n = _topology().node(b.nodeName);
 		if (!n) continue;
 		auto* port = n->schema().findInput(b.portName);
-		if (port) inSchema.inputs.push_back(*port);
+		if (!port) continue;
+		const auto srcTag = b.nodeName + "." + b.portName;
+		auto [it, inserted] = inPortSource.try_emplace(port->name, srcTag);
+		if (!inserted)
+			throw GraphException(GraphException::ErrorType::DuplicatePort, "InferGraph::exportNode",
+								 "subgraph export rejected: duplicate input port '" + port->name +
+									 "' (from '" + it->second + "' and '" + srcTag +
+									 "'); rename ports to unique names before export");
+		inSchema.inputs.push_back(*port);
 	}
 
-	// ② 从输出绑定推导输出 Schema（跳过连接器）
+	// ② 从输出绑定推导输出 Schema（跳过连接器；端口名同样要求唯一）
 	Node::Schema outSchema;
+	std::unordered_map<std::string, std::string> outPortSource; // 端口名 → 来源 "node.port"
 	for (auto& b : _outputBindingsView()) {
 		auto* n = _topology().node(b.nodeName);
 		if (!n || n->isConnector()) continue;
 		auto* port = n->schema().findOutput(b.portName);
-		if (port) outSchema.outputs.push_back(*port);
+		if (!port) continue;
+		const auto srcTag = b.nodeName + "." + b.portName;
+		auto [it, inserted] = outPortSource.try_emplace(port->name, srcTag);
+		if (!inserted)
+			throw GraphException(GraphException::ErrorType::DuplicatePort, "InferGraph::exportNode",
+								 "subgraph export rejected: duplicate output port '" + port->name +
+									 "' (from '" + it->second + "' and '" + srcTag +
+									 "'); rename ports to unique names before export");
+		outSchema.outputs.push_back(*port);
 	}
 
 	Node::Schema fullSchema;

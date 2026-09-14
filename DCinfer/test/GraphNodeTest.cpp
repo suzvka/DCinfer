@@ -48,8 +48,8 @@ static Value makeFloatTensor(float value) {
 
 static Node::Schema addSchema() {
 	Node::Schema s;
-	s.inputs = {{"a", TensorType::Float, sizeof(float), {}}, {"b", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("b")};
+	s.outputs = {Node::Port::out<float>("s")};
 	return s;
 }
 
@@ -69,8 +69,8 @@ static Node::RunFn addRunFn() {
 
 static Node::Schema identitySchema() {
 	Node::Schema s;
-	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("x")};
+	s.outputs = {Node::Port::out<float>("y")};
 	return s;
 }
 
@@ -247,8 +247,8 @@ void testSubgraphLoopTTL() {
 
 		// 自增节点（反馈环）
 		Node::Schema incSchema;
-		incSchema.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-		incSchema.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+		incSchema.inputs = {Node::Port::in<float>("x")};
+		incSchema.outputs = {Node::Port::out<float>("y")};
 		auto incRunFn = [](Node::RunContext& ctx) -> Node::Result {
 			const auto* t = ctx.peek("x").as<Tensor>();
 			if (!t) return ctx.failure(Node::Status::InvalidInput, "not Tensor");
@@ -613,6 +613,71 @@ void testSubgraphFirstFreezeFromParentWorker() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// exportNode 端口唯一性（单栈命名法则：接口层端口名必须唯一）
+// ════════════════════════════════════════════
+
+void testExportDuplicateInputPortRejected() {
+	TEST("exportNode rejects duplicate input port names") {
+		InferGraph subGraph;
+		subGraph.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
+		subGraph.addNode(std::make_unique<Node>("Builtin", "n2", identitySchema(), identityRunFn()));
+
+		// 跨节点同名输入端口 "x"：运行时寻址 (nodeName, portName) 天然消歧，
+		// 但导出为子图接口时端口名扁平化，必须唯一——单栈命名法则
+		subGraph.bindInput("in_a", "n1", "x");
+		subGraph.bindInput("in_b", "n2", "x");
+		subGraph.bindOutput("out", "n2", "y");
+
+		bool threw = false;
+		std::string message;
+		try {
+			auto node = subGraph.exportNode("DupIn");
+			static_cast<void>(node);
+		} catch (const GraphException& e) {
+			threw = true;
+			message = e.what();
+			CHECK(e.getErrorType() == GraphException::ErrorType::DuplicatePort,
+				  "error type should be DuplicatePort");
+		}
+		CHECK(threw, "exportNode should reject duplicate input port names");
+		CHECK(message.find("'x'") != std::string::npos, "message should name the conflicting port");
+		CHECK(message.find("n1.x") != std::string::npos && message.find("n2.x") != std::string::npos,
+			  "message should name both source bindings");
+	}
+	END_TEST();
+}
+
+void testExportDuplicateOutputPortRejected() {
+	TEST("exportNode rejects duplicate output port names") {
+		InferGraph subGraph;
+		subGraph.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
+		subGraph.addNode(std::make_unique<Node>("Builtin", "n2", identitySchema(), identityRunFn()));
+
+		subGraph.bindInput("in", "n1", "x");
+		// 跨节点同名输出端口 "y"：导出时扁平化为接口端口名，必须唯一
+		subGraph.bindOutput("out_a", "n1", "y");
+		subGraph.bindOutput("out_b", "n2", "y");
+
+		bool threw = false;
+		std::string message;
+		try {
+			auto node = subGraph.exportNode("DupOut");
+			static_cast<void>(node);
+		} catch (const GraphException& e) {
+			threw = true;
+			message = e.what();
+			CHECK(e.getErrorType() == GraphException::ErrorType::DuplicatePort,
+				  "error type should be DuplicatePort");
+		}
+		CHECK(threw, "exportNode should reject duplicate output port names");
+		CHECK(message.find("'y'") != std::string::npos, "message should name the conflicting port");
+		CHECK(message.find("n1.y") != std::string::npos && message.find("n2.y") != std::string::npos,
+			  "message should name both source bindings");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testBasicGraphEmbedding();
@@ -626,6 +691,8 @@ int main() {
 		testWaitMechanism();
 		testConcurrentTaskLifecycleStress();
 		testSubgraphFirstFreezeFromParentWorker();
+		testExportDuplicateInputPortRejected();
+		testExportDuplicateOutputPortRejected();
 
 		if (failures == 0) {
 			std::cout << "\nAll GraphNode tests passed!" << std::endl;

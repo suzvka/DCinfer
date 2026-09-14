@@ -36,7 +36,7 @@ struct UnsatisfiedDeclaration {
 struct OutputBinding {
 	std::string nodeName;
 	std::string portName;
-	std::string alias;  ///< 公共别名（必填；构成图级签名的一部分）
+	std::string alias;  ///< 公共别名（必填；序列化/内省元数据，不参与运行时寻址）
 };
 
 /// @brief OutputZone：append-only 输出区，聚合纯任务态（声明/累加/artifact）。

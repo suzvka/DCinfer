@@ -23,8 +23,8 @@ namespace {
 
 Node::Schema idSchema() {
 	Node::Schema s;
-	s.inputs = {{"x", Tensor::TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"y", Tensor::TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("x")};
+	s.outputs = {Node::Port::out<float>("y")};
 	return s;
 }
 
@@ -79,6 +79,7 @@ int main(int argc, char** argv) {
 		totalMs += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 		lastResult =
 			graph.takeOutputTensor(taskId, "id_" + std::to_string(chainLength - 1), "y").item<float>();
+		graph.releaseTask(taskId); // 大量短任务：消费结果后释放任务资源，防内存增长
 	}
 
 	std::cout << "tasks=" << taskCount << " avg latency=" << totalMs / taskCount << " ms\n";

@@ -39,8 +39,8 @@ static int g_failures = 0;
 
 static Node::Schema idSchema() {
 	Node::Schema s;
-	s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("x")};
+	s.outputs = {Node::Port::out<float>("y")};
 	return s;
 }
 

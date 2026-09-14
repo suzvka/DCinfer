@@ -71,7 +71,7 @@ public:
 					const std::string& dstNode, const std::string& dstPort);
 
 	/// @brief  标记输入：该节点的该端口为图级输入口
-	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一，唯一性由 GraphBuilder 负责）
+	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一，唯一性由 GraphBuilder 负责；不参与运行时寻址）
 	/// @throws GraphException(Frozen) 若拓扑已被封印（图已冻结）
 	void bindInput(const std::string& nodeName, const std::string& portName,
 				   const std::string& alias);

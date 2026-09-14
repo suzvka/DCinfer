@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **类型化输入访问器 `Node::RunContext::input<T>()`**：组合 peek + 类型标签校验 +
+  空值检查，替代手写 "peek → as<T> → 判空" 三步样板——失败返回 nullptr 并可选
+  输出原因（端口不存在 / 数据未到达 / 类型不匹配 / 空值）；类型不匹配从
+  `Value::as<T>()` 的未定义行为降为可处理的失败。内置算子（Builtin）、
+  OnnxRuntime / OpenAI 适配器已迁移为按此写法。
+- **自定义节点教程示例 `examples/03_custom_node`**：NodePort 工厂声明 Schema →
+  `ctx.input<Tensor>` 类型化读取 → `registerOperator` 注册 → 建图执行的完整
+  可运行教程；README 新增"常见问题"段（自定义节点入口 + 任务资源释放）。
+
 ### Fixed
 
 - **首次惰性冻结的数据竞争（冻结事务一次性发布）**：`GraphRuntimeState` 的冻结快照
@@ -36,13 +47,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edgeCount()/nodeNames()/edges()/inputBindings()/outputBindings()` 在
   `compile()` 后曾空指针解引用（注释误称"返回空/零"，实际 `_store` 已被移走）——
   现持锁并委托快照读取（源图视角与 facade `_topology` 一致）。
+- **exportNode 端口唯一性校验（单栈命名法则）**：子图导出时端口名在接口层扁平化
+  （父图按该名寻址），同名端口（跨节点同名/同一端口重复绑定）此前静默折叠至同一
+  槽位（数据串扰）；现拒绝导出并抛 `GraphException(DuplicatePort)`，消息含端口名
+  与来源绑定（`node.port`）。运行时复合坐标寻址在普通拓扑下天然消歧，仅此扁平化
+  时刻需要接口端口名唯一。
 
 ### Changed
 
+- **寻址模型定案（单栈）**：运行时数据注入与取用唯一按 `(nodeName, portName)`
+  复合坐标寻址，无名称解析、无回退；删除 `feedBoundInput`（0.3.0 引入、
+  0.4.0 收窄的别名寻址路径），`feedInput` / `takeOutput` / `takeOutputTensor` /
+  `hasOutput` 统一仅按内部坐标寻址。`alias` 定位为图级签名的序列化/内省元数据，
+  不参与运行时寻址（取代 0.4.0 条目中的别名寻址描述；决策记录见
+  `docs/addressing-model.md`）。宿主契约稳定的推荐姿势：经
+  `inputBindings()`/`outputBindings()` 内省取坐标，不硬编码内部名。
 - **破坏性 API 收窄**：移除 `GraphBuilder::store()` 非 const 重载（唯一使用点
   `InferGraph::node()` 改走 `GraphBuilder::node()`）。冻结前泄漏可变
   `GraphStore&` 的路径在编译期不可达；`store() const` 保留且冻结后返回快照持有的
   源图。
+- **View 写入接口统一为 `set()`**：删除 `Tensor::View::item`——同名
+  `Tensor::item<T>()` 为读取语义，View 侧写入方法造成读写命名不对称
+  （全仓库零调用者，直接移除而非保留别名）；View 写入用 `set()` / `operator=`。
+- **Schema 声明统一迁移 NodePort 工厂**：示例与测试中的手写聚合初始化
+  （如 `{"x", Tensor::TensorType::Float, sizeof(float), {}}`）迁移为
+  `Node::Port::in<T>` / `out<T>` / `optional<T>` 工厂形式，消除类型标签与
+  sizeof 双写风险；DCIr 测试的通用 makePort 辅助删除（Void 端口无 C++ 类型
+  载体，保留语义收窄后的 voidPort）。
+- **`02_lowering_benchmark` 演示 `releaseTask`**：大量短任务循环中消费结果后
+  释放任务资源（防内存增长），README 常见问题同步点名。
 
 ## [0.4.0] - 2026-09-10
 
@@ -72,7 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   仅保留 `(alias, nodeName, portName)` —— 原两参/三参重载的第一参数含义不同
   （节点名 vs 别名），是隐性歧义签名。新增 `GraphException::InvalidBinding`
   （别名为空）；别名唯一性校验不变。连带收敛：`feedBoundInput` / `takeOutput` /
-  `takeOutputTensor` / `hasOutput` 的 name 参数统一**仅按公共别名寻址**，
+  `takeOutputTensor` / `hasOutput` 的 name 参数统一**仅按公共别名寻址**
+  （此寻址语义已由上方 Unreleased「寻址模型定案（单栈）」取代：最终定案为仅按
+  内部坐标寻址，`feedBoundInput` 已删除），
   删除“唯一绑定端口名回退”分支与跨绑定歧义 `FeedFailed` 错误。
   DCIr 序列化格式同步：绑定 JSON 新增 `alias` 字段，反序列化对旧文件回退
   `alias = portName`（行为等价于原回退路径）。
@@ -185,6 +220,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `feedBoundInput` 优先按别名解析，跨节点同名端口可用唯一别名消歧；
   `takeOutput` / `takeOutputTensor` / `hasOutput` 新增 2 参重载，
   按公共别名或唯一绑定端口名定位，调用方无需感知内部节点/端口名
+  （注：此别名寻址语义为 0.3.0 历史行为，后经 0.4.0 收窄、Unreleased 定案单栈
+  后已整体移除；最终寻址唯一按 (nodeName, portName) 复合坐标）
 - **README 新增「环境要求」矩阵**：CMake/C++ 标准/各编译器下限与 CI 验证平台、
   可选依赖与模块的对应关系
 - **任务生命周期 API（issue P0-2/P0-3/P1-6）**：新增 `TaskStatus`（Unknown/Running/

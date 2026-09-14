@@ -18,15 +18,15 @@ using Shape = DC::Tensor::Shape;
 // ── Schema 辅助 ──
 static Node::Schema scalarAddSchema() {
 	Node::Schema s;
-	s.inputs = {{"a", TensorType::Float, sizeof(float), {}}, {"b", TensorType::Float, sizeof(float), {}}};
-	s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+	s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("b")};
+	s.outputs = {Node::Port::out<float>("s")};
 	return s;
 }
 
 static Node::Schema shapedAddSchema(Shape shape) {
 	Node::Schema s;
-	s.inputs = {{"a", TensorType::Float, sizeof(float), shape}, {"b", TensorType::Float, sizeof(float), shape}};
-	s.outputs = {{"s", TensorType::Float, sizeof(float), shape}};
+	s.inputs = {Node::Port::in<float>("a", shape), Node::Port::in<float>("b", shape)};
+	s.outputs = {Node::Port::out<float>("s", shape)};
 	return s;
 }
 
@@ -75,12 +75,6 @@ static Value makeIntNative(int value) {
 }
 
 // ── 创建辅助张量（用于默认值等 Schema 定义）──
-static Tensor makeScalarFloat(float value) {
-	Tensor t(TensorType::Float, sizeof(float));
-	t = value;
-	return t;
-}
-
 static Tensor makeVectorFloat(const std::vector<float>& values) {
 	std::vector<std::byte> bytes(values.size() * sizeof(float));
 	std::memcpy(bytes.data(), values.data(), bytes.size());
@@ -227,9 +221,9 @@ void runTests() {
 	TEST("default value unblocks") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs = {{"a", TensorType::Float, sizeof(float), {}},
-						{"b", TensorType::Float, sizeof(float), {}, true, makeScalarFloat(100.0f)}}; // b 有默认值 100
-			s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+			s.inputs = {Node::Port::in<float>("a"),
+						Node::Port::optional<float>("b", 100.0f)}; // b 有默认值 100
+			s.outputs = {Node::Port::out<float>("s")};
 			return s;
 		}();
 		CHECK(schema.valid(), "schema with default should be valid");
@@ -263,9 +257,9 @@ void runTests() {
 	TEST("default value overridden") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs = {{"a", TensorType::Float, sizeof(float), {}},
-						{"b", TensorType::Float, sizeof(float), {}, true, makeScalarFloat(100.0f)}};
-			s.outputs = {{"s", TensorType::Float, sizeof(float), {}}};
+			s.inputs = {Node::Port::in<float>("a"),
+						Node::Port::optional<float>("b", 100.0f)};
+			s.outputs = {Node::Port::out<float>("s")};
 			return s;
 		}();
 
@@ -301,8 +295,8 @@ void runTests() {
 	TEST("RunFn exception handled") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-			s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+			s.inputs = {Node::Port::in<float>("x")};
+			s.outputs = {Node::Port::out<float>("y")};
 			return s;
 		}();
 
@@ -330,8 +324,8 @@ void runTests() {
 	TEST("RunFn missing output") {
 		auto schema = []() {
 			Node::Schema s;
-			s.inputs = {{"x", TensorType::Float, sizeof(float), {}}};
-			s.outputs = {{"y", TensorType::Float, sizeof(float), {}}};
+			s.inputs = {Node::Port::in<float>("x")};
+			s.outputs = {Node::Port::out<float>("y")};
 			return s;
 		}();
 

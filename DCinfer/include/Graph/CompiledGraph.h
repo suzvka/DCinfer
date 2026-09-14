@@ -55,7 +55,7 @@ public:
 	/// 拓扑增删改（addNode/connect/...）在冻结后无公开入口，属不可达 API。
 	const GraphStore& store() const { return *_store; }
 
-	/// @brief  图级签名（不可变；执行期别名/绑定解析无锁）
+	/// @brief  图级签名（不可变；执行期签名读取无锁——寻址坐标固定，无别名解析）
 	const GraphSignature& signature() const { return _signature; }
 
 	// ── 运行时视图（lowering 后；执行引擎的调度/传播/清理面）──
