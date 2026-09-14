@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-*面向端云协同 AI 的数据驱动推理运行时。*
+*可嵌入的端云协同数据驱动推理运行时*
 
 DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在 **本地、云端、PC、局域网设备**间，以**不同推理引擎** 自由放置模型节点，同时把网络、调度、数据传输、引擎生命周期和执行细节隔离在运行时。
 
@@ -12,36 +12,10 @@ DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在 
 
 ### 灵活的图拓扑
 
-传统 DAG 框架将推理管线约束为线性或树形结构——这在多模型、多分支场景下很快会成为瓶颈。DCinfer 采用 **节点 + 端口 + Connector** 的抽象：节点通过类型化端口声明输入输出 Schema，Connector 负责节点间的数据路由。
-
-得益于此模型，你可以轻松构建：
+传统 DAG 框架将推理管线约束为线性或树形结构——这在多模型、多分支场景下很快会成为瓶颈。DCinfer 采用电路图语义的节点化、端口化、连接器化设计。得益于此模型，你可以轻松构建：
 - **多分支管线**：单输出同时驱动多个下游节点并行推理
 - **汇聚模式**：多个上游输出合并注入同一节点
 - **成环拓扑**：支持反馈回路，用于迭代优化、强化学习或流式场景
-- **广播分发**：Connector 内置 `Broadcast`（1→N 广播）连接器；条件分发/轮询等选择语义由上层自定义节点实现（RunFn 每次仅产出一个输出口即可）
-
-### Build → Freeze → Execute 生命周期
-
-图的生命周期分为两个阶段：**构建期**（`addNode`/`connect`/`bind...` 等可变 API）与**执行期**（只读冻结快照）。首次 `submit`/`feedInput` 自动触发惰性冻结（也可显式 `freeze()`），此后拓扑不可变——"任务执行期间拓扑能否改变"的答案恒为否，从源头消除一整类数据竞争。
-
-冻结边界的并发契约：
-- **并发首次冻结安全**：多线程同时首次调用 `freeze()` / `feedInput()` / `submit()`（含 `exportNode` 子图由父图执行线程触发的首次冻结）恰执行一次完整初始化，其他线程只能观察到"尚未冻结"或"完整冻结"状态；
-- **冻结后全不可变**：`compile`/`freeze` 返回后，拓扑、运行时视图、图级签名与节点配置（回调、信号绑定、连接器标记等）一致且不可修改——经冻结前保存的 `Node&`/`Node*` 修改抛 `NodeException(Frozen)`，构建面与拓扑修改抛 `GraphException(Frozen)`；
-- **构图与冻结可并发**：构建 API 与 `compile()` 由构建面互斥锁串行化，每个构建操作要么纳入快照、要么在冻结后确定抛 Frozen，无 TOCTOU 窗口。
-
-冻结时执行编译与 lowering：
-- **图级签名**：输入/输出绑定固化为不可变 `GraphSignature`，执行期签名读取无锁（寻址坐标固定，无别名解析）；
-- **运行时视图**：语义等价于"边"的 `Broadcast(1)` 导线连接器被擦除，减少调度顶点、传播跳数与线程池提交（源图不变——序列化与内省仍反映源图；成环 TTL 只统计运行时顶点）；
-- **拓扑演进**：重建图并重新编译产生新快照，旧图任务排空后替换。
-
-```text
-GraphBuilder（构建期，可变）
-      │ compile()（首次 submit 自动触发，或显式 freeze()）
-      v
-CompiledGraph（不可变：拓扑 + GraphSignature + 运行时视图）
-      v
-ExecutionEngine（调度 / 传播 / 取消 / 生命周期）
-```
 
 ### 原生并发执行
 
@@ -87,7 +61,7 @@ DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准�
 | Ninja | 可选（README 示例使用 `-G Ninja`） |
 | vcpkg | 仅 DCIr / DCNet / OnnxRuntime / OpenAI 模块需要（仓库以 submodule 提供） |
 
-平台支持：Linux 与 Windows 为 CI 验证平台；macOS 未经验证（核心库理论上可随任意 C++20 工具链构建）。
+平台支持：Linux、Windows
 
 ## 开始使用
 
@@ -137,16 +111,9 @@ if (graph.waitForResult("task1").status == DC::TaskStatus::Succeeded) {
 [examples/03_custom_node](examples/03_custom_node/main.cpp) 开始——完整可运行教程；
 其他常见问题见[常见问题](#常见问题)。
 
-### 寻址模型（单栈）
+### 寻址模型
 
-运行时数据注入与取用（`feedInput` / `takeOutput` / `takeOutputTensor` / `hasOutput`
-/ `submit` 声明）唯一按 `(nodeName, portName)` 复合坐标寻址——坐标唯一可判定，
-无名称解析、无回退。`bindInput` / `bindOutput` 的别名是图级签名的序列化/内省元数据
-（随冻结快照固化，供 `submitBound` 推导输出声明、DCIr 序列化与内省使用），
-**不参与运行时寻址**；这是刻意决策而非能力缺口——历史别名寻址方案（0.3.0）
-因跨绑定歧义被否决（决策记录见 [docs/addressing-model.md](docs/addressing-model.md)）。
-
-宿主保持契约稳定的推荐姿势——内省驱动寻址，不硬编码内部名：
+运行时数据注入与取用（`feedInput` / `takeOutput` / `takeOutputTensor` / `hasOutput`/ `submit` 声明）按 `(nodeName, portName)` 复合坐标寻址。
 
 ```cpp
 // 启动时：从签名取坐标（图换版本、内部重构不影响宿主代码）
@@ -157,27 +124,12 @@ auto [n, p] = addr.at("prompt");
 graph.feedInput(tid, n, p, data);
 ```
 
-输出在任务终止后仍保留；`takeOutput` / `takeOutputTensor` 为消费式取出
-（取出即不可重复读取）。
-`waitForResult(taskId)` 默认无限等待直至终止，可能阻塞的场景改用显式超时重载
-`waitForResult(taskId, 5s)` 或从其他线程 `cancel()`。执行超时由节点实现方自行负责
-（引擎不设执行超时；节点内部超时失败经 `NodeResult` + `Diagnostic` 自报，任务终止为
-`Failed`）；`waitForResult` 的超时仅是宿主护栏（放弃等待，不取消任务）。复用已终止的
-taskId 合法；活动任务重复提交会抛出明确错误；支持 `cancel()` / `taskStatus()` /
-`releaseTask()`。submit 时声明目标在拓扑上不可达会立即抛
-`GraphException(UnreachableDeclaration)`（构图/断链错误）。
+输出在任务终止后仍保留；`takeOutput` / `takeOutputTensor` 为消费式取出。
+`waitForResult(taskId)` 默认无限等待直至终止，执行超时由节点实现方自行负责；
+复用已终止的taskId 合法；活动任务重复提交会抛出明确错误；
+submit 时声明目标在拓扑上不可达会立即抛构图/断链错误。
 
-### 默认构建内容
-
-不带任何 `-D` 开关的默认配置只构建核心库（`DCinfer`）+ 核心测试——
-裸 `cmake -B build` **零外部依赖**即可配置成功；DCIr（需 nlohmann-json/minizip/zlib）、
-引擎适配器（Builtin / OnnxRuntime / OpenAI）与网络框架 DCNet **全部默认 OFF**，按需启用。
-启用/停用情况在配置结束时以 **configure summary** 汇总输出。
-
-### 仅使用核心（Core-only）
-
-DCinfer 核心库零外部依赖，不反向依赖任何引擎适配器。**不启用任何模块时，
-不会安装任何 vcpkg 依赖**（模块依赖已按 feature 分层）：
+### 构建选项
 
 ```bash
 # 方式一：预设（推荐）——只构建核心库，零 vcpkg 依赖（无 DCIr/引擎/DCNet/测试/示例）
@@ -192,10 +144,7 @@ cmake --build build/core-ir --config Release
 cmake -B build -S .
 ```
 
-模块依赖分层（`vcpkg.json` feature）：`ir` → DCIr（nlohmann-json/minizip/zlib）、
-`net` → DCNet（nlohmann-json + poco[netssl]）、`ort-*` → ONNX Runtime 适配器
-（由 `DCINFER_ORT_EP` 自动注入）。构建选项已迁移至 `DCINFER_BUILD_*` 命名空间
-（旧 `BUILD_*` 名仍被识别，避免宿主工程经 `add_subdirectory()` 引入时冲突）。
+模块依赖分层（`vcpkg.json` feature）：`ir` → DCIr（nlohmann-json/minizip/zlib）、`net` → DCNet（nlohmann-json + poco[netssl]）、`ort-*` → ONNX Runtime 适配器
 
 仅需源码的下载层面，可用 git sparse-checkout 只取核心目录：
 
@@ -204,16 +153,12 @@ git sparse-checkout init --cone
 git sparse-checkout set DCinfer DCIr cmake vcpkg.json CMakeLists.txt
 ```
 
-核心之上注册自有引擎：实现 `EngineDescriptor` 钩子 → `EngineRegistry::registerEngine()`
-（详见 `DCinfer/include/Graph/EngineRegistry.h`），图级语义与内置引擎完全一致。
-执行钩子遵循相位协议（`ExecutionPhases`：preRun → RunFn → synchronize → postRun，
-任一相位失败触发 onError）——同步引擎可全部留空、逻辑内联 RunFn
-（参见 OnnxRuntime 适配器）。
+核心之上注册自有引擎：实现 `EngineDescriptor` 钩子 → `EngineRegistry::registerEngine()`。
+执行钩子遵循相位协议——同步引擎可全部留空、逻辑内联 RunFn。
 
 ### 作为库消费（安装与 find_package）
 
-除源码内 `add_subdirectory()` 外，DCinfer 支持 `cmake --install` 后以
-`find_package` 消费——这是集成到宿主工程的推荐方式：
+除源码内 `add_subdirectory()` 外，DCinfer 支持 `cmake --install` 后以`find_package` 消费：
 
 ```bash
 # 构建 + 安装（core-only；其他预设同理，预设名见 CMakePresets.json）
@@ -240,8 +185,6 @@ target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)
 ```
 
 安装闭环可运行 [examples/install_smoke](examples/install_smoke/CMakeLists.txt)
-冒烟验证（独立消费工程，不参与主构建）。OnnxRuntime / OpenAI 适配器依赖
-vcpkg 重型依赖，暂未纳入安装导出，仍以 `add_subdirectory` 消费。
 
 ### 运行测试
 
