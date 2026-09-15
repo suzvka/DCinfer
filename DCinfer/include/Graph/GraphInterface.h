@@ -30,7 +30,7 @@ public:
 	std::vector<std::string> outputAliases() const;
 
 	/// @brief 创建任务句柄（自动分配 taskId；句柄析构按状态回收：
-	///        终态即释放 / 在飞弃置后自动回收 / 未提交即释放输入）
+	///        终态即释放 / 在飞弃置即请求取消并回收 / 未提交即释放输入）
 	/// @note  仅限具名对象调用：临时接口对象上的任务句柄生命周期不安全
 	Task createTask() &;
 
@@ -49,14 +49,6 @@ private:
 };
 
 /// @brief 统一任务句柄：按公开别名喂数据 →（同步）run /（异步）submit+wait → 取结果。
-///
-/// 宿主层对推理图的唯一操作入口（默认 API）：同步与异步同级——
-/// run() 等价于 submit() 后 wait() 的同步组合，两者可互换表达；
-/// 连接/等待/取消/诊断全部按公开别名操作，无 taskId / 坐标暴露。
-/// 析构资源回收（不取消在飞任务）：终态任务立即释放（状态表条目 /
-/// 结果 / 诊断）；未提交任务（仅 feed，未 submit）立即释放输入；
-/// 在飞弃置任务登记完成后自动回收——资源不随句柄丢失而滞留。
-/// 动作均转发 InferGraph 运行期 API。
 class GraphInterface::Task {
 public:
 	Task(Task&& other) noexcept;
@@ -66,7 +58,7 @@ public:
 	Task(const Task&) = delete;
 	Task& operator=(const Task&) = delete;
 
-	/// @brief 自动分配的 taskId（供下沉互操作：需坐标级精细控制时可用）
+	/// @brief 自动分配的 taskId
 	const std::string& taskId() const { return _taskId; }
 
 	// ── 组装（按公开输入别名；链式）──
@@ -87,7 +79,7 @@ public:
 	TaskResult run();
 
 	/// @brief 同步运行（显式超时）：超时未终止返回 {status=Running}，
-	///        不取消任务——仍可继续 wait()/cancel() 或由析构兜底
+	///        不取消任务——仍可继续 wait()/cancel()；句柄析构则请求取消并回收
 	TaskResult run(std::chrono::milliseconds timeout);
 
 	// ── 等待 / 控制（异步路径配套）──
@@ -129,7 +121,7 @@ private:
 	GraphInterface* _iface = nullptr;
 	std::string _taskId;
 	/// 是否已成功 submit（run/submit 成功后置位；仅 submit 抛异常保持 false）——
-	/// 析构路径据此区分：未提交（清输入）/ 在飞弃置（登记自动回收）
+	/// 析构路径据此区分：未提交（清输入）/ 在飞弃置（请求取消并回收）
 	bool _submitted = false;
 };
 

@@ -257,7 +257,7 @@ static void testBindingValidationAtCreation() {
 }
 
 // ════════════════════════════════════════════
-// 任务句柄：移动交权 / 析构释放 / 不取消在飞任务
+// 任务句柄：移动交权 / 析构释放 / 外部提交不受析构影响
 // ════════════════════════════════════════════
 
 static void testTaskHandleLifecycle() {
@@ -291,7 +291,7 @@ static void testTaskHandleLifecycle() {
 	}
 	CHECK(graph.taskStatus(doneId) == TaskStatus::Unknown, "destructor should release terminated task");
 
-	// 在飞任务的句柄析构不取消任务（慢算子保证析构时仍在运行）
+	// 外部提交（submitBound）的在飞任务不受句柄析构影响（句柄仅接管自身提交的任务）
 	InferGraph slowGraph;
 	slowGraph.addNode(std::make_unique<Node>("Builtin", "slow", incSchema(), slowIncRunFn()));
 	slowGraph.bindInput("num", "slow", "x");
@@ -303,10 +303,10 @@ static void testTaskHandleLifecycle() {
 		auto task = slowApi.createTask();
 		runningId = task.taskId();
 		task.feed("num", floatTensor(10.0f));
-		slowGraph.submitBound(runningId); // 异步提交（句柄外），析构发生在运行中
+		slowGraph.submitBound(runningId); // 句柄外提交（坐标层）；析构发生在运行中也不受影响
 	}
 	const auto slowResult = slowGraph.waitForResult(runningId);
-	CHECK(slowResult.status == TaskStatus::Succeeded, "destruction must not cancel the in-flight task");
+	CHECK(slowResult.status == TaskStatus::Succeeded, "handle destruction must not cancel an externally submitted task");
 	CHECK(std::abs(slowGraph.takeOutputTensor(runningId, "slow", "y").item<float>() - 11.0f) < 1e-6f,
 		  "in-flight result should be intact");
 }

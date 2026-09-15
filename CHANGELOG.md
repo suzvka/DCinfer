@@ -19,8 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   可运行教程；README 新增"常见问题"段（自定义节点入口 + 任务资源释放）。
 - **图公开接口 `GraphInterface`（按别名喂数据 / 取结果）**：`graph.interface()`
   冻结图并一次性解析公开绑定（alias → (nodeName, portName)）后返回；
-  `api.createTask()` 取得任务句柄（析构按状态回收：终态即释放 / 在飞弃置后
-  自动回收 / 未提交即释放输入），
+  `api.createTask()` 取得任务句柄（析构按状态回收：终态即释放 / 在飞弃置即
+  请求取消并回收 / 未提交即释放输入），
   `task.feed(alias, data)` / `task.run()`（同步）/ `task.take(alias)` 只按公开
   别名操作；未知别名抛 `GraphException(InvalidBinding)` 并列出全部可用别名；
   绑定坐标在创建接口时校验（NodeNotFound / PortNotFound）。内核寻址不变——
@@ -33,22 +33,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   原 `TaskScope` 的能力（超时 run / 取消 / 状态查询 / 结构化等待）全部并入。
 - **任务生命周期回归测试 `TaskLifecycleRegressionTest`**（8 用例）：取消后复用同
   taskId 的旧轮次消费竞态、失败后输出、必需输出缺失、终止回调异常、活动任务
-  释放拒绝（并发幂等）、未提交句柄析构释放输入、弃置任务自动回收、不可达提交
+  释放拒绝（并发幂等）、未提交句柄析构释放输入、弃置即取消并回收、不可达提交
   回滚后重试——覆盖 F04–F10 各项缺陷的复现路径。
 - **DCIr 归档安全回归测试 `DcgArchiveSecurityTest`**：路径校验单元（空/内嵌
   NUL/绝对路径/盘符/UNC/父目录跳转）、`extractOne` 越界写入拒绝端到端、
   符号链接祖先目录防御（无权限环境自动跳过）、截断归档明确报错、高压缩比
   条目预算拒绝、正常归档往返回归。
 - **`InferGraph::detachTask` / `InferGraph::discardUnsubmitted`**：任务句柄析构
-  路径配套——在飞任务弃置（不取消，完成收尾时自动回收状态/结果/诊断）、
+  路径配套——在飞任务弃置先请求取消（协作式），再经 detachTask 兜底回收
+  （已终态立即释放；取消竞态窗口由完成收尾自动回收状态/结果/诊断）、
   已喂数据但从未成功提交的任务立即释放输入。
+
+### Changed
+
+- **任务句柄析构：“弃置即取消”（协作式）**：`GraphInterface::Task` 析构时对本
+  句柄提交的在飞任务先请求 `cancel()`（不中断在飞节点执行，传播链在下一检查点
+  停止），再回收——取代原“弃置不取消、完成后自动回收”语义；长工作流下弃置
+  任务不再空耗算力，资源随终态同步释放。外部经坐标 API（`submitBound`）提交
+  的任务不受句柄析构影响。
+- **OutputZone 搬运补充终止复查（检查点 2）**：传播第二步（输出搬运）在
+  `takeOutput` / `append` 前复查 `round->terminated`，关闭与并发取消 / 同 ID
+  复用相关的窄写入竞态窗口。
 
 ### Removed
 
 - **内核坐标层作用域句柄 `TaskScope` 下线**：其能力已并入
   `GraphInterface::Task`（同步/异步同级）；examples/04_task_scope 迁往
-  examples/04_task_lifecycle。需显式 taskId / 坐标级精细控制的宿主场景
-  改为直接使用 `InferGraph` 坐标运行期 API（限框架/扩展作者）。
+  examples/04_task_lifecycle。
 
 ### Fixed
 

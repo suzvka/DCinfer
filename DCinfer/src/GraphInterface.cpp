@@ -134,16 +134,18 @@ GraphInterface::Task::~Task() { _releaseOnDestroy(); }
 void GraphInterface::Task::_releaseOnDestroy() noexcept {
 	if (!_iface)
 		return;
-	// 析构路径资源回收（不取消在飞任务）：
+	// 析构路径资源回收（弃置即取消）：
 	//   终态   → 立即释放（状态表条目 / 结果 / 诊断）；
-	//   在飞   → 登记完成后自动回收（detachTask，保留不取消语义）；
+	//   在飞   → 先请求协作式取消（不中断在飞节点），再经 detachTask 回收兜底
+	//            （已终态立即释放；取消竞态窗口内由终态收尾自动回收）；
 	//   未提交 → 立即释放 feed 输入（discardUnsubmitted）。
 	try {
 		const TaskStatus st = _iface->_graph->taskStatus(_taskId);
 		if (st == TaskStatus::Succeeded || st == TaskStatus::Failed || st == TaskStatus::Cancelled) {
 			_iface->_graph->releaseTask(_taskId);
 		} else if (_submitted) {
-			_iface->_graph->detachTask(_taskId);
+			_iface->_graph->cancel(_taskId);     // 弃置即取消（协作式；竞态下返回 false，由回收兜底）
+			_iface->_graph->detachTask(_taskId); // 终态→立即释放；仍在飞→终态收尾自动回收
 		} else {
 			_iface->_graph->discardUnsubmitted(_taskId);
 		}

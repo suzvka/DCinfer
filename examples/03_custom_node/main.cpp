@@ -68,7 +68,7 @@ int main() {
 	graph.bindInput("in", "scale1", "x");
 	graph.bindOutput("out", "scale1", "y");
 
-	// ── 5. 取公开接口并执行：宿主一律走统一任务句柄（自定义算子与执行 API 分层无关）──
+	// ── 5. 取公开接口并执行 ──
 	auto api = graph.interface(); // 冻结图并一次性解析 bindInput/bindOutput 别名
 	auto task = api.createTask(); // 任务句柄：析构自动释放已终止任务
 

@@ -5,7 +5,7 @@
 //   F05 节点失败优先于输出存在性：先产出后失败 / 必需输出缺失必须 Failed 且不传播
 //   F07 完成回调异常隔离：终止事务完整，wait 契约（返回即可读）不被破坏
 //   F08 releaseTask 仅终态可释放：活动任务拒绝时声明/结果/诊断保持不动
-//   F09 句柄析构：未提交立即释放输入；在飞弃置完成后自动回收（不取消任务）
+//   F09 句柄析构：未提交立即释放输入；在飞弃置即请求取消并随即回收（协作式）
 //   F10 提交失败（不可达声明）不留 Running 残留，可重试
 #include <chrono>
 #include <cmath>
@@ -295,8 +295,8 @@ static void testUnsubmittedDestructorFreesInput() {
 	END_TEST();
 }
 
-static void testDetachedAutoRelease() {
-	TEST("F09: detached in-flight handle must not cancel the task and auto-release after completion") {
+static void testDiscardedCancelsAndReleases() {
+	TEST("F09: discarded in-flight handle must cancel and release at destruction (cooperative)") {
 		std::promise<void> entered, go, executed;
 		auto ready = go.get_future().share();
 		auto ran = executed.get_future();
@@ -306,11 +306,11 @@ static void testDetachedAutoRelease() {
 			[&](Node::RunContext& ctx) -> Node::Result {
 				entered.set_value();
 				ready.wait();
+				executed.set_value(); // 协作式取消不打断在飞节点：RunFn 照常返回
 				const auto* x = ctx.input<Tensor>("x");
 				if (!x)
 					return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
 				ctx.output("y", Value(std::make_unique<Tensor>(*x)));
-				executed.set_value();
 				return ctx.success();
 			}));
 		g.bindInput("num", "n", "x");
@@ -324,24 +324,16 @@ static void testDetachedAutoRelease() {
 			t.feed("num", floatTensor(7.0f));
 			t.submit(); // 异步启动（_submitted = true）
 			entered.get_future().wait();
-		} // 句柄析构 → 在飞弃置（detach）：不取消任务
+		} // 句柄析构 → 在飞弃置：先请求取消（协作式），再回收兜底
 
+		// 弃置即取消：无需等节点返回，任务在析构内同步终态并完成回收
+		CHECK(g.taskStatus(tid) == TaskStatus::Unknown,
+			  "discarded in-flight task must be cancelled and released at destruction");
+
+		// 协作式：在飞节点调用不被中断，RunFn 照常返回；其产出被丢弃、不传播
 		go.set_value();
-
-		// 弃置不取消任务：节点必须真实执行完成（旧缺陷下任务可能被跳过/中断）
 		CHECK(ran.wait_for(2s) == std::future_status::ready,
-			  "detached task must still execute to completion (not cancelled)");
-
-		// 完成后自动回收：状态条目被清除（弃置任务回收后不再可观察，
-		// 外部等待者以 Unknown 为回收完成判据）
-		bool released = false;
-		for (int i = 0; i < 400 && !released; ++i) {
-			if (g.taskStatus(tid) == TaskStatus::Unknown)
-				released = true;
-			else
-				std::this_thread::sleep_for(5ms);
-		}
-		CHECK(released, "detached task must be auto-released after completion");
+			  "in-flight node run must not be interrupted by discarding (cooperative)");
 	}
 	END_TEST();
 }
@@ -388,7 +380,7 @@ int main() {
 		testCallbackThrows();
 		testReleaseActiveRejected();
 		testUnsubmittedDestructorFreesInput();
-		testDetachedAutoRelease();
+		testDiscardedCancelsAndReleases();
 		testUnreachableSubmitRollback();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;

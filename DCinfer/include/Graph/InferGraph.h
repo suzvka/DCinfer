@@ -224,9 +224,11 @@ public:
 	///         活动或已终止任务不受影响（分别由 detachTask / releaseTask 管理）。
 	void discardUnsubmitted(const TaskId& taskId);
 
-	/// @brief  弃置在飞任务的托管句柄（句柄析构路径）：不取消任务，
-	///         终态收尾时自动回收状态表条目 / OutputZone 结果 / 诊断；
-	///         已终止 → 立即等价 releaseTask；未知 → no-op。
+	/// @brief  弃置在飞任务的托管句柄：不取消任务，终态收尾时自动回收
+	///         状态表条目 / OutputZone 结果 / 诊断；已终止 → 立即等价
+	///         releaseTask；未知 → no-op。
+	/// @note   句柄析构路径的回收兜底：先请求 cancel()，随后调用本接口——
+	///         正常路径已终态（立即释放）；仅取消竞态窗口内按在飞自动回收。
 	void detachTask(const TaskId& taskId);
 
 	// ── 查询（源图视角：冻结前后均反映源图拓扑/绑定，供内省与序列化）──

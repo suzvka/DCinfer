@@ -1,12 +1,4 @@
 // 04_task_lifecycle - 统一任务句柄：同步与异步同级
-//
-// 同一套 GraphInterface::Task 的两种节奏（同一 Add → Identity 图）：
-//   1. 同步一发：feed 链式注入 → run()（内部 submit + 无限等待）
-//   2. 异步：feed + submit 后做其他工作，再 wait(超时) + take；
-//      终态任务随句柄析构自动释放；在飞任务不受析构影响（不取消）
-//
-// 全部按公开别名操作，无 taskId / 坐标。宿主唯一 API 见 examples/01。
-//
 // 预期输出：3.0 + 4.0 = 7 / 10.0 + 5.0 = 15
 
 #include "InferGraph.h"
@@ -65,7 +57,7 @@ int main() {
 		auto result = task.wait(std::chrono::milliseconds(5000));
 		if (result.status == DC::TaskStatus::Succeeded)
 			asyncValue = task.takeTensor("result").item<float>();
-	} // 在飞任务不受析构影响；显式放弃可调用 task.cancel()
+	} // 终态任务随析构自动释放；在飞弃置将请求取消（协作式）
 	std::cout << "10.0 + 5.0 = " << asyncValue << std::endl;
 
 	return 0;

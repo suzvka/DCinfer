@@ -291,6 +291,10 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 		if (!srcNs || !srcNs->buffer.hasOutput(taskId, outPort.name))
 			continue;
 		if (snap->signature().isOutputBound(nodeName, outPort.name)) {
+			// [检查点 2] 终止复查：OutputZone 写入前再确认本轮未被终止
+			// （取消/复用可能在检查点 1 与打卡复查之后触发）
+			if (round->terminated.load(std::memory_order_acquire))
+				return;
 			Value data = srcNs->buffer.takeOutput(taskId, outPort.name);
 			output.append(taskId, nodeName, outPort.name, std::move(data),
 						  {nodeName, outPort.name, taskId});
