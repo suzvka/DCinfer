@@ -29,7 +29,8 @@ public:
 	/// @brief 公开输出别名列表（按绑定顺序）
 	std::vector<std::string> outputAliases() const;
 
-	/// @brief 创建任务句柄（自动分配 taskId；句柄析构自动释放已终止任务）
+	/// @brief 创建任务句柄（自动分配 taskId；句柄析构按状态回收：
+	///        终态即释放 / 在飞弃置后自动回收 / 未提交即释放输入）
 	/// @note  仅限具名对象调用：临时接口对象上的任务句柄生命周期不安全
 	Task createTask() &;
 
@@ -52,8 +53,10 @@ private:
 /// 宿主层对推理图的唯一操作入口（默认 API）：同步与异步同级——
 /// run() 等价于 submit() 后 wait() 的同步组合，两者可互换表达；
 /// 连接/等待/取消/诊断全部按公开别名操作，无 taskId / 坐标暴露。
-/// 析构自动释放已终止任务的资源（状态表条目 / 结果 / 诊断）；
-/// 不取消在飞任务。动作均转发 InferGraph 运行期 API。
+/// 析构资源回收（不取消在飞任务）：终态任务立即释放（状态表条目 /
+/// 结果 / 诊断）；未提交任务（仅 feed，未 submit）立即释放输入；
+/// 在飞弃置任务登记完成后自动回收——资源不随句柄丢失而滞留。
+/// 动作均转发 InferGraph 运行期 API。
 class GraphInterface::Task {
 public:
 	Task(Task&& other) noexcept;
@@ -121,10 +124,13 @@ private:
 
 	Task(GraphInterface& iface, std::string taskId);
 
-	void _releaseIfTerminated() noexcept;
+	void _releaseOnDestroy() noexcept;
 
 	GraphInterface* _iface = nullptr;
 	std::string _taskId;
+	/// 是否已成功 submit（run/submit 成功后置位；仅 submit 抛异常保持 false）——
+	/// 析构路径据此区分：未提交（清输入）/ 在飞弃置（登记自动回收）
+	bool _submitted = false;
 };
 
 } // namespace DC

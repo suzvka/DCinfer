@@ -112,28 +112,44 @@ GraphInterface::Task::Task(GraphInterface& iface, std::string taskId)
 	: _iface(&iface), _taskId(std::move(taskId)) {}
 
 GraphInterface::Task::Task(Task&& other) noexcept
-	: _iface(other._iface), _taskId(std::move(other._taskId)) {
+	: _iface(other._iface), _taskId(std::move(other._taskId)), _submitted(other._submitted) {
 	other._iface = nullptr;
+	other._submitted = false;
 }
 
 GraphInterface::Task& GraphInterface::Task::operator=(Task&& other) noexcept {
 	if (this != &other) {
-		_releaseIfTerminated();
+		_releaseOnDestroy();
 		_iface = other._iface;
 		_taskId = std::move(other._taskId);
+		_submitted = other._submitted;
 		other._iface = nullptr;
+		other._submitted = false;
 	}
 	return *this;
 }
 
-GraphInterface::Task::~Task() { _releaseIfTerminated(); }
+GraphInterface::Task::~Task() { _releaseOnDestroy(); }
 
-void GraphInterface::Task::_releaseIfTerminated() noexcept {
+void GraphInterface::Task::_releaseOnDestroy() noexcept {
 	if (!_iface)
 		return;
-	const TaskStatus st = _iface->_graph->taskStatus(_taskId);
-	if (st == TaskStatus::Succeeded || st == TaskStatus::Failed || st == TaskStatus::Cancelled)
-		_iface->_graph->releaseTask(_taskId);
+	// 析构路径资源回收（不取消在飞任务）：
+	//   终态   → 立即释放（状态表条目 / 结果 / 诊断）；
+	//   在飞   → 登记完成后自动回收（detachTask，保留不取消语义）；
+	//   未提交 → 立即释放 feed 输入（discardUnsubmitted）。
+	try {
+		const TaskStatus st = _iface->_graph->taskStatus(_taskId);
+		if (st == TaskStatus::Succeeded || st == TaskStatus::Failed || st == TaskStatus::Cancelled) {
+			_iface->_graph->releaseTask(_taskId);
+		} else if (_submitted) {
+			_iface->_graph->detachTask(_taskId);
+		} else {
+			_iface->_graph->discardUnsubmitted(_taskId);
+		}
+	} catch (...) {
+		// noexcept 析构：清理失败（极端异常路径）不向外传播
+	}
 }
 
 GraphInterface::Task& GraphInterface::Task::feed(const std::string& alias, Value data) {
@@ -152,6 +168,7 @@ GraphInterface::Task& GraphInterface::Task::feed(const std::string& alias, Tenso
 
 void GraphInterface::Task::submit() {
 	_iface->_graph->submitBound(_taskId, InferGraph::kDefaultMaxHops);
+	_submitted = true; // 提交成功后置位（抛异常保持 false：该任务于析构时按未提交路径回收）
 }
 
 TaskResult GraphInterface::Task::run() {

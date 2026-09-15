@@ -152,17 +152,45 @@ TaskResult InferGraph::waitForResult(const TaskId& taskId) {
 }
 
 TaskResult InferGraph::waitForResult(const TaskId& taskId, std::chrono::milliseconds timeout) {
-	_engine->wait(taskId, timeout);   // timeout <= 0 视为无限等待
+	const bool ready = _engine->wait(taskId, timeout); // timeout <= 0 视为无限等待
 	TaskResult result;
+	if (!ready) {
+		// 等待未满足（超时，或 taskId 未知/已释放）：如实返回 {Running / Unknown}。
+		// 终态已迁移但收尾（结果抢救）尚未完成的竞争窗口同样按未完成报告——
+		// "wait 返回 true 才保证结果可读"契约不因状态表提前可见而失真，
+		// 调用方可继续 wait 或按 Running 语义处理。
+		const TaskStatus st = taskStatus(taskId);
+		result.status = (st == TaskStatus::Unknown) ? TaskStatus::Unknown : TaskStatus::Running;
+		result.errors = _state->errors.taskErrors(taskId);
+		return result;
+	}
 	result.status = taskStatus(taskId);
 	result.errors = _state->errors.taskErrors(taskId);
 	return result;
 }
 
 void InferGraph::releaseTask(const TaskId& taskId) {
-	_engine->releaseTask(taskId);     // 仅终止态可释放（活动任务拒绝）
+	if (!_engine->releaseTask(taskId))
+		return; // 未知或活动任务：引擎拒绝释放，结果/诊断保持不动（待终态后再释放）
 	_state->output.clearTask(taskId);   // 释放结果 artifact
-	_state->errors.clearTask(taskId);       // 释放诊断记录
+	_state->errors.clearTask(taskId);   // 释放诊断记录
+}
+
+void InferGraph::discardUnsubmitted(const TaskId& taskId) {
+	// 仅清理"已喂数据但从未成功提交"（Unknown 状态）的输入执行态/声明/诊断。
+	// 活动或已终止任务不受影响：前者须保留输入（在飞执行），后者分别由
+	// detachTask（弃置回收）与 releaseTask（显式释放）路径管理。
+	if (_engine->status(taskId) != TaskStatus::Unknown)
+		return;
+	_state->exec->clearTaskState(taskId);
+	_state->output.clearTask(taskId);
+	_state->errors.clearTask(taskId);
+}
+
+void InferGraph::detachTask(const TaskId& taskId) {
+	// 转发引擎：不取消在飞任务；完成收尾时自动回收
+	// （状态表条目 / OutputZone 结果 / 诊断）；已终止立即释放；未知 no-op。
+	_engine->detachTask(taskId);
 }
 
 // ════════════════════════════════════════════

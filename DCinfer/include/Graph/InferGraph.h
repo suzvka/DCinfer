@@ -206,15 +206,28 @@ public:
 	TaskResult waitForResult(const TaskId& taskId);
 
 	/// @brief  同步等待 task 终止并返回结构化结果（显式超时）
-	/// @param  timeout 等待超时（超时未终止时 status 为 Running，调用方可据此区分
+	/// @param  timeout 等待超时（等待未满足时 status 为 Running，调用方可据此区分
 	///         "仍在运行"与各类终止态）；超时只放弃等待，不取消任务
-	/// @note   输出数据在终止后仍由 OutputZone 持有，经 takeOutput 取出
+	/// @note   输出数据在终止后仍由 OutputZone 持有，经 takeOutput 取出；
+	///         等待未满足（含终态已迁移、结果尚未就绪的收尾窗口）一律
+	///         按 {status=Running} 如实报告——wait 返回 true 才保证结果可读
 	TaskResult waitForResult(const TaskId& taskId, std::chrono::milliseconds timeout);
 
 	/// @brief  释放已终止 task 的全部资源（状态表条目、OutputZone 结果、诊断记录）
 	/// @note   此后 taskStatus 返回 Unknown、hasOutput 返回 false；
-	///         活动 task 不可释放；"大量短任务"场景建议在消费结果后调用以防内存增长
+	///         活动 task 不可释放（引擎拒绝时结果/诊断保持不动）；
+	///         "大量短任务"场景建议在消费结果后调用以防内存增长
 	void releaseTask(const TaskId& taskId);
+
+	/// @brief  弃置"已喂数据但从未成功提交"（Unknown 状态）的任务输入。
+	///         供任务句柄析构路径调用：清理执行态输入缓冲 / 声明 / 诊断；
+	///         活动或已终止任务不受影响（分别由 detachTask / releaseTask 管理）。
+	void discardUnsubmitted(const TaskId& taskId);
+
+	/// @brief  弃置在飞任务的托管句柄（句柄析构路径）：不取消任务，
+	///         终态收尾时自动回收状态表条目 / OutputZone 结果 / 诊断；
+	///         已终止 → 立即等价 releaseTask；未知 → no-op。
+	void detachTask(const TaskId& taskId);
 
 	// ── 查询（源图视角：冻结前后均反映源图拓扑/绑定，供内省与序列化）──
 
