@@ -88,7 +88,7 @@ public:
 
 	/// @brief  图级输入绑定（强制公共别名）
 	///
-	/// 绑定构成图级签名，随冻结快照固化：供内省、序列化（DCIr）与
+	/// 绑定构成图级签名，随冻结快照固化：供内省、序列化与
 	/// submitBound 声明推导使用。alias 不参与运行时寻址——运行期数据注入/取用
 	/// 一律按 (nodeName, portName) 内部坐标（feedInput / takeOutput）；
 	/// 按公开别名操作见 interface()。

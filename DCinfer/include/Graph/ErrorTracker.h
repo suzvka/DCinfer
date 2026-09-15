@@ -24,7 +24,7 @@ struct TaskError {
 	std::string nodeName;  ///< 发生错误的节点名
 	std::string source;    ///< 异常来源（如 "InferGraph::_propagateFrom"）
 	std::string message;   ///< 错误详情
-	/// @brief 领域结构化诊断（可为空）：产生错误的子系统（如 DCNet）的细分分类，
+	/// @brief 领域结构化诊断（可为空）：产生错误的子系统的细分分类，
 	///        语义由 Diagnostic::domain 定义；核心状态枚举不承载领域分类
 	std::optional<Diagnostic> diagnostic;
 };

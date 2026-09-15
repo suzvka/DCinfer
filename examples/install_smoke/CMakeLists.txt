@@ -3,7 +3,7 @@
 # 验证安装树闭环：find_package → 传递依赖解析 → 链接 → 运行。
 # 独立工程，不参与主构建（examples/CMakeLists.txt 不引入本目录）。
 #
-# 用法（先按 README“作为库消费”完成安装，<prefix> 为安装前缀）：
+# 用法（先按 README「引入」章节完成安装，<prefix> 为安装前缀）：
 #   core-only 冒烟（零外部依赖，无需 vcpkg）：
 #     cmake -B build -S . -DCMAKE_PREFIX_PATH=<prefix>
 #     cmake --build build && ./build/install_smoke
@@ -19,7 +19,7 @@ project(DCinferInstallSmoke LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(DCinfer 0.4 CONFIG REQUIRED)
+find_package(DCinfer 0.5 CONFIG REQUIRED)
 message(STATUS "DCinfer_VERSION = ${DCinfer_VERSION}")
 
 add_executable(install_smoke main.cpp)

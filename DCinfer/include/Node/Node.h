@@ -186,7 +186,7 @@ public:
 
 	// ── 线程池归属与元数据 ──
 	ThreadPoolAffinity affinity() const { return _meta.affinity; }
-	/// @brief  自由标签（纯序列化元数据，随 DCIr JSON/.dcg 往返；无调度语义）
+	/// @brief  自由标签（纯序列化元数据，随 JSON/.dcg 图序列化往返；无调度语义）
 	/// @throws NodeException(Frozen) 若节点所在图已冻结
 	void setTag(std::string tag) {
 		std::lock_guard lk(_mutationMutex);

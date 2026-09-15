@@ -41,7 +41,7 @@ namespace DC {
 ///   N=1 wire 本就是零拷贝 move 直通、无数据搬运，不违背三层池隔离初衷
 ///   （Broadcast(N>1) 等重型连接器不受影响，仍在 System 池）。
 ///
-/// 源图不受影响：DCIr 序列化、exportNode、nodeCount/edges 内省均反映源图。
+/// 源图不受影响：图序列化、exportNode、nodeCount/edges 内省均反映源图。
 struct GraphLoweringStats {
 	size_t erasedConnectors = 0; ///< 被擦除的退化连接器数量
 };

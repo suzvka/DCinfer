@@ -142,14 +142,14 @@ if (r.status == DC::TaskStatus::Succeeded)
 执行操作：
 
 - `status()`：获取任务状态。
-- `cancel()`：取消并析构任务。
+- `cancel()`：请求取消（协作式；不中断在飞节点，传播链随即停止），幂等。
 - `has(name)`：检查指定输出端点是否已有结果。
 - `errors()`：获取任务错误信息。
 
 析构时：
 
 - 已终止：立即释放全部资源。
-- 已提交：在下个端点输入中检查并释放。
+- 已提交（在飞）：请求取消（协作式），随后回收。
 - 未提交：立即释放已有输入。
 
 > 任务生命周期管理 [examples/04_task_lifecycle](examples/04_task_lifecycle/main.cpp)。
@@ -192,7 +192,7 @@ cmake --install build/core-only --prefix <安装前缀>
 宿主工程 CMakeLists 示例：
 
 ```cmake
-find_package(DCinfer 0.4 CONFIG REQUIRED)
+find_package(DCinfer 0.5 CONFIG REQUIRED)
 find_package(DCEngine CONFIG REQUIRED)   # 需要 Builtin 引擎时
 
 target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)

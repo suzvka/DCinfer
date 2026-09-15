@@ -45,7 +45,7 @@ static int g_failures = 0;
 using namespace DC;
 using namespace DC::Net;
 
-// ── 文本张量辅助（TensorType::Data 约定，DESIGN.md §3.4 / FreeToken §7）──
+// ── 文本张量辅助（TensorType::Data 约定，DESIGN.md §3.4）──
 
 static Tensor makeTextTensor(const std::string& s) {
 	Tensor::DataBlock block(s.size());

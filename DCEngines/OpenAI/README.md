@@ -1,7 +1,7 @@
 # DCEngine::OpenAI — OpenAI 兼容远端服务引擎适配器
 
 > 把任何 OpenAI 兼容服务（vLLM / TGI / llama.cpp server / 云 API）以统一形态
-> 接入 DCinfer 图运行时。基于 [DCNet](../../DCNet/DESIGN.md) 张量网络传输框架：
+> 接入 DCinfer 图运行时。基于 DCNet 张量网络传输框架：
 > HttpTransport（POCO，跨平台）+ chat codec（`DC::Net::DcNetCodec` 契约实现）+
 > NetError 归一化。与 OnnxRuntime（本地模型后端）对称并列，同属
 > EngineDescriptor 家族。
@@ -79,8 +79,8 @@ cmake -B build -S . -DDCINFER_BUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON
 
 ## 设计要点
 
-- **双向翻译器**（DCNet DESIGN.md ADR-3）：本适配器是"DC 端口 ↔ OpenAI 报文"
+- **双向翻译器**：本适配器是"DC 端口 ↔ OpenAI 报文"
   的翻译器；协议错误码精确映射可调用 DCNet 核心归一化函数
   （`NetError.h`）扩展，分类规则归核心统一维护
-- **本地形状规则**：端口 Schema 静态声明，不依赖远端元数据（DCNet DESIGN.md §1.2）
-- 流式输出 / embedding 端口 / mTLS 属展望（DCNet DESIGN.md §12）
+- **本地形状规则**：端口 Schema 静态声明，不依赖远端元数据
+- 流式输出 / embedding 端口 / mTLS 属展望（不随本次交付）。

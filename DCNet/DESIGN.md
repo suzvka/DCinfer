@@ -33,7 +33,7 @@ DCNet 是**张量网络传输框架**，与 `DCEngines` 的本地引擎适配器
    在本地声明，不依赖远端提供元数据。
 2. **转化为本地标准报错模式**：网络错误（超时/断连/拒绝）与对方机器传来的错误
    报文，统一映射为 DCinfer 既有标准（`Node::Result` + `NodeStatus` +
-   `ErrorTracker` 诊断），图级语义与本地引擎节点完全一致，InferGraph / DCIr /
+   `ErrorTracker` 诊断），图级语义与本地引擎节点完全一致，InferGraph 与
    上层调度对 DCNet 节点零特判。
 
 ---
@@ -121,7 +121,7 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 3. **transport 级可选 worker**：异步原生 SDK / gRPC / 流式 / 多路复用场景下，
    transport 内部可自持 I/O 线程 + 事件循环；对运行时仍呈现同步接口（契约不变，
    换策略不动 RunFn / 图 / 契约）。
-4. **子进程仅限外来运行时 / 崩溃隔离**（FreeToken LocalSpawn 先例），非 DCNet
+4. **子进程仅限外来运行时 / 崩溃隔离**（进程即边界），非 DCNet
    出站算子默认形态。
 5. **真正需要"监听"的场景**（`DCNet.Native` 接收端 / 本地代理端点）属服务端组件，
    单独设计，不属于出站算子职责（见 §2.5 ADR-7：节点服务化）。
@@ -132,7 +132,7 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 |---|---|---|
 | 简单 HTTP/JSON（OpenAI 兼容） | RunFn 内直接阻塞调用 | 池线程已吸收；I/O 线程零增益 |
 | 异步原生 SDK / gRPC / 流式 / 多路复用 | transport 内常驻 I/O 线程（可选） | SDK 异步模型原生可用；连接跨节点复用 |
-| Python / 外来运行时 / 崩溃隔离 | 子进程（FreeToken 先例） | 无法内嵌，进程即边界 |
+| Python / 外来运行时 / 崩溃隔离 | 子进程 | 无法内嵌，进程即边界 |
 | 附着既有服务（RemoteAttach） | 纯客户端，无任何监听 | 服务端在别处（本端被远程驱动的场景见 ADR-7 / M-server） |
 
 ### 2.5 ADR-7：服务端 / 入站组件（节点服务化）
@@ -243,11 +243,11 @@ struct NetError {
 
 - 静态形状：`NodePort::in<float>("data", {1,3,224,224})`
 - 动态维度：形状中直接写 `-1`（`Tensor::Shape = vector<int64_t>`，与 ONNX 动态维
-  语义一致；DCIr 序列化已 int64_t 直通，见 `DCIr/include/Ir/GraphCompiler.h`）
+  语义一致）
 - 形状锚定：`NodePort::anchored<T>("out", "in_x")`（输出形状跟随输入端口）
 - 可选端口 + 默认值：`NodePort::optional<T>(...)`
 - 文本/JSON 载荷：`TensorType::Data` 约定（typeSize=1，UTF-8 字节；`SlotType`
-  校验器不比对 typeSize，文本通路安全——FreeToken DESIGN.md §7 已核实）
+  校验器不比对 typeSize，文本通路安全）
 
 ```cpp
 // 示例：OpenAI 兼容 chat 算子的本地形状规则
@@ -423,7 +423,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 
 执行上下文（ADR-6）：默认无任何派生——RunFn 直接阻塞调用 transport；需要时
 transport 内部自持 I/O 线程 / 事件循环（异步 SDK、流式、多路复用场景），
-对运行时仍是同步接口；子进程仅用于外来运行时 / 崩溃隔离（FreeToken 先例）。
+对运行时仍是同步接口；子进程仅用于外来运行时 / 崩溃隔离。
 
 - 节点归属 `ThreadPoolAffinity::System`（README：System Pool 承担 I/O、网络传输），
   阻塞式 HTTP 调用天然适合；
@@ -495,8 +495,8 @@ DCEngines/OpenAI/
 `DCinfer::DCinfer` + `nlohmann_json` + POCO，含安装导出），测试随
 `DCINFER_BUILD_TESTS` 启用。
 
-DCIr 兼容：DCNet 节点是普通引擎节点（`engineType` 已注册），`modelPath` 字段承载
-远端端点，`GraphCompiler` JSON/.dcg 序列化无需改动（引擎节点路径已支持）。
+序列化兼容：网络节点是普通引擎节点（`engineType` 已注册），`modelPath` 字段承载
+远端端点，图 JSON/.dcg 序列化无需改动（引擎节点路径已支持）。
 
 **外部消费注意事项**：
 
