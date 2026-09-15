@@ -4,6 +4,7 @@
 #include "EngineRegistry.h"
 #include "GraphException.h"
 #include "Ir/DcgArchive.h"
+#include "PathGuard.h"
 
 #include <fstream>
 #include <iostream>
@@ -476,6 +477,14 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 				for (auto& j : root["nodes"]) {
 					if (j.contains("modelPath")) {
 						std::string mp = j["modelPath"].get<std::string>();
+						// 提交期路径校验（F01）：拒绝父目录跳转/绝对路径/盘符等越界声明，
+						// 在解压前 fail-fast（extractOne 内亦有防御，此处提供更明确的上层错误）
+						std::string reason;
+						if (!DC::Ir::detail::isSafeArchiveRelPath(mp, archive->tempDir(), &reason)) {
+							throw GraphException(GraphException::ErrorType::Other,
+								"GraphCompiler::compileFile",
+								"unsafe modelPath in .dcg graph.json: '" + mp + "': " + reason);
+						}
 						if (extracted.insert(mp).second) {
 							archive->extractOne(mp);
 						}

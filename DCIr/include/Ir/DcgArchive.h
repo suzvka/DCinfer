@@ -51,8 +51,11 @@ public:
 	std::string readGraphJson();
 
 	/// @brief 解压 archive 内的单个文件到临时目录，返回绝对路径
-	/// @param archivePath ZIP 内路径，如 "models/resnet.onnx"
+	/// @param archivePath ZIP 内路径，如 "models/resnet.onnx"（必须为安全相对路径：
+	///        禁止空/内嵌 NUL/绝对路径/盘符/父目录跳转/归一化越界/经符号链接逃逸）
 	/// @return 临时目录下的绝对路径
+	/// @throws GraphException(Other) 路径不安全、超预算（单条目体积/压缩比）、
+	///         CRC/完整性校验失败或写盘失败
 	std::filesystem::path extractOne(const std::string& archivePath);
 
 	/// @brief 删除 extractOne 产生的临时文件

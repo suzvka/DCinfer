@@ -1,16 +1,120 @@
 #include "Ir/DcgArchive.h"
 
 #include "GraphException.h"
+#include "PathGuard.h"
 
 #include <minizip/unzip.h>
 #include <minizip/zip.h>
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <random>
+#include <string>
 #include <vector>
 
 namespace DC::Ir {
+
+namespace {
+
+// ── 解包安全与预算（审查 F01 / 归档健壮性）──
+
+/// 单条目未压缩体积上限（防大文件/损坏归档耗尽内存或磁盘）
+constexpr uint64_t kMaxEntryBytes = 1ull << 30; // 1 GiB
+/// 压缩比上限（防 zip bomb：低熵膨胀条目在读取前拒绝；真实模型/JSON 远低于此）
+constexpr uint64_t kMaxCompressionRatio = 200;
+/// 流式读取块大小
+constexpr std::size_t kReadChunkBytes = 64 * 1024;
+
+/// 读取前预算校验：体积 + 压缩比（只依赖 ZIP 目录声明，不解压）
+void ensureEntryWithinBudget(const unz_file_info64& info, const std::string& entry) {
+	if (info.uncompressed_size > kMaxEntryBytes) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+			"entry exceeds size budget (" + std::to_string(info.uncompressed_size) + " > "
+				+ std::to_string(kMaxEntryBytes) + " bytes): " + entry);
+	}
+	if (info.compressed_size > 0
+		&& info.uncompressed_size / kMaxCompressionRatio > info.compressed_size) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+			"entry rejected: suspicious compression ratio: " + entry);
+	}
+}
+
+/// 符号链接防御：baseDir 到 target 之间已存在的路径组件不得是符号链接
+/// （防归档借解包目录中既有 symlink 将写入重定向到目录之外）
+void ensureNoSymlinkAncestor(const std::filesystem::path& baseDir, const std::filesystem::path& target,
+							 const std::string& entry) {
+	const auto rel = target.lexically_normal().lexically_relative(baseDir.lexically_normal());
+	if (rel.empty())
+		return;
+	std::filesystem::path cur = baseDir;
+	for (const auto& comp : rel) {
+		if (comp == "..") {
+			throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+				"extraction target escapes base directory: " + entry);
+		}
+		cur /= comp;
+		std::error_code ec;
+		const auto st = std::filesystem::symlink_status(cur, ec);
+		if (!ec && std::filesystem::is_symlink(st)) {
+			throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+				"symlink in extraction path is not allowed: " + cur.string());
+		}
+	}
+}
+
+/// 当前打开条目的 RAII 关闭（异常路径防句柄泄漏；CRC 检查后置 closed 标志）
+struct CurrentEntryGuard {
+	unzFile handle;
+	bool closed = false;
+
+	~CurrentEntryGuard() {
+		if (!closed && handle)
+			::unzCloseCurrentFile(handle);
+	}
+};
+
+/// 流式读取当前打开条目：分块循环至 EOF，边读边交给 sink；
+/// 累计字节与声明体积比对（防截断/超读），CRC 由调用方经
+/// closeCurrentEntryWithCrcCheck 收尾校验。
+template <typename Sink>
+void streamCurrentEntry(unzFile handle, uint64_t expectedSize, const std::string& entry, Sink&& sink) {
+	std::vector<char> buf(kReadChunkBytes);
+	uint64_t total = 0;
+	for (;;) {
+		const int n = ::unzReadCurrentFile(handle, buf.data(), static_cast<unsigned>(buf.size()));
+		if (n < 0) {
+			throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+				"read error for: " + entry);
+		}
+		if (n == 0)
+			break; // EOF
+		total += static_cast<uint64_t>(n);
+		if (total > expectedSize) {
+			throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+				"entry larger than declared size: " + entry);
+		}
+		sink(buf.data(), static_cast<std::size_t>(n));
+	}
+	if (total != expectedSize) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+			"truncated entry: expected " + std::to_string(expectedSize) + " got "
+				+ std::to_string(total) + " bytes: " + entry);
+	}
+}
+
+/// CRC 校验收尾：unzCloseCurrentFile 返回非 OK（如 UNZ_CRCERROR）时拒绝
+void closeCurrentEntryWithCrcCheck(unzFile handle, CurrentEntryGuard& guard, const std::string& entry) {
+	const int ret = ::unzCloseCurrentFile(handle);
+	guard.closed = true;
+	if (ret != UNZ_OK) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+			"CRC/integrity verification failed for: " + entry);
+	}
+}
+
+} // namespace
 
 // ════════════════════════════════════════════
 // 工厂方法
@@ -28,11 +132,38 @@ std::unique_ptr<DcgArchive> DcgArchive::openRead(const std::filesystem::path& pa
 			"cannot open archive: " + pathStr);
 	}
 
-	// 创建临时目录
+	// 创建唯一且私有的临时目录（随机后缀 + 独占创建；冲突则换名重试）
 	auto tmpBase = std::filesystem::temp_directory_path();
 	auto now = std::chrono::system_clock::now().time_since_epoch().count();
-	auto tmpDir = tmpBase / ("dcg_" + path.stem().string() + "_" + std::to_string(now));
-	std::filesystem::create_directories(tmpDir);
+	std::random_device rd;
+	std::uniform_int_distribution<uint64_t> dist;
+	std::filesystem::path tmpDir;
+	bool created = false;
+	for (int attempt = 0; attempt < 16; ++attempt) {
+		tmpDir = tmpBase / ("dcg_" + path.stem().string() + "_" + std::to_string(now) + "_"
+							+ std::to_string(dist(rd)));
+		std::error_code ec;
+		const bool made = std::filesystem::create_directory(tmpDir, ec);
+		if (made && !ec) {
+			created = true;
+			break;
+		}
+		if (ec) {
+			throw GraphException(GraphException::ErrorType::Other,
+				"DcgArchive::openRead",
+				"cannot create temp dir: " + tmpDir.string() + ": " + ec.message());
+		}
+		// made=false 且无错误：同名目录已存在（极小概率冲突）→ 换随机名重试
+	}
+	if (!created) {
+		throw GraphException(GraphException::ErrorType::Other,
+			"DcgArchive::openRead",
+			"cannot create unique temp dir under: " + tmpBase.string());
+	}
+	// 尽力收紧目录权限（POSIX 0700；Windows 无权限位模型，忽略失败）
+	std::error_code pec;
+	std::filesystem::permissions(tmpDir, std::filesystem::perms::owner_all,
+		std::filesystem::perm_options::replace, pec);
 	archive->_tempDir = tmpDir;
 
 	return archive;
@@ -99,6 +230,9 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 			"failed to get info for: " + entryName);
 	}
 
+	// 读取前预算校验（体积/压缩比）
+	ensureEntryWithinBudget(info, entryName);
+
 	// 打开条目
 	ret = ::unzOpenCurrentFile(handle);
 	if (ret != UNZ_OK) {
@@ -106,20 +240,16 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 			"DcgArchive",
 			"failed to open entry: " + entryName);
 	}
+	CurrentEntryGuard guard{handle};
 
-	// 读取全部数据
-	std::vector<char> buffer(static_cast<size_t>(info.uncompressed_size));
-	int bytesRead = ::unzReadCurrentFile(handle, buffer.data(), static_cast<unsigned>(buffer.size()));
+	// 流式读取全部数据（分块循环；预算内一次性容器，避免多次重分配）
+	std::vector<char> buffer;
+	buffer.reserve(static_cast<std::size_t>(info.uncompressed_size));
+	streamCurrentEntry(handle, info.uncompressed_size, entryName,
+		[&buffer](const char* p, std::size_t n) { buffer.insert(buffer.end(), p, p + n); });
 
-	::unzCloseCurrentFile(handle);
-
-	if (bytesRead < 0) {
-		throw GraphException(GraphException::ErrorType::Other,
-			"DcgArchive",
-			"read error for: " + entryName);
-	}
-
-	buffer.resize(static_cast<size_t>(bytesRead));
+	// CRC/完整性校验收尾（unzCloseCurrentFile 返回值）
+	closeCurrentEntryWithCrcCheck(handle, guard, entryName);
 	return buffer;
 }
 
@@ -133,6 +263,14 @@ std::string DcgArchive::readGraphJson() {
 }
 
 std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
+	// 路径安全校验（F01）：拒绝空/内嵌 NUL/绝对路径/盘符/父目录跳转/归一化越界
+	std::string reason;
+	if (!detail::isSafeArchiveRelPath(archivePath, _tempDir, &reason)) {
+		throw GraphException(GraphException::ErrorType::Other,
+			"DcgArchive::extractOne",
+			"unsafe archive path '" + archivePath + "': " + reason);
+	}
+
 	// 定位条目
 	int ret = ::unzLocateFile(_readHandle, archivePath.c_str(), 2);
 	if (ret != UNZ_OK) {
@@ -150,8 +288,12 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 			"failed to get info for: " + archivePath);
 	}
 
-	// 确定输出路径
-	auto tmpPath = _tempDir / archivePath;
+	// 读取前预算校验（体积/压缩比）
+	ensureEntryWithinBudget(info, archivePath);
+
+	// 确定输出路径（校验后归一化）并防御既有符号链接组件
+	const auto tmpPath = (_tempDir / archivePath).lexically_normal();
+	ensureNoSymlinkAncestor(_tempDir, tmpPath, archivePath);
 	std::filesystem::create_directories(tmpPath.parent_path());
 
 	// 打开条目
@@ -161,29 +303,31 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 			"DcgArchive::extractOne",
 			"failed to open entry: " + archivePath);
 	}
+	CurrentEntryGuard guard{_readHandle};
 
-	// 读取并写入临时文件
-	std::vector<char> buffer(static_cast<size_t>(info.uncompressed_size));
-	int bytesRead = ::unzReadCurrentFile(_readHandle, buffer.data(), static_cast<unsigned>(buffer.size()));
-	::unzCloseCurrentFile(_readHandle);
-
-	if (bytesRead < 0) {
-		throw GraphException(GraphException::ErrorType::Other,
-			"DcgArchive::extractOne",
-			"read error for: " + archivePath);
-	}
-
-	std::ofstream ofs(tmpPath, std::ios::binary);
-	if (!ofs.is_open()) {
-		throw GraphException(GraphException::ErrorType::Other,
-			"DcgArchive::extractOne",
-			"cannot create temp file: " + tmpPath.string());
-	}
-	ofs.write(buffer.data(), bytesRead);
-	if (!ofs) {
-		throw GraphException(GraphException::ErrorType::Other,
-			"DcgArchive::extractOne",
-			"write error for: " + tmpPath.string());
+	// 流式读取写盘（分块）：完整性/CRC 校验失败或写盘失败时清理部分文件后重抛
+	try {
+		{
+			std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
+			if (!ofs.is_open()) {
+				throw GraphException(GraphException::ErrorType::Other,
+					"DcgArchive::extractOne",
+					"cannot create temp file: " + tmpPath.string());
+			}
+			streamCurrentEntry(_readHandle, info.uncompressed_size, archivePath,
+				[&ofs](const char* p, std::size_t n) {
+					ofs.write(p, static_cast<std::streamsize>(n));
+					if (!ofs) {
+						throw GraphException(GraphException::ErrorType::Other,
+							"DcgArchive::extractOne", "write error to extraction target");
+					}
+				});
+		} // ofs 关闭（异常清理前先释放文件句柄）
+		closeCurrentEntryWithCrcCheck(_readHandle, guard, archivePath);
+	} catch (...) {
+		std::error_code ec;
+		std::filesystem::remove(tmpPath, ec);
+		throw;
 	}
 
 	return tmpPath;
