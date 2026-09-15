@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-09-16
 
 ### Added
 
@@ -46,14 +46,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **任务句柄析构：“弃置即取消”（协作式）**：`GraphInterface::Task` 析构时对本
-  句柄提交的在飞任务先请求 `cancel()`（不中断在飞节点执行，传播链在下一检查点
-  停止），再回收——取代原“弃置不取消、完成后自动回收”语义；长工作流下弃置
-  任务不再空耗算力，资源随终态同步释放。外部经坐标 API（`submitBound`）提交
-  的任务不受句柄析构影响。
+- **任务句柄析构：“弃置即取消”（协作式）**：`GraphInterface::Task` 析构按下述
+  三路回收——已终止 → 立即释放全部资源；在飞弃置 → 先请求 `cancel()`
+  （不中断在飞节点执行，传播链在下一检查点停止），再回收；未提交 → 立即释放
+  已喂入输入。取代原“弃置不取消、完成后自动回收”语义；长工作流下弃置任务不再
+  空耗算力，资源随终态同步释放。外部经坐标 API（`submitBound`）提交的任务不受
+  句柄析构影响。
 - **OutputZone 搬运补充终止复查（检查点 2）**：传播第二步（输出搬运）在
   `takeOutput` / `append` 前复查 `round->terminated`，关闭与并发取消 / 同 ID
   复用相关的窄写入竞态窗口。
+- **寻址模型定案（单栈）**：运行时数据注入与取用唯一按 `(nodeName, portName)`
+  复合坐标寻址，无名称解析、无回退；删除 `feedBoundInput`（0.3.0 引入、
+  0.4.0 收窄的别名寻址路径），`feedInput` / `takeOutput` / `takeOutputTensor` /
+  `hasOutput` 统一仅按内部坐标寻址。`alias` 定位为图级签名的序列化/内省元数据，
+  不参与运行时寻址（取代 0.4.0 条目中的别名寻址描述）。
+- **破坏性 API 收窄**：移除 `GraphBuilder::store()` 非 const 重载（唯一使用点
+  `InferGraph::node()` 改走 `GraphBuilder::node()`）。冻结前泄漏可变
+  `GraphStore&` 的路径在编译期不可达；`store() const` 保留且冻结后返回快照持有的
+  源图。
+- **View 写入接口统一为 `set()`**：删除 `Tensor::View::item`——同名
+  `Tensor::item<T>()` 为读取语义，View 侧写入方法造成读写命名不对称
+  （全仓库零调用者，直接移除而非保留别名）；View 写入用 `set()` / `operator=`。
+- **Schema 声明统一迁移 NodePort 工厂**：示例与测试中的手写聚合初始化
+  （如 `{"x", Tensor::TensorType::Float, sizeof(float), {}}`）迁移为
+  `Node::Port::in<T>` / `out<T>` / `optional<T>` 工厂形式，消除类型标签与
+  sizeof 双写风险；DCIr 测试的通用 makePort 辅助删除（Void 端口无 C++ 类型
+  载体，保留语义收窄后的 voidPort）。
+- **`02_lowering_benchmark` 循环示范句柄回收**：大量短任务循环无需手工
+  `releaseTask`——每轮局部任务句柄析构即自动回收资源；README 常见问题同步点名。
+- **`releaseTask` / `waitForResult` 语义定案**：`InferGraph::releaseTask` 收窄为
+  仅终态可释放——活动任务被拒绝、结果/诊断保持不动；`waitForResult` 等待未
+  满足（含终态已迁移、结果尚未就绪的收尾窗口）一律如实报告
+  `{status=Running}`，`wait` 返回成功才保证结果可读。
 
 ### Removed
 
@@ -119,34 +143,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   测试静默不注册；改随规范开关启用。CI 同步：TSan 用例扩围至
   GraphInterfaceTest / TaskLifecycleRegressionTest，dcnet-openai 作业新增
   "OpenAiEngineTest 已注册"断言。
-
-### Changed
-
-- **寻址模型定案（单栈）**：运行时数据注入与取用唯一按 `(nodeName, portName)`
-  复合坐标寻址，无名称解析、无回退；删除 `feedBoundInput`（0.3.0 引入、
-  0.4.0 收窄的别名寻址路径），`feedInput` / `takeOutput` / `takeOutputTensor` /
-  `hasOutput` 统一仅按内部坐标寻址。`alias` 定位为图级签名的序列化/内省元数据，
-  不参与运行时寻址（取代 0.4.0 条目中的别名寻址描述）。
-- **破坏性 API 收窄**：移除 `GraphBuilder::store()` 非 const 重载（唯一使用点
-  `InferGraph::node()` 改走 `GraphBuilder::node()`）。冻结前泄漏可变
-  `GraphStore&` 的路径在编译期不可达；`store() const` 保留且冻结后返回快照持有的
-  源图。
-- **View 写入接口统一为 `set()`**：删除 `Tensor::View::item`——同名
-  `Tensor::item<T>()` 为读取语义，View 侧写入方法造成读写命名不对称
-  （全仓库零调用者，直接移除而非保留别名）；View 写入用 `set()` / `operator=`。
-- **Schema 声明统一迁移 NodePort 工厂**：示例与测试中的手写聚合初始化
-  （如 `{"x", Tensor::TensorType::Float, sizeof(float), {}}`）迁移为
-  `Node::Port::in<T>` / `out<T>` / `optional<T>` 工厂形式，消除类型标签与
-  sizeof 双写风险；DCIr 测试的通用 makePort 辅助删除（Void 端口无 C++ 类型
-  载体，保留语义收窄后的 voidPort）。
-- **`02_lowering_benchmark` 演示 `releaseTask`**：大量短任务循环中消费结果后
-  释放任务资源（防内存增长），README 常见问题同步点名。
-- **任务句柄析构与 `releaseTask` 语义定案**：`GraphInterface::Task` 析构按状态
-  三路回收——已终止 → 立即释放全部资源；已提交仍在飞 → 弃置托管（不取消任务，
-  完成后自动回收）；从未提交 → 立即释放已喂入输入。`InferGraph::releaseTask`
-  收窄为仅终态可释放（活动任务被拒绝、结果/诊断保持不动）；
-  `waitForResult` 等待未满足（含终态已迁移、结果尚未就绪的收尾窗口）一律如实
-  报告 `{status=Running}`，`wait` 返回成功才保证结果可读。
 
 ## [0.4.0] - 2026-09-10
 
@@ -525,6 +521,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single example**: Only `01_hello_graph` is provided. More complex scenarios (multi-branch, cyclic, cloud offload) are documented but not exemplified.
 - **No Python bindings**: C++ only; no language bindings or scripting interface.
 
+[0.5.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.0
 [0.4.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.4.0
 [0.3.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.3.0
 [0.2.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.2.0
