@@ -43,11 +43,15 @@ void ValidatorRegistry::ensureDefaults() {
 }
 
 void ValidatorRegistry::registerValidator(SlotDataType type, SlotCheckFn fn) {
+	std::lock_guard lk(_mutex);
 	_validators[type] = std::move(fn);
 }
 
 const SlotCheckFn* ValidatorRegistry::find(SlotDataType type) const {
+	std::lock_guard lk(_mutex);
 	auto it = _validators.find(type);
+	// unordered_map 节点地址稳定（rehash 不移动节点），启动期注册完成后
+	// 返回的指针在运行期持续有效（契约：启动期注册、运行期并发读取）
 	return it != _validators.end() ? &it->second : nullptr;
 }
 

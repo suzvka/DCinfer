@@ -218,23 +218,34 @@ void EngineRegistry::releaseEngine(const std::string& engineType, const std::str
 	// 句柄释放时——与调用方无需任何释放顺序约定。
 	// single-flight 创建中的条目（loading）无可释放对象，保留槽位，
 	// 待领导者完成发布后由后续 release 生效。
-	std::lock_guard lk(_mutex);
-	auto it = _engineInstances.find(_makeEngineKey(engineType, modelPath));
-	if (it == _engineInstances.end() || it->second.loading.valid())
-		return;
-	_engineInstances.erase(it);
+	// 待析构句柄移入局部容器、锁外释放：用户 releaseEngine 钩子不持有 _mutex。
+	EngineHandle doomed;
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engineInstances.find(_makeEngineKey(engineType, modelPath));
+		if (it == _engineInstances.end() || it->second.loading.valid())
+			return;
+		doomed = std::move(it->second.ready);
+		_engineInstances.erase(it);
+	}
 }
 
 void EngineRegistry::releaseAllEngines() {
 	// 语义同 releaseEngine：逐条目移除缓存，实例销毁由句柄引用计数决定。
 	// 创建中（loading）条目跳过，待创建完成后由后续 release 处理。
-	std::lock_guard lk(_mutex);
-	for (auto it = _engineInstances.begin(); it != _engineInstances.end();) {
-		if (it->second.loading.valid()) {
-			++it;
-			continue;
+	// 待析构句柄批量移入局部容器、锁外释放：用户 releaseEngine 钩子不持有 _mutex。
+	std::vector<EngineHandle> doomed;
+	{
+		std::lock_guard lk(_mutex);
+		doomed.reserve(_engineInstances.size());
+		for (auto it = _engineInstances.begin(); it != _engineInstances.end();) {
+			if (it->second.loading.valid()) {
+				++it;
+				continue;
+			}
+			doomed.push_back(std::move(it->second.ready));
+			it = _engineInstances.erase(it);
 		}
-		it = _engineInstances.erase(it);
 	}
 }
 

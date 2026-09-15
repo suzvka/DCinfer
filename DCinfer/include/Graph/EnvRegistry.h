@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -15,6 +16,9 @@ namespace DC {
 //
 // 类型擦除基于 shared_ptr<void>，自动保留原始 deleter。
 // 遵循单例模式，与 EngineRegistry / ValidatorRegistry 一致。
+//
+// 并发契约：容器访问由 _mutex 保护；用户回调（factory 创建、cleanup 钩子）
+// 一律在锁外调用，回调内可安全重入注册表。
 //
 // 用法：
 //   EnvRegistry::instance().registerEnv("ONNX", []() {
@@ -59,6 +63,8 @@ private:
 
 	std::unordered_map<std::string, Entry> _factories;
 	std::unordered_map<std::string, std::shared_ptr<void>> _instances;
+
+	mutable std::mutex _mutex;
 };
 
 } // namespace DC

@@ -121,6 +121,11 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
+      - name: Assert OpenAiEngineTest registered (F11 guard)
+        run: |
+          ctest --test-dir build -N -R "OpenAiEngineTest" | grep -q "OpenAiEngineTest" \
+            || { echo "::error::OpenAiEngineTest is not registered (DCINFER_BUILD_TESTS wiring)"; exit 1; }
+
       - name: Test (full suite)
         run: ctest --test-dir build -C Release --output-on-failure
 
@@ -247,7 +252,7 @@ jobs:
       - name: Concurrency tests under TSan
         run: >
           ctest --test-dir build-tsan
-          -R "FreezeBoundaryTest|GraphNodeTest|InferGraphTest|LoweringTest"
+          -R "FreezeBoundaryTest|GraphNodeTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest"
           --output-on-failure
 
       - name: Freeze-boundary repeated (until-fail x3)

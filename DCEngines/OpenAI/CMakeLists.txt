@@ -31,7 +31,7 @@ file(GLOB_RECURSE DCENGINE_OPENAI_SRC CONFIGURE_DEPENDS
 )
 target_sources(DCEngine_OpenAI PRIVATE ${DCENGINE_OPENAI_SRC})
 
-# ── 集成测试（BUILD_TESTS 开启时编译）──
-if (BUILD_TESTS)
+# ── 集成测试（DCINFER_BUILD_TESTS 开启时编译）──
+if (DCINFER_BUILD_TESTS)
     add_subdirectory(test)
 endif()

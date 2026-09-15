@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <unordered_map>
 
 #include "TensorMeta.h"
@@ -63,6 +64,10 @@ using SlotCheckFn = std::function<SlotDataStatus(const void* data, SlotDataType 
 /// TensorSlot::store() 调用 validate() 执行运行时校验。
 /// 未注册类型直接放行（返回 ready=true）。
 ///
+/// 并发契约：registerValidator 与 find/validate 之间以 _mutex 保护容器访问，
+/// 约定“启动期注册、运行期并发读取”：引擎注册均在启动期完成，
+/// 运行期多方并发调用 validate() 安全。
+///
 /// 用法：
 ///   auto id = ensureSlotType<MyType>();
 ///   ValidatorRegistry::instance().registerValidator(id, myCheckFn);
@@ -92,6 +97,7 @@ public:
 
 private:
 	ValidatorRegistry() = default;
+	mutable std::mutex _mutex;
 	std::unordered_map<SlotDataType, SlotCheckFn> _validators;
 };
 
