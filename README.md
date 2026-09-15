@@ -53,11 +53,11 @@ DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准�
 
 | 组件 | 要求 |
 |---|---|
-| CMake | >= 3.17 |
+| CMake | >= 3.17（裸构建最低 3.17；CMakePresets version 3 需 ≥ 3.21） |
 | C++ 标准 | C++20 |
 | GCC | >= 11（Linux；CI 在 ubuntu-24.04 上验证） |
 | Clang | >= 14（CI 在 ubuntu-24.04 上验证） |
-| MSVC | VS 2022（Windows；CI 在 windows-latest 上验证） |
+| MSVC | VS 2026（Windows；CI 在 windows-latest 上验证） |
 | Ninja | 可选（README 示例使用 `-G Ninja`） |
 | vcpkg | 仅 DCIr / DCNet / OnnxRuntime / OpenAI 模块需要（仓库以 submodule 提供） |
 
@@ -95,6 +95,8 @@ git submodule update --init --recursive
 cmake -B build -S . -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake -DBUILD_ENGINE_BUILTIN=ON
 ```
 
+注意：DCIr 随主库交付；DCNet / OnnxRuntime / OpenAI 适配器为实验性组件、本次不交付（见上方"发布状态"）。
+
 示例代码（[examples/01_hello_graph](examples/01_hello_graph/main.cpp)）展示标准任务生命周期：
 
 ```cpp
@@ -102,7 +104,7 @@ graph.bindInput("a", "adder", "a");        // 图公开输入别名
 graph.bindOutput("result", "pass", "y");   // 图公开输出别名
 
 auto api = graph.interface();              // 取接口即定型：冻结图并解析别名 → 坐标
-auto task = api.createTask();              // 任务句柄：析构自动释放已终止任务
+auto task = api.createTask();              // 任务句柄：析构自动回收（终态即释放；在飞弃置后自动回收）
 task.feed("a", tensorA);                   // 按公开别名喂数据
 task.feed("b", tensorB);
 auto result = task.run();                  // 同步运行（内部 submitBound + 等待终止）
@@ -117,7 +119,7 @@ if (result.status == DC::TaskStatus::Succeeded) {
 
 ### 寻址模型与 API 分层
 
-**宿主层只有一套 API**：`graph.interface()` 冻结图并一次性解析公开绑定后，
+`graph.interface()` 冻结图并一次性解析公开绑定后，
 `GraphInterface::Task` 按公开别名操作，同步与异步同级——`run()` 等价于
 `submit()` 后 `wait()` 的同步组合（可用别名见 `api.inputAliases()` /
 `api.outputAliases()`；未知别名抛错并列出全部可用别名）：
@@ -140,8 +142,10 @@ if (r.status == DC::TaskStatus::Succeeded)
     auto output = task.take("answer");
 ```
 
-任务句柄同时提供 `status()` / `cancel()` / `has(alias)` / `errors()`；
-终态任务随析构自动释放（无需 `releaseTask`），在飞任务不受析构影响。
+任务句柄同时提供 `status()` / `cancel()` / `has(alias)` / `errors()`。
+析构语义按任务状态分三路：**已终止** → 立即释放全部资源（无需手工 `releaseTask`）；
+**已提交仍在飞** → 弃置托管（不取消任务，完成后自动回收）；
+**从未提交** → 立即释放已喂入的输入。
 两种节奏的完整演示见 [examples/04_task_lifecycle](examples/04_task_lifecycle/main.cpp)。
 
 **坐标层仅供扩展作者**：内核唯一按 `(nodeName, portName)` 复合坐标寻址
@@ -153,7 +157,7 @@ taskId 复用、引擎嵌入、精细资源控制）才直接驱动 `InferGraph`
 graph.feedInput(tid, "llm", "input", data);
 graph.submit(tid, "llm", "output");
 auto r = graph.takeOutputTensor(tid, "llm", "output");
-graph.releaseTask(tid); // 坐标层手工管理；消费结果后释放
+graph.releaseTask(tid); 
 ```
 
 输出在任务终止后仍保留；`take` / `takeOutput` / `takeOutputTensor` 为消费式取出。
@@ -195,6 +199,7 @@ git sparse-checkout set DCinfer DCIr cmake vcpkg.json CMakeLists.txt
 ```bash
 # 构建 + 安装（core-only；其他预设同理，预设名见 CMakePresets.json）
 cmake --preset core-only
+cmake --build build/core-only --config Release
 cmake --install build/core-only --prefix <安装前缀>
 ```
 
@@ -202,15 +207,14 @@ cmake --install build/core-only --prefix <安装前缀>
 
 | 包 | 消费方式 | 导出目标 | 传递依赖 |
 |---|---|---|---|
-| DCinfer | `find_package(DCinfer CONFIG REQUIRED)` | `DCinfer::DCinfer` | 无（仅 C++20 标准库） |
-| DCIr | `find_package(DCIr CONFIG REQUIRED)` | `DCIr::DCIr` | 自动拉起 DCinfer + nlohmann-json/minizip/zlib |
-| DCNet | `find_package(DCNet CONFIG REQUIRED)` | `DCNet::DCNet` | 自动拉起 DCinfer + json + Poco |
-| DCEngine | `find_package(DCEngine CONFIG REQUIRED)` | `DCEngine::Builtin` | 自动拉起 DCinfer |
+| DCinfer | `find_package(DCinfer CONFIG REQUIRED)` | `DCinfer::DCinfer` | 标准库 |
+| DCIr | `find_package(DCIr CONFIG REQUIRED)` | `DCIr::DCIr` | DCinfer, zlib |
+| DCNet | `find_package(DCNet CONFIG REQUIRED)` | `DCNet::DCNet` | DCinfer, Poco |
 
 宿主工程 CMakeLists 示例：
 
 ```cmake
-find_package(DCinfer 0.3 CONFIG REQUIRED)
+find_package(DCinfer 0.4 CONFIG REQUIRED)
 find_package(DCEngine CONFIG REQUIRED)   # 需要 Builtin 引擎时
 
 target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)
@@ -230,10 +234,12 @@ ctest --test-dir build -C Release
 
 **循环提交大量短任务，内存持续增长？**
 
-高层默认写法无需关注：任务句柄析构自动回收已终止任务（循环示范见
+高层默认写法无需关注：任务句柄析构自动回收资源——已终止任务立即释放，
+在飞任务被弃置（不取消），完成后自动回收（循环示范见
 [examples/02_lowering_benchmark](examples/02_lowering_benchmark/main.cpp)）。
 仅当直接使用坐标层 `InferGraph` 运行期 API 且复用同一 taskId 时，才需在消费结果后
-调用 `releaseTask(taskId)`。
+调用 `releaseTask(taskId)`（仅终态可释放，活动任务会被拒绝且资源保持不动；
+在飞任务交给 `detachTask(taskId)` 弃置）。
 
 **我应该用 `interface()` 还是直接操作 `InferGraph`？**
 

@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   可运行教程；README 新增"常见问题"段（自定义节点入口 + 任务资源释放）。
 - **图公开接口 `GraphInterface`（按别名喂数据 / 取结果）**：`graph.interface()`
   冻结图并一次性解析公开绑定（alias → (nodeName, portName)）后返回；
-  `api.createTask()` 取得任务句柄（析构自动释放已终止任务、不取消在飞任务），
+  `api.createTask()` 取得任务句柄（析构按状态回收：终态即释放 / 在飞弃置后
+  自动回收 / 未提交即释放输入），
   `task.feed(alias, data)` / `task.run()`（同步）/ `task.take(alias)` 只按公开
   别名操作；未知别名抛 `GraphException(InvalidBinding)` 并列出全部可用别名；
   绑定坐标在创建接口时校验（NodeNotFound / PortNotFound）。内核寻址不变——
@@ -30,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   同步 `run()` 与异步 `submit + wait` 是同一句柄上的同级表达——宿主层仅一套
   API（两种节奏演示见 examples/04_task_lifecycle），无需 taskId / 坐标。
   原 `TaskScope` 的能力（超时 run / 取消 / 状态查询 / 结构化等待）全部并入。
+- **任务生命周期回归测试 `TaskLifecycleRegressionTest`**（8 用例）：取消后复用同
+  taskId 的旧轮次消费竞态、失败后输出、必需输出缺失、终止回调异常、活动任务
+  释放拒绝（并发幂等）、未提交句柄析构释放输入、弃置任务自动回收、不可达提交
+  回滚后重试——覆盖 F04–F10 各项缺陷的复现路径。
+- **DCIr 归档安全回归测试 `DcgArchiveSecurityTest`**：路径校验单元（空/内嵌
+  NUL/绝对路径/盘符/UNC/父目录跳转）、`extractOne` 越界写入拒绝端到端、
+  符号链接祖先目录防御（无权限环境自动跳过）、截断归档明确报错、高压缩比
+  条目预算拒绝、正常归档往返回归。
+- **`InferGraph::detachTask` / `InferGraph::discardUnsubmitted`**：任务句柄析构
+  路径配套——在飞任务弃置（不取消，完成收尾时自动回收状态/结果/诊断）、
+  已喂数据但从未成功提交的任务立即释放输入。
 
 ### Removed
 
@@ -72,6 +84,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   槽位（数据串扰）；现拒绝导出并抛 `GraphException(DuplicatePort)`，消息含端口名
   与来源绑定（`node.port`）。运行时复合坐标寻址在普通拓扑下天然消歧，仅此扁平化
   时刻需要接口端口名唯一。
+- **任务生命周期竞态加固（F04–F10 批次）**：`ExecutionEngine` 的任务状态表与
+  活动闸表合并为自包含"轮次"对象——提交（成功登记）时捕获本轮执行态，等待
+  协议与状态发布共用同一把锁。修复：取消/终止后复用同 taskId 时，旧轮次在飞
+  节点不再消费新轮次输入（F04）；节点失败优先于输出存在判定，无输出记
+  InternalError 且不传播（F05）；终止回调异常被隔离、结果发布与唤醒由 RAII
+  收尾保证完成（F06/F07）；`releaseTask` 仅终态可释放、并发幂等（F08）；
+  句柄析构按状态三路回收（F09，见 Changed）；提交期拓扑守卫前移、登记失败
+  无残留可重试（F10）。
+- **DCIr 归档路径穿越与读取健壮性（F01 批次）**：`extractOne` / `compileFile`
+  入口拒绝 `..` / 绝对路径 / 盘符 / UNC 条目（归一化后组件级前缀比对，防前缀
+  误判），写入前拒绝符号链接祖先目录逃逸；zip 条目改 64 KiB 分块流式读取，
+  累计字节与声明不符即报错、关闭时校验 CRC；新增单条目体积（1 GiB）与压缩比
+  （200:1）预算拦截 zip 炸弹；临时解包目录随机化命名 + 独占创建 + 尽力设置
+  私有权限（POSIX 0700）。
+- **注册表并发加固**：`EnvRegistry` 容器加锁、factory/cleanup 钩子移出锁外
+  调用（并发创建先到者胜出）；`ValidatorRegistry` register/find 加锁，契约
+  明确为"启动期注册、运行期并发读取"；`EngineRegistry::releaseEngine` /
+  `releaseAllEngines` 把待析构句柄移入局部容器、锁外释放——用户
+  `releaseEngine` 钩子不再持锁运行。
+- **引擎集成测试注册开关修复（F11）**：OpenAI / OnnxRuntime 测试目录此前以
+  未定义的旧名 `BUILD_TESTS` 作开关，仅传规范名 `DCINFER_BUILD_TESTS=ON` 时
+  测试静默不注册；改随规范开关启用。CI 同步：TSan 用例扩围至
+  GraphInterfaceTest / TaskLifecycleRegressionTest，dcnet-openai 作业新增
+  "OpenAiEngineTest 已注册"断言。
 
 ### Changed
 
@@ -94,6 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   载体，保留语义收窄后的 voidPort）。
 - **`02_lowering_benchmark` 演示 `releaseTask`**：大量短任务循环中消费结果后
   释放任务资源（防内存增长），README 常见问题同步点名。
+- **任务句柄析构与 `releaseTask` 语义定案**：`GraphInterface::Task` 析构按状态
+  三路回收——已终止 → 立即释放全部资源；已提交仍在飞 → 弃置托管（不取消任务，
+  完成后自动回收）；从未提交 → 立即释放已喂入输入。`InferGraph::releaseTask`
+  收窄为仅终态可释放（活动任务被拒绝、结果/诊断保持不动）；
+  `waitForResult` 等待未满足（含终态已迁移、结果尚未就绪的收尾窗口）一律如实
+  报告 `{status=Running}`，`wait` 返回成功才保证结果可读。
 
 ## [0.4.0] - 2026-09-10
 

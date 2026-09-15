@@ -5,6 +5,9 @@
 > HttpTransport（POCO，跨平台）+ chat codec（`DC::Net::DcNetCodec` 契约实现）+
 > NetError 归一化。与 OnnxRuntime（本地模型后端）对称并列，同属
 > EngineDescriptor 家族。
+>
+> **发布状态**：实验性组件，本次不交付；不承诺 API 稳定性，
+> **禁止用于网络暴露部署**（见根 [README.md](../../README.md) 发布状态）。
 
 ## 使用
 

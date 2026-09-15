@@ -5,7 +5,7 @@
 
 @PACKAGE_INIT@
 
-# find_package(DCEngine 0.2) 版本匹配与消费方可见的版本变量
+# find_package 版本匹配与消费方可见的版本变量
 set(DCEngine_VERSION "@DCINFER_PKG_VERSION@")
 
 include(CMakeFindDependencyMacro)
