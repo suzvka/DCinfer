@@ -10,6 +10,7 @@
 #include <string>
 
 #include "EngineRegistry.h"
+#include "Ir/DcgArchive.h"
 #include "Ir/GraphCompiler.h"
 #include "TestHarness.h"
 
@@ -412,7 +413,7 @@ void testEmptyGraph() {
 }
 
 void testEdgeToMissingNode() {
-	TEST("edge referencing non-existent dstNode — does not crash") {
+	TEST("edge referencing non-existent dstNode — fails fast with GraphException") {
 		const char* json = R"({
   "version": "1.0",
   "nodes": [
@@ -431,10 +432,16 @@ void testEdgeToMissingNode() {
   ],
   "outputBindings": []
 })";
-		InferGraph graph; GraphCompiler::compileString(graph, json);
-		// 图仍应构建成功（n1 存在），但 wire 失败会输出 warning
-		CHECK(graph.nodeCount() >= 1, "n1 should exist even if edge target is missing");
-		CHECK(graph.node("n1") != nullptr, "n1 should exist");
+		// IR-07：连接失败不再容忍（旧行为：stderr 告警 + 图残缺继续），
+		// 反序列化 fail-fast，不产生孤儿连接器
+		bool rejected = false;
+		try {
+			InferGraph graph;
+			GraphCompiler::compileString(graph, json);
+		} catch (const GraphException&) {
+			rejected = true;
+		}
+		CHECK(rejected, "edge to missing node must fail the compile (fail-fast)");
 	}
 	END_TEST();
 }
@@ -798,6 +805,160 @@ void testDcgRecompileAfterReleaseAllEngines() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// IR-01：共享模型文件的多节点 .dcg 序列化
+// ════════════════════════════════════════════
+
+void testSharedModelDcgRoundTrip() {
+	TEST("IR-01: two nodes sharing one model file round-trip through .dcg") {
+		std::string modelFile = "test_shared_model.bin";
+		{
+			std::ofstream ofs(modelFile, std::ios::binary);
+			ofs.write("shared-weights-payload", 21);
+		}
+
+		// 两个节点引用同一模型文件（共享权重场景）
+		TestHarness harness;
+		auto na = std::make_unique<Node>("ONNX", "shared_a", identitySchema(), identityRunFn());
+		na->setModelPath(modelFile);
+		auto nb = std::make_unique<Node>("ONNX", "shared_b", identitySchema(), identityRunFn());
+		nb->setModelPath(modelFile);
+		harness.addNode(std::move(na));
+		harness.addNode(std::move(nb));
+
+		std::string dcgFile = "test_shared_model.dcg";
+		GraphCompiler::serialize(harness.graph(), dcgFile);
+
+		// 反序列化必须成功（旧实现：二次改名覆盖记录，首节点引用悬空 → 必然编译失败）
+		InferGraph graph2;
+		GraphCompiler::compileFile(graph2, dcgFile);
+		auto* a = graph2.node("shared_a");
+		auto* b = graph2.node("shared_b");
+		CHECK(a != nullptr && b != nullptr, "both shared-model nodes must exist");
+		CHECK(!a->modelPath().empty() && !b->modelPath().empty(), "both modelPaths must resolve");
+		CHECK(a->modelPath() == b->modelPath(), "shared nodes must resolve to the same extracted file");
+
+		std::remove(dcgFile.c_str());
+		std::remove(modelFile.c_str());
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// IR-02：.dcg 反序列化安全不变量
+// ════════════════════════════════════════════
+
+void testDcgObjectShapedNodesRejected() {
+	TEST("IR-02: object-shaped 'nodes' in .dcg is rejected") {
+		std::string dcgFile = "test_object_nodes.dcg";
+		{
+			auto w = DC::Ir::DcgArchive::openWrite(dcgFile);
+			// 对象形状 nodes：曾整体绕过 modelPath 校验与解压
+			w->writeGraphJson(R"({"version":"1.0","nodes":{"a":{"name":"a","type":"Builtin","affinity":"Compute","inputs":[],"outputs":[]}},"edges":[],"outputBindings":[]})");
+			w->finalize();
+		}
+
+		bool rejected = false;
+		try {
+			InferGraph graph;
+			GraphCompiler::compileFile(graph, dcgFile);
+		} catch (const GraphException&) {
+			rejected = true;
+		}
+		CHECK(rejected, "object-shaped nodes must be rejected");
+
+		std::remove(dcgFile.c_str());
+	}
+	END_TEST();
+}
+
+void testDcgUnsafeModelPathRejected() {
+	TEST("IR-02: .dcg modelPath with '..' or absolute path is rejected") {
+		auto makeDcg = [](const std::string& dcgFile, const std::string& mp) {
+			auto w = DC::Ir::DcgArchive::openWrite(dcgFile);
+			std::string json = R"({"version":"1.0","nodes":[{"name":"n1","type":"Builtin","affinity":"Compute","modelPath":")"
+				+ mp + R"(","inputs":[],"outputs":[]}],"edges":[],"outputBindings":[]})";
+			w->writeGraphJson(json);
+			w->finalize();
+		};
+
+		const std::string cases[] = {"../evil.onnx", "/tmp/evil.onnx", "C:/tmp/evil.onnx"};
+		constexpr size_t kCaseCount = 3;
+		int rejected = 0;
+		for (size_t i = 0; i < kCaseCount; ++i) {
+			std::string dcgFile = "test_unsafe_path_" + std::to_string(i) + ".dcg";
+			makeDcg(dcgFile, cases[i]);
+			try {
+				InferGraph graph;
+				GraphCompiler::compileFile(graph, dcgFile);
+			} catch (const GraphException&) {
+				++rejected;
+			}
+			std::remove(dcgFile.c_str());
+		}
+		CHECK(rejected == 3, "all unsafe modelPath declarations must be rejected");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// IR-07/08：fail-fast 与 typeSize 校验
+// ════════════════════════════════════════════
+
+void testInvalidEdgeFailFast() {
+	TEST("IR-07: invalid edge port fails the compile (no orphan connector)") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "n1", "type": "Builtin", "affinity": "Operator",
+      "inputs": [{"name":"x","tensorType":"Float","typeSize":4,"shape":[],"required":true}],
+      "outputs": [{"name":"y","tensorType":"Float","typeSize":4,"shape":[],"required":true}]
+    }
+  ],
+  "edges": [
+    {"srcNode":"n1","srcPort":"bogus","dstNode":"n1","dstPort":"x"}
+  ],
+  "outputBindings": []
+})";
+		bool rejected = false;
+		try {
+			InferGraph graph;
+			GraphCompiler::compileString(graph, json);
+		} catch (const GraphException&) {
+			rejected = true;
+		}
+		CHECK(rejected, "edge with invalid port must fail fast");
+	}
+	END_TEST();
+}
+
+void testTypeSizeNegativeRejected() {
+	TEST("IR-08: negative port typeSize is rejected at compile time") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "n1", "type": "Builtin", "affinity": "Operator",
+      "inputs": [{"name":"x","tensorType":"Float","typeSize":-5,"shape":[],"required":true}],
+      "outputs": []
+    }
+  ],
+  "edges": [],
+  "outputBindings": []
+})";
+		bool rejected = false;
+		try {
+			InferGraph graph;
+			GraphCompiler::compileString(graph, json);
+		} catch (const GraphException&) {
+			rejected = true;
+		}
+		CHECK(rejected, "typeSize:-5 must be rejected (would otherwise wrap to SIZE_MAX)");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testCompileStringBasic();
@@ -820,6 +981,12 @@ int main() {
 		testEngineNodeLoadFailure();
 		testEngineSchemaDerivedAndEmpty();
 		testDcgRecompileAfterReleaseAllEngines();
+		// v0.5.2 修复项回归（IR-01/02/07/08）
+		testSharedModelDcgRoundTrip();
+		testDcgObjectShapedNodesRejected();
+		testDcgUnsafeModelPathRejected();
+		testInvalidEdgeFailFast();
+		testTypeSizeNegativeRejected();
 
 		if (failures == 0) {
 			std::cout << "\nAll GraphCompiler tests passed!" << std::endl;

@@ -236,6 +236,23 @@ static void runTensorDataExceptionTests() {
 		expectRuntimeError([&] { td.editMode(); }, "editMode on empty");
 	}
 
+	// 12) 双参构造（shape, data）除零防护（CORE-03）：shape 含 0 维 → invalid_argument
+	{
+		TensorData::Shape shape{2, 0};
+		TensorData::DataBlock bytes(2 * sizeof(float), std::byte(0));
+		expectInvalidArgument([&] { TensorData td(shape, std::move(bytes)); },
+							  "TensorData(shape{2,0}, data) division-by-zero guard");
+	}
+
+	// 12b) 双参构造正常路径：typeSize = data.size() / 形状乘积
+	{
+		TensorData::Shape shape{2, 3};
+		TensorData::DataBlock bytes(2 * 3 * sizeof(float), std::byte(0));
+		TensorData td(shape, std::move(bytes));
+		if (td.typeSize() != sizeof(float))
+			fail("TensorData(shape{2,3}, data) typeSize inference mismatch");
+	}
+
 	std::cout << "TensorData exception tests passed" << std::endl;
 }
 

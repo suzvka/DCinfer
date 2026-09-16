@@ -678,6 +678,42 @@ void testExportDuplicateOutputPortRejected() {
 	END_TEST();
 }
 
+// ════════════════════════════════════════════
+// CORE-01：同一输出端口二次 connect → 构图期拒绝
+// ════════════════════════════════════════════
+
+void testDuplicateConnectRejected() {
+	TEST("CORE-01: second connect on the same output port rejects with DuplicateEdge") {
+		InferGraph g;
+		g.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+		g.addNode(std::make_unique<Node>("Builtin", "b", identitySchema(), identityRunFn()));
+		g.addNode(std::make_unique<Node>("Builtin", "c", identitySchema(), identityRunFn()));
+
+		// 首次 connect：正常建线
+		g.connect("src", "y", "b", "x");
+		const size_t edgesAfterFirst = g.edgeCount();
+
+		// 二次 connect 同源端口：构图期 fail-fast
+		// （此前会产生两条同源直连边：首边消费数据、次边静默跳过，
+		//   下游永不收数、任务永久挂起）
+		bool threw = false;
+		std::string message;
+		try {
+			g.connect("src", "y", "c", "x");
+		} catch (const GraphException& e) {
+			threw = true;
+			message = e.what();
+			CHECK(e.getErrorType() == GraphException::ErrorType::DuplicateEdge,
+				  "error type should be DuplicateEdge");
+		}
+		CHECK(threw, "second connect on the same source port must be rejected");
+		CHECK(message.find("src:y") != std::string::npos, "message should name the source port");
+		CHECK(message.find("Broadcast") != std::string::npos, "message should point to Broadcast(N)");
+		CHECK(g.edgeCount() == edgesAfterFirst, "rejected connect must leave no partial edges");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testBasicGraphEmbedding();
@@ -693,6 +729,7 @@ int main() {
 		testSubgraphFirstFreezeFromParentWorker();
 		testExportDuplicateInputPortRejected();
 		testExportDuplicateOutputPortRejected();
+		testDuplicateConnectRejected();
 
 		if (failures == 0) {
 			std::cout << "\nAll GraphNode tests passed!" << std::endl;

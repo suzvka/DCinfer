@@ -89,6 +89,11 @@ void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPo
 // ════════════════════════════════════════════
 // connect：自动插入广播连接器（1→1，零拷贝 move 直通）
 // ════════════════════════════════════════════
+// 同一输出端口禁止二次 connect（CORE-01）：每次 connect 创建独立 1:1 wire，
+// 二次连接会产生两条同源直连边（lowering 将 1 出边 wire 融合为直连边），
+// 而传播期按边逐个消费式取数——首条边取走后 hasOutput=false，第二条边
+// 静默跳过，下游永远收不到数据且任务永久挂起。1:N 分发必须显式创建
+// Connector.Broadcast(N)（见 README「灵活的图拓扑」）。
 
 Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort,
 					   const std::string& dstNode, const std::string& dstPort) {
@@ -108,6 +113,16 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 	if (!dst->schema().findInput(dstPort))
 		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connect",
 							 "input port '" + dstPort + "' not found on node '" + dstNode + "'");
+
+	// 同源端口已有出边 → 构图期 fail-fast（错误消息指引用 Broadcast(N) 正确姿势）
+	for (const auto& e : _edges) {
+		if (e.srcNode == srcNode && e.srcPort == srcPort) {
+			throw GraphException(GraphException::ErrorType::DuplicateEdge, "GraphStore::connect",
+								 "output port '" + srcNode + ":" + srcPort
+									 + "' already has an outgoing edge; 1:N fan-out requires an explicit "
+									   "Connector.Broadcast(N) (see README)");
+		}
+	}
 
 	// 自动创建广播连接器（1 下游 → 零拷贝 move 直通，等效导线）
 	auto wireName = "__wire_" + std::to_string(_nextWireId.fetch_add(1));

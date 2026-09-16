@@ -1,10 +1,12 @@
-// DcgArchive 路径安全与完整性 回归测试（发布前审查 F01 + 归档健壮性）
+// DcgArchive 路径安全与完整性 回归测试（发布前审查 F01 + 归档健壮性 + v0.5.2 IR-03/04/05）
 //
 // 覆盖：
-//   - isSafeArchiveRelPath：空/内嵌 NUL/绝对路径/盘符/UNC/父目录跳转拒绝，正常相对路径放行
+//   - isSafeArchiveRelPath：空/内嵌 NUL/绝对路径/盘符/UNC/父目录跳转拒绝，正常相对路径放行；
+//     IR-03：Windows 保留设备名 / ADS 冒号 / 尾点尾空格拒绝
 //   - extractOne 端到端：../ 条目拒绝且无文件逃逸解包目录
 //   - 符号链接祖先目录拒绝（无 symlink 权限的环境自动跳过）
 //   - 截断归档明确报错；高压缩比（zip bomb 形态）条目按预算拒绝
+//   - IR-04/05：解包条目数聚合预算、归档全局条目数上限、graph.json 专用体积预算
 //   - 正常归档读取不被安全校验误伤（graph.json 往返 + 模型解压内容比对）
 #include <chrono>
 #include <filesystem>
@@ -84,6 +86,20 @@ static void testSafePathValidator() {
 		CHECK(detail::isSafeArchiveRelPath("graph.json", base, &reason), "top-level relative must be accepted");
 		CHECK(detail::isSafeArchiveRelPath("models/resnet.onnx", base, &reason), "nested relative must be accepted");
 		CHECK(detail::isSafeArchiveRelPath("models/./x.bin", base, &reason), "dot component must be accepted");
+
+		// IR-03：Windows 罪名字形（保留设备名 / ADS 冒号 / 尾点尾空格）
+		CHECK(!detail::isSafeArchiveRelPath("models/CON", base, &reason), "CON device name must be rejected");
+		CHECK(!detail::isSafeArchiveRelPath("models/con.txt", base, &reason),
+			  "case-insensitive device name with extension must be rejected");
+		CHECK(!detail::isSafeArchiveRelPath("models/AUX.onnx", base, &reason), "AUX device name must be rejected");
+		CHECK(!detail::isSafeArchiveRelPath("models/COM1", base, &reason), "COM1 device name must be rejected");
+		CHECK(!detail::isSafeArchiveRelPath("models/LPT9.bin", base, &reason), "LPT9 device name must be rejected");
+		CHECK(!detail::isSafeArchiveRelPath("models/data.txt:ads", base, &reason), "ADS colon must be rejected");
+		CHECK(!detail::isSafeArchiveRelPath("models/trailing.", base, &reason), "trailing dot must be rejected");
+		CHECK(!detail::isSafeArchiveRelPath("models/trailing ", base, &reason), "trailing space must be rejected");
+		// 合法名不被误伤
+		CHECK(detail::isSafeArchiveRelPath("models/console.onnx", base, &reason), "'console' must be accepted");
+		CHECK(detail::isSafeArchiveRelPath("models/com10.onnx", base, &reason), "'com10' must be accepted");
 	}
 	END_TEST();
 }
@@ -265,6 +281,131 @@ static void testNormalRoundTripStillWorks() {
 }
 
 // ════════════════════════════════════════════
+// IR-04/05：聚合预算（条目数 / 全局条目 / graph.json 体积）
+// ════════════════════════════════════════════
+
+static void testExtractEntryCountBudgetRejected() {
+	TEST("IR-04: extract entry-count budget rejects excessive extraction") {
+		const auto workDir = makeWorkDir("entrycount");
+		const auto dcgPath = workDir / "entrycount.dcg";
+
+		writePayload(workDir / "payload.bin", "x");
+		{
+			auto w = DcgArchive::openWrite(dcgPath);
+			w->writeGraphJson("{\"nodes\":[]}");
+			// 超过 kMaxExtractEntries(256) 条解包请求：路径各异、内容相同
+			for (int i = 0; i < 257; ++i)
+				w->addModelFile("models/entry_" + std::to_string(i) + ".bin", workDir / "payload.bin");
+			w->finalize();
+		}
+
+		auto r = DcgArchive::openRead(dcgPath);
+		bool rejected = false;
+		try {
+			for (int i = 0; i < 257; ++i)
+				r->extractOne("models/entry_" + std::to_string(i) + ".bin");
+		} catch (const GraphException&) {
+			rejected = true;
+		}
+		CHECK(rejected, "257th extractOne must hit the entry-count budget");
+
+		r.reset(); // 释放归档读句柄后再清理
+		std::error_code cleanupEc;
+		std::filesystem::remove_all(workDir, cleanupEc);
+	}
+	END_TEST();
+}
+
+static void testArchiveGlobalEntryBudgetRejected() {
+	TEST("IR-04: archive with too many entries is rejected on open") {
+		const auto workDir = makeWorkDir("globalentries");
+		const auto dcgPath = workDir / "globalentries.dcg";
+
+		writePayload(workDir / "payload.bin", "x");
+		{
+			auto w = DcgArchive::openWrite(dcgPath);
+			w->writeGraphJson("{\"nodes\":[]}");
+			// 4097 + graph.json = 4098 > kMaxArchiveEntries(4096)
+			for (int i = 0; i < 4097; ++i)
+				w->addModelFile("models/e" + std::to_string(i) + ".bin", workDir / "payload.bin");
+			w->finalize();
+		}
+
+		bool rejected = false;
+		try {
+			auto r = DcgArchive::openRead(dcgPath);
+			(void)r;
+		} catch (const GraphException&) {
+			rejected = true;
+		}
+		CHECK(rejected, "openRead must reject archives above the global entry budget");
+
+		std::error_code cleanupEc;
+		std::filesystem::remove_all(workDir, cleanupEc);
+	}
+	END_TEST();
+}
+
+static void testGraphJsonSizeBudgetRejected() {
+	TEST("IR-05: graph.json above the dedicated size budget is rejected") {
+		const auto workDir = makeWorkDir("bigjson");
+		const auto dcgPath = workDir / "bigjson.dcg";
+
+		// > 64 MiB 的 graph.json：预算检查在读入前触发（不依赖压缩比检查）
+		const std::string bigJson = "{\"pad\":\"" + std::string(65u << 20, 'a') + "\"}";
+		{
+			auto w = DcgArchive::openWrite(dcgPath);
+			w->writeGraphJson(bigJson);
+			w->finalize();
+		}
+
+		auto r = DcgArchive::openRead(dcgPath);
+		bool rejected = false;
+		try {
+			r->readGraphJson();
+		} catch (const GraphException& e) {
+			rejected = std::string(e.what()).find("graph.json exceeds size budget") != std::string::npos;
+		}
+		CHECK(rejected, "oversized graph.json must be rejected by the dedicated budget");
+
+		r.reset(); // 释放归档读句柄后再清理
+		std::error_code cleanupEc;
+		std::filesystem::remove_all(workDir, cleanupEc);
+	}
+	END_TEST();
+}
+
+static void testMultiChunkModelRoundTrip() {
+	TEST("IR-06: multi-chunk (streamed) model file round-trips intact") {
+		const auto workDir = makeWorkDir("multichunk");
+		const auto dcgPath = workDir / "multichunk.dcg";
+
+		// > 64 KiB 分块：跨多次循环迭代校验流式写入正确性（全程不整读入内存）
+		std::string payload;
+		payload.reserve((256u << 10) + 64);
+		for (int i = 0; payload.size() < (256u << 10); ++i)
+			payload += "chunk-" + std::to_string(i) + ";";
+		writePayload(workDir / "payload.bin", payload);
+
+		{
+			auto w = DcgArchive::openWrite(dcgPath);
+			w->writeGraphJson("{\"nodes\":[]}");
+			w->addModelFile("models/multi.bin", workDir / "payload.bin");
+			w->finalize();
+		}
+
+		auto r = DcgArchive::openRead(dcgPath);
+		const auto p = r->extractOne("models/multi.bin");
+		CHECK(readFile(p) == payload, "multi-chunk model content must round-trip intact");
+
+		r.reset(); // 释放归档读句柄后再清理
+		std::error_code cleanupEc;
+		std::filesystem::remove_all(workDir, cleanupEc);
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
@@ -273,6 +414,10 @@ int main() {
 		testSymlinkAncestorRejected();
 		testTruncatedArchiveRejected();
 		testCompressionRatioBombRejected();
+		testMultiChunkModelRoundTrip();
+		testExtractEntryCountBudgetRejected();
+		testArchiveGlobalEntryBudgetRejected();
+		testGraphJsonSizeBudgetRejected();
 		testNormalRoundTripStillWorks();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;

@@ -8,8 +8,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -22,6 +24,14 @@ namespace {
 
 /// 单条目未压缩体积上限（防大文件/损坏归档耗尽内存或磁盘）
 constexpr uint64_t kMaxEntryBytes = 1ull << 30; // 1 GiB
+/// graph.json 专用单条目上限（图描述文件；收紧于通用 1 GiB，限制 DOM 解析内存放大）
+constexpr uint64_t kMaxGraphJsonBytes = 64ull << 20; // 64 MiB
+/// 一次性解包总预算（graph.json 之外的 extractOne 累计；防多条目聚合耗尽磁盘）
+constexpr uint64_t kMaxExtractTotalBytes = 4ull << 30; // 4 GiB
+/// extractOne 条目数上限（防多条目磁盘耗尽与 O(M×N) 定位 CPU 放大）
+constexpr std::size_t kMaxExtractEntries = 256;
+/// 归档全局条目数上限（openRead 校验，防海量条目拖慢逐次定位）
+constexpr uint64_t kMaxArchiveEntries = 4096;
 /// 压缩比上限（防 zip bomb：低熵膨胀条目在读取前拒绝；真实模型/JSON 远低于此）
 constexpr uint64_t kMaxCompressionRatio = 200;
 /// 流式读取块大小
@@ -132,6 +142,16 @@ std::unique_ptr<DcgArchive> DcgArchive::openRead(const std::filesystem::path& pa
 			"cannot open archive: " + pathStr);
 	}
 
+	// 全局条目数上限（IR-04）：海量条目的归档会使每次 unzLocateFile 线性定位
+	// 变得昂贵（O(M×N) CPU 放大）；超限直接拒绝打开。
+	unz_global_info64 globalInfo{};
+	if (::unzGetGlobalInfo64(archive->_readHandle, &globalInfo) == UNZ_OK
+		&& globalInfo.number_entry > kMaxArchiveEntries) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive::openRead",
+			"archive has too many entries (" + std::to_string(globalInfo.number_entry) + " > "
+				+ std::to_string(kMaxArchiveEntries) + ")");
+	}
+
 	// 创建唯一且私有的临时目录（随机后缀 + 独占创建；冲突则换名重试）
 	auto tmpBase = std::filesystem::temp_directory_path();
 	auto now = std::chrono::system_clock::now().time_since_epoch().count();
@@ -230,7 +250,13 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 			"failed to get info for: " + entryName);
 	}
 
-	// 读取前预算校验（体积/压缩比）
+	// 读取前预算校验（体积/压缩比）；graph.json 走更严的专用预算（IR-05：
+	// 限制图描述文件的内存驻留与 DOM 解析放大）
+	if (entryName == "graph.json" && info.uncompressed_size > kMaxGraphJsonBytes) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
+			"graph.json exceeds size budget (" + std::to_string(info.uncompressed_size) + " > "
+				+ std::to_string(kMaxGraphJsonBytes) + " bytes)");
+	}
 	ensureEntryWithinBudget(info, entryName);
 
 	// 打开条目
@@ -242,9 +268,10 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 	}
 	CurrentEntryGuard guard{handle};
 
-	// 流式读取全部数据（分块循环；预算内一次性容器，避免多次重分配）
+	// 流式读取全部数据（分块循环）。预分配不再信任 ZIP 声明的体积
+	// （声明 1 GiB 实际 1 KiB 也会立即提交 1 GiB —— IR-05）：小量起步、按需增长。
 	std::vector<char> buffer;
-	buffer.reserve(static_cast<std::size_t>(info.uncompressed_size));
+	buffer.reserve(static_cast<std::size_t>(std::min<uint64_t>(info.uncompressed_size, 1ull << 20)));
 	streamCurrentEntry(handle, info.uncompressed_size, entryName,
 		[&buffer](const char* p, std::size_t n) { buffer.insert(buffer.end(), p, p + n); });
 
@@ -290,6 +317,20 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 
 	// 读取前预算校验（体积/压缩比）
 	ensureEntryWithinBudget(info, archivePath);
+
+	// 聚合预算（IR-04）：条目数 + 累计解压量——单条目合规不代表聚合合规，
+	// 多条目同样能耗尽磁盘；逐次 unzLocateFile 线性扫描还存在 O(M×N) CPU 放大。
+	if (++_extractEntries > kMaxExtractEntries) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive::extractOne",
+			"too many extracted entries (limit " + std::to_string(kMaxExtractEntries) + ")");
+	}
+	if (info.uncompressed_size > kMaxExtractTotalBytes - _extractTotalBytes) {
+		throw GraphException(GraphException::ErrorType::Other, "DcgArchive::extractOne",
+			"extract total budget exceeded (" + std::to_string(_extractTotalBytes) + " + "
+				+ std::to_string(info.uncompressed_size) + " > " + std::to_string(kMaxExtractTotalBytes)
+				+ " bytes)");
+	}
+	_extractTotalBytes += info.uncompressed_size;
 
 	// 确定输出路径（校验后归一化）并防御既有符号链接组件
 	const auto tmpPath = (_tempDir / archivePath).lexically_normal();
@@ -352,6 +393,12 @@ void DcgArchive::writeGraphJson(std::string_view json) {
 			"failed to open graph.json entry");
 	}
 
+	// 防御：graph.json 实际规模受序列化侧约束，此处兜底 unsigned 写入上限
+	if (json.size() > std::numeric_limits<unsigned>::max()) {
+		throw GraphException(GraphException::ErrorType::Other,
+			"DcgArchive::writeGraphJson",
+			"graph.json exceeds the single-entry write limit");
+	}
 	ret = ::zipWriteInFileInZip(_writeHandle, json.data(), static_cast<unsigned>(json.size()));
 	if (ret != ZIP_OK) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -375,16 +422,20 @@ void DcgArchive::addModelFile(const std::string& archivePath, const std::filesys
 			"DcgArchive::addModelFile",
 			"cannot open model file: " + diskPath.string());
 	}
-	auto fileSize = static_cast<size_t>(ifs.tellg());
-	ifs.seekg(0);
-
-	std::vector<char> buf(fileSize);
-	ifs.read(buf.data(), static_cast<std::streamsize>(fileSize));
-	if (!ifs) {
+	const std::streamoff endPos = ifs.tellg();
+	if (endPos < 0) {
 		throw GraphException(GraphException::ErrorType::Other,
 			"DcgArchive::addModelFile",
-			"failed to read model file: " + diskPath.string());
+			"cannot determine size of model file: " + diskPath.string());
 	}
+	// minizip 单次写入长度参数为 unsigned，且本写入路径未启用 zip64 条目：
+	// >4 GiB 的文件此前会静默截断（只写低 32 位且无报错）——现显式拒绝（IR-06）。
+	if (static_cast<uint64_t>(endPos) > std::numeric_limits<unsigned>::max()) {
+		throw GraphException(GraphException::ErrorType::Other,
+			"DcgArchive::addModelFile",
+			"model file exceeds the 4 GiB single-entry limit: " + diskPath.string());
+	}
+	ifs.seekg(0);
 
 	// 写入 ZIP（store 模式，因为模型文件通常已经压缩）
 	int ret = ::zipOpenNewFileInZip64(_writeHandle, archivePath.c_str(),
@@ -396,11 +447,25 @@ void DcgArchive::addModelFile(const std::string& archivePath, const std::filesys
 			"failed to open entry: " + archivePath);
 	}
 
-	ret = ::zipWriteInFileInZip(_writeHandle, buf.data(), static_cast<unsigned>(buf.size()));
-	if (ret != ZIP_OK) {
+	// 分块流式写入（64 KiB）：不再把整模型读入内存（IR-05）；每块长度
+	// 转换 unsigned 安全（块大小远小于 4 GiB 上限）。
+	std::vector<char> buf(kReadChunkBytes);
+	while (ifs) {
+		ifs.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+		const auto got = static_cast<std::size_t>(ifs.gcount());
+		if (got == 0)
+			break;
+		ret = ::zipWriteInFileInZip(_writeHandle, buf.data(), static_cast<unsigned>(got));
+		if (ret != ZIP_OK) {
+			throw GraphException(GraphException::ErrorType::Other,
+				"DcgArchive::addModelFile",
+				"failed to write data for: " + archivePath);
+		}
+	}
+	if (!ifs.eof()) {
 		throw GraphException(GraphException::ErrorType::Other,
 			"DcgArchive::addModelFile",
-			"failed to write data for: " + archivePath);
+			"failed to read model file: " + diskPath.string());
 	}
 
 	ret = ::zipCloseFileInZip(_writeHandle);

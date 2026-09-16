@@ -69,7 +69,15 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	Node::Port p;
 	p.name = j.at("name").get<std::string>();
 	p.type = TensorMeta::stringToType(j.at("tensorType").get<std::string>());
-	p.typeSize = static_cast<size_t>(j.at("typeSize").get<int64_t>());
+	// typeSize 校验（IR-08）：负值经 static_cast<size_t> 会穿透为 SIZE_MAX，
+	// 直接被缓冲/张量路径当作巨额单元大小——显式拒绝；0 合法
+	// （Void + 0 = 不校验类型语义）。
+	const int64_t typeSize = j.at("typeSize").get<int64_t>();
+	if (typeSize < 0 || typeSize > (1ll << 20)) {
+		throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::jsonToPort",
+			"invalid typeSize " + std::to_string(typeSize) + " for port '" + p.name + "'");
+	}
+	p.typeSize = static_cast<size_t>(typeSize);
 	for (auto& dim : j.at("shape")) {
 		// 直接以 int64_t 保留（含 -1 动态维度）：禁止 static_cast<size_t> 等
 		// 有符号/无符号转换——JSON -1 会被转为巨大值，破坏 roundtrip 对称性。
@@ -84,10 +92,21 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 // ════════════════════════════════════════════
 
 /// @brief 从 JSON 节点读取 modelPath，相对路径拼接 baseDir
+/// @param restrictModelPaths .dcg 受限模式（IR-02）：modelPath 必须是解压目录内的
+///        安全相对路径（拒绝 ../、绝对路径、盘符等越界声明）——归档为不可信
+///        输入，安全不变量必须显式校验；.json（本地可信输入）保持宽松语义。
 /// @return 无 modelPath 字段时返回 nullopt（调用方据此分支）
-static std::optional<std::string> resolveModelPath(const nlohmann::json& j, const std::filesystem::path& baseDir) {
+static std::optional<std::string> resolveModelPath(const nlohmann::json& j, const std::filesystem::path& baseDir,
+												   bool restrictModelPaths) {
 	if (!j.contains("modelPath")) return std::nullopt;
 	std::string mp = j["modelPath"].get<std::string>();
+	if (restrictModelPaths) {
+		std::string reason;
+		if (!DC::Ir::detail::isSafeArchiveRelPath(mp, baseDir, &reason)) {
+			throw GraphException(GraphException::ErrorType::Other, "GraphCompiler",
+				"unsafe modelPath in .dcg graph.json: '" + mp + "': " + reason);
+		}
+	}
 	std::filesystem::path mpPath(mp);
 	if (mpPath.is_relative()) {
 		mpPath = baseDir / mpPath;
@@ -97,8 +116,9 @@ static std::optional<std::string> resolveModelPath(const nlohmann::json& j, cons
 }
 
 /// @brief 将 JSON 中的 tag / modelPath 应用到已创建节点（Builtin / 引擎 / 骨架三分支共用）
-static void applyNodeMeta(DC::Node& node, const nlohmann::json& j, const std::filesystem::path& baseDir) {
-	if (auto mp = resolveModelPath(j, baseDir)) {
+static void applyNodeMeta(DC::Node& node, const nlohmann::json& j, const std::filesystem::path& baseDir,
+						  bool restrictModelPaths) {
+	if (auto mp = resolveModelPath(j, baseDir, restrictModelPaths)) {
 		node.setModelPath(std::move(*mp));
 	}
 	if (j.contains("tag")) {
@@ -310,34 +330,18 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 
 			// src → conn.in；conn.out_i → dst_i（connect 自动包裹直通导线，
 			// 序列化折叠后不可见，round-trip 幂等不受影响）
-			try {
-				graph.connect(key.srcNode, key.srcPort, connName, "in");
-			} catch (const DC::GraphException& e) {
-				std::cerr << "GraphCompiler: warning — failed to connect '" << key.srcNode
-					<< "." << key.srcPort << "' → '" << connName << ".in': "
-					<< e.what() << std::endl;
-			}
+			// 连接失败不再容忍（IR-07）：孤儿连接器 / 残缺图属静默错误，
+			// GraphException（含节点/端口坐标）直接透传，反序列化 fail-fast。
+			graph.connect(key.srcNode, key.srcPort, connName, "in");
 			// conn.out_i → dst_i
 			for (size_t i = 0; i < targets.size(); ++i) {
-				std::string outPort = "out_" + std::to_string(i);
-				try {
-					graph.connect(connName, outPort, targets[i].dstNode, targets[i].dstPort);
-				} catch (const DC::GraphException& e) {
-					std::cerr << "GraphCompiler: warning — failed to connect '" << connName
-						<< "." << outPort << "' → '" << targets[i].dstNode
-						<< "." << targets[i].dstPort << "': " << e.what() << std::endl;
-				}
+				graph.connect(connName, "out_" + std::to_string(i), targets[i].dstNode, targets[i].dstPort);
 			}
 		} else {
 			// 默认 1→1：用 connect() 自动插入导线连接器
+			// 连接失败直接 fail-fast（IR-07，同上）
 			for (auto& tgt : targets) {
-				try {
-					graph.connect(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
-				} catch (const DC::GraphException& e) {
-					std::cerr << "GraphCompiler: warning — failed to connect '" << key.srcNode
-						<< "." << key.srcPort << "' → '" << tgt.dstNode
-						<< "." << tgt.dstPort << "': " << e.what() << std::endl;
-				}
+				graph.connect(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
 			}
 		}
 	}
@@ -347,7 +351,8 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 // 反序列化：JSON → InferGraph
 // ════════════════════════════════════════════
 
-void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, const std::filesystem::path& baseDir) {
+void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, const std::filesystem::path& baseDir,
+							   bool restrictModelPaths) {
 
 	// 节点
 	for (auto& j : root.at("nodes")) {
@@ -371,7 +376,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			auto node = std::make_unique<DC::Node>(
 				type, name, std::move(schema), nullptr,
 				stringToAffinity(j.value("affinity", "Operator")));
-			applyNodeMeta(*node, j, baseDir);
+			applyNodeMeta(*node, j, baseDir, restrictModelPaths);
 			graph.addNode(std::move(node));
 		} else if (reg.hasEngine(type)) {
 			// 引擎节点。语义约定见 GraphCompiler.h：
@@ -382,7 +387,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			//   触发引擎加载不存在的模型文件（如 ORT Session 构造抛异常），
 			//   中断整个图编译。此处回退为骨架节点（与未注册类型一致），
 			//   保留 JSON schema，保证图结构完整可序列化。
-			auto mp = resolveModelPath(j, baseDir);
+			auto mp = resolveModelPath(j, baseDir, restrictModelPaths);
 			if (!mp) {
 				std::cerr << "GraphCompiler: warning — engine node '" << name
 					<< "' (type '" << type << "') has no modelPath, "
@@ -390,7 +395,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 				auto node = std::make_unique<DC::Node>(
 					type, name, std::move(schema), nullptr,
 					stringToAffinity(j.value("affinity", "Operator")));
-				applyNodeMeta(*node, j, baseDir);
+				applyNodeMeta(*node, j, baseDir, restrictModelPaths);
 				graph.addNode(std::move(node));
 				continue;
 			}
@@ -412,7 +417,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 					<< "engine did not provide getInputPorts/getOutputPorts; "
 					<< "JSON schema was overridden by engine-derived schema (which is empty)" << std::endl;
 			}
-			applyNodeMeta(*node, j, baseDir);
+			applyNodeMeta(*node, j, baseDir, restrictModelPaths);
 			graph.addNode(std::move(node));
 		} else {
 			// 未注册类型：创建骨架节点（RunFn 留空）
@@ -421,7 +426,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, co
 			auto node = std::make_unique<DC::Node>(
 				type, name, std::move(schema), nullptr,
 				stringToAffinity(j.value("affinity", "Operator")));
-			applyNodeMeta(*node, j, baseDir);
+			applyNodeMeta(*node, j, baseDir, restrictModelPaths);
 			graph.addNode(std::move(node));
 		}
 	}
@@ -468,11 +473,27 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 		// 1. 读取并解析 graph.json
 		std::string json = archive->readGraphJson();
 
+		nlohmann::json root;
+		try {
+			root = nlohmann::json::parse(json);
+		} catch (const nlohmann::json::exception& e) {
+			throw GraphException(GraphException::ErrorType::Other,
+				"GraphCompiler::compileFile",
+				std::string("JSON parse error in .dcg: ") + e.what());
+		}
+
 		// 2. 解析 JSON 找出所有 modelPath，批量解压到临时目录
 		//    这样 buildGraph → createNode → getOrCreateEngine 能找到模型文件
 		try {
-			auto root = nlohmann::json::parse(json);
-			if (root.contains("nodes") && root["nodes"].is_array()) {
+			// nodes 形状校验（IR-02）：对象形状的 nodes 会绕过下方 modelPath 校验/
+			// 解压（循环仅在 is_array 时执行），而 buildGraph 对 object 亦能迭代——
+			// 必须显式拒绝，堵住 F01 校验旁路。
+			if (root.contains("nodes") && !root["nodes"].is_array()) {
+				throw GraphException(GraphException::ErrorType::Other,
+					"GraphCompiler::compileFile",
+					"invalid .dcg graph.json: 'nodes' must be an array");
+			}
+			if (root.contains("nodes")) {
 				std::set<std::string> extracted;
 				for (auto& j : root["nodes"]) {
 					if (j.contains("modelPath")) {
@@ -497,8 +518,9 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 				std::string("JSON parse error in .dcg: ") + e.what());
 		}
 
-		// 3. 构建图（baseDir = 临时目录，相对路径 models/xxx 自动解析）
-		compileString(graph, json, archive->tempDir());
+		// 3. 构建图（受限模式：baseDir = 临时目录，相对路径 models/xxx 自动解析；
+		//    modelPath 额外经 PathGuard 校验，拒绝 ../ 与绝对路径——IR-02）
+		compileInternal(graph, root, archive->tempDir(), /*restrictModelPaths=*/true);
 
 		// 4. 引擎已加载模型，清理临时文件（逐个删除 models/ 下的文件，最后删除临时目录）。
 		//    与引擎实例缓存的生命周期交互（含惰性加载引擎的边界）详见 GraphCompiler.h 头注释。
@@ -533,10 +555,21 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 void GraphCompiler::compileString(InferGraph& graph, std::string_view json, std::filesystem::path baseDir) {
 	try {
 		auto root = nlohmann::json::parse(json);
-		buildGraph(graph, root, baseDir);
+		compileInternal(graph, root, baseDir, /*restrictModelPaths=*/false);
 	} catch (const nlohmann::json::exception& e) {
 		throw GraphException(GraphException::ErrorType::Other,
 							"GraphCompiler::compileString",
+							std::string("JSON parse error: ") + e.what());
+	}
+}
+
+void GraphCompiler::compileInternal(InferGraph& graph, const nlohmann::json& root,
+									const std::filesystem::path& baseDir, bool restrictModelPaths) {
+	try {
+		buildGraph(graph, root, baseDir, restrictModelPaths);
+	} catch (const nlohmann::json::exception& e) {
+		throw GraphException(GraphException::ErrorType::Other,
+							"GraphCompiler::compileInternal",
 							std::string("JSON parse error: ") + e.what());
 	}
 }
@@ -557,12 +590,21 @@ void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
 			if (!j.contains("modelPath")) continue;
 			std::string origPath = j["modelPath"].get<std::string>();
 
+			// 共享模型（IR-01）：同一磁盘文件被多个节点引用时复用已分配的
+			// archive 名——只入包一份、所有引用节点写回同一相对路径。
+			// （此前重复条目会二次改名并覆盖 modelFiles 记录，导致首节点
+			// graph.json 引用悬空、.dcg 必然编译失败）
+			if (auto it = modelFiles.find(origPath); it != modelFiles.end()) {
+				j["modelPath"] = it->second;
+				continue;
+			}
+
 			// 生成 archive 内唯一名称: models/<basename>
 			std::filesystem::path orig(origPath);
 			std::string baseName = orig.filename().string();
 			std::string archiveName = "models/" + baseName;
 
-			// 同名冲突：加数字后缀
+			// 同名冲突（不同源路径同 basename）：加数字后缀
 			int suffix = 1;
 			while (!usedNames.insert(archiveName).second) {
 				archiveName = "models/" + orig.stem().string() + "_" + std::to_string(suffix++)

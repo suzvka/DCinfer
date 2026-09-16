@@ -3,6 +3,18 @@
 #include <numeric>
 
 namespace DC {
+
+namespace {
+/// 形状乘积守卫（CORE-03）：shape 含 0 维（或空乘积）时乘积为 0，
+/// 作为除数即未定义行为——前置拒绝并抛出明确异常。
+/// 仅供双参构造的 typeSize 推导使用（委托构造的初始化列表中无法先行校验）。
+size_t checkedShapeProduct(size_t product) {
+	if (product == 0)
+		throw std::invalid_argument("TensorData: shape product must be > 0 for typeSize inference");
+	return product;
+}
+} // namespace
+
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 // TensorData implementation
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -40,8 +52,8 @@ TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseByt
 TensorData::TensorData(const Shape& shape, DataBlock&& data)
 	: TensorData(shape,
 				 (!shape.empty())
-					 ? (data.size() / std::accumulate(shape.begin(), shape.end(), static_cast<size_t>(1),
-													  [](size_t a, auto b) { return a * static_cast<size_t>(b); }))
+					 ? (data.size() / checkedShapeProduct(std::accumulate(shape.begin(), shape.end(), static_cast<size_t>(1),
+													  [](size_t a, auto b) { return a * static_cast<size_t>(b); })))
 					 : data.size(),
 				 std::move(data)) {}
 

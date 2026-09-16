@@ -19,6 +19,9 @@ namespace DC::Ir {
 /// modelPath 处理：
 /// - 序列化时，绝对路径转为 zip 内相对路径（models/ 前缀）
 /// - 反序列化时，相对路径拼接解压目录为绝对路径
+/// - .dcg 反序列化（不可信归档）为受限模式：modelPath 必须是解压目录内的
+///   安全相对路径（拒绝 ../、绝对路径、盘符、保留设备名等，见 PathGuard）；
+///   .json 反序列化（本地可信输入）保持宽松拼接语义
 ///
 /// 引擎节点（type 已注册 EngineRegistry）反序列化语义：
 /// - createNode(engineType, name, modelPath) 一次加载并缓存引擎实例，
@@ -83,8 +86,16 @@ public:
 private:
 	// ── 反序列化辅助 ──
 
+	/// @brief 反序列化内部入口（compileString 与 compileFile(.dcg) 共用）
+	/// @param restrictModelPaths .dcg 受限模式（IR-02）：modelPath 必须通过
+	///        PathGuard 校验（解压目录内的安全相对路径），拒绝越界声明
+	static void compileInternal(InferGraph& graph, const nlohmann::json& root,
+								const std::filesystem::path& baseDir, bool restrictModelPaths);
+
 	/// @brief 从解析好的 JSON 填充 InferGraph
-	static void buildGraph(InferGraph& graph, const nlohmann::json& root, const std::filesystem::path& baseDir);
+	/// @param restrictModelPaths .dcg 受限模式：modelPath 必须通过 PathGuard 校验
+	static void buildGraph(InferGraph& graph, const nlohmann::json& root, const std::filesystem::path& baseDir,
+						   bool restrictModelPaths);
 
 	/// @brief 处理边的重连：按 mode 分组，重建连接器
 	static void rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJson);

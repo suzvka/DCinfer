@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cctype>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -54,9 +55,36 @@ inline bool isSafeArchiveRelPath(std::string_view rel, const std::filesystem::pa
 	fs::path p(normalized);
 	if (p.is_absolute() || p.has_root_name())
 		return fail("absolute or rooted archive path is not allowed");
+
+	// Windows 罪名字形（IR-03）：保留设备名 / ADS 冒号 / 尾点尾空格。
+	// 三者都会使实际落盘位置与声明路径不一致（设备名命中 DOS 设备而非
+	// 文件、冒号写入 ADS、尾点尾空格被 Win32 静默裁剪），跨平台一致拒绝。
+	auto isReservedDeviceName = [](const std::string& comp) {
+		std::string stem = comp;
+		if (auto dot = stem.find('.'); dot != std::string::npos)
+			stem = stem.substr(0, dot); // "CON.txt" 同样是设备名
+		std::string upper;
+		upper.reserve(stem.size());
+		for (char c : stem)
+			upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+		if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL")
+			return true;
+		if (upper.size() == 4 && (upper.rfind("COM", 0) == 0 || upper.rfind("LPT", 0) == 0)
+			&& upper[3] >= '1' && upper[3] <= '9')
+			return true;
+		return false;
+	};
+
 	for (const auto& comp : p) {
 		if (comp == "..")
 			return fail("parent directory traversal ('..') is not allowed");
+		const std::string c = comp.string();
+		if (c.find(':') != std::string::npos)
+			return fail("colon (alternate data stream) in archive path is not allowed");
+		if (c != "." && !c.empty() && (c.back() == '.' || c.back() == ' '))
+			return fail("archive path component with trailing dot or space is not allowed");
+		if (isReservedDeviceName(c))
+			return fail("Windows reserved device name in archive path is not allowed");
 	}
 
 	// 归一化 + 组件级包含校验（lexically_normal 为纯词法运算，不触碰文件系统）：

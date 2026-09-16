@@ -30,9 +30,14 @@ Tensor& Tensor::setName(const std::string& name) {
 	return *this;
 }
 
-Tensor::View Tensor::operator[](int64_t index) const {
+Tensor::View Tensor::operator[](int64_t index) {
 	Shape path = {index}; // Handle empty shape case
 	return View(std::move(path), *this);
+}
+
+Tensor::ConstView Tensor::operator[](int64_t index) const {
+	Shape path = {index}; // Handle empty shape case
+	return ConstView(std::move(path), *this);
 }
 
 Tensor::Tensor(const Tensor& other) {

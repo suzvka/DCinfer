@@ -78,6 +78,8 @@ public:
 	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
 	///         自动插入广播连接器（Broadcast Connector, N=1）
 	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
+	/// @throws GraphException(DuplicateEdge) 若该输出端口已有出边
+	///         （1:N 分发必须显式创建 Connector.Broadcast(N)，禁止二次 connect）
 	/// @throws GraphException(Frozen) 若图已冻结
 	/// @return 指向自动创建的广播连接器的引用
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
@@ -307,7 +309,12 @@ public:
 	/// @brief  导出为可嵌入父图的包装 Node
 	///         子图复用本图的 ExecutionEngine（三层线程池）执行，与父图隔离
 	/// @note   前提：已调用 bindInput + bindOutput 定义了图接口
-	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活；
+	///         生命周期契约（关键）：API 返回 unique_ptr<Node> 仅转移 Node
+	///         所有权，**不转移子图所有权**——调用者必须保证本 InferGraph
+	///         在返回的 Node 的整个使用期内存活（含全部父任务执行期间）。
+	///         运行期以生命周期哨兵做 best-effort 检测：子图先析构再执行
+	///         导出节点将返回 ExecutionFailed 显式失败（而非悬垂段错误）；
+	///         但检测存在并发窗口，不构成安全保证——契约违规仍属未定义行为。
 	///         子图 task ID = 父任务 ID（taskId 空间贯穿父子边界）——宿主
 	///         cancel 父任务后 RunFn ≤100ms 内感知并取消子图任务解围，
 	///         不再令父池线程因内部信号阻塞无限期挂起；
@@ -375,6 +382,11 @@ private:
 	std::unique_ptr<GraphBuilder> _builder = std::make_unique<GraphBuilder>();
 	std::unique_ptr<ExecutionEngine> _engine;
 	mutable std::mutex _freezeMutex; ///< 惰性冻结串行化（快照填充一次性）
+
+	// 生命周期哨兵（CORE-04）：exportNode 的 RunFn / blockedOverride 捕获其
+	// weak_ptr，在子图已析构仍被使用时（悬垂 this）把未定义行为降级为显式
+	// 失败（best-effort：并发析构窗口仍属宿主契约违规，见 exportNode 注释）。
+	std::shared_ptr<void> _lifeToken = std::make_shared<int>(0);
 };
 
 } // namespace DC

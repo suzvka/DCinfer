@@ -47,6 +47,8 @@ public:
 	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
 	///         自动插入广播连接器（Broadcast Connector, N=1）
 	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
+	/// @throws GraphException(DuplicateEdge) 若该输出端口已有出边
+	///         （1:N 分发必须显式创建 Connector.Broadcast(N)，禁止二次 connect）
 	/// @return 指向自动创建的广播连接器的引用
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort);

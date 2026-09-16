@@ -154,11 +154,42 @@ static void testNestedNormalRoundTrip() {
 }
 
 // ════════════════════════════════════════════
+// CORE-04：子图先析构 → 导出节点执行显式失败（非悬垂段错误）
+// ════════════════════════════════════════════
+
+static void testExportedNodeAfterSubgraphDestructionFailsExplicitly() {
+	TEST("CORE-04: exported node executed after subgraph destruction fails explicitly") {
+		std::unique_ptr<Node> subNode;
+		{
+			InferGraph sub;
+			sub.addNode(std::make_unique<Node>("test", "n", passSchema(), passRunFn()));
+			sub.bindInput("x", "n", "x");
+			sub.bindOutput("y", "n", "y");
+			subNode = sub.exportNode("sub");
+		} // 子图析构：生命周期契约违规的实证场景（此前为悬垂 this 段错误）
+
+		InferGraph g;
+		g.addNode(std::move(subNode));
+		g.bindInput("x", "sub", "x");
+		g.bindOutput("y", "sub", "y");
+
+		g.feedInput("p", "sub", "x", floatValue(1.0f));
+		g.submit("p", "sub", "y");
+
+		// 生命周期哨兵检测到子图已析构 → 节点失败 → 任务 Failed（而非崩溃）
+		const auto r = g.waitForResult("p", 3s);
+		CHECK(r.status == TaskStatus::Failed, "run against destroyed subgraph must fail explicitly");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
 		testNestedCancelUnblocksParentThread();
 		testNestedNormalRoundTrip();
+		testExportedNodeAfterSubgraphDestructionFailsExplicitly();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;
 		return 1;

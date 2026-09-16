@@ -25,6 +25,7 @@ public:
 		PropagateFailed,     ///< 数据传播链中写下游输入失败
 		UnreachableDeclaration, ///< submit 时声明目标在拓扑上不可达（构图/断链错误）
 		DuplicatePort,       ///< 子图导出时接口端口名重复（单栈命名法则：接口端口名必须唯一）
+		DuplicateEdge,       ///< 同一输出端口已存在出边（1:N 分发必须显式创建 Broadcast(N)）
 		Other                ///< 其他未分类的错误
 	};
 
@@ -89,6 +90,9 @@ private:
 			break;
 		case ErrorType::DuplicatePort:
 			errorStr = "Duplicate Port";
+			break;
+		case ErrorType::DuplicateEdge:
+			errorStr = "Edge Already Connected";
 			break;
 		case ErrorType::Other:
 			errorStr = "Other";

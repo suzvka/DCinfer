@@ -252,9 +252,16 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 	fullSchema.inputs = std::move(inSchema.inputs);
 	fullSchema.outputs = std::move(outSchema.outputs);
 
-	// ③ 构造 RunFn：捕获 this + maxHops
-	//    调用者必须保证 this 在 Node 生命周期内有效
-	auto runFn = [this, maxHops](Node::RunContext& ctx) -> Node::Result {
+	// ③ 构造 RunFn：捕获 this + maxHops + 生命周期哨兵（CORE-04）
+	//    调用者必须保证 this 在 Node 生命周期内有效；哨兵为 best-effort 检测——
+	//    子图先析构再执行时返回 ExecutionFailed 而非悬垂段错误。
+	std::weak_ptr<void> lifeToken = _lifeToken; // RunFn 外先建 weak，避免 lambda 捕获表达式过于复杂
+	auto runFn = [this, maxHops, lifeToken](Node::RunContext& ctx) -> Node::Result {
+		if (lifeToken.expired()) {
+			return ctx.failure(Node::Status::ExecutionFailed,
+							   "subgraph owner InferGraph was destroyed before the exported node executed; "
+							   "the subgraph must outlive every run of its exported node");
+		}
 		// 子图 task ID = 父任务 ID：taskId 空间贯穿父子边界
 		// （blockedOverride/SignalProbe 同空间寻址；并发父任务天然互不冲突）。
 		// 注：同一父任务内同一子图的多个导出节点并发调用不受支持
@@ -321,7 +328,11 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 	// isReady 保持边界缓冲语义（父级数据齐即可进入执行）。
 	// 注：本回调由父图执行线程调用——首次冻结可能在此触发（并发安全：
 	// 快照经发布协议一次性就位，见 GraphRuntimeState 发布协议）。
-	graphNode->setBlockedOverride([this](const Node::TaskId& tid) {
+	graphNode->setBlockedOverride([this, lifeToken](const Node::TaskId& tid) {
+		if (lifeToken.expired()) {
+			// 子图已析构：不阻塞，让节点进入执行后由 RunFn 哨兵显式失败
+			return false;
+		}
 		auto snap = _ensureFrozen(); // 通路检测读图级签名（冻结快照）
 		return !canSatisfyDeclarations(snap->store(), snap->signature(), tid);
 	});

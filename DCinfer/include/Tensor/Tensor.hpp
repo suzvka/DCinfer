@@ -27,6 +27,7 @@ public:
 
 	virtual ~Tensor() = default;
 	class View;
+	class ConstView;
 
 	/// @brief 默认构造一个 Void 类型的空张量。
 	Tensor();
@@ -54,10 +55,16 @@ public:
 	/// @return 自身引用，支持链式调用。
 	Tensor& setName(const std::string& name);
 
-	/// @brief 索引访问，返回 View 代理对象支持链式索引和数据读写。
+	/// @brief 索引访问（非 const）：返回可写 View 代理对象，支持链式索引和数据读写。
 	/// @param index 维度索引，支持负数（从末尾倒序）。
-	/// @return View 代理对象。
-	View operator[](int64_t index) const;
+	/// @return 可写 View 代理对象。
+	View operator[](int64_t index);
+
+	/// @brief 索引访问（const）：返回只读 ConstView 代理对象，仅支持链式索引与读取；
+	///        不提供任何写入口，编译期禁止通过 const 张量修改数据。
+	/// @param index 维度索引，支持负数（从末尾倒序）。
+	/// @return 只读 ConstView 代理对象。
+	ConstView operator[](int64_t index) const;
 
 	/// @brief 获取当前张量的顶层视图（空路径）。
 	View view();
@@ -239,8 +246,6 @@ public:
 	/// @brief 从可变张量构造视图。
 	View(Shape&& shape, Tensor& top) : _shape(std::move(shape)), _top(top) {}
 
-	/// @brief 从常量张量构造视图（内部通过 const_cast 支持 const View 读取）。
-	View(Shape&& shape, const Tensor& top) : _shape(std::move(shape)), _top(const_cast<Tensor&>(top)) {}
 
 	/// @brief 继续索引下一维，返回新的 View 节点以支持链式调用。
 	/// @param index 维度索引，支持负数（从末尾倒序）。
@@ -288,6 +293,50 @@ public:
 
 	mutable Shape _shape;
 	Tensor& _top;
+};
+
+/// @brief 张量只读索引视图代理：const Tensor 的 operator[] 返回类型。
+///
+/// 仅支持链式索引与只读访问（read / readScalar），不提供 set / operator=
+/// 等任何写入口——const 张量经此路径在编译期无法被修改。
+///
+/// @par 典型用法
+/// @code
+/// const auto& ct = t;
+/// auto row = ct[0].read<float>();          // 整行读取
+/// float v = ct[1][2].readScalar<float>();  // 单元素读取
+/// @endcode
+class Tensor::ConstView {
+public:
+	/// @brief 从常量张量构造只读视图。
+	ConstView(Shape&& shape, const Tensor& top) : _shape(std::move(shape)), _top(top) {}
+
+	/// @brief 继续索引下一维，返回新的 ConstView 节点以支持链式调用。
+	/// @param index 维度索引，支持负数（从末尾倒序）。
+	/// @return 包含扩展路径的新 ConstView 对象。
+	ConstView operator[](int64_t index) const {
+		_shape.push_back(index);
+		return ConstView(std::move(_shape), _top);
+	}
+
+	/// @brief 从 View 读取标量值。
+	/// @tparam T 期望的 C++ 类型。
+	/// @return 标量值的副本。
+	template <typename T>
+	T readScalar() const {
+		return _top.readScalar<T>(_shape);
+	}
+
+	/// @brief 从 View 读取数据块（行或子张量）的只读 span。
+	/// @tparam T 期望的元素类型。
+	/// @return 数据的只读 span。
+	template <typename T>
+	std::span<const T> read() const {
+		return _top.read<T>(_shape);
+	}
+
+	mutable Shape _shape;
+	const Tensor& _top;
 };
 
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>

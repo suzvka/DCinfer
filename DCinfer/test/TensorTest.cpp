@@ -69,6 +69,12 @@ static void runTensorTests() {
 	if (row1.size() != 3)
 		throw std::runtime_error("const view read size mismatch");
 
+	// 8b) Const view chained indexing + scalar read（CORE-02：const 路径只读，
+	//     链式索引/读取在 ConstView 上继续可用）
+	float c00 = ct[0][0].readScalar<float>();
+	if (std::abs(c00 - 10.0f) > 1e-6f)
+		throw std::runtime_error("const chained scalar read mismatch");
+
 	// 9) bytes() view size check
 	auto b = moved.bytes();
 	if (b.size() != moved.data<float>().size() * sizeof(float))

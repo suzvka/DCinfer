@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -54,8 +55,8 @@ public:
 	/// @param archivePath ZIP 内路径，如 "models/resnet.onnx"（必须为安全相对路径：
 	///        禁止空/内嵌 NUL/绝对路径/盘符/父目录跳转/归一化越界/经符号链接逃逸）
 	/// @return 临时目录下的绝对路径
-	/// @throws GraphException(Other) 路径不安全、超预算（单条目体积/压缩比）、
-	///         CRC/完整性校验失败或写盘失败
+	/// @throws GraphException(Other) 路径不安全、超预算（单条目体积/压缩比/
+	///         条目数/累计解压总量聚合）、CRC/完整性校验失败或写盘失败
 	std::filesystem::path extractOne(const std::string& archivePath);
 
 	/// @brief 删除 extractOne 产生的临时文件
@@ -86,6 +87,10 @@ private:
 	std::filesystem::path _tempDir;
 	std::filesystem::path _archivePath;
 	bool _finalized = false;
+
+	// 解包预算聚合（IR-04）：extractOne 累计解压字节与条目计数
+	uint64_t _extractTotalBytes = 0;
+	std::size_t _extractEntries = 0;
 };
 
 } // namespace DC::Ir

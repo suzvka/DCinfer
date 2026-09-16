@@ -12,9 +12,26 @@ DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在*
 
 传统 DAG 框架将推理管线约束为线性或树形结构——这在多模型、多分支场景下很快会成为瓶颈。DCinfer 采用电路图语义的节点化、端口化、连接器化设计。得益于此模型，你可以轻松构建：
 
-- **多分支管线**：单输出同时驱动多个下游节点并行推理。
+- **多分支管线**：单输出同时驱动多个下游节点并行推理（1:N 分发须显式使用
+  `Connector.Broadcast(N)`，见下方示例）。
 - **汇聚模式**：多个上游输出合并注入同一节点。
 - **成环拓扑**：支持反馈回路，用于迭代优化、强化学习或流式场景。
+
+1:N 分发的正确姿势——显式创建 Broadcast(N)，各输出口分别接线；同一输出端口
+二次 `connect()` 会在构图期抛出 `GraphException(DuplicateEdge)`（1→1 自动导线
+只承载单个下游，避免二次接线导致的数据静默丢失）：
+
+```cpp
+// 1:N 分发：src.y 同时驱动 b、c 两个下游
+auto bc = std::make_unique<Node>("Connector.Broadcast", "bc",
+                                 Connector::broadcastSchema(2), Connector::broadcastRunFn(),
+                                 ThreadPoolAffinity::System);
+bc->setConnector(true);
+graph.addNode(std::move(bc));
+graph.connect("src", "y", "bc", "in");   // src.y → bc.in（该端口仅接一次）
+graph.connect("bc", "out_0", "b", "x");  // 分支 1
+graph.connect("bc", "out_1", "c", "x");  // 分支 2
+```
 
 ### 原生并发执行
 
@@ -234,6 +251,23 @@ const auto* x = ctx.input<Tensor>("x");
 if (!x)
     return ctx.failure(Node::Status::InvalidInput, "x must be a Tensor");
 ```
+
+### 单输出如何同时驱动多个下游节点（1:N 分发）？
+
+必须显式创建 `Connector.Broadcast(N)`（见「灵活的图拓扑」示例）：同一输出端口
+二次 `connect()` 会在构图期抛出 `GraphException(DuplicateEdge)`——自动插入的
+1→1 导线只能承载单个下游，不存在“静默丢数据”的兼容行为。
+
+### 嵌套子图（exportNode）的生命周期约定？
+
+`exportNode()` 返回的 Node 内部引用子图（`InferGraph`）——API 返回
+`unique_ptr<Node>` 仅转移 Node 所有权，**子图必须存活于导出节点的整个使用期
+（含全部父任务执行期间）**。子图先析构时执行导出节点将返回 `ExecutionFailed`
+（生命周期哨兵 best-effort 检测，避免悬垂段错误），但该检测存在并发窗口，
+不构成安全保证。
+
+另注意：每个嵌套子图持有独立的三层线程池——深嵌套 + 高并发场景需按
+“每层线程池配置 × 嵌套层数”规划线程总量。
 
 ## License
 

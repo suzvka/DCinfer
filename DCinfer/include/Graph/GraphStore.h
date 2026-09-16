@@ -54,6 +54,8 @@ public:
 	///         适用于两个业务节点之间的 1→1 直连场景
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	/// @throws GraphException(PortNotFound) 若端口不存在
+	/// @throws GraphException(DuplicateEdge) 若该输出端口已有出边
+	///         （1:N 分发必须显式创建 Connector.Broadcast(N)，禁止二次 connect）
 	/// @throws GraphException(Frozen) 若拓扑已被封印（图已冻结）
 	/// @return 指向自动创建的广播连接器的引用
 	Node& connect(const std::string& srcNode, const std::string& srcPort,

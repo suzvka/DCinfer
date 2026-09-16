@@ -5,6 +5,62 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-09-16
+
+### Fixed
+
+- **CORE-01（High）同一输出端口二次 `connect()` 静默丢数据 + 任务永久挂起**：
+  新增构图期拦截——`(srcNode, srcPort)` 已有出边时抛
+  `GraphException(DuplicateEdge)`（新增错误类型），错误消息指引正确姿势；
+  1:N 分发必须显式创建 `Connector.Broadcast(N)`（README 增补示例与 FAQ）。
+- **IR-01（High）两节点共享同一模型文件时 .dcg 序列化互相覆盖**：序列化时
+  按源路径复用同一 archive 名（模型只入包一份、所有引用节点写回同一相对
+  路径）——共享权重场景不再产生悬空引用导致必然编译失败。
+- **CORE-02 `Tensor::View` 破坏 const 正确性**：`const Tensor` 的
+  `operator[]` 改回返回只读 `ConstView`（仅链式索引 + read/readScalar），
+  删除 `const_cast` 构造——const 路径的写入在编译期被禁止。
+- **CORE-03 `TensorData` 双参构造除零 UB**：shape 乘积为 0（含 0 维）时
+  前置抛 `std::invalid_argument`。
+- **CORE-04 `exportNode` 悬垂契约**：新增子图生命周期哨兵（weak 检测）——
+  子图先析构再执行导出节点从段错误降级为显式 `ExecutionFailed`；
+  `exportNode` 注释与 README 显著标注生命周期契约（best-effort 检测，
+  不替代契约）。
+- **IR-02 .dcg 反序列化安全不变量旁路**：object 形状 `nodes` 显式拒绝；
+  受限模式下所有节点 `modelPath` 经 PathGuard 校验（拒绝 `../`、绝对路径、
+  盘符等越界声明）——.json（本地可信输入）保持宽松语义。
+- **IR-03 PathGuard 未拒 Windows 罪名字形**：新增拒绝保留设备名
+  （CON/PRN/AUX/NUL/COM1-9/LPT1-9，含扩展名形式）、ADS 冒号、尾点尾空格。
+- **IR-04/05 zip 预算单条目化**：新增解包条目数上限（256）、归档全局条目数
+  上限（4096）、累计解压总量预算（4 GiB）与 graph.json 专用上限（64 MiB）；
+  `readGraphJson` 预分配不再信任 ZIP 声明体积。
+- **IR-06 >4 GiB 模型静默截断**：`addModelFile` 改为 64 KiB 分块流式写入
+  （不再整模型读入内存），超过 minizip 单条目 unsigned 上限（4 GiB）的
+  文件显式拒绝（不再静默截断）。
+- **IR-07 连接失败 fail-open**：`rebuildEdges` 连接失败从 stderr 告警继续
+  改为直接抛 `GraphException`（fail-fast，不再产生孤儿连接器/残缺图）。
+- **IR-08 typeSize 负数穿透**：端口 `typeSize` 负值（穿透为 SIZE_MAX）在
+  反序列化期显式拒绝；0（Void 不校验语义）保持合法。
+
+### Changed
+
+- `connect()` 行为修正：同一输出端口二次调用从“静默丢数据”改为抛
+  `GraphException(DuplicateEdge)`；反序列化畸形边（无效端口/未知节点）
+  从“告警 + 图残缺”改为编译失败。
+- .dcg 反序列化收紧：`nodes` 必须为数组；`modelPath` 必须为解压目录内的
+  安全相对路径（.json 不受影响）。
+- `Tensor::operator[]` const 重载返回类型由 `View`（可写）改为
+  `ConstView`（只读）——const 张量的只读用法兼容，写入用法编译期报错。
+- 回归测试增补：`GraphNodeTest`（DuplicateEdge）、`TensorTest`/`TensorDataTest`
+  （ConstView/除零）、`NestedGraphCancelTest`（子图生命周期哨兵）、
+  `GraphCompilerTest`（共享模型/.dcg 校验/fail-fast/typeSize）、
+  `DcgArchiveSecurityTest`（罪名字形/聚合预算）。
+
+### Notes
+
+- 明确边界：不支持 >4 GiB 的单个模型文件入库（zip64 写入未启用），超限
+  显式拒绝。
+- 本次未包含 DCNet/DCEngines 审查项（NET-01~05、ENG-01~04）的修复。
+
 ## [0.5.1] - 2026-09-16
 
 ### Fixed
