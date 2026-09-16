@@ -617,6 +617,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single example**: Only `01_hello_graph` is provided. More complex scenarios (multi-branch, cyclic, cloud offload) are documented but not exemplified.
 - **No Python bindings**: C++ only; no language bindings or scripting interface.
 
+[0.5.2]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.2
 [0.5.1]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.1
 [0.5.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.0
 [0.4.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.4.0

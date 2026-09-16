@@ -32,7 +32,7 @@ include(GNUInstallDirs)
 # 包版本：与 DCinfer 模块同一约定（顶层 project(DCinfer VERSION) 权威 + 兜底）
 set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 if(NOT DCINFER_PKG_VERSION)
-    set(DCINFER_PKG_VERSION "0.5.1")
+    set(DCINFER_PKG_VERSION "0.5.2")
 endif()
 
 set_target_properties(DCEngine_Builtin PROPERTIES EXPORT_NAME Builtin)
