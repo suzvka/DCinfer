@@ -19,6 +19,20 @@ void TaskBuffer::setInput(const TaskId& taskId, const std::string& portName, Val
 	_taskInputs[taskId].at(portName) = std::move(data);
 }
 
+bool TaskBuffer::setInputAndCheckReady(const TaskId& taskId, const std::string& portName,
+									   Value data, const NodeSchema& schema) {
+	if (!schema.findInput(portName)) {
+		throw NodeException(NodeException::ErrorType::PortNotFound, "TaskBuffer::setInputAndCheckReady",
+							"port '" + portName + "' not found in schema");
+	}
+
+	// 写入与就绪判定同一临界区：多上游并发传播时仅最后写入者观察到 ready
+	std::unique_lock lk(_mutex);
+	_ensureTaskExists(taskId, schema);
+	_taskInputs[taskId].at(portName) = std::move(data);
+	return _isReadyLocked(taskId, schema);
+}
+
 void TaskBuffer::setInputBatch(const TaskId& taskId,
 							   std::unordered_map<std::string, TaskData> inputs,
 							   const NodeSchema& schema) {
@@ -42,7 +56,10 @@ void TaskBuffer::setInputBatch(const TaskId& taskId,
 
 bool TaskBuffer::isReady(const TaskId& taskId, const NodeSchema& schema) const {
 	std::shared_lock lk(_mutex);
+	return _isReadyLocked(taskId, schema);
+}
 
+bool TaskBuffer::_isReadyLocked(const TaskId& taskId, const NodeSchema& schema) const {
 	auto it = _taskInputs.find(taskId);
 	if (it == _taskInputs.end())
 		return false;

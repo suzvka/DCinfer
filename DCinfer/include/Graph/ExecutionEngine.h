@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Node.h"
+#include "OutputZone.h"
 #include "TaskStatus.h"
 #include "ThreadPool.h"
 
@@ -15,6 +16,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace DC {
 
@@ -71,15 +73,21 @@ public:
 
 	// ── 执行驱动 ──
 
-	/// @brief  异步启动整张图的计算
-	/// @throws GraphException(NoDeclaration) 若提交时未携带输出声明
-	///         （InferGraph::submit 的 declarations / submitBound 已先行声明）
+	/// @brief  异步启动整张图的计算（原子提交事务）。
+	/// @param  declarations 期望产出：{nodeName, portName, count} 列表。声明清理与
+	///         写入、准入检查、轮次登记在同一临界区完成（H-3/H-5）——并发同 ID
+	///         提交恰有一方成功，败者抛错且零副作用，不可能破坏在飞轮次状态。
+	/// @throws GraphException(NoDeclaration) declarations 为空
 	/// @throws GraphException(UnreachableDeclaration) 声明目标在运行时视图上
 	///         从已注入输入的节点集合纯拓扑不可达（构图/断链错误，提交期即暴露）
+	/// @throws GraphException(DuplicateTask) 同 taskId 轮次仍在运行，或处于
+	///         "终态已发布、结果可读（wait 返回）前"的收尾窗口——复用/释放/
+	///         再喂输入均须待 waitForResult 返回后
 	/// @note   state 为图运行时状态共享句柄：任务 lambda / TaskGate 各持一份，
 	///         图对象先行析构时在飞任务所需的图组件仍存活
 	void submit(const TaskId& taskId, uint32_t maxHops,
-				const std::shared_ptr<GraphRuntimeState>& state);
+				const std::shared_ptr<GraphRuntimeState>& state,
+				std::vector<OutputDeclaration> declarations);
 
 	// ── 同步等待 ──
 
@@ -98,19 +106,26 @@ public:
 	/// @return Unknown=从未提交；Running=执行中；Succeeded/Failed/Cancelled=已终止
 	TaskStatus status(const TaskId& taskId) const;
 
+	/// @brief  查询 task 是否处于"终态已发布、结果收尾未完成"的窗口。
+	///         供上层（feedInput 准入）区分"可复用"与"收尾中"——收尾窗口内
+	///         注入输入会写入随旧轮 clearTaskState 摘除的执行态，静默丢失。
+	bool isFinalizing(const TaskId& taskId) const;
+
 	/// @brief  请求取消活动中的 task（幂等；未知或已终止返回 false）。
 	///         协作式取消：在飞节点执行不会被中断，传播链即刻停止，
 	///         节点缓冲与信号照常清理，wait() 被唤醒，状态置 Cancelled。
 	bool cancel(const TaskId& taskId);
 
 	/// @brief  释放已终止 task 的状态记录（结果与诊断由上层一并清理）
-	/// @return true 已释放；false 未释放（未知 taskId 或活动 Running 任务）
-	/// @note   仅终态可释放；释放后 status 返回 Unknown
+	/// @return true 已释放；false 未释放（未知 taskId、活动 Running 任务，
+	///         或终态已发布但结果收尾尚未完成的窗口）
+	/// @note   仅"终态 + 收尾完成"可释放；释放后 status 返回 Unknown
 	bool releaseTask(const TaskId& taskId);
 
 	/// @brief  弃置在飞 task 的托管句柄（高-层句柄析构路径）：不取消任务，
 	///         完成收尾（_terminate）时自动回收状态表条目 / OutputZone 结果 / 诊断。
-	///         已终止 → 立即等价 releaseTask；未知 → no-op。
+	///         已终止且收尾完成 → 立即等价 releaseTask；未知 → no-op；
+	///         Running 或收尾中 → 登记自动回收（不打断在飞/收尾语义）。
 	void detachTask(const TaskId& taskId);
 
 	// ── task 完成回调 ──
@@ -119,7 +134,10 @@ public:
 	///         先于结果就绪发布——回调可安全读取 task 缓冲中尚存的输出）
 	///         线程安全：与 _terminate 的读取之间以互斥锁同步
 	/// @note   回调内不得对同一 taskId 调用 wait()：回调先于 resultsReady
-	///         置位执行，等待将自我阻塞；回调应只读取/捕获数据
+	///         置位执行，等待将自我阻塞；亦不得 submit()/feedInput()/
+	///         releaseTask()/detachTask()——收尾窗口内复用/输入注入/释放
+	///         均被拒绝（DuplicateTask/无操作，H-3）。回调应只读取/捕获数据，
+	///         新一轮提交请在 waitForResult 返回后进行。
 	void setTaskCompleteCallback(TaskCompleteCallback cb) {
 		std::lock_guard lk(_cbMutex);
 		_taskCompleteCb = std::move(cb);

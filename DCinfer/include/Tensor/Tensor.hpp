@@ -4,6 +4,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <optional>
@@ -156,8 +157,11 @@ public:
 	Tensor& crop(const Shape& targetShape);
 
 	/// @brief 消费式取出内部缓存数据（移动所有权后内部缓存清空）。
-	/// @tparam T 期望的元素类型。
-	/// @return 数据副本（std::vector<T>）。
+	/// @details 数据以原始字节堆视作重解释源：按调用方指定的 T 逐字节重解释，
+	///          不进行任何类型/大小校验——重解释安全由实现保证（容量按 T 精确重算）。
+	/// @tparam T 期望的元素类型（须可平凡复制）。
+	/// @return 数据副本（std::vector<T>）；元素数 = ceil(总字节数 / sizeof(T))，
+	///         全部字节进入结果，末元素不足部分零填充；无数据时返回空 vector。
 	/// @note 取出后缓存被清空，hasCache() 将返回 false。
 	template <typename T>
 	std::vector<T> getData();
@@ -434,9 +438,15 @@ T Tensor::readScalar(const Shape& path) const {
 
 template <typename T>
 std::vector<T> Tensor::getData() {
+	static_assert(std::is_trivially_copyable_v<T>, "Tensor::getData requires trivially copyable type");
 	auto data = _data.getData();
-	std::vector<T> result(data.size() / typeSize());
-	std::memcpy(result.data(), data.data(), data.size());
+	const size_t bytes = data.size();
+	// 字节堆按 T 重解释：元素数 = ceil(总字节 / sizeof(T))——全部字节进入结果
+	// （末元素不足部分由 vector 值初始化零填充）；容量与拷贝均以 sizeof(T) 为
+	// 基准，typeSize() 不参与计算（无除零、无"分配/拷贝基准不一致"的越界）。
+	std::vector<T> result((bytes + sizeof(T) - 1) / sizeof(T));
+	if (bytes > 0)
+		std::memcpy(result.data(), data.data(), bytes);
 	return result;
 }
 

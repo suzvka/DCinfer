@@ -24,7 +24,8 @@ NodeResult ExecutionPipeline::execute(
 	const TaskId& taskId,
 	const Node& node,
 	NodeExecState& exec,
-	NodeExecutionGate& gate) {
+	NodeExecutionGate& gate,
+	std::function<bool()> isCancelRequested) {
 
 	auto& buffer = exec.buffer;
 	auto& workspace = *exec.workspace;
@@ -46,6 +47,16 @@ NodeResult ExecutionPipeline::execute(
 	}
 	gate.setCurrentTask(taskId);
 
+	// 租约 RAII（H-1/H-2）：任何退出路径（含完成回调在异常分支二次抛出）
+	// 都必须释放租约——闸泄漏会让重试登记永久滞留、节点永久不可再执行。
+	struct GateGuard {
+		NodeExecutionGate& gate;
+		~GateGuard() {
+			gate.clearCurrentTask();
+			gate.release();
+		}
+	} gateGuard{gate};
+
 	NodeResult result;
 
 	try {
@@ -65,7 +76,8 @@ NodeResult ExecutionPipeline::execute(
 
 		// ③ 执行 RunFn
 		try {
-			Node::RunContext ctx(workspace, engine, schema, node.type(), node.name());
+			Node::RunContext ctx(workspace, engine, schema, node.type(), node.name(),
+								 taskId, isCancelRequested);
 			result = fn(ctx);
 		} catch (const std::exception& e) {
 			result.status = NodeStatus::ExecutionFailed;
@@ -94,7 +106,8 @@ NodeResult ExecutionPipeline::execute(
 		// ③¾ postRun 钩子：同步后的后处理（仅成功路径；自身失败同样触发 onError 复位）
 		if (result.ok()) {
 			try {
-				Node::RunContext ctx(workspace, engine, schema, node.type(), node.name());
+				Node::RunContext ctx(workspace, engine, schema, node.type(), node.name(),
+									 taskId, isCancelRequested);
 				engine.postRun(ctx);
 			} catch (...) {
 				safeTriggerOnError(engine);
@@ -119,19 +132,16 @@ NodeResult ExecutionPipeline::execute(
 			onComplete(taskId, result);
 		}
 	} catch (const std::exception& e) {
-		// 加载阶段或执行阶段抛出未捕获异常，必须通知完成回调
+		// 加载阶段或执行阶段抛出未捕获异常，必须通知完成回调；
+		// 租约由 GateGuard 统一释放（含回调在此再次抛出的路径）
 		result.status = NodeStatus::ExecutionFailed;
 		result.message = e.what();
 		if (onComplete) {
 			onComplete(taskId, result);
 		}
-		gate.clearCurrentTask();
-		gate.release();
 		throw;
 	}
 
-	gate.clearCurrentTask();
-	gate.release();
 	return result;
 }
 

@@ -218,7 +218,9 @@ const std::string& Node::RunContext::name() const {
 }
 
 Node::RunContext::RunContext(SlotWorkspace& workspace, EngineAdapter& engine,
-							 const Node::Schema& schema, const std::string& type, const std::string& name)
-	: _workspace(workspace), _engine(engine), _schema(schema), _type(type), _name(name) {}
+							 const Node::Schema& schema, const std::string& type, const std::string& name,
+							 TaskId taskId, std::function<bool()> cancelProbe)
+	: _workspace(workspace), _engine(engine), _schema(schema), _type(type), _name(name),
+	  _taskId(std::move(taskId)), _cancelProbe(std::move(cancelProbe)) {}
 
 } // namespace DC

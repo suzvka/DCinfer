@@ -24,13 +24,16 @@ struct ExecutionPipeline {
 	/// @brief  执行完整流水线（唯一入口）。
 	/// @param  exec 节点 task 执行态（buffer/workspace 由同一 schema 构造）
 	/// @param  gate 节点执行闸（图路径来自冻结期预建闸表；单节点路径随载体）
+	/// @param  isCancelRequested 取消感知谓词（可选；图路径注入轮次终止标志读取器，
+	///         单节点路径缺省——RunContext::isCancellationRequested 恒 false）
 	/// @throws NodeException(NotReady)     必选输入未就绪
 	/// @throws NodeException(Reentrant)    节点正被另一 task 占用（闸租约拒绝）
 	static NodeResult execute(
 		const TaskId& taskId,
 		const Node& node,
 		NodeExecState& exec,
-		NodeExecutionGate& gate);
+		NodeExecutionGate& gate,
+		std::function<bool()> isCancelRequested = {});
 };
 
 } // namespace DC

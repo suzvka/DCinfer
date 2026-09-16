@@ -131,6 +131,9 @@ public:
 	/// @brief  从图外注入数据到指定节点的输入端口（写入缓冲，不触发执行）
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	/// @throws GraphException(FeedFailed) 若 setInput 失败
+	/// @throws GraphException(DuplicateTask) 若 task 处于收尾窗口（终态已发布、
+	///         waitForResult 返回前）——此时注入会写入随旧轮清理摘除的执行态；
+	///         复用语义：waitForResult 返回后再 feed
 	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data);
 
 	/// @brief  便捷接口：直接传入 DC::Tensor
@@ -140,31 +143,26 @@ public:
 
 	/// @brief  异步启动整张图的计算。输出声明直接作为 submit 参数，消除 temporal coupling。
 	/// @param  declarations  期望产出：{nodeName, portName, count} 列表
-	/// @throws GraphException(DuplicateTask) 若同 taskId 任务仍在执行
+	/// @throws GraphException(DuplicateTask) 若同 taskId 任务仍在执行，或处于收尾窗口
+	///         （终态已发布、结果可读（waitForResult 返回）前）
 	/// @throws GraphException(UnreachableDeclaration) 声明目标拓扑不可达（提交期即暴露）
-	/// @note   复用已终止的 taskId 合法：上一轮的声明/结果/诊断随之清理。
+	/// @note   声明清理/写入与轮次登记由引擎在单事务内原子完成（并发同 ID 提交恰一方
+	///         成功）。复用已收尾的 taskId 合法：上一轮的声明/结果/诊断随之清理。
 	///         输出在 task 终止后仍保留，供 waitForResult → takeOutput 取用。
 	///         执行超时由节点实现方自行负责（失败经 NodeResult + Diagnostic 自报）。
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				uint32_t maxHops = kDefaultMaxHops) {
-		_ensureFrozen();                     // 惰性冻结：首次提交即编译（此后拓扑不可变）
-		_ensureSubmittable(taskId);
-		_state->errors.clearTask(taskId);    // 上一轮诊断不残留（影响 taskStatus 归一化）
-		_state->output.clearTask(taskId);    // 复用同 ID：清掉上一轮声明/累加/结果
-		_state->output.declare(taskId, std::move(declarations));
-		_engine->submit(taskId, maxHops, _state);
+		_ensureFrozen(); // 惰性冻结：首次提交即编译（此后拓扑不可变）
+		_engine->submit(taskId, maxHops, _state, std::move(declarations));
 	}
 
 	/// @brief  单输出便捷重载（生命周期语义同上）
 	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 				size_t count = 1,
 				uint32_t maxHops = kDefaultMaxHops) {
-		_ensureFrozen();                     // 惰性冻结：首次提交即编译（此后拓扑不可变）
-		_ensureSubmittable(taskId);
-		_state->errors.clearTask(taskId);
-		_state->output.clearTask(taskId);
-		_state->output.declare(taskId, nodeName, portName, count);
-		_engine->submit(taskId, maxHops, _state);
+		_ensureFrozen(); // 惰性冻结：首次提交即编译（此后拓扑不可变）
+		std::vector<OutputDeclaration> declarations{{nodeName, portName, count}};
+		_engine->submit(taskId, maxHops, _state, std::move(declarations));
 	}
 
 	// ── 结果获取（消费式：取出即消耗）──
@@ -215,7 +213,7 @@ public:
 
 	/// @brief  释放已终止 task 的全部资源（状态表条目、OutputZone 结果、诊断记录）
 	/// @note   此后 taskStatus 返回 Unknown、hasOutput 返回 false；
-	///         活动 task 不可释放（引擎拒绝时结果/诊断保持不动）；
+	///         活动或收尾中 task 不可释放（引擎拒绝时结果/诊断保持不动）；
 	///         "大量短任务"场景建议在消费结果后调用以防内存增长
 	void releaseTask(const TaskId& taskId);
 
@@ -309,23 +307,16 @@ public:
 	/// @brief  导出为可嵌入父图的包装 Node
 	///         子图复用本图的 ExecutionEngine（三层线程池）执行，与父图隔离
 	/// @note   前提：已调用 bindInput + bindOutput 定义了图接口
-	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活
+	///         调用者必须保证 InferGraph 在返回的 Node 使用期间存活；
+	///         子图 task ID = 父任务 ID（taskId 空间贯穿父子边界）——宿主
+	///         cancel 父任务后 RunFn ≤100ms 内感知并取消子图任务解围，
+	///         不再令父池线程因内部信号阻塞无限期挂起；
+	///         同一父任务内同一子图的多个导出节点并发调用不受支持
+	///         （复用同一子图 task 空间，将以 DuplicateTask 显式失败）
 	std::unique_ptr<Node> exportNode(const std::string& nodeName,
 									uint32_t maxHops = kDefaultMaxHops);
 
 private:
-	/// @brief  提交前置校验：活动 task 拒绝重复提交。
-	///
-	/// 必须在 errors.clearTask / output.clearTask / declare 之前执行：
-	/// 引擎内校验虽是权威串行点，但发生在本 facade 的状态变更之后——
-	/// 缺失此守卫时，对 Running 任务的重复提交会先清掉其声明/累加/结果
-	/// 再抛 DuplicateTask，破坏在飞任务状态。
-	void _ensureSubmittable(const TaskId& taskId) const {
-		if (_engine->status(taskId) == TaskStatus::Running)
-			throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::submit",
-								 "task '" + taskId + "' is still running; duplicate submit rejected");
-	}
-
 	/// @brief  惰性冻结：首次运行期调用时把构建面编译为不可变快照。
 	/// @return 冻结快照（幂等：已冻结时直接返回现有快照）
 	/// @note   快路径经发布协议无锁 acquire 读（未发布返回 nullptr）；

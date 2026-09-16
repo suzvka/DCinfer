@@ -106,12 +106,43 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 		auto execState = round->execState;
 		try {
 			auto& exec = execState->ensure(nodeName, node->schema());
-			result = ExecutionPipeline::execute(taskId, *node, exec,
-												state->exec->gateFor(nodeName));
+			result = ExecutionPipeline::execute(
+				taskId, *node, exec, state->exec->gateFor(nodeName),
+				[round] { return round->terminated.load(std::memory_order_acquire); });
 		} catch (const NodeException& e) {
-			// 就绪判定竞态（NotReady/Reentrant）：记录错误，跳过传播
+			switch (e.getErrorType()) {
+			case NodeException::ErrorType::Reentrant:
+				// 节点正忙（另一任务/另一提交持有执行租约）：登记重投——
+				// 闸释放时自动重放本提交，节点上的并发任务排队执行，
+				// "节点正忙"不再记为 Error 判死任务（H-1）。重投入口天然经
+				// round->terminated 检查丢弃已终止轮次。
+				state->exec->gateFor(nodeName).enqueueRetry(
+					round.get(), [this, node, nodeName, round, remainingHops] {
+						_submitNodeRun(node, nodeName, round, remainingHops);
+					});
+				return;
+			case NodeException::ErrorType::NotReady:
+				// 就绪竞态（重复提交已由原子就绪路径消除，此处仅剩边缘场景）：
+				// 降级为 Warning，跳过本次提交，不判死任务（H-1）。
+				errors.recordWarning(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
+									 "NotReady race in tryExecute (duplicate trigger skipped): "
+										 + std::string(e.what()));
+				return;
+			default:
+				errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
+								   "NodeException in tryExecute: " + std::string(e.what()));
+				return;
+			}
+		} catch (const std::exception& e) {
+			// 非 NodeException（引擎钩子/缓冲层抛出）此前穿过调度层逃逸到池 worker
+			// （仅 stderr），任务因无诊断而永久挂起——现统一记录 Error 诊断，
+			// 由耗尽检测收束为 Failed（H-2 失败闭环）。
 			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
-							   "NodeException in tryExecute: " + std::string(e.what()));
+							   "non-NodeException escaped node execution: " + std::string(e.what()));
+			return;
+		} catch (...) {
+			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
+							   "unknown non-standard exception escaped node execution");
 			return;
 		}
 
@@ -157,15 +188,15 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 // ════════════════════════════════════════════
 
 void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
-							 const std::shared_ptr<GraphRuntimeState>& state) {
+							 const std::shared_ptr<GraphRuntimeState>& state,
+							 std::vector<OutputDeclaration> declarations) {
 	// 快照经发布协议读取（acquire）：进入本函数前 facade 已 _ensureFrozen，
 	// 本地句柄同时把快照存活期钉在本次调用内（state 亦持有）
 	auto snap = state->snapshot();
-	auto& output = state->output;
 	auto& graph = snap->runtimeView();
 
-	// 校验：必须已声明输出
-	if (!output.hasDeclaration(taskId)) {
+	// 校验：必须声明输出（声明随提交事务传入，由下方临界区原子写入）
+	if (declarations.empty()) {
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "ExecutionEngine::submit",
 							 "no output declarations for task '" + taskId
 								 + "'; pass declarations via InferGraph::submit(...) / submitBound(...) first");
@@ -175,13 +206,14 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 	// 声明目标必须从"已注入输入的节点 ∪ 输入绑定节点"纯拓扑可达。忽略信号——
 	// 信号阻断属合法运行期状态，由宿主 wait+cancel 解围；构图/断链等确定性
 	// 错误才在提交期立即暴露。检查不依赖轮次表/门控，可在登记前完成。
+	// 目标集取自本次提交参数（声明写入移入下方事务，与登记同临界区）。
 	std::vector<std::string> starts;
 	if (auto taskExec = state->exec->findTaskState(taskId))
 		starts = taskExec->nodeNames(); // 已注入输入的节点
 	for (const auto& b : snap->signature().inputs)
 		starts.push_back(b.nodeName);
 	std::unordered_set<std::string> targets;
-	for (const auto& d : output.declarationsOf(taskId))
+	for (const auto& d : declarations)
 		targets.insert(d.nodeName);
 	if (!starts.empty() && !targets.empty()
 		&& !canSatisfyTopologically(snap->runtimeView(), starts, targets)) {
@@ -198,23 +230,33 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 	round->engine = this;
 	round->state = state; // 与图对象共享图运行时状态（在飞任务保活）
 	round->taskId = taskId;
-	round->execState = state->exec->taskState(taskId);
 
-	// 登记：同一 taskId 活动期间禁止重复提交；已终止的 ID 允许复用（替换旧轮次，
-	// 新轮次的 wait 谓词与传播拦截随新任务重新生效）。检查与写入同临界区。
-	// 节点执行态无需在此清理：所有终态必经 _terminate（唯一清理点），
-	// 且本分支之后调用方可能重新 feedInput——此时清理会抹掉新输入。
+	// ── 提交事务（单临界区，H-3/H-5）──
+	// 复用准入检查、声明清理与写入、执行态捕获、轮次登记原子完成：
+	// - 并发同 ID 提交：恰一方通过检查并完成登记，败者抛 DuplicateTask 且
+	//   零副作用（不再出现"先清声明、后拒提交"的破坏窗口）；
+	// - 复用准入 = "终态已发布 + 清理完成（resultsReady）"：收尾窗口内
+	//   （回调/结果抢救/clearTaskState 仍在执行）的 ID 一律拒绝——旧轮
+	//   清理不可能再触碰新一轮的声明/累加/结果/执行态；
+	// - 执行态捕获置于准入之后：复用时必为全新对象（旧轮 clearTaskState
+	//   已将其摘除），不存在新旧轮共享执行态的跨轮污染。
 	{
 		std::lock_guard lk(_roundsMutex);
 		auto it = _rounds.find(taskId);
 		if (it != _rounds.end()) {
 			std::lock_guard lk2(it->second->m);
-			if (it->second->terminalStatus == TaskStatus::Running)
+			if (it->second->terminalStatus == TaskStatus::Running || !it->second->resultsReady)
 				throw GraphException(GraphException::ErrorType::DuplicateTask, "ExecutionEngine::submit",
-									 "task '" + taskId + "' is still running; duplicate submit rejected");
+									 "task '" + taskId
+										 + "' is still running or finalizing; duplicate submit rejected");
 		}
-		_rounds[taskId] = round;
+		round->execState = state->exec->taskState(taskId);
+		state->errors.clearTask(taskId); // 上一轮诊断不残留（影响 taskStatus 归一化）
+		state->output.clearTask(taskId); // 复用同 ID：清掉上一轮声明/累加/结果
+		state->output.declare(taskId, std::move(declarations));
+		_rounds[taskId] = round; // 登记（替换旧轮；旧轮由在飞 lambda 保活至收尾）
 	}
+	// 节点执行态无需在此清理：所有终态必经 _terminate（唯一清理点）。
 
 	// 扫描全图（运行时视图），对所有已就绪的节点提交执行任务（执行完成后再传播下游）。
 	// 就绪查询仅针对本轮执行态条目（feedInput 时创建）：无条目 = 无暂存输入 = 未就绪
@@ -331,9 +373,20 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 		// 下游执行态：经本轮执行态惰性创建（写入缓冲，不触发执行）。
 		// execState 由轮次持有，存活至本轮传播结束
 		NodeExecState* dstNs = nullptr;
+		bool ready = false;
 		try {
 			dstNs = &execState->ensure(edge.dstNode, dst->schema());
-			dstNs->buffer.setInput(taskId, edge.dstPort, std::move(data), dst->schema());
+			if (dst->hasReadyOverride()) {
+				// 就绪语义由覆盖方定义（无法与写入合并判定）：保留 setInput +
+				// isReady 分离路径，残余竞态归 override 实现方。
+				dstNs->buffer.setInput(taskId, edge.dstPort, std::move(data), dst->schema());
+				ready = dst->isReady(taskId, dstNs->buffer);
+			} else {
+				// 原子路径（H-1）：写入与就绪判定同临界区——多上游并发传播时
+				// 仅"最后写入者"观察到就绪并返回 true，双触发自根上消除。
+				ready = dstNs->buffer.setInputAndCheckReady(taskId, edge.dstPort,
+															std::move(data), dst->schema());
+			}
 		} catch (const NodeException& e) {
 			errors.recordError(taskId, edge.dstNode, "ExecutionEngine::_propagateFrom",
 							   "NodeException in setInput for port '" + edge.dstPort
@@ -342,7 +395,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 		}
 
 		// 下游就绪 → 提交执行 + 完成后继续传播（数据冒泡）
-		if (dst->isReady(taskId, dstNs->buffer)) {
+		if (ready) {
 			_submitNodeRun(dst, edge.dstNode, round, remainingHops - 1);
 		}
 	}
@@ -601,6 +654,14 @@ TaskStatus ExecutionEngine::status(const TaskId& taskId) const {
 	return round->terminalStatus;
 }
 
+bool ExecutionEngine::isFinalizing(const TaskId& taskId) const {
+	auto round = _findRound(taskId);
+	if (!round)
+		return false;
+	std::lock_guard lk(round->m);
+	return round->terminalStatus != TaskStatus::Running && !round->resultsReady;
+}
+
 bool ExecutionEngine::cancel(const TaskId& taskId) {
 	auto round = _findRound(taskId);
 	if (!round)
@@ -624,8 +685,8 @@ bool ExecutionEngine::releaseTask(const TaskId& taskId) {
 		return false; // 未知（从未提交或已释放）：无释放资格
 	{
 		std::lock_guard lk2(it->second->m);
-		if (it->second->terminalStatus == TaskStatus::Running)
-			return false; // 活动任务不可释放
+		if (it->second->terminalStatus == TaskStatus::Running || !it->second->resultsReady)
+			return false; // 活动任务或收尾中（清理未完成）：不可释放
 	}
 	_rounds.erase(it); // 终态轮次移除；在飞 lambda 经 shared_ptr 副本保活，不受影响
 	return true;
@@ -637,12 +698,13 @@ void ExecutionEngine::detachTask(const TaskId& taskId) {
 		return; // 未知：无托管对象（feed 输入由上层 discardUnsubmitted 清理）
 	{
 		std::lock_guard lk(round->m);
-		if (round->terminalStatus == TaskStatus::Running) {
-			round->autoRelease = true; // 完成收尾时自动回收（不取消任务，保留在飞语义）
+		if (round->terminalStatus == TaskStatus::Running || !round->resultsReady) {
+			// 在飞或收尾中：登记完成后自动回收（不取消任务，保留在飞/收尾语义）
+			round->autoRelease = true;
 			return;
 		}
 	}
-	// 已终止：立即等价释放（身份校验防误清新一轮复用后的状态）
+	// 已终止且收尾完成：立即等价释放（身份校验防误清新一轮复用后的状态）
 	bool owned = false;
 	{
 		std::lock_guard lk(_roundsMutex);

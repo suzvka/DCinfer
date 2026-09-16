@@ -259,6 +259,10 @@ public:
 	///         readyOverride 优先，否则检查所有必选输入已就绪（或存在默认值/形状锚定）
 	bool isReady(const TaskId& taskId, const TaskBuffer& buffer) const;
 
+	/// @brief  是否注册了就绪覆盖委托（调度侧据此选择原子就绪路径或委托路径；
+	///         冻结后注册面关闭，运行期只读安全）
+	bool hasReadyOverride() const { return static_cast<bool>(_readyOverride); }
+
 private:
 	friend class RunContext;
 	friend class GraphBuilder;
@@ -343,11 +347,24 @@ public:
 	const std::string& type() const;
 	const std::string& name() const;
 
+	/// @brief  当前 task 标识（图路径为所属轮次 taskId；单节点路径为调用方给定值）。
+	/// @note   子图嵌套场景该 ID 空间贯穿父子边界（exportNode 以父任务 ID 驱动子图），
+	///         RunFn 内部等待/轮询以本 ID 寻址。
+	const TaskId& taskId() const { return _taskId; }
+
+	/// @brief  取消感知（协作式）：所属 task 是否已被请求取消/已终止。
+	///         RunFn 中的长等待应周期性轮询本谓词并及时解围；未注入谓词的
+	///         执行路径恒 false（单节点执行无取消语义）。
+	bool isCancellationRequested() const {
+		return _cancelProbe ? _cancelProbe() : false;
+	}
+
 private:
 	friend class Node;
 	friend struct ExecutionPipeline;
 	RunContext(SlotWorkspace& workspace, EngineAdapter& engine,
-			   const Node::Schema& schema, const std::string& type, const std::string& name);
+			   const Node::Schema& schema, const std::string& type, const std::string& name,
+			   TaskId taskId, std::function<bool()> cancelProbe);
 
 	/// @brief 类型化输入检查的非模板实现（定义在 Node.cpp）：成功返回原生指针，
 	///        失败返回 nullptr 并可选填充 error（模板 input<T> 薄包装）
@@ -358,6 +375,8 @@ private:
 	const Node::Schema& _schema;
 	std::string _type;
 	std::string _name;
+	TaskId _taskId;                        ///< 所属 task（子图嵌套时贯穿父子边界）
+	std::function<bool()> _cancelProbe;    ///< 取消感知谓词（可空：单节点路径无取消语义）
 };
 
 } // namespace DC

@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **B-1 `Tensor::getData<T>()` 堆越界写（内存安全）**：此前 `sizeof(T) < typeSize()`
+  时按整块字节数 `memcpy` 进按元素数分配的缓冲区即溢出（如 float 张量取
+  `getData<uint8_t>()`）。现改为"字节堆按 T 重解释"语义：容量与拷贝均以
+  `sizeof(T)` 为基准，元素数 = ceil(总字节/sizeof(T))（末元素零填充、全部字节
+  无损），不做类型校验；`typeSize()` 退出计算（同时消除空张量的除零）。
+- **H-1 多输入节点双触发 / 节点闸竞争伪失败**：TaskBuffer 写入与就绪判定合并
+  到单一临界区（`setInputAndCheckReady`），并发传播仅"最后写入者"触发提交；
+  节点执行闸从"拒绝即错"改为排队重投（`enqueueRetry` + 释放时全量投递）——
+  共享图上并发任务的节点竞争败者经重投执行，不再被 Reentrant 记为 Error 判死；
+  NotReady 降级为 Warning 跳过。
+- **H-2 非 NodeException 逃逸导致任务永久 Running**：引擎调度层 catch 扩展为
+  NodeException 分流 + `std::exception`/`...` 统一记录 Error 诊断，由耗尽检测
+  收束 Failed；执行流水线闸租约改为 RAII（异常路径含完成回调二次抛出不再泄漏租约）。
+- **H-3 终态发布先于收尾完成（跨轮污染）**：同 ID 复用/释放准入收紧为
+  "终态 + 结果可读（waitForResult 返回）"；收尾窗口内 submit / releaseTask /
+  detachTask / feedInput 一律拒绝（detach 登记自动回收）——旧轮结果抢救与
+  执行态清理不再污染新轮。
+- **H-5 并发同 ID 提交 TOCTOU**：提交改为引擎侧单临界区原子事务（准入检查 +
+  声明清理/写入 + 执行态捕获 + 轮次登记），并发同 ID 恰一方成功、败者
+  DuplicateTask 零副作用。
+- **H-4 嵌套子图无限期挂起 / 取消不跨边界**：exportNode 的子图任务 ID 改为
+  父任务 ID（taskId 空间贯穿父子边界）；RunFn 分段等待（100ms）轮询父轮终止，
+  父任务取消/收束/TTL 后主动取消子图任务并解围返回——不再永久占住父池线程。
+
+### Changed
+
+- `ExecutionEngine::submit` 签名携带输出声明参数（`declarations`）——声明清理/
+  写入并入提交事务（内部 API，InferGraph 同步迁移）。
+- 任务完成回调约束补充：回调内不得 submit / feedInput / releaseTask /
+  detachTask（收尾窗口内均被拒绝）；新一轮提交请在 waitForResult 返回后进行。
+- `Node::RunContext` 新增 `taskId()` / `isCancellationRequested()`（协作式取消
+  感知，供长等待节点轮询解围；单节点路径恒 false）。
+- 新增回归测试：`ExecutionConcurrencyTest`（H-1/H-2）、`NestedGraphCancelTest`
+  （H-4）；`TaskLifecycleRegressionTest` 增补收尾窗口拒绝 / 弃置自动回收 /
+  并发同 ID 提交用例；`TensorTest` 增补 getData 字节重解释用例。
+
 ## [0.5.0] - 2026-09-16
 
 ### Added

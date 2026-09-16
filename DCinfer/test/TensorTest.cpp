@@ -101,6 +101,47 @@ static void runTensorTests() {
 		throw std::runtime_error("fast read failed");
 	}
 
+	// 12) B-1 regression: getData<T> reinterprets the raw byte heap safely.
+	//     No type validation; capacity computed by sizeof(T); every byte enters the
+	//     result (non-divisible tail zero-filled) — the previous overflow scenario.
+	{
+		std::vector<float> fsrc = {1.5f, -2.25f, 3.125f};
+		std::vector<std::byte> fbytes(fsrc.size() * sizeof(float));
+		std::memcpy(fbytes.data(), fsrc.data(), fbytes.size());
+
+		// a) uint8_t over float tensor: full byte round-trip (would previously overflow).
+		Tensor tu8 = Tensor::Create<float>({3}, std::vector<std::byte>(fbytes));
+		auto byteOut = tu8.getData<uint8_t>();
+		if (byteOut.size() != fbytes.size()
+			|| std::memcmp(byteOut.data(), fbytes.data(), fbytes.size()) != 0)
+			throw std::runtime_error("getData<uint8_t> byte reinterpretation mismatch");
+		if (tu8.hasCache())
+			throw std::runtime_error("getData should consume cache");
+
+		// b) double over float tensor: ceil element count, all bytes preserved, tail zeroed.
+		Tensor td = Tensor::Create<float>({3}, std::vector<std::byte>(fbytes));
+		auto doubleOut = td.getData<double>();
+		if (doubleOut.size() != 2) // ceil(12 / 8)
+			throw std::runtime_error("getData<double> ceil element count mismatch");
+		const auto* outBytes = reinterpret_cast<const std::byte*>(doubleOut.data());
+		if (std::memcmp(outBytes, fbytes.data(), fbytes.size()) != 0)
+			throw std::runtime_error("getData<double> leading bytes mismatch");
+		for (size_t i = fbytes.size(); i < doubleOut.size() * sizeof(double); ++i)
+			if (outBytes[i] != std::byte{0})
+				throw std::runtime_error("getData<double> tail not zero-filled");
+
+		// c) same-type read stays exact.
+		Tensor tf2 = Tensor::Create<float>({3}, std::vector<std::byte>(fbytes));
+		auto floatOut = tf2.getData<float>();
+		if (floatOut != fsrc)
+			throw std::runtime_error("getData<float> same-type mismatch");
+
+		// d) empty tensor yields an empty vector.
+		Tensor emptyT = Tensor::Create<float>();
+		if (!emptyT.getData<int32_t>().empty())
+			throw std::runtime_error("getData on empty tensor should return empty vector");
+	}
+
 	std::cout << "Tensor tests passed" << std::endl;
 }
 

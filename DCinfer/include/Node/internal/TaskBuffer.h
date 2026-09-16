@@ -34,6 +34,16 @@ public:
 	void setInput(const TaskId& taskId, const std::string& portName, Value data,
 				  const NodeSchema& schema);
 
+	/// @brief  单端口写入 + 就绪判定（单一临界区，消除多上游双触发）。
+	/// @details 写入与"所有必需输入已就绪"判定在同一 unique_lock 内完成并
+	///          返回结论——多上游并发传播到同一多输入节点时，仅"最后写入者"
+	///          观察到 ready=true，即由唯一提交者触发执行；不存在 setInput
+	///          与 isReady 分离导致的重复提交窗口。
+	/// @return 写入后该 task 的全部必需输入是否已就绪
+	/// @throws NodeException(PortNotFound) 若端口名不存在于 Schema 中。
+	bool setInputAndCheckReady(const TaskId& taskId, const std::string& portName, Value data,
+						   const NodeSchema& schema);
+
 	/// @brief  批量写入，预校验所有端口名。
 	void setInputBatch(const TaskId& taskId,
 					   std::unordered_map<std::string, TaskData> inputs,
@@ -92,6 +102,9 @@ private:
 
 	/// @brief  惰性创建任务的输入缓冲区条目（内部使用，调用前须持锁）。
 	void _ensureTaskExists(const TaskId& taskId, const NodeSchema& schema);
+
+	/// @brief  就绪判定核心（调用方须持有 _mutex；读/写锁均可）
+	bool _isReadyLocked(const TaskId& taskId, const NodeSchema& schema) const;
 
 	mutable std::shared_mutex _mutex;
 	TaskBufferMap _taskInputs;

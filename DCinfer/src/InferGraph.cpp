@@ -24,6 +24,15 @@ InferGraph::InferGraph(const PoolConfig& computeCfg,
 void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName, Value data) {
 	_ensureFrozen(); // 惰性冻结：运行期 API 入口统一编译（此后拓扑不可变）
+
+	// 收尾窗口（终态已发布、结果抢救未完成）拒绝注入：此时旧轮执行态容器
+	// 仍挂在域表上、随后将被 clearTaskState 摘除——注入的输入会静默丢失。
+	// 复用语义：waitForResult 返回（结果可读）后再 feed。
+	if (_engine->isFinalizing(taskId))
+		throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::feedInput",
+							 "task '" + taskId
+								 + "' is finalizing; feed input after waitForResult/release");
+
 	auto* n = _topology().node(nodeName);
 	if (!n)
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
@@ -246,7 +255,11 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 	// ③ 构造 RunFn：捕获 this + maxHops
 	//    调用者必须保证 this 在 Node 生命周期内有效
 	auto runFn = [this, maxHops](Node::RunContext& ctx) -> Node::Result {
-		const std::string tid = ctx.name();
+		// 子图 task ID = 父任务 ID：taskId 空间贯穿父子边界
+		// （blockedOverride/SignalProbe 同空间寻址；并发父任务天然互不冲突）。
+		// 注：同一父任务内同一子图的多个导出节点并发调用不受支持
+		//（同一父任务下复用同一子图 task 空间，将以 DuplicateTask 显式失败）。
+		const std::string tid = ctx.taskId();
 
 		// 将 RunContext 的输入注入子图
 		for (auto& ib : _inputBindingsView()) {
@@ -266,9 +279,21 @@ std::unique_ptr<Node> InferGraph::exportNode(const std::string& nodeName, uint32
 
 		// 驱动子图（无执行超时：时间语义归节点实现方，由 TTL 与宿主护栏兜底）。
 		// wait 返回即 task 已终止：_terminate 已把声明输出抢救至 OutputZone，
-		// 此后声明输出必可经 takeOutput 取出
+		// 此后声明输出必可经 takeOutput 取出。
+		// 分段等待 + 父轮感知（H-4）：每 100ms 轮询父轮是否已被请求取消/已终止
+		// （宿主 cancel / TTL 耗尽 / 收束 / 同 ID 复用替换）——子图信号阻塞令
+		// 声明无法满足时，等待不再令池线程永久挂起：检测到父轮终止即主动
+		// cancel 子图 task 并解围返回（父子取消边界打通）。
 		submit(tid, std::move(declarations), maxHops);
-		_engine->wait(tid, std::chrono::milliseconds(0)); // 内部路径：无限等待至子图 task 终止
+		static constexpr auto kParentPollInterval = std::chrono::milliseconds(100);
+		while (!_engine->wait(tid, kParentPollInterval)) {
+			if (!ctx.isCancellationRequested())
+				continue;
+			cancel(tid); // 子图任务解围（幂等；已终态时无操作）
+			_engine->wait(tid, std::chrono::seconds(1)); // 有限等待收尾（结果不再使用）
+			return ctx.failure(Node::Status::ExecutionFailed,
+							   "parent task terminated while awaiting subgraph completion");
+		}
 
 		// 检查本 task 的错误诊断（task 级判定，不读全局 hasErrors/clearErrors）
 		auto errors = taskErrors(tid);

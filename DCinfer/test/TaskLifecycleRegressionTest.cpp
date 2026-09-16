@@ -1,4 +1,4 @@
-// 任务生命周期回归测试（发布前审查 F04-F10 修复的确定性用例）
+// 任务生命周期回归测试（发布前审查 F04-F10 修复 + H-3/H-5 修复的确定性用例）
 //
 // 锁定"轮次化任务状态"重构后的行为契约：
 //   F04 同 ID 复用竞态：旧轮次排队 lambda 不得消费新一轮输入；取消后复用必须成功
@@ -7,6 +7,10 @@
 //   F08 releaseTask 仅终态可释放：活动任务拒绝时声明/结果/诊断保持不动
 //   F09 句柄析构：未提交立即释放输入；在飞弃置即请求取消并随即回收（协作式）
 //   F10 提交失败（不可达声明）不留 Running 残留，可重试
+//   H-3 收尾窗口：终态已发布、结果可读前的复用/注入/释放全部拒绝；
+//       弃置（detach）登记自动回收，收尾完成后无残留
+//   H-5 并发同 ID 提交：原子事务下恰一方成功，胜者任务状态/声明/输出完整
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <future>
@@ -371,6 +375,176 @@ static void testUnreachableSubmitRollback() {
 }
 
 // ════════════════════════════════════════════
+// H-3：收尾窗口（终态已发布、结果可读前）复用/注入/释放全部拒绝
+// ════════════════════════════════════════════
+
+static void testReuseDuringFinalizeRejected() {
+	TEST("H-3: reuse during finalizing window rejected (blocked callback widens window)") {
+		std::promise<void> cbEntered, cbGo;
+		auto cbEnteredF = cbEntered.get_future();
+		bool submitRejectedInCb = false, feedRejectedInCb = false, releaseKeptState = false;
+
+		InferGraph g;
+		g.addNode(std::make_unique<Node>("test", "n", passSchema(), passRunFn()));
+		g.bindInput("x", "n", "x");
+		g.bindOutput("y", "n", "y");
+
+		// 回调阻塞：人为拉长收尾窗口（终态已发布，结果抢救/执行态清理未完成）
+		g.setTaskCompleteCallback([&](const std::string& tid) {
+			cbEntered.set_value();
+			cbGo.get_future().wait();
+
+			// 回调内复用尝试：提交/注入均被拒（DuplicateTask），释放被拒（状态保留）
+			try {
+				g.submit(tid, "n", "y");
+			} catch (const GraphException& e) {
+				submitRejectedInCb = (e.getErrorType() == GraphException::ErrorType::DuplicateTask);
+			}
+			try {
+				g.feedInput(tid, "n", "x", floatValue(9.0f));
+			} catch (const GraphException& e) {
+				feedRejectedInCb = (e.getErrorType() == GraphException::ErrorType::DuplicateTask);
+			}
+			g.releaseTask(tid); // 收尾中：引擎拒绝，状态/结果保持不动
+			releaseKeptState = (g.taskStatus(tid) != TaskStatus::Unknown);
+		});
+
+		g.feedInput("t", "n", "x", floatValue(1.0f));
+		g.submitBound("t");
+		cbEnteredF.wait();
+
+		// 收尾窗口内（回调阻塞中）：终态可见，但复用/注入/释放全部拒绝
+		CHECK(g.taskStatus("t") != TaskStatus::Running, "terminal status must be visible during finalize");
+
+		bool feedRejected = false;
+		try {
+			g.feedInput("t", "n", "x", floatValue(5.0f));
+		} catch (const GraphException& e) {
+			feedRejected = (e.getErrorType() == GraphException::ErrorType::DuplicateTask);
+		}
+		CHECK(feedRejected, "feed during finalize must be rejected (input would be silently dropped)");
+
+		bool submitRejected = false;
+		try {
+			g.submit("t", "n", "y");
+		} catch (const GraphException& e) {
+			submitRejected = (e.getErrorType() == GraphException::ErrorType::DuplicateTask);
+		}
+		CHECK(submitRejected, "submit during finalize must be rejected");
+
+		g.releaseTask("t"); // 收尾中：拒绝
+		CHECK(g.taskStatus("t") != TaskStatus::Unknown, "release during finalize must be rejected");
+
+		cbGo.set_value(); // 放行回调 → 收尾完成（结果可读发布）
+
+		const auto r = g.waitForResult("t", 2s);
+		CHECK(r.status == TaskStatus::Succeeded, "task must complete after finalize window closes");
+		CHECK(submitRejectedInCb && feedRejectedInCb && releaseKeptState,
+			  "in-callback reuse attempts must be rejected while finalizing");
+
+		// 收尾完成后：复用同 ID 合法，且新一轮结果无旧轮残留
+		g.feedInput("t", "n", "x", floatValue(9.0f));
+		g.submit("t", "n", "y");
+		const auto r2 = g.waitForResult("t", 2s);
+		CHECK(r2.status == TaskStatus::Succeeded, "reuse after finalize must succeed");
+		CHECK(std::abs(g.takeOutputTensor("t", "n", "y").item<float>() - 9.0f) < 1e-6f,
+			  "reused round must reflect fresh input (no stale artifact)");
+	}
+	END_TEST();
+}
+
+static void testDetachDuringFinalize() {
+	TEST("H-3: detach during finalize auto-releases after cleanup completes") {
+		std::promise<void> cbEntered, cbGo;
+		auto cbEnteredF = cbEntered.get_future();
+
+		InferGraph g;
+		g.addNode(std::make_unique<Node>("test", "n", passSchema(), passRunFn()));
+		g.bindInput("x", "n", "x");
+		g.bindOutput("y", "n", "y");
+		g.setTaskCompleteCallback([&](const std::string&) {
+			cbEntered.set_value();
+			cbGo.get_future().wait();
+		});
+
+		g.feedInput("t", "n", "x", floatValue(3.0f));
+		g.submitBound("t");
+		cbEnteredF.wait();
+
+		g.detachTask("t"); // 收尾中：登记自动回收（不立即释放、不破坏收尾事务）
+		CHECK(g.taskStatus("t") != TaskStatus::Unknown, "detach during finalize must not release immediately");
+
+		cbGo.set_value();
+
+		// 收尾完成后自动回收：状态表条目/结果/诊断清空（轮询至回收完成）
+		const auto deadline = std::chrono::steady_clock::now() + 2s;
+		while (g.taskStatus("t") != TaskStatus::Unknown && std::chrono::steady_clock::now() < deadline)
+			std::this_thread::sleep_for(5ms);
+		CHECK(g.taskStatus("t") == TaskStatus::Unknown, "detached finalizing task must be auto-released");
+		CHECK(!g.hasOutput("t", "n", "y"), "auto-released task must clear artifacts");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// H-5：并发同 ID 提交 —— 原子事务恰一方成功
+// ════════════════════════════════════════════
+
+static void testConcurrentSubmitSameId() {
+	TEST("H-5: concurrent submit on same taskId -> exactly one wins, winner intact") {
+		std::promise<void> entered, go;
+		auto enteredF = entered.get_future();
+		auto goF = go.get_future().share();
+
+		InferGraph g({1}, {2}, {1}); // 双 Operator 线程：两线程真正并发进入 submit
+		g.addNode(std::make_unique<Node>("test", "n", passSchema(),
+			[&](Node::RunContext& ctx) -> Node::Result {
+				entered.set_value();
+				goF.wait(); // 首轮执行阻塞：胜者轮次保持 Running，败者必遭 DuplicateTask
+				const auto* x = ctx.input<Tensor>("x");
+				if (!x)
+					return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+				ctx.output("y", Value(std::make_unique<Tensor>(*x)));
+				return ctx.success();
+			}));
+		g.bindInput("x", "n", "x");
+		g.bindOutput("y", "n", "y");
+
+		g.feedInput("t", "n", "x", floatValue(7.0f));
+
+		std::atomic<int> wins{0}, dups{0};
+		std::atomic<bool> start{false};
+		auto submitter = [&]() {
+			while (!start.load())
+				std::this_thread::yield();
+			try {
+				g.submit("t", "n", "y");
+				++wins;
+			} catch (const GraphException& e) {
+				if (e.getErrorType() == GraphException::ErrorType::DuplicateTask)
+					++dups;
+			}
+		};
+		std::thread t1(submitter), t2(submitter);
+		start.store(true);
+		t1.join();
+		t2.join();
+
+		CHECK(wins.load() == 1, "exactly one concurrent submit must win");
+		CHECK(dups.load() == 1, "the losing submit must fail with DuplicateTask");
+
+		enteredF.wait(); // 胜者轮次执行中（阻塞）
+		go.set_value();
+
+		const auto r = g.waitForResult("t", 2s);
+		CHECK(r.status == TaskStatus::Succeeded, "winner task must complete with intact declarations");
+		CHECK(std::abs(g.takeOutputTensor("t", "n", "y").item<float>() - 7.0f) < 1e-6f,
+			  "winner output must be intact (no cross-submit corruption)");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
@@ -382,6 +556,9 @@ int main() {
 		testUnsubmittedDestructorFreesInput();
 		testDiscardedCancelsAndReleases();
 		testUnreachableSubmitRollback();
+		testReuseDuringFinalizeRejected();
+		testDetachDuringFinalize();
+		testConcurrentSubmitSameId();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;
 		return 1;
