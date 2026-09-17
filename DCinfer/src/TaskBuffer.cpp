@@ -110,6 +110,19 @@ Value TaskBuffer::takeOutput(const TaskId& taskId, const std::string& name) {
 	return result;
 }
 
+std::optional<Value> TaskBuffer::tryTakeOutput(const TaskId& taskId, const std::string& name) {
+	std::unique_lock lk(_mutex);
+	auto taskIt = _taskOutputs.find(taskId);
+	if (taskIt == _taskOutputs.end())
+		return std::nullopt;
+	auto slotIt = taskIt->second.find(name);
+	if (slotIt == taskIt->second.end() || !slotIt->second.has_value())
+		return std::nullopt;
+	Value result = std::move(slotIt->second.value());
+	slotIt->second.reset();
+	return result;
+}
+
 std::unordered_map<std::string, TaskBuffer::TaskData> TaskBuffer::collectOutputs(const TaskId& taskId) {
 	std::unique_lock lk(_mutex);
 	std::unordered_map<std::string, TaskData> result;
@@ -141,7 +154,14 @@ void TaskBuffer::clearTask(const TaskId& taskId) {
 
 size_t TaskBuffer::taskCount() const {
 	std::shared_lock lk(_mutex);
-	return _taskInputs.size();
+	// 与 hasTask 同口径（#8-17）：输入表 ∪ 输出表——执行后输入已擦除
+	// 但输出未取走的任务（eraseInputs 后）仍被计入
+	size_t count = _taskInputs.size();
+	for (const auto& [tid, entry] : _taskOutputs) {
+		if (!_taskInputs.contains(tid))
+			++count;
+	}
+	return count;
 }
 
 // ── 批量传输（供 ExecutionPipeline 使用）──

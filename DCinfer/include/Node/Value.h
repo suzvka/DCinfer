@@ -103,9 +103,10 @@ public:
 	}
 
 	/// @brief  产生共享只读别名：与 *this 指向同一载荷（引用计数 +1，零拷贝）。
-	///        别名生命周期独立延长载荷；不产生 deep copy；携带发布标记
-	///        （isPublished）——出口产出独立可变副本的依据。
+	///        别名生命周期独立延长载荷；不产生 deep copy；发布标记为粘性——
+	///        源句柄与全部别名从此恒视为"已发布"（isPublished）。
 	Value share() const {
+		_published = true; // 粘性发布标记：源句柄（载荷曾被发布）也保持标记
 		Value v;
 		v._innerType = _innerType;
 		v._ptr = _ptr;
@@ -118,9 +119,10 @@ public:
 		return _ptr && _ptr.use_count() > 1;
 	}
 
-	/// @brief  载荷处于（或曾处于）共享发布状态：本句柄源自 share()，
-	///        或载荷仍被多处引用。发布过的载荷可能为冻结只读态——
-	///        出口需要可变所有权时应先 cloneOwned()（take 语义）。
+	/// @brief  载荷处于（或曾处于）共享发布状态：本句柄源自 share() 或
+	///        曾调用过 share()（粘性标记，别名消亡后仍保持），或载荷当前
+	///        仍被多处引用。发布过的载荷可能为冻结只读态——出口需要可变
+	///        所有权时应先 cloneOwned()（take 语义）。
 	bool isPublished() const {
 		return _published || isShared();
 	}
@@ -153,7 +155,7 @@ public:
 private:
 	std::shared_ptr<void> _ptr; ///< 类型擦除载荷（引用计数共享；保留原始类型删除器）。
 	SlotDataType _innerType = SlotDataTypeUnknown; ///< 内部数据类型的标签。
-	bool _published = false; ///< 发布标记：本句柄经 share() 发布（随 move 流转）。
+	mutable bool _published = false; ///< 粘性发布标记：句柄经 share() 发布过（随 move 流转）
 };
 
 } // namespace DC

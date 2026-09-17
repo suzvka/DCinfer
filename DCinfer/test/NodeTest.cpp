@@ -361,6 +361,8 @@ void runTests() {
 		exec.tryExecute("task1");
 
 		CHECK(exec.hasOutput("task1", "s"), "hasOutput should be true");
+		// #8-17 并集口径：执行后输入已擦除、输出未取——任务仍须计入
+		CHECK(exec.taskCount() == 1, "task with undrained outputs must still be counted");
 		auto outNT = exec.takeOutput("task1", "s");
 		auto* out = outNT.as<Tensor>();
 		CHECK(std::abs(out->item<float>() - 15.0f) < 1e-6f, "polling value mismatch");

@@ -253,6 +253,51 @@ static void runTensorDataExceptionTests() {
 			fail("TensorData(shape{2,3}, data) typeSize inference mismatch");
 	}
 
+	// 13) expand（#8-5）：秩不匹配/空 shape/降维目标拒绝；1D/标量目标行为正确
+	{
+		TensorData td;
+		td.write(std::vector<size_t>{0}, std::vector<float>{1.0f, 2.0f, 3.0f}); // 2D 数据（catalog {0} + 3 元素）
+		// 目标秩低于当前 → 拒绝（原实现越界读 UB）
+		expectInvalidArgument([&] { td.expand(std::vector<size_t>{2}, 0.0f); }, "expand rank mismatch (target lower)");
+		// 目标秩高于当前 → 拒绝
+		expectInvalidArgument([&] { td.expand(std::vector<size_t>{2, 1, 1}, 0.0f); },
+							  "expand rank mismatch (target higher)");
+		// 空 shape 目标 → 拒绝（原实现对空 shape 的 back() 为 UB）
+		expectInvalidArgument([&] { td.expand(std::vector<size_t>{}, 0.0f); }, "expand empty target shape");
+	}
+
+	// 13b) expand 2-D 正常路径：缺失块以 fillData 填充（回归保护）
+	{
+		TensorData td;
+		td.write(std::vector<size_t>{0}, std::vector<float>{1.0f, 2.0f, 3.0f}); // block {0}
+		td.expand(std::vector<size_t>{2, 3}, 9.0f); // 目标 {2,3}：块 {1} 缺失 → 填充 9.0
+		auto span = td.data<float>();
+		if (span.size() != 6)
+			fail("expand 2-D dense size mismatch");
+		if (std::abs(span[0] - 1.0f) > 1e-6f || std::abs(span[5] - 9.0f) > 1e-6f)
+			fail("expand 2-D must fill missing block with fillData");
+	}
+
+	// 13c) expand 1-D 目标：已有 root 块保持数据（不再走"循环零迭代"静默分支）
+	{
+		TensorData td;
+		td.write({}, std::vector<float>{1.0f, 2.0f, 3.0f}); // 1-D root block
+		td.expand(std::vector<size_t>{5}, 7.0f); // 目标 {5} ≥ {3}
+		auto span = td.data<float>();
+		if (span.size() != 3 || std::abs(span[0] - 1.0f) > 1e-6f)
+			fail("expand 1-D must keep existing data and not corrupt");
+	}
+
+	// 13d) expand 标量目标：等 shape 提前返回（no-op）
+	{
+		TensorData td;
+		td.write({}, 3.5f);
+		td.expand(std::vector<size_t>{}, 9.99f);
+		auto v = td.readElement<float>({});
+		if (std::abs(v - 3.5f) > 1e-6f)
+			fail("expand scalar target must be a no-op");
+	}
+
 	std::cout << "TensorData exception tests passed" << std::endl;
 }
 

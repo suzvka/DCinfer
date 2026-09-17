@@ -162,6 +162,9 @@ void testValueShareIdentity() {
 		a = {};
 		b = {};
 		CHECK(!v.isShared() && v.useCount() == 1, "back to sole ownership after aliases released");
+		// 粘性发布标记（#8-9）：别名消亡后源句柄仍视为已发布——载荷曾发布过，
+		// 出口路径（takeOutput）据此产出独立副本，不误判独占交付
+		CHECK(v.isPublished(), "source handle stays published after aliases die (sticky)");
 	}
 	END_TEST();
 }

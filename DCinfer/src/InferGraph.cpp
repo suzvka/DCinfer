@@ -22,8 +22,9 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName, Value data) {
 	_ensureFrozen(); // 惰性冻结：运行期 API 入口统一编译（此后拓扑不可变）
 
-	// 收尾窗口（终态已发布、结果抢救未完成）拒绝注入：此时旧轮执行态容器
-	// 仍挂在域表上、随后将被 clearTaskState 摘除——注入的输入会静默丢失。
+	// 收尾窗口（终态已发布、结果抢救未完成）快速预检拒绝；原子保障在
+	// 下方 tryWriteTaskState——写入与收尾抢救同锁互斥，不存在
+	// "检查通过后写入随即被 clearTaskState 摘除"的静默丢失（#8-12）。
 	// 复用语义：waitForResult 返回（结果可读）后再 feed。
 	if (_engine->isFinalizing(taskId))
 		throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::feedInput",
@@ -35,11 +36,18 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
 							 "node '" + nodeName + "' not found");
 	try {
-		// 输入写入 task 执行域的 per-node 缓冲；
+		// 写入经引擎收尾协议保护（轮次锁内执行）：收尾窗口拒绝时抛出，
+		// 不给旧轮（即将被 clearTaskState 摘除）写入任何输入；
 		// shared_ptr 先落局部量，防止临时量析构导致引用悬垂
-		auto ts = _state->exec->taskState(taskId);
-		auto& ns = ts->ensure(nodeName, n->schema());
-		ns.buffer.setInput(taskId, portName, std::move(data), n->schema());
+		const bool accepted = _engine->tryWriteTaskState(taskId, [&] {
+			auto ts = _state->exec->taskState(taskId);
+			auto& ns = ts->ensure(nodeName, n->schema());
+			ns.buffer.setInput(taskId, portName, std::move(data), n->schema());
+		});
+		if (!accepted)
+			throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::feedInput",
+								 "task '" + taskId
+									 + "' is finalizing; feed input after waitForResult/release");
 	} catch (const NodeException& e) {
 		_state->errors.recordError(taskId, nodeName, "InferGraph::feedInput",
 							"NodeException in setInput for port '" + portName

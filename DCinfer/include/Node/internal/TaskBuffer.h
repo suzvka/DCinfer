@@ -64,6 +64,13 @@ public:
 	/// @throws NodeException(OutputNotProduced) 若输出端口为空。
 	Value takeOutput(const TaskId& taskId, const std::string& name);
 
+	/// @brief  消费式取出输出数据（一次加锁完成「检查 + 取数」）。
+	///         与 hasOutput + takeOutput 两步序列不同：检查与取数在同一临界区，
+	///         并发取数时后到者得到 nullopt，不存在 OutputNotProduced 抛出窗口
+	///         （check-then-act 竞态根治，#3）。
+	/// @return 消费出的数据；任务不存在或输出端口为空返回 nullopt（不抛异常）
+	std::optional<Value> tryTakeOutput(const TaskId& taskId, const std::string& name);
+
 	/// @brief  批量消费所有输出。
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
 

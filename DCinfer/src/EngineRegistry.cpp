@@ -279,12 +279,9 @@ std::vector<std::string> EngineRegistry::engineTypes() const {
 bool EngineRegistry::registerOperator(const std::string& operatorName, Node::Schema schema, Node::RunFn fn) {
 	if (operatorName.empty())
 		return false;
-	{
-		std::lock_guard lk(_mutex);
-		if (_engines.contains(operatorName))
-			return false;
-	}
 
+	// 描述符在锁外构造（无共享状态依赖）；检查与插入合并为单一临界区——
+	// 并发同名注册恰一方成功，败者返回 false，不静默覆盖（#8-2）
 	EngineDescriptor desc;
 	desc.engineType = operatorName;
 	desc.converter = {builtinToNative, builtinToDC};
@@ -296,6 +293,8 @@ bool EngineRegistry::registerOperator(const std::string& operatorName, Node::Sch
 	};
 
 	std::lock_guard lk(_mutex);
+	if (_engines.contains(operatorName))
+		return false;
 	_engines[operatorName] = std::move(desc);
 	return true;
 }

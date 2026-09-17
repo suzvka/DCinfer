@@ -670,6 +670,51 @@ static void testConstructorValidation() {
 }
 
 // ════════════════════════════════════════════
+// 14. #6 修复回归：绑定输出缺失 → 显式失败（携带缺失端口信息）
+// ════════════════════════════════════════════
+
+static void testMissingBoundOutputFailFast() {
+	TEST("missing bound output after subgraph success -> explicit failure with port info (#6)") {
+		auto sub = std::make_shared<InferGraph>();
+		sub->addNode(std::make_unique<Node>("test", "n", identitySchema(), identityRunFn()));
+		sub->bindInput("x", "n", "x");
+		sub->bindOutput("y", "n", "y");
+
+		// 子图完成回调消费掉绑定输出：声明满足但产物不再可取（收尾时数据
+		// 已在 OutputZone，回调先于父节点取数执行）。修复前步骤⑤静默跳过 →
+		// 父节点以"无输出"判败（根因被掩盖）；修复后显式失败并携带端口信息。
+		std::atomic<bool> consumed{false};
+		sub->setTaskCompleteCallback([&](const std::string& tid) {
+			try {
+				sub->takeOutput(tid, "n", "y");
+				consumed.store(true);
+			} catch (...) {
+				// 消费失败不阻断回调
+			}
+		});
+
+		GraphOperator op(sub);
+		InferGraph parent;
+		parent.addNode(op.makeNode("Blk"));
+		parent.feedInput("t1", "Blk", "x", floatValue(1.0f));
+		parent.submit("t1", "Blk", "y", 1);
+
+		const auto res = parent.waitForResult("t1", 5s);
+		CHECK(consumed.load(), "sanity: callback must consume the bound output");
+		CHECK(res.status == TaskStatus::Failed, "missing bound output must fail explicitly");
+
+		bool carriesPort = false;
+		for (const auto& e : parent.taskErrors("t1")) {
+			if (e.message.find("bound outputs were not produced") != std::string::npos
+				&& e.message.find("y") != std::string::npos)
+				carriesPort = true;
+		}
+		CHECK(carriesPort, "failure diagnostic must carry the missing port info");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
@@ -686,6 +731,7 @@ int main() {
 		testOperatorDestroyedNodeStillRuns();
 		testInnerFailureDiagnosticsForwarded();
 		testConstructorValidation();
+		testMissingBoundOutputFailFast();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;
 		return 1;

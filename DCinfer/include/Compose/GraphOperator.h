@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace DC {
 
@@ -19,7 +20,7 @@ namespace DC {
 ///
 /// ── 定位：组合工具，非核心图语义 ──
 /// 仅使用公开 API（bindings / feedInput / submitBound / waitForResult /
-/// cancel / detachTask / releaseTask / taskId / isCancellationRequested），
+/// cancel / detachTask / taskId / isCancellationRequested），
 /// 不涉及任何 InferGraph 特判；宿主对"子图"的使用方式与自定义算子一致：
 /// 构造 → makeNode → addNode。若要真正复用一个逻辑块，推荐将其建模为
 /// 自定义算子（见 examples/03_custom_node）；本工具适用于"把现成图整体
@@ -37,9 +38,10 @@ namespace DC {
 /// 由此消灭"makeNode 后改绑定"的 schema 漂移窗口与懒冻结竞争。
 ///
 /// ── 子任务空间：命名空间化 ──
-/// 每次执行以 "父任务ID|实例号|节点名" 命名子任务——同一子图被多个组合
-/// 节点、多个父图（含任务 ID 撞名）并发复用时互不冲突，无 DuplicateTask
-/// 限制（逐节点实例号的进程级唯一性由原子计数器保证）。
+/// 每次执行以 "父任务ID|实例号|节点名" 命名子任务（段内 | 与 \ 转义，
+/// 拼接单射）——同一子图被多个组合节点、多个父图（含任务 ID 撞名与
+/// 分隔符字符）并发复用时互不冲突，无 DuplicateTask 限制（逐节点实例号
+/// 的进程级唯一性由原子计数器保证）。
 ///
 /// ── 执行语义：等待型节点 ──
 /// RunFn 内同步喂入 → 提交 → 分段等待子图任务，并周期性感知父任务取消
@@ -91,10 +93,19 @@ public:
 		const uint64_t instanceId = _nextInstanceId.fetch_add(1, std::memory_order_relaxed) + 1;
 
 		auto runFn = [graph = _graph, opts = _opts, nodeName, instanceId](Node::RunContext& ctx) -> Node::Result {
-			// 子任务 ID：父任务空间 + 本节点实例命名空间——
-			// 同一子图的多节点/多父图并发复用互不冲突（无 DuplicateTask 限制）。
-			const std::string childTid =
-				ctx.taskId() + "|" + std::to_string(instanceId) + "|" + nodeName;
+			// 子任务 ID：父任务空间 + 本节点实例命名空间——段内 | 与 \ 转义
+			// （单射拼接）：taskId/节点名含分隔符时跨任务/实例仍不碰撞（#8-14）。
+			const std::string childTid = _escapeIdSegment(ctx.taskId()) + "|"
+									 + std::to_string(instanceId) + "|" + _escapeIdSegment(nodeName);
+
+			// 子任务资源守卫（RAII，#6）：任何退出路径（含步骤⑤取数抛出）都
+			// 回收子任务——已终态立即释放；仍在飞/收尾中登记自动回收，不泄漏。
+			struct ChildTaskGuard {
+				InferGraph& graph;
+				const std::string& childTid;
+
+				~ChildTaskGuard() { graph.detachTask(childTid); }
+			} childGuard{*graph, childTid};
 
 			// ① 输入注入：父级已投递的数据按绑定代理到子图；未投递的输入
 			//    跳过（把可选输入/默认值语义交还子图自身的就绪判定）。
@@ -115,7 +126,6 @@ public:
 				if (ctx.isCancellationRequested()) {
 					graph->cancel(childTid);
 					graph->waitForResult(childTid, kCancelGrace); // 限时收尾（结果不再使用）
-					graph->detachTask(childTid); // 已终态立即回收；仍在飞 → 终态自动回收
 					return ctx.failure(Node::Status::ExecutionFailed,
 									   "block '" + nodeName + "' (child task '" + childTid +
 										   "'): parent task cancelled while awaiting subgraph completion");
@@ -123,23 +133,37 @@ public:
 				res = graph->waitForResult(childTid, opts.pollInterval);
 			}
 
-			// ④ 终止判定：非成功 → 转发内层诊断并回收子任务资源
+			// ④ 终止判定：非成功 → 转发内层诊断（资源由守卫回收）
 			if (res.status != TaskStatus::Succeeded) {
 				std::string detail;
 				if (!res.errors.empty())
 					detail = ": " + res.errors[0].message;
-				graph->releaseTask(childTid);
 				return ctx.failure(Node::Status::ExecutionFailed,
 								   "block '" + nodeName + "' (child task '" + childTid +
 									   "'): subgraph terminated with status " + _statusName(res.status) + detail);
 			}
 
-			// ⑤ 输出收集（仅已产出端口）→ 回收子任务资源
+			// ⑤ 输出收集：缺失即显式失败（fail-fast，#6）——真实根因
+			//    （声明满足但绑定端口未产出）不再被父节点"无输出"判败掩盖。
+			std::vector<std::string> missing;
 			for (const auto& b : graph->outputBindings()) {
-				if (graph->hasOutput(childTid, b.nodeName, b.portName))
-					ctx.output(b.alias, graph->takeOutput(childTid, b.nodeName, b.portName));
+				if (!graph->hasOutput(childTid, b.nodeName, b.portName)) {
+					missing.push_back(b.alias);
+					continue;
+				}
+				ctx.output(b.alias, graph->takeOutput(childTid, b.nodeName, b.portName));
 			}
-			graph->releaseTask(childTid); // 终态回收：结果/诊断不滞留
+			if (!missing.empty()) {
+				std::string list;
+				for (const auto& alias : missing) {
+					if (!list.empty())
+						list += ", ";
+					list += alias;
+				}
+				return ctx.failure(Node::Status::ExecutionFailed,
+								   "block '" + nodeName + "' (child task '" + childTid +
+									   "'): subgraph finished but bound outputs were not produced: " + list);
+			}
 			return ctx.success();
 		};
 
@@ -231,6 +255,20 @@ private:
 		case TaskStatus::Cancelled: return "Cancelled";
 		}
 		return "Unknown";
+	}
+
+	/// @brief 子任务命名空间段转义：\ → \\、| → \|——保证
+	///        "段A|实例号|段B" 拼接单射（段内不出现裸分隔符，
+	///        taskId/节点名含 | 时跨任务/实例仍不碰撞）。
+	static std::string _escapeIdSegment(const std::string& s) {
+		std::string out;
+		out.reserve(s.size());
+		for (char c : s) {
+			if (c == '\\' || c == '|')
+				out.push_back('\\');
+			out.push_back(c);
+		}
+		return out;
 	}
 
 	std::shared_ptr<InferGraph> _graph; ///< 子图（共享所有权：节点经 RunFn 捕获延长其生命周期）

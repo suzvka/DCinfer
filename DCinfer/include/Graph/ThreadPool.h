@@ -36,8 +36,12 @@ public:
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool& operator=(const ThreadPool&) = delete;
 
-	/// @brief  fire-and-forget 提交
-	void submit(std::function<void()> task);
+	/// @brief  fire-and-forget 提交。
+	/// @return true = 任务已入队；false = 池已关闭或入队失败（内存压力）——
+	///         任务未被接受，调用方应按失败语义处理（不得假设任务会执行）
+	/// @note   队列无界（无背压）：提交速率长期超过执行速率时内存占用随之
+	///         增长，宿主应以提交节流或扩大线程数控制队列规模
+	bool submit(std::function<void()> task);
 
 	/// @brief  优雅关闭（丢弃队列中未执行的任务）
 	void shutdown();

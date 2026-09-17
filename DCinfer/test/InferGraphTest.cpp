@@ -667,7 +667,7 @@ void testInputZoneRoundTrip() {
 		graph.bindInput("a", "n2", "a");
 		graph.bindInput("b", "n2", "b");
 
-		auto& bindings = graph.inputBindings();
+		auto bindings = graph.inputBindings(); // 值副本（#8-4）
 		CHECK(bindings.size() == 3, "should have 3 input bindings");
 		CHECK(bindings[0].nodeName == "n1", "first binding node should be n1");
 		CHECK(bindings[0].portName == "x", "first binding port should be x");

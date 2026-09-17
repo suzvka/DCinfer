@@ -178,16 +178,18 @@ TensorSlot& TensorSlot::store(T&& data) {
 		}
 	}
 
-	// 释放旧数据
-	if (_blob.has_value() && _blob->deleter && _blob->ptr) {
-		_blob->deleter(_blob->ptr);
-	}
-
-	// 类型擦除存储
+	// 类型擦除存储（强异常安全，#5）：先在局部完成新值构造——构造抛出
+	// （内存压力下的 bad_alloc / 可抛的拷贝构造）时旧值保持完好，不出现
+	// "旧数据已释放、_blob 仍持悬垂指针"的 UAF / 双重释放窗口。
 	TypedBlob blob;
 	blob.type = typeEnum;
 	blob.ptr = new std::decay_t<T>(std::forward<T>(data));
 	blob.deleter = [](void* p) { delete static_cast<std::decay_t<T>*>(p); };
+
+	// 新值构造成功后再释放旧数据
+	if (_blob.has_value() && _blob->deleter && _blob->ptr) {
+		_blob->deleter(_blob->ptr);
+	}
 	_blob = std::move(blob);
 
 	return *this;

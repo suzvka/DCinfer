@@ -258,8 +258,8 @@ public:
 	/// @brief  获取所有边的只读引用
 	const std::vector<Edge>& edges() const { return _topology().edges(); }
 
-	/// @brief  获取所有输入绑定的只读引用
-	const std::vector<InputBinding>& inputBindings() const { return _inputBindingsView(); }
+	/// @brief  获取所有输入绑定（值副本）
+	std::vector<InputBinding> inputBindings() const { return _inputBindingsView(); }
 
 	/// @brief  获取所有输出绑定的只读引用
 	const std::vector<OutputBinding>& outputBindings() const { return _outputBindingsView(); }
@@ -340,8 +340,8 @@ private:
 		return _builder->store();
 	}
 
-	/// @brief  输入绑定视图：冻结后读 GraphSignature（无锁），构建期读 builder
-	const std::vector<InputBinding>& _inputBindingsView() const {
+	/// @brief  输入绑定视图（值副本）：冻结后读 GraphSignature，构建期读 builder
+	std::vector<InputBinding> _inputBindingsView() const {
 		if (auto snap = _state->snapshot())
 			return snap->signature().inputs;
 		return _builder->inputBindings();

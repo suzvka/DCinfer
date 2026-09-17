@@ -114,8 +114,8 @@ public:
 		return _snapshot ? _snapshot->store().edges() : _store->edges();
 	}
 
-	/// @brief  获取所有输入绑定的只读引用
-	const std::vector<InputBinding>& inputBindings() const {
+	/// @brief  获取所有输入绑定（值副本）
+	std::vector<InputBinding> inputBindings() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().inputBindings() : _store->inputBindings();
 	}

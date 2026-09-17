@@ -24,12 +24,23 @@ ThreadPool::~ThreadPool() {
 	shutdown();
 }
 
-void ThreadPool::submit(std::function<void()> task) {
+bool ThreadPool::submit(std::function<void()> task) {
 	{
 		std::lock_guard lk(_mutex);
-		_taskQueue.push(std::move(task));
+		// 已关闭（shutdown 后）拒绝：任务入队后无消费者，返回失败让调用方
+		// 按失败语义收尾，避免任务静默滞留（#8-1）
+		if (!_running.load(std::memory_order_acquire))
+			return false;
+		// 入队可能因内存压力抛 bad_alloc：捕获后按拒绝处理（#7）——
+		// 提交方（_submitNodeRun）据返回值回滚在飞计数，不静默丢任务
+		try {
+			_taskQueue.push(std::move(task));
+		} catch (...) {
+			return false;
+		}
 	}
 	_cv.notify_one();
+	return true;
 }
 
 void ThreadPool::shutdown() {

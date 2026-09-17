@@ -354,10 +354,6 @@ public:
 	const Tensor& _top;
 };
 
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// Template Implementations: Tensor
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
 template <typename T>
 Tensor Tensor::Create(const Shape& shape, DataBlock&& data) {
 	TensorMeta::ensureTypeMap();
@@ -368,7 +364,7 @@ Tensor Tensor::Create(const Shape& shape, DataBlock&& data) {
 
 template <typename T>
 T Tensor::item() const {
-	return _data.readElement<T>({}); // 0-D scalar access via empty path
+	return _data.readElement<T>({}); // 通过空路径访问标量数据
 }
 
 template <typename T>
@@ -377,7 +373,7 @@ Tensor& Tensor::operator=(const T& value) {
 		abort(*err, "type mismatch in scalar assignment");
 	}
 
-	// Prefer dense-write fast-path to safely create 0-D scalar if no cache exists.
+	// 如果不存在缓存，优先使用密集写入快速路径安全地创建0维标量。
 	DataBlock bytes(_meta.typeSize);
 	std::fill(bytes.begin(), bytes.end(), std::byte(0));
 	std::memcpy(bytes.data(), &value, std::min(sizeof(T), _meta.typeSize));
@@ -389,7 +385,7 @@ Tensor& Tensor::operator=(const T& value) {
 		_data.setScalar(true);
 		return *this;
 	}
-	// No dense cache: set dense bytes to represent scalar (creates dense-pass-through mode)
+	// 没有稠密缓存：设置稠密字节以表示标量（创建稠密通过模式）
 	_data.loadData({}, _meta.typeSize, std::move(bytes));
 	_data.setScalar(true);
 	return *this;
@@ -470,8 +466,7 @@ std::span<const T> Tensor::read(const Shape& path) const {
 	return _data.read<T>(indexShape(path, true));
 }
 
-// Expected-based implementations
-
+// 标量读写
 template <typename T>
 T Tensor::readScalar(const Shape& path) const {
 	// dataShape is TensorData::Shape (vector<size_t>)
@@ -481,19 +476,19 @@ T Tensor::readScalar(const Shape& path) const {
 	if (auto err = checkPathValid(path, dataShape))
 		abort(*err, "invalid path in scalar read");
 
-	// If path length equals rank, read the single element
+	// 如果路径长度等于秩，则读取单个元素
 	if (path.size() == dataShape.size()) {
 		auto full = indexShape(path, true); // convert/validate
 		return _data.readElement<T>(full);
 	}
 
-	// Path shorter than rank: ensure remaining dimensions multiply to 1
-	// convert dataShape to Tensor::Shape for checkSingleElementView
+	// 路径短于秩：确保剩余维度乘积为1
+	// 将 dataShape 转换为 Tensor::Shape 以进行单元素检查
 	Shape asTensorShape(dataShape.begin(), dataShape.end());
 	if (auto err = checkSingleElementView(path, asTensorShape))
 		abort(*err, "not a scalar view");
 
-	// build full path with trailing zeros
+	// 构建完整路径，末尾填充零
 	Shape fullPath = path;
 	fullPath.insert(fullPath.end(), dataShape.size() - path.size(), 0);
 	auto full = indexShape(fullPath, true);

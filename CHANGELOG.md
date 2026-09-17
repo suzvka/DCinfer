@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-17
+
+### Fixed
+
+- **#2（P0）僵尸重试污染已完成/已复用任务**：`_terminate()` 终态迁移成功处统一
+  置 `round->terminated`（确立"已收尾 ⇒ 已终止"不变量）——经节点执行门排队
+  （`enqueueRetry`，不计 `inflight`）的迟到重试与迟到的在飞传播在提交/执行/
+  传播全部拦截点被丢弃，不再事后覆盖已发布结果，也不再向同 ID 复用轮次写入
+  计数与结果。
+- **#3（P0）收尾抢救与传播线程竞态跳过 `clearTaskState`**：`TaskBuffer` 新增
+  `tryTakeOutput`（一次加锁完成"检查+取数"，无输出返回 `nullopt`，不抛异常）
+  替换 `_terminate` 抢救段与 `_propagateFrom` 第二/三步的 check-then-act 序列；
+  抢救段移入 `round->m` 临界区并以 RAII 守卫保证 `clearTaskState` 必然执行
+  ——`cancel()` 不再有异常逃逸路径，同 ID 复用不再继承陈旧执行态（残留输入
+  重放被根除）。
+- **#8-12 `feedInput` 收尾窗口输入丢失**：`ExecutionEngine` 新增
+  `tryWriteTaskState`（持 `round->m` 检查"终态已发布、resultsReady 未置"的
+  收尾窗口并拒绝写入），`InferGraph::feedInput` 经其执行 taskState + setInput
+  写入，拒绝时统一抛 `DuplicateTask`——Running→finalizing 竞态窗口内输入
+  不再静默丢失，同 ID 复用（重试）语义完整。
+- **#4（P1）`~ExecutionEngine` 析构期跨池提交 UB**：析构起始显式按
+  `_computePool` → `_operatorPool` → `_systemPool` 顺序 `shutdown()` 全部
+  join 后再移出轮次表；配合 `submit` 的关闭检查（#8-1），残余跨池竞态收敛
+  为良性丢弃（不再持已销毁互斥、写已销毁队列）。
+- **#5（P1）`TensorSlot::store` 构造抛出致悬垂指针（UAF/双释放）**：改为先在
+  局部完成新值构造、成功后再释放旧值并接手（强异常安全）——构造失败时旧值
+  完好，`peek`/`take` 不再读到已释放内存。
+- **#6（P1）`GraphOperator` 子任务资源泄漏 + 绑定输出缺失静默**：RunFn 全流程
+  套 RAII 守卫（析构 `detachTask`），含取数抛出在内的任何退出路径都不再滞留
+  子图结果与 OutputZone 条目；绑定输出缺失由静默跳过改 fail-fast
+  （`ExecutionFailed` 并携带缺失端口别名列表）。
+- **#7（P1）派发失败致 `inflight` 永久泄漏、任务挂起**：`ThreadPool::submit`
+  改返回 `bool`（池已关闭或入队失败 → false，含内存压力下 `bad_alloc` 不再
+  抛异常）；`_submitNodeRun` 对"拒绝 + 异常"统一回滚计数并按 Failed 收尾
+  （与 RunDone 归零语义一致），`_dispatchToPool` 透传三池结果——不再绕过
+  maxHops 与宿主护栏无限 Running。
+- **#8（P2 清理 17 项）**：`InferGraph::submit` 声明遍历补节点/端口存在性校验
+  （拼写错误不再致任务悬挂，#8-13）；`EngineRegistry::registerOperator` 检查
+  与插入合并单临界区（并发同名不再静默覆盖，#8-2）；`GraphStore::nodeNames`
+  补锁（#8-3）；`TensorData::expand` 补空 shape/秩不等校验并修复 1D 单块填充
+  路径（#8-5）；`TensorData::write(element)` 删除死代码预计算（#8-6）；
+  `buildCache` 越界截断路径补断言诊断（debug 构建暴露数据不一致，#8-7）；
+  `buildView` 标量/1D 降级路径补 `setViewFlag()`（#8-8）；`TaskBuffer::taskCount`
+  改并集口径（`_taskInputs ∪ _taskOutputs`）与 `hasTask` 一致（#8-17）。
+
+### Changed
+
+- **`ThreadPool::submit` 返回值契约**：`void` → `bool`（false = 池已关闭或
+  入队失败，任务未被接受）；任务队列无界设计意图注释显式声明。
+- **`EnvRegistry::getOrCreate` 句柄化**：`void*` → `std::shared_ptr<void>`
+  ——`release`/`releaseAll` 仅移除缓存，外部持有句柄期间实例存活；`nullptr`
+  语义保留（#8-15）。
+- **`Value::isPublished` 粘性语义**：`share()` 同时置位源句柄"曾发布"标记
+  ——别名消亡后源句柄仍报告已发布；`takeOutput` 克隆路径据此收紧（共享/
+  冻结载荷不逃逸，方向更安全，#8-9）。
+- **绑定查询改值副本返回**：`InferGraph`/`GraphStore`/`GraphBuilder`/
+  `InputZone` 的 `bindings`/`inputBindings` 由锁外引用改返回值副本（#8-4）。
+- **`NodeExecutionGate` 清理**：删除死状态 `_currentTaskId` 与
+  `setCurrentTask`/`clearCurrentTask`（连带 `ExecutionPipeline` 调用点）；
+  `enqueueRetry` 同 key 去重改"后到覆盖"（消除 TTL 轻微漂移，#8-10）。
+- **`GraphOperator` childTid 转义**：taskId/节点名中的 `\` 与 `|` 转义后拼接
+  （单射不碰撞，#8-14）。
+- **`ExecutionEngine` 移动操作显式 `= delete`**（原 `= default` 实为删除），
+  头文件注释修正（`_isTerminated` → `_exhaustedCheck`，#8-11）。
+- README："灵活的图拓扑"节声明同口多上游串行化汇聚（N:1）为规划特性
+  （当前未实现，#8-16）。
+- 测试：新增 `ThreadPoolTest`（submit 返回值语义）与
+  `TaskLifecycleRegressionTest`（门重试×收尾交叉、cancel×count>1 完成竞态
+  循环 + 同 ID 复用、feed×finalizing 竞态）；`TensorDataTest`、
+  `GraphOperatorTest`、`TensorSlotTest`、`EnvRegistryTest`、`ValueSharingTest`、
+  `NodeTest` 增补用例与断言。
+
 ## [0.6.0] - 2026-09-17
 
 ### Added

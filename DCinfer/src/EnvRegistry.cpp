@@ -25,15 +25,15 @@ bool EnvRegistry::registerEnv(const std::string& envType,
 	return true;
 }
 
-void* EnvRegistry::getOrCreate(const std::string& envType) {
+std::shared_ptr<void> EnvRegistry::getOrCreate(const std::string& envType) {
 	// 锁内拷贝工厂，锁外调用（factory 是用户回调，可能重入注册表）
 	std::function<std::shared_ptr<void>()> factory;
 	{
 		std::lock_guard lk(_mutex);
-		// 已缓存则直接返回
+		// 已缓存则直接返回共享句柄
 		auto instIt = _instances.find(envType);
 		if (instIt != _instances.end())
-			return instIt->second.get();
+			return instIt->second;
 
 		auto factIt = _factories.find(envType);
 		if (factIt == _factories.end())
@@ -49,7 +49,7 @@ void* EnvRegistry::getOrCreate(const std::string& envType) {
 
 	std::lock_guard lk(_mutex);
 	auto [it, _] = _instances.emplace(envType, std::move(instance));
-	return it->second.get();
+	return it->second;
 }
 
 void EnvRegistry::release(const std::string& envType) {

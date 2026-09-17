@@ -180,6 +180,7 @@ void GraphStore::bindInput(const std::string& nodeName, const std::string& portN
 // ════════════════════════════════════════════
 
 std::vector<std::string> GraphStore::nodeNames() const {
+	std::lock_guard lk(_mutex); // 与同类查询 API 一致持锁（#8-3）：无锁遍历并发修改即 UB
 	std::vector<std::string> names;
 	names.reserve(_nodes.size());
 	for (const auto& [name, nodePtr] : _nodes) {

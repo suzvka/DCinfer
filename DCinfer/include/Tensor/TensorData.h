@@ -371,15 +371,15 @@ bool TensorData::write(const Shape& fullPath, const T& value) {
 	updateCatalog(blockPath, "TensorData::write(element)");
 	ensureView();
 
-	size_t targetBlockSize = (elementIndex + 1) * typeSize();
-	// Guard against multiplication overflow when computing target block byte size
+	// Guard against multiplication overflow before computing target block byte
+	// size（#8-6：删除被覆盖的死代码式预计算，检查后只计算一次）
 	if (typeSize() != 0) {
 		size_t maxElems = std::numeric_limits<size_t>::max() / typeSize();
 		if (elementIndex > maxElems) {
 			throw std::out_of_range("TensorData::write(element): index too large");
 		}
 	}
-	targetBlockSize = (elementIndex + 1) * typeSize();
+	const size_t targetBlockSize = (elementIndex + 1) * typeSize();
 	auto it = _dataMain.find(blockPath);
 	DataBlock block;
 	if (it == _dataMain.end()) {
@@ -517,6 +517,12 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	auto current = getCurrentShape();
 	if (current == targetShape)
 		return *this;
+	// 秩校验（#8-5）：目标秩必须与当前一致——原实现对空 shape 的 back()
+	// 与低秩目标 T 为 UB，对一维目标静默不做任何填充；现显式拒绝
+	if (targetShape.size() != current.size()) {
+		throw std::invalid_argument(
+			"TensorData::expand: rank mismatch (target rank must equal current rank)");
+	}
 	for (size_t i = 0; i < current.size(); ++i) {
 		if (targetShape[i] < current[i]) {
 			throw std::invalid_argument(
@@ -528,23 +534,33 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	size_t blockRank = (rank >= 1) ? rank - 1 : 0;
 	size_t blockLen = targetShape.back();
 
-	// iterate over all block paths (multi-index loop)
-	Shape blockPath(blockRank, 0);
-	bool done = (blockRank == 0); // zero-dim block space handled separately
-	while (!done) {
-		if (_dataMain.find(blockPath) == _dataMain.end()) {
-			updateCatalog(blockPath, "TensorData::expand");
+	if (blockRank == 0) {
+		// 一维目标：整个数据即单块（root path）——缺失则以 fillData 整块填充
+		if (_dataMain.find({}) == _dataMain.end()) {
+			updateCatalog({}, "TensorData::expand");
 			std::vector<T> vals(blockLen, fillData);
 			auto bytes = deposit(std::span<const T>(vals.data(), vals.size()));
-			commitData(blockPath, std::move(bytes));
+			commitData({}, std::move(bytes));
 		}
-		// increment blockPath lexicographically with carry
-		for (size_t i = 0; i < blockRank; ++i) {
-			if (++blockPath[i] < targetShape[i])
-				break;
-			blockPath[i] = 0;
-			if (i + 1 == blockRank)
-				done = true;
+	} else {
+		// iterate over all block paths (multi-index loop)
+		Shape blockPath(blockRank, 0);
+		bool done = false;
+		while (!done) {
+			if (_dataMain.find(blockPath) == _dataMain.end()) {
+				updateCatalog(blockPath, "TensorData::expand");
+				std::vector<T> vals(blockLen, fillData);
+				auto bytes = deposit(std::span<const T>(vals.data(), vals.size()));
+				commitData(blockPath, std::move(bytes));
+			}
+			// increment blockPath lexicographically with carry
+			for (size_t i = 0; i < blockRank; ++i) {
+				if (++blockPath[i] < targetShape[i])
+					break;
+				blockPath[i] = 0;
+				if (i + 1 == blockRank)
+					done = true;
+			}
 		}
 	}
 

@@ -24,7 +24,8 @@ namespace DC {
 //   EnvRegistry::instance().registerEnv("ONNX", []() {
 //       return std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "dc");
 //   });
-//   auto* env = static_cast<Ort::Env*>(EnvRegistry::instance().getOrCreate("ONNX"));
+//   auto env = EnvRegistry::instance().getOrCreate("ONNX");
+//   auto* raw = static_cast<Ort::Env*>(env.get());
 //
 // 释放顺序：先 releaseAllEngines()，再 releaseAll()。
 class EnvRegistry {
@@ -41,10 +42,14 @@ public:
 					 std::function<void(void*)> cleanup = nullptr);
 
 	/// @brief  获取或创建环境实例（按 envType 缓存）
-	/// @return 环境裸指针，若未注册则返回 nullptr
-	void* getOrCreate(const std::string& envType);
+	/// @return 环境实例共享句柄；未注册时返回空
+	/// @note   句柄与注册表缓存共享所有权：release/releaseAll 仅移除缓存，
+	///         外部持有句柄期间实例保持存活（不再有"释放后裸指针悬垂"
+	///         窗口，#8-15）。
+	std::shared_ptr<void> getOrCreate(const std::string& envType);
 
-	/// @brief  释放指定环境（若存在则先调用 cleanup 钩子再移除实例）
+	/// @brief  释放指定环境（若存在则先调用 cleanup 钩子再移除缓存）。
+	///         外部仍持有句柄的实例随最后一个句柄释放而析构。
 	void release(const std::string& envType);
 
 	/// @brief  释放所有环境（依序调用所有 cleanup）

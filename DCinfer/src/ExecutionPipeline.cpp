@@ -45,16 +45,12 @@ NodeResult ExecutionPipeline::execute(
 		throw NodeException(NodeException::ErrorType::Reentrant, "ExecutionPipeline::execute",
 							"node '" + node.name() + "' is busy executing another task");
 	}
-	gate.setCurrentTask(taskId);
 
 	// 租约 RAII（H-1/H-2）：任何退出路径（含完成回调在异常分支二次抛出）
 	// 都必须释放租约——闸泄漏会让重试登记永久滞留、节点永久不可再执行。
 	struct GateGuard {
 		NodeExecutionGate& gate;
-		~GateGuard() {
-			gate.clearCurrentTask();
-			gate.release();
-		}
+		~GateGuard() { gate.release(); }
 	} gateGuard{gate};
 
 	NodeResult result;

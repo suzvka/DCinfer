@@ -146,6 +146,57 @@ static void runTensorSlotTests() {
 		if (!thrown)
 			throw std::runtime_error("expected exception on type mismatch take");
 	}
+
+	// Test 6: store 构造抛出（拷贝构造可抛）时旧值保持完好（#5 强异常安全）
+	{
+		struct ThrowingCopy {
+			std::string payload;
+			bool throwOnCopy = false;
+
+			ThrowingCopy() = default;
+			ThrowingCopy(std::string p, bool bomb) : payload(std::move(p)), throwOnCopy(bomb) {}
+			ThrowingCopy(const ThrowingCopy& o) : payload(o.payload), throwOnCopy(o.throwOnCopy) {
+				if (o.throwOnCopy)
+					throw std::runtime_error("copy boom");
+			}
+			ThrowingCopy(ThrowingCopy&&) noexcept = default;
+			ThrowingCopy& operator=(const ThrowingCopy&) = delete;
+			ThrowingCopy& operator=(ThrowingCopy&&) noexcept = default;
+		};
+
+		TensorSlot::Config cfg = TensorSlot::CreateConfig();
+		cfg.setPosition(TensorSlot::Config::Position::Input);
+		TensorSlot slot("safe", TensorMeta::TensorType::Float, sizeof(float), {1}, cfg);
+
+		ThrowingCopy oldVal{"intact", false};
+		slot.store(oldVal); // lvalue → 拷贝构造存储
+
+		const auto* before = slot.peek<ThrowingCopy>();
+		if (!before || before->payload != "intact")
+			throw std::runtime_error("sanity: initial store failed");
+
+		ThrowingCopy bomby{"replacement", true};
+		bool thrown = false;
+		try {
+			slot.store(bomby); // 拷贝构造抛出：旧值必须保持完好（不得悬垂/双释放）
+		} catch (const std::runtime_error&) {
+			thrown = true;
+		}
+		if (!thrown)
+			throw std::runtime_error("expected exception from throwing copy on store");
+		if (!slot.hasData())
+			throw std::runtime_error("old value must survive a throwing store");
+		const auto* still = slot.peek<ThrowingCopy>();
+		if (!still || still->payload != "intact")
+			throw std::runtime_error("old value corrupted after throwing store (UAF/double-free)");
+
+		// 后续正常 store 仍工作（槽位状态未被破坏）
+		ThrowingCopy fresh{"fresh", false};
+		slot.store(fresh);
+		const auto* after = slot.peek<ThrowingCopy>();
+		if (!after || after->payload != "fresh")
+			throw std::runtime_error("slot must remain usable after a throwing store");
+	}
 }
 
 int main() {

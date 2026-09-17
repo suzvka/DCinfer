@@ -545,6 +545,197 @@ static void testConcurrentSubmitSameId() {
 }
 
 // ════════════════════════════════════════════
+// #2 修复回归：僵尸重试 —— 收尾轮次的待重试经 terminated 拦截丢弃
+// ════════════════════════════════════════════
+
+static void testZombieRetryAfterFinalize() {
+	TEST("#2: enqueued retry must not execute after its round finalized (zombie discarded)") {
+		std::promise<void> entered, go;
+		auto ready = go.get_future().share(); // shared_future：僵尸重试再次进入不挂起
+		std::atomic<bool> firstEntry{true};
+
+		InferGraph g({2}, {2}, {2}); // 多 worker：门被占期间 B 的提交可真实执行
+		g.addNode(std::make_unique<Node>("test", "gate", passSchema(),
+			[&](Node::RunContext& ctx) -> Node::Result {
+				if (firstEntry.exchange(false))
+					entered.set_value();
+				ready.wait();
+				const auto* x = ctx.input<Tensor>("x");
+				if (!x)
+					return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+				ctx.output("y", Value(std::make_unique<Tensor>(*x)));
+				return ctx.success();
+			}));
+		g.addNode(std::make_unique<Node>("test", "err", passSchema(),
+			[](Node::RunContext& ctx) -> Node::Result {
+				return ctx.failure(Node::Status::ExecutionFailed, "deliberate error node");
+			}));
+
+		// A：占住 gate 节点执行门（长时间执行）
+		g.feedInput("A", "gate", "x", floatValue(1.0f));
+		g.submit("A", "gate", "y");
+		entered.get_future().wait();
+
+		// B：gate 提交抛 Reentrant → 重试排队（不计 inflight）；err 报错 →
+		// B 经 _exhaustedCheck 收尾为 Failed（修复点：终态迁移必置 terminated）
+		g.feedInput("B", "gate", "x", floatValue(2.0f));
+		g.feedInput("B", "err", "x", floatValue(2.0f));
+		g.submit("B", {{"gate", "y"}, {"err", "y"}});
+
+		const auto deadline = std::chrono::steady_clock::now() + 2s;
+		while (g.taskStatus("B") == TaskStatus::Running && std::chrono::steady_clock::now() < deadline)
+			std::this_thread::sleep_for(2ms);
+		CHECK(g.taskStatus("B") == TaskStatus::Failed, "B must finalize as Failed (error node)");
+
+		// 放行 A：门释放 → 派发 B 的待重试 → terminated 拦截，僵尸不执行
+		go.set_value();
+		const auto ra = g.waitForResult("A", 2s);
+		CHECK(ra.status == TaskStatus::Succeeded, "task A must complete normally");
+		CHECK(std::abs(g.takeOutputTensor("A", "gate", "y").item<float>() - 1.0f) < 1e-6f,
+			  "task A result must be intact");
+
+		// 给异步路径留时间：修复后收尾轮次不得出现僵尸产出
+		std::this_thread::sleep_for(150ms);
+		CHECK(!g.hasOutput("B", "gate", "y"),
+			  "zombie retry must not execute/accumulate into finalized round");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// #3 修复回归：cancel × 完成竞态 —— 收尾清理必然完成，复用无残留
+// ════════════════════════════════════════════
+
+static void testCancelVsCompletionRace() {
+	TEST("#3: cancel x completion race loop with same-ID reuse (no state residue)") {
+		for (int round = 0; round < 30; ++round) {
+			InferGraph g({2}, {2}, {2});
+			g.addNode(std::make_unique<Node>("test", "n", passSchema(),
+				[](Node::RunContext& ctx) -> Node::Result {
+					const auto* x = ctx.input<Tensor>("x");
+					if (!x)
+						return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+					ctx.output("y", Value(std::make_unique<Tensor>(*x)));
+					// 产出后微睡：把 cancel 竞态落在“产出已写入、搬运/收尾未完成”窗口内
+					std::this_thread::sleep_for(std::chrono::microseconds(200));
+					return ctx.success();
+				}));
+
+			const std::string tid = "race";
+			g.feedInput(tid, "n", "x", floatValue(1.0f));
+			g.submit(tid, "n", "y");
+
+			std::atomic<bool> go{false};
+			std::thread canceller([&] {
+				while (!go.load())
+					std::this_thread::yield();
+				g.cancel(tid);
+			});
+			go.store(true);
+
+			const auto r = g.waitForResult(tid, 2s);
+			canceller.join();
+			CHECK(r.status == TaskStatus::Succeeded || r.status == TaskStatus::Cancelled,
+				  "task must terminate as Succeeded or Cancelled under cancel race");
+
+			// 复用同 ID：旧轮执行态清理必然完成，新一轮不得读入残留输入/输出
+			g.feedInput(tid, "n", "x", floatValue(3.0f));
+			g.submit(tid, "n", "y");
+			const auto r2 = g.waitForResult(tid, 2s);
+			CHECK(r2.status == TaskStatus::Succeeded, "reused round must succeed");
+			CHECK(std::abs(g.takeOutputTensor(tid, "n", "y").item<float>() - 3.0f) < 1e-6f,
+				  "reused round must reflect fresh input (no stale residue)");
+		}
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// #8-12 修复回归：finishing 窗口并发 feed —— 要么接受要么 DuplicateTask
+// ════════════════════════════════════════════
+
+static void testConcurrentFeedDuringFinalize() {
+	TEST("#8-12: concurrent feed during active/finalizing task -> accepted or DuplicateTask only") {
+		for (int round = 0; round < 20; ++round) {
+			InferGraph g({2}, {2}, {2});
+			g.addNode(std::make_unique<Node>("test", "n", passSchema(), passRunFn()));
+
+			const std::string tid = "cf";
+			g.feedInput(tid, "n", "x", floatValue(1.0f));
+			g.submit(tid, "n", "y");
+
+			std::atomic<bool> stop{false};
+			std::atomic<int> protocolViolations{0};
+			std::thread feeder([&] {
+				while (!stop.load()) {
+					try {
+						g.feedInput(tid, "n", "x", floatValue(2.0f));
+					} catch (const GraphException& e) {
+						if (e.getErrorType() != GraphException::ErrorType::DuplicateTask)
+							++protocolViolations; // 只允许收尾窗口拒绝
+					} catch (...) {
+						++protocolViolations;
+					}
+				}
+			});
+
+			const auto r = g.waitForResult(tid, 2s);
+			stop.store(true);
+			feeder.join();
+			CHECK(r.status == TaskStatus::Succeeded, "task must succeed despite concurrent feed");
+			CHECK(protocolViolations.load() == 0,
+				  "concurrent feed must only be accepted or rejected as DuplicateTask");
+
+			// 复用同 ID：新一轮结果干净
+			g.feedInput(tid, "n", "x", floatValue(4.0f));
+			g.submit(tid, "n", "y");
+			const auto r2 = g.waitForResult(tid, 2s);
+			CHECK(r2.status == TaskStatus::Succeeded, "reuse after concurrent feed must succeed");
+			CHECK(std::abs(g.takeOutputTensor(tid, "n", "y").item<float>() - 4.0f) < 1e-6f,
+				  "reused round must reflect fresh input");
+		}
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
+// #8-13 修复回归：声明坐标拼写错误在提交期即拒绝（不留 Running 残留）
+// ════════════════════════════════════════════
+
+static void testTypoDeclarationRejected() {
+	TEST("#8-13: typo in declared node/port rejected at submit with clear error") {
+		InferGraph g;
+		g.addNode(std::make_unique<Node>("test", "n", passSchema(), passRunFn()));
+		g.feedInput("t", "n", "x", floatValue(1.0f));
+
+		bool portRejected = false;
+		try {
+			g.submit("t", "n", "y_typo");
+		} catch (const GraphException& e) {
+			portRejected = (e.getErrorType() == GraphException::ErrorType::PortNotFound);
+		}
+		CHECK(portRejected, "typo port must be rejected with PortNotFound at submit");
+		CHECK(g.taskStatus("t") == TaskStatus::Unknown, "rejected submit must leave no Running residue");
+
+		bool nodeRejected = false;
+		try {
+			g.submit("t", "n_typo", "y");
+		} catch (const GraphException& e) {
+			nodeRejected = (e.getErrorType() == GraphException::ErrorType::NodeNotFound);
+		}
+		CHECK(nodeRejected, "typo node must be rejected with NodeNotFound at submit");
+
+		// 修正后提交成功（提交入口无状态污染）
+		g.submit("t", "n", "y");
+		const auto r = g.waitForResult("t", 2s);
+		CHECK(r.status == TaskStatus::Succeeded, "corrected submit must succeed");
+		CHECK(std::abs(g.takeOutputTensor("t", "n", "y").item<float>() - 1.0f) < 1e-6f,
+			  "corrected submit result must be intact");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
@@ -559,6 +750,10 @@ int main() {
 		testReuseDuringFinalizeRejected();
 		testDetachDuringFinalize();
 		testConcurrentSubmitSameId();
+		testZombieRetryAfterFinalize();
+		testCancelVsCompletionRace();
+		testConcurrentFeedDuringFinalize();
+		testTypoDeclarationRejected();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;
 		return 1;

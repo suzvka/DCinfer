@@ -28,8 +28,8 @@ public:
 	void bind(const std::string& nodeName, const std::string& portName,
 			  const std::string& alias);
 
-	/// @brief  获取所有输入绑定（只读，保留插入顺序）
-	const std::vector<InputBinding>& bindings() const;
+	/// @brief  获取所有输入绑定（值副本，保留插入顺序）
+	std::vector<InputBinding> bindings() const;
 
 private:
 	mutable std::mutex _mutex;
@@ -47,9 +47,9 @@ inline void InputZone::bind(const std::string& nodeName,
 	_bindingsList.push_back({nodeName, portName, alias});
 }
 
-inline const std::vector<InputBinding>& InputZone::bindings() const {
+inline std::vector<InputBinding> InputZone::bindings() const {
 	std::lock_guard lk(_mutex);
-	return _bindingsList;
+	return _bindingsList; // 副本返回（#8-4）：锁外持有的引用在并发 bind 时失效
 }
 
 } // namespace DC

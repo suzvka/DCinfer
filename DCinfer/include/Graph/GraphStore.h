@@ -101,8 +101,8 @@ public:
 	/// @brief  获取所有边的只读引用
 	const std::vector<Edge>& edges() const { return _edges; }
 
-	/// @brief  获取所有输入绑定的只读引用
-	const std::vector<InputBinding>& inputBindings() const { return _inputZone.bindings(); }
+	/// @brief  获取所有输入绑定（值副本）
+	std::vector<InputBinding> inputBindings() const { return _inputZone.bindings(); }
 
 	/// @brief  获取所有节点的只读引用
 	const std::unordered_map<std::string, std::unique_ptr<Node>>& nodes() const { return _nodes; }
@@ -129,8 +129,9 @@ private:
 	InputZone _inputZone;
 
 	// 构图串行化与封印标志：全部构图方法持锁；compile() 先 seal() 再只读遍历，
-	// 保证封印后的拓扑对快照构建与运行期完全只读（详见类注释）
-	std::mutex _mutex;
+	// 保证封印后的拓扑对快照构建与运行期完全只读（详见类注释）。
+	// mutable：const 查询（如 nodeNames，#8-3）也需在常量上下文中获取锁。
+	mutable std::mutex _mutex;
 	bool _sealed = false;
 };
 

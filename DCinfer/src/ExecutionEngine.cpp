@@ -38,9 +38,15 @@ ExecutionEngine::ExecutionEngine(const PoolConfig& computeCfg,
 	  _systemPool(systemCfg) {}
 
 ExecutionEngine::~ExecutionEngine() {
-	// 先将轮次表整体移出（锁外释放）：析构中的轮次对象不再触发任何引擎回访，
-	// 锁内 clear 保留防御性（未来若恢复回访路径，锁内 clear 会自死锁）。
-	// 成员随后逆序析构：线程池先 shutdown/join，状态成员最后释放。
+	// 先显式依次关闭三池并等待全部 join（#4）：池 shutdown-join 期间其余池
+	// 的在飞 lambda 仍可经 _dispatchToPool 提交——此时引擎全部状态成员存活，
+	// 被关闭池的 submit 拒绝返回 false，调用方按失败语义收尾（#7），不再
+	// 出现"向逐个析构中的池成员提交"的 UB。join 完成后不再有并发生产者。
+	_computePool.shutdown();
+	_operatorPool.shutdown();
+	_systemPool.shutdown();
+
+	// 再移出轮次表（锁外释放）：析构中的轮次对象不再触发任何引擎回访。
 	decltype(_rounds) leftover;
 	{
 		std::lock_guard lk(_roundsMutex);
@@ -53,19 +59,17 @@ ExecutionEngine::~ExecutionEngine() {
 // 线程池分发
 // ════════════════════════════════════════════
 
-void ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity,
+bool ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity,
 									  std::function<void()> task) {
 	switch (affinity) {
 	case ThreadPoolAffinity::Compute:
-		_computePool.submit(std::move(task));
-		break;
+		return _computePool.submit(std::move(task));
 	case ThreadPoolAffinity::Operator:
-		_operatorPool.submit(std::move(task));
-		break;
+		return _operatorPool.submit(std::move(task));
 	case ThreadPoolAffinity::System:
-		_systemPool.submit(std::move(task));
-		break;
+		return _systemPool.submit(std::move(task));
 	}
+	return false; // 枚举全覆盖（防御：未知 affinity 按拒绝处置）
 }
 
 void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeName,
@@ -74,10 +78,15 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 	if (round->terminated.load(std::memory_order_acquire))
 		return;
 
-	// 在飞计数 +1：submit 入口扫描与传播下游提交统一经本函数促发
+	// 在飞计数 +1：submit 入口扫描与传播下游提交统一经本函数促发。
+	// 派发可能被拒（池已关闭）或因内存压力抛异常（入队/lambda 构造）——
+	// 统一按失败语义回滚计数并收尾（#7）：否则在飞计数泄漏使
+	// _exhaustedCheck 永不触发，任务无限 Running 绕过 maxHops 与宿主护栏。
 	round->inflight.fetch_add(1, std::memory_order_acq_rel);
-	_dispatchToPool(node->affinity(),
-					[this, node, nodeName, round, remainingHops] {
+	bool dispatched = false;
+	try {
+		dispatched = _dispatchToPool(node->affinity(),
+									 [this, node, nodeName, round, remainingHops] {
 		// 在飞计数收尾（RAII）：任何退出路径均经本析构递减；归零且本轮
 		// 未终止时由最后完成的 lambda 触发耗尽检测。
 		struct RunDone {
@@ -180,7 +189,21 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 
 		// 节点执行成功 → 就地传播输出到下游（池线程内，与调度点同上下文）
 		_propagateFrom(nodeName, round, remainingHops);
-	});
+		});
+	} catch (...) {
+		// 派发中分配失败（lambda/std::function 构造）：按拒绝处理
+	}
+	if (!dispatched) {
+		// 派发被拒（池已关闭或入队失败）：回滚在飞计数 + 诊断 + 触发耗尽
+		// 检测（归零语义与 RunDone 一致 → 因 Error 诊断收尾为 Failed）
+		auto& errors = round->state->errors;
+		errors.recordError(round->taskId, nodeName, "ExecutionEngine::_submitNodeRun",
+						   "task dispatch rejected (pool stopped or memory pressure)");
+		if (round->inflight.fetch_sub(1, std::memory_order_acq_rel) == 1
+			&& !round->terminated.load(std::memory_order_acquire)) {
+			_exhaustedCheck(round);
+		}
+	}
 }
 
 // ════════════════════════════════════════════
@@ -213,8 +236,19 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 	for (const auto& b : snap->signature().inputs)
 		starts.push_back(b.nodeName);
 	std::unordered_set<std::string> targets;
-	for (const auto& d : declarations)
+	for (const auto& d : declarations) {
+		// 声明坐标校验（#8-13）：拼错的节点/端口名在提交期即暴露——
+		// 否则声明永远无法满足，任务悬置至宿主护栏且无任何诊断
+		auto* declared = graph.node(d.nodeName);
+		if (!declared)
+			throw GraphException(GraphException::ErrorType::NodeNotFound, "ExecutionEngine::submit",
+								 "declared output node '" + d.nodeName + "' not found in graph");
+		if (!declared->schema().findOutput(d.portName))
+			throw GraphException(GraphException::ErrorType::PortNotFound, "ExecutionEngine::submit",
+								 "declared output port '" + d.portName + "' not found on node '"
+									 + d.nodeName + "'");
 		targets.insert(d.nodeName);
+	}
 	if (!starts.empty() && !targets.empty()
 		&& !canSatisfyTopologically(snap->runtimeView(), starts, targets)) {
 		throw GraphException(GraphException::ErrorType::UnreachableDeclaration,
@@ -268,6 +302,22 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 		// 入口节点：执行 + 完成后就地传播（_submitNodeRun 内部处理）
 		_submitNodeRun(nodePtr, nodeName, round, maxHops);
 	}
+}
+
+bool ExecutionEngine::tryWriteTaskState(const TaskId& taskId, const std::function<void()>& writeOp) {
+	auto round = _findRound(taskId);
+	if (!round) {
+		// 无轮次（从未提交 / 已释放）：不存在并发收尾，直接写入
+		writeOp();
+		return true;
+	}
+	// 与 _terminate 的结果抢救段（clearTaskState）同一互斥（#8-12）：
+	// 收尾窗口内拒绝写入，非收尾窗口内写入不可能被收尾摘除
+	std::lock_guard lk(round->m);
+	if (round->terminalStatus != TaskStatus::Running && !round->resultsReady)
+		return false; // 收尾窗口：终态已发布、结果可读未发布，拒绝
+	writeOp();
+	return true;
 }
 
 // ════════════════════════════════════════════
@@ -330,15 +380,19 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 
 	// 第二步：OutputZone 目的地搬运 — OutputZone 绑定端口消费后自然空
 	for (const auto& outPort : src->schema().outputs) {
-		if (!srcNs || !srcNs->buffer.hasOutput(taskId, outPort.name))
+		if (!srcNs)
 			continue;
 		if (snap->signature().isOutputBound(nodeName, outPort.name)) {
 			// [检查点 2] 终止复查：OutputZone 写入前再确认本轮未被终止
 			// （取消/复用可能在检查点 1 与打卡复查之后触发）
 			if (round->terminated.load(std::memory_order_acquire))
 				return;
-			Value data = srcNs->buffer.takeOutput(taskId, outPort.name);
-			output.append(taskId, nodeName, outPort.name, std::move(data),
+			// 一次加锁完成检查+取数（#3）：与 _terminate 抢救并发时后到者
+			// 得 nullopt 跳过，不再抛 OutputNotProduced 穿透池线程
+			auto data = srcNs->buffer.tryTakeOutput(taskId, outPort.name);
+			if (!data)
+				continue;
+			output.append(taskId, nodeName, outPort.name, std::move(*data),
 						  {nodeName, outPort.name, taskId});
 		}
 	}
@@ -364,7 +418,12 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 			continue;
 		}
 
-		Value data = srcNs->buffer.takeOutput(taskId, edge.srcPort);
+		// 一次加锁完成检查+取数（#3）：前置 hasOutput 仅为快速过滤，
+		// 与 _terminate 抢救并发时后到者得 nullopt 跳过，不再抛异常穿透池线程
+		auto dataOpt = srcNs->buffer.tryTakeOutput(taskId, edge.srcPort);
+		if (!dataOpt)
+			continue;
+		Value data = std::move(*dataOpt);
 
 		// [检查点 3] 写入下游前再确认一次本轮未被终止（轮次级，同 ID 复用安全）
 		if (round->terminated.load(std::memory_order_acquire))
@@ -442,11 +501,15 @@ void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskSta
 
 	// 防止重复终止（幂等）：仅 Running → 终态迁移一次有效。
 	// 此处仅发布终态；"结果可读"由收尾守卫在 notify 前统一发布。
+	// 终态迁移成功即置 terminated 标记（#2）：确立「已收尾 ⇒ 已终止」不变
+	// 量——迟到的僵尸重试与在飞传播经 terminated 检查全部丢弃，不再触碰
+	// 已完成/已复用轮次（cancel、TTL 判死、打卡满足路径共用此唯一迁移点）。
 	{
 		std::lock_guard lk(round->m);
 		if (round->terminalStatus != TaskStatus::Running)
 			return;
 		round->terminalStatus = terminalStatus;
+		round->terminated.store(true, std::memory_order_release);
 	}
 
 	// 收尾守卫（RAII，F07）：任何后续步骤异常不得跳过"结果可读发布 + 唤醒
@@ -503,18 +566,36 @@ void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskSta
 	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → takeOutput 可取，
 	//    含取消/失败路径的部分结果），再从域表清除本轮的节点执行态
 	//    （在飞 lambda 经 round->execState 保活至流水线结束）。
-	//    回调在①已先行触发，其消费过的端口 hasOutput=false 自然跳过。
-	if (round->execState) {
-		for (const auto& decl : output.declarationsOf(taskId)) {
-			auto* ns = round->execState->find(decl.nodeName);
-			if (!ns || !ns->buffer.hasOutput(taskId, decl.portName))
-				continue;
-			Value data = ns->buffer.takeOutput(taskId, decl.portName);
-			output.append(taskId, decl.nodeName, decl.portName, std::move(data),
-						  {decl.nodeName, decl.portName, taskId});
+	//    回调在①已先行触发，其消费过的端口已消费，取数自然返回空。
+	//
+	//    锁协议（#3/#8-12）：本段在 round->m 内执行——与 feedInput 的
+	//    tryWriteTaskState 同一互斥：收尾窗口内的输入注入被明确拒绝，不再出现
+	//    "检查通过后写入随即被 clearTaskState 摘除"的静默丢失；取数经
+	//    tryTakeOutput 一次加锁完成检查+取数，与传播线程并发时后到者得
+	//    nullopt 而非抛 OutputNotProduced（异常不再从 _terminate 逃逸）；
+	//    clearTaskState 经作用域守卫保证必然执行（抢救中任何异常不跳过清理）。
+	{
+		std::lock_guard lk(round->m);
+		struct ClearGuard {
+			TaskExecutionDomain& domain;
+			const TaskId& taskId;
+
+			~ClearGuard() { domain.clearTaskState(taskId); }
+		} clearGuard{*state->exec, taskId};
+
+		if (round->execState) {
+			for (const auto& decl : output.declarationsOf(taskId)) {
+				auto* ns = round->execState->find(decl.nodeName);
+				if (!ns)
+					continue;
+				auto data = ns->buffer.tryTakeOutput(taskId, decl.portName);
+				if (!data)
+					continue;
+				output.append(taskId, decl.nodeName, decl.portName, std::move(*data),
+							  {decl.nodeName, decl.portName, taskId});
+			}
 		}
 	}
-	state->exec->clearTaskState(taskId);
 
 	// ⑤⑥ 由 finish 守卫发布"结果可读"并唤醒全部等待者：
 	//    wait 谓词（终态 + resultsReady）与两个发布点绑定同一把轮次锁

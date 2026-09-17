@@ -71,10 +71,10 @@ static void runTests() {
 
 	// ── Test 6: getOrCreate 按名创建实例 ──
 	{
-		auto* env = reg.getOrCreate("Mock");
+		auto env = reg.getOrCreate("Mock");
 		if (!env)
 			throw std::runtime_error("getOrCreate returned null");
-		auto* mock = static_cast<MockEnv*>(env);
+		auto* mock = static_cast<MockEnv*>(env.get());
 		if (mock->id != 42)
 			throw std::runtime_error("mock env id mismatch: expected 42, got " + std::to_string(mock->id));
 	}
@@ -82,12 +82,12 @@ static void runTests() {
 
 	// ── Test 7: 同一类型多次 getOrCreate 返回同一实例 ──
 	{
-		auto* env1 = reg.getOrCreate("Mock");
-		auto* env2 = reg.getOrCreate("Mock");
-		if (env1 != env2)
+		auto env1 = reg.getOrCreate("Mock");
+		auto env2 = reg.getOrCreate("Mock");
+		if (env1.get() != env2.get())
 			throw std::runtime_error("getOrCreate should return same instance for same type");
-		auto* mock1 = static_cast<MockEnv*>(env1);
-		auto* mock2 = static_cast<MockEnv*>(env2);
+		auto* mock1 = static_cast<MockEnv*>(env1.get());
+		auto* mock2 = static_cast<MockEnv*>(env2.get());
 		if (mock1->id != mock2->id)
 			throw std::runtime_error("same instance should have same id");
 	}
@@ -108,12 +108,11 @@ static void runTests() {
 		if (!ok)
 			throw std::runtime_error("registerEnv with cleanup failed");
 
-		// 先创建实例
-		auto* env = reg.getOrCreate("WithCleanup");
-		if (!env)
+		// 先创建实例（不保留句柄：缓存为唯一所有者）
+		if (!reg.getOrCreate("WithCleanup"))
 			throw std::runtime_error("getOrCreate WithCleanup failed");
 
-		// 释放
+		// 释放：缓存移除 → 无其他句柄 → 实例立即销毁
 		reg.release("WithCleanup");
 		if (!cleanupCalled)
 			throw std::runtime_error("cleanup should have been called on release");
@@ -122,17 +121,20 @@ static void runTests() {
 
 		// 释放后 getOrCreate 应重新创建（以工厂调用计数验证；
 		// 不用指针地址比较——分配器可能复用已释放地址，比较不可靠）
-		auto* env2 = reg.getOrCreate("WithCleanup");
+		auto env2 = reg.getOrCreate("WithCleanup");
 		if (!env2)
 			throw std::runtime_error("getOrCreate after release should create new instance");
 		if (createCount != 2)
 			throw std::runtime_error("getOrCreate after release should create a new instance");
 
-		// 块结束前再次释放：注册表为全局单例，若残留实例，
-		// 其工厂/清理回调捕获的块内局部变量将悬垂，后续 releaseAll 会触发 UB
+		// 句柄保活语义（#8-15）：外部持有句柄时 release 仅移除缓存，实例存活；
+		// 最后一个句柄释放时才析构—不再有"释放后裸指针悬垂"窗口
 		reg.release("WithCleanup");
+		if (destroyCount != 1)
+			throw std::runtime_error("released instance must stay alive while a handle is held");
+		env2.reset();
 		if (destroyCount != 2)
-			throw std::runtime_error("second release should destroy the recreated instance");
+			throw std::runtime_error("instance must be destroyed when the last handle drops");
 	}
 	std::cout << "Test 8 passed: release with cleanup" << std::endl;
 
@@ -162,21 +164,22 @@ static void runTests() {
 			throw std::runtime_error("releaseAll should destroy all instances");
 
 		// 释放后 _instances 应为空（getOrCreate 应重新创建）
-		auto* envA = reg.getOrCreate("RelA");
+		auto envA = reg.getOrCreate("RelA");
 		if (!envA)
 			throw std::runtime_error("getOrCreate after releaseAll should succeed");
 
-		// 块结束前释放重建的实例，避免其析构计数器指向块内已销毁的局部变量
+		// 释放缓存并释放句柄（实例在最后一个句柄释放时析构）
 		reg.release("RelA");
+		envA.reset();
 		reg.release("RelB");
 	}
 	std::cout << "Test 9 passed: releaseAll" << std::endl;
 
-	// ── Test 10: 未注册类型 getOrCreate 返回 nullptr ──
+	// ── Test 10: 未注册类型 getOrCreate 返回空 ──
 	{
-		auto* env = reg.getOrCreate("Ghost");
+		auto env = reg.getOrCreate("Ghost");
 		if (env)
-			throw std::runtime_error("getOrCreate for unregistered type should return nullptr");
+			throw std::runtime_error("getOrCreate for unregistered type should return null");
 	}
 	std::cout << "Test 10 passed: unregistered getOrCreate returns nullptr" << std::endl;
 

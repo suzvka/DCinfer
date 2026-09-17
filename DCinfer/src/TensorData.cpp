@@ -1,4 +1,5 @@
 #include "TensorData.h"
+#include <cassert>
 #include <limits>
 #include <numeric>
 
@@ -314,7 +315,13 @@ void TensorData::buildCache() {
 	_dataCache.assign(totalBytes, std::byte(0));
 	for (const auto& [path, block] : _dataMain) {
 		const size_t offset = blockOffset(path, denseShape);
+		// 越界/超长块（catalog 与数据不一致导致的脏数据）保持跳过容错，
+		// debug 构建经断言暴露不一致（#8-7：不再完全无诊断）
 		const size_t copyBytes = std::min(block.size(), _dataSize);
+		assert(block.size() <= _dataSize
+			   && "TensorData::buildCache: block exceeds _dataSize (silently truncated)");
+		assert(offset + copyBytes <= _dataCache.size()
+			   && "TensorData::buildCache: block out of dense cache range (catalog/data inconsistent)");
 		if (offset + copyBytes <= _dataCache.size()) {
 			std::memcpy(_dataCache.data() + offset, block.data(), copyBytes);
 		}
@@ -339,6 +346,7 @@ void TensorData::buildView() {
 		// Treat whole data as one block at root path {}
 		_dataMain[{}] = _dataCache;
 		_dataSize = _dataCache.size();
+		setViewFlag(); // 视图已从缓存重建（#8-8：与多维路径一致，不依赖调用顺序）
 		return;
 	}
 
@@ -361,6 +369,7 @@ void TensorData::buildView() {
 	if (pathDims == 0) {
 		// Degrade to 1D: store whole block at root path {}
 		_dataMain[{}] = _dataCache;
+		setViewFlag(); // 视图已从缓存重建（#8-8：与多维路径一致）
 		return;
 	}
 

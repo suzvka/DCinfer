@@ -33,17 +33,9 @@ struct GraphRuntimeState;
 /// 从 InferGraph 提取的独立组件，负责：
 /// - 异步提交 task（submit）
 /// - 节点完成事件驱动的数据传播（_propagateFrom / _submitNodeRun）
-/// - task 生命周期管理（_terminate / _isTerminated）
+/// - task 生命周期管理（_terminate 终态收尾 / _exhaustedCheck 耗尽检测）
 /// - 传播耗尽检测（节点自报失败 → 终止为 Failed；纯信号停滞 → 宿主护栏）
 /// - 同步等待（wait）
-///
-/// 不持有图拓扑、输出区、信号仓库、错误收集器——任务经
-/// shared_ptr<GraphRuntimeState> 共享持有（GraphRuntimeState 聚合四组件，
-/// 飞行任务期间状态保活），与 InferGraph 共同拥有。
-///
-/// 调度模型：无协程、无独立调度器线程。节点执行与数据传播打包为
-/// 一个任务 lambda 提交到对应线程池，池线程执行完节点后就地传播输出，
-/// 下游就绪则继续提交——数据沿图自上游向下游自然"冒泡"。
 class ExecutionEngine {
 public:
 	using TaskId = std::string;
@@ -60,16 +52,17 @@ public:
 							const PoolConfig& operatorCfg = {},
 							const PoolConfig& systemCfg = {});
 
-	/// @brief  析构：先在全部状态成员存活时释放残余活动门控。
-	///         若留到成员析构阶段，门控析构触发的 _exhaustedCheck 将访问
-	///         已析构的 _blockedSkips 等状态。
-	/// @note   定义于 .cpp（先移出并释放残余门控，再经成员逆序析构关闭线程池）。
+	/// @brief  析构：先显式关闭三个线程池（全部 join，在飞传播完结），
+	///         再移出并释放轮次表——此后无并发生产者访问引擎状态。
+	/// @note   定义于 .cpp（避免逐个成员逆序析构时，其余池的在飞 lambda
+	///         向已析构池提交的 UB，#4）。
 	~ExecutionEngine();
 
 	ExecutionEngine(const ExecutionEngine&) = delete;
 	ExecutionEngine& operator=(const ExecutionEngine&) = delete;
-	ExecutionEngine(ExecutionEngine&&) = default;
-	ExecutionEngine& operator=(ExecutionEngine&&) = default;
+	// 含不可移动成员（线程池/互斥），移动操作显式删除（此前 = default 实为删除）
+	ExecutionEngine(ExecutionEngine&&) = delete;
+	ExecutionEngine& operator=(ExecutionEngine&&) = delete;
 
 	// ── 执行驱动 ──
 
@@ -88,6 +81,18 @@ public:
 	void submit(const TaskId& taskId, uint32_t maxHops,
 				const std::shared_ptr<GraphRuntimeState>& state,
 				std::vector<OutputDeclaration> declarations);
+
+	/// @brief  受收尾协议保护的 task 状态写入（feedInput 专用）。
+	///         writeOp 在「任务仍可接收输入」时于轮次锁内执行：
+	///         - 无轮次（从未提交/已释放）：不存在并发收尾，直接执行；
+	///         - 有轮次且非收尾窗口（Running，或收尾已完成）：锁内执行——
+	///           与 _terminate 的结果抢救段（clearTaskState）同一互斥，
+	///           写入不可能在检查后被收尾摘除；
+	///         - 收尾窗口（终态已发布、resultsReady 未置）：拒绝。
+	/// @return true = writeOp 已执行；false = 收尾窗口拒绝（调用方应抛错/重试）
+	/// @note   锁序约定：_roundsMutex → round->m → 域/缓冲锁 单向；
+	///         round->m 内绝不获取 _roundsMutex。
+	bool tryWriteTaskState(const TaskId& taskId, const std::function<void()>& writeOp);
 
 	// ── 同步等待 ──
 
@@ -212,9 +217,9 @@ private:
 
 	// ── 线程池分发（消除重复的 affinity switch-case）──
 
-	/// @brief  fire-and-forget 提交到对应线程池
-	void _dispatchToPool(ThreadPoolAffinity affinity,
-						 std::function<void()> task);
+	/// @brief  提交到 affinity 对应线程池。
+	/// @return false = 池已关闭或入队失败（内存压力），任务未被接受
+	bool _dispatchToPool(ThreadPoolAffinity affinity, std::function<void()> task);
 
 	// ── 成员 ──
 	// 声明顺序即析构顺序约束：

@@ -248,6 +248,11 @@ if (!x)
 （多分一份），所有下游均获得数据副本——不存在“静默丢数据”的兼容行为。
 也可显式创建 `Connector.Broadcast(N)` 手动建模分发点。
 
+> **限制（规划中）**：多上游驱动同一输入口（N:1 串行化汇聚）尚不支持——
+> 构图期对同口的第二条入边直接拒绝（`DuplicateEdge`）；多路合并请改用
+> 多输入端口汇聚节点。带单值在途通道的串行化汇聚连接器为规划特性
+> （见 `GraphStore::connect` 中的 TODO）。
+
 ### 如何组合/复用一张推理图？
 
 使用组合算子 `GraphOperator`（[include/Compose/GraphOperator.h](DCinfer/include/Compose/GraphOperator.h)）
