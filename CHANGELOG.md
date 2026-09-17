@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   等待型节点不再因内层信号停滞永久占住池线程）；终态自动回收子任务资源；
   内层诊断带上下文转发（block 名 + 子任务 ID + 首条错误消息）。
 
+- **零拷贝广播与值共享发布语义（数据面重构）**：`Value` 载荷改为 `shared_ptr`
+  承载（保留类型删除器，独占投递路径零开销），新增 `share()`（共享只读别名）/
+  `isShared()`/`isPublished()`（发布位）/`cloneOwned()`（take 语义：出口取得
+  独立可变所有权）；引用计数仅在显式 `share()` 时产生。`TensorData`/`Tensor`
+  新增冻结门（`freeze()`/`isFrozen()`：冻结后写路径抛 `TensorException(Frozen)`；
+  有效标志原子化与惰性物化串行化；拷贝/移动产出非冻结副本）；
+  `ValueCloneRegistry` 按 `SlotDataType` 注册深拷贝函数（未注册类型的共享载荷
+  只读消费）。`Broadcast(N>1)` 改为发布时一次性 freeze、share N 份零拷贝只读
+  分发（替代拷贝 N-1 份 + move 最后一份）。
+
 ### Removed
 
 - **`InferGraph::exportNode` 及核心侧子图特判整组移除**（破坏性变更）：组合/
@@ -34,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **同一输出端口二次 `connect()` 升级为自动扩容**（v0.5.2 `DuplicateEdge`
+  fail-fast 语义的可用性修正）：既有连接由广播导线承载（自动导线 / 显式
+  `Broadcast` 的 in 接线）时原地扩容为 N 路扇出——增加连接即扩扇出、返回同一
+  连接器引用，无需手写 `Broadcast(N)`；非广播拓扑（不含连接器的直连构造等）
+  保持构图期 `DuplicateEdge` fail-fast；扇入守卫改为按输入口去重（同一输入口
+  二次驱动仍构图期拒绝）。README 1:N 分发示例与 FAQ 同步更换。
+- `take` 边界语义：`InferGraph::takeOutput`/`takeOutputTensor` 对发布残留载荷
+  （广播共享/冻结）自动克隆为独立可变副本——take 即得可变所有权，冻结共享
+  载荷不逃逸出图边界。
+- DCIr 序列化穿透连接器链展开逻辑边：1:1 链（自动导线 / 包裹导线）折叠为
+  单条直连边；链上出现多路分发 Broadcast 时展开边标 `mode=broadcast`
+  （重建还原为同一分发组）；防环（节点+入口去重）与悬空连接器丢弃。
 - README：FAQ 一节改写为"如何组合/复用一张推理图？"（GraphOperator 用法、
   shared_ptr 生命周期、等待型节点占池语义、序列化待遇）。
 - 测试重组：新增 `GraphOperatorTest`（13 用例：基本往返/分支/三层嵌套/环+TTL/
@@ -41,7 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   迁移）/同一子图并发复用/共享所有权生命周期/诊断转发/构造校验）；
   `GraphNodeTest` 的通用用例（绑定内省/wait/并发压力/CORE-01 扇出扩容/
   扇入守卫）迁入 `InferGraphTest`；删除 `GraphNodeTest`、`NestedGraphCancelTest`；
-  `FreezeBoundaryTest` 移除 setBlockedOverride 冻结断言。
+  `FreezeBoundaryTest` 移除 setBlockedOverride 冻结断言；新增 `ValueSharingTest`
+  （冻结门/共享别名/clone 语义/广播零拷贝分发/跨边界所有权）；`GraphCompilerTest`
+  增补扩容往返稳定性；`LoweringTest` 增补扩容导线保留与双分支值分发。
 - CI：until-fail 重复名单与 TSan 子集改用 `GraphOperatorTest`（原 `GraphNodeTest`）。
 
 ## [0.5.2] - 2026-09-16
@@ -656,6 +680,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single example**: Only `01_hello_graph` is provided. More complex scenarios (multi-branch, cyclic, cloud offload) are documented but not exemplified.
 - **No Python bindings**: C++ only; no language bindings or scripting interface.
 
+[0.6.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.6.0
 [0.5.2]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.2
 [0.5.1]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.1
 [0.5.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.0
