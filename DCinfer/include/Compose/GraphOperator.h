@@ -59,12 +59,19 @@ public:
 		std::chrono::milliseconds pollInterval{100};    ///< 父取消感知轮询间隔（必须 > 0）
 	};
 
+	/// @brief 构造（默认参数形态）：等价于 GraphOperator(graph, Options{})。
+	/// @note  不写成默认实参 `Options opts = {}`——嵌套类型的默认成员初始化器
+	///        不得在默认实参中求值（GCC/Clang 拒绝，MSVC 宽松接受），改由委托
+	///        构造在同一成员函数上下文中完成。
+	explicit GraphOperator(std::shared_ptr<InferGraph> graph)
+		: GraphOperator(std::move(graph), Options{}) {}
+
 	/// @brief 构造：接管子图共享所有权，立即冻结并推导接口 Schema（fail-fast）。
 	/// @throws GraphException(Other)         graph 为空 / 两侧绑定均空 / pollInterval <= 0
 	/// @throws GraphException(NodeNotFound)  绑定引用的节点不存在
 	/// @throws GraphException(PortNotFound)  绑定引用的端口不存在
 	/// @throws GraphException(Other)         绑定目标为连接器（接口必须指向业务节点）
-	explicit GraphOperator(std::shared_ptr<InferGraph> graph, Options opts = {})
+	explicit GraphOperator(std::shared_ptr<InferGraph> graph, Options opts)
 		: _graph(std::move(graph)), _opts(opts) {
 		if (!_graph)
 			throw GraphException(GraphException::ErrorType::Other, "GraphOperator",
