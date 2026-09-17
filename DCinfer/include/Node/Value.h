@@ -1,9 +1,10 @@
 #pragma once
 
-#include <functional>
 #include <memory>
+#include <string>
 #include <utility>
 
+#include "NodeException.h"
 #include "SlotType.h"
 
 namespace DC {
@@ -13,6 +14,10 @@ namespace DC {
 /// 封装引擎原生张量（Ort::Value / nvinfer1::ITensor* / DC::Tensor / …）的
 /// 所有权与析构逻辑。move-only 设计兼容 GPU 资源句柄。
 ///
+/// 内部采用 shared_ptr<void> 承载载荷（保留自定义 deleter）：move 为唯一
+/// 所有权转移（零开销）；share() 产生共享只读别名（引用计数 +1，零拷贝）。
+/// 引用计数仅在显式 share() 时产生，独占投递路径无任何开销。
+///
 /// 构造时自动从模板参数 T 推导 SlotDataType 标签，
 /// 用于 TensorSlot::store() 中的校验路由。
 ///
@@ -20,6 +25,7 @@ namespace DC {
 /// @code
 ///   DC::Value v(std::make_unique<Tensor>(TensorType::Float, sizeof(float)));
 ///   DC::Value v(std::unique_ptr<Ort::Value>(new Ort::Value(...)));  // 自定义 deleter
+///   DC::Value alias = v.share();  // 共享只读别名（零拷贝）
 /// @endcode
 class Value {
 public:
@@ -34,52 +40,35 @@ public:
 	Value(std::unique_ptr<T, Deleter> ptr) {
 		ValidatorRegistry::ensureDefaults();
 		_innerType = ensureSlotType<T>();
-		auto d = ptr.get_deleter(); // 在 release 前拷贝 deleter
-		_ptr = ptr.release();
-		_deleter = [d = std::move(d)](void* p) {
-			if (p)
-				d(static_cast<T*>(p));
-		};
+		if (ptr) {
+			auto d = ptr.get_deleter(); // 在 release 前拷贝 deleter
+			_ptr = std::shared_ptr<void>(ptr.release(), std::move(d));
+		}
 	}
 
-	/// @brief 兼容构造函数：从原始指针 + 自定义删除器接管所有权（C API 场景）。
+	/// @brief 接管构造函数：从原始指针 + 自定义删除器接管所有权（C API 场景）。
 	/// @tparam T       原生张量类型。
 	/// @tparam Deleter 删除器类型。
 	/// @param ptr      原始指针。
 	/// @param deleter  自定义删除器。
 	template <typename T, typename Deleter>
-	Value(T* ptr, Deleter&& deleter) : _ptr(ptr) {
+	Value(T* ptr, Deleter&& deleter) {
 		ValidatorRegistry::ensureDefaults();
 		_innerType = ensureSlotType<T>();
-		_deleter = [d = std::forward<Deleter>(deleter)](void* p) {
-			if (p)
-				d(static_cast<T*>(p));
-		};
+		if (ptr)
+			_ptr = std::shared_ptr<void>(ptr, std::forward<Deleter>(deleter));
 	}
 
-	/// @brief 析构：若持有数据则调用自定义删除器。
-	~Value() {
-		if (_ptr && _deleter)
-			_deleter(_ptr);
-	}
+	/// @brief 析构：shared_ptr 自动调用删除器（引用计数归零时）。
+	~Value() = default;
 
-	/// @brief 移动构造。
-	Value(Value&& other) noexcept
-		: _ptr(std::exchange(other._ptr, nullptr)), _innerType(other._innerType), _deleter(std::move(other._deleter)) {}
+	/// @brief 移动构造：载荷所有权转移（零开销）。
+	Value(Value&& other) noexcept = default;
 
-	/// @brief 移动赋值。
-	Value& operator=(Value&& other) noexcept {
-		if (this != &other) {
-			if (_ptr && _deleter)
-				_deleter(_ptr);
-			_ptr = std::exchange(other._ptr, nullptr);
-			_innerType = other._innerType;
-			_deleter = std::move(other._deleter);
-		}
-		return *this;
-	}
+	/// @brief 移动赋值：旧载荷按引用计数释放，接管新载荷。
+	Value& operator=(Value&& other) noexcept = default;
 
-	/// @brief 禁止拷贝。
+	/// @brief 禁止拷贝（copy 会隐式共享载荷，与独占语义冲突；显式共享用 share()）。
 	Value(const Value&) = delete;
 	Value& operator=(const Value&) = delete;
 
@@ -93,19 +82,19 @@ public:
 	/// @return 类型化指针（调用者自行确保类型正确）。
 	template <typename T>
 	T* as() {
-		return static_cast<T*>(_ptr);
+		return static_cast<T*>(_ptr.get());
 	}
 	template <typename T>
 	const T* as() const {
-		return static_cast<const T*>(_ptr);
+		return static_cast<const T*>(_ptr.get());
 	}
 
 	/// @brief  获取原始 void* 指针。
 	void* get() {
-		return _ptr;
+		return _ptr.get();
 	}
 	const void* get() const {
-		return _ptr;
+		return _ptr.get();
 	}
 
 	/// @brief  是否持有有效数据。
@@ -113,10 +102,58 @@ public:
 		return _ptr != nullptr;
 	}
 
+	/// @brief  产生共享只读别名：与 *this 指向同一载荷（引用计数 +1，零拷贝）。
+	///        别名生命周期独立延长载荷；不产生 deep copy；携带发布标记
+	///        （isPublished）——出口产出独立可变副本的依据。
+	Value share() const {
+		Value v;
+		v._innerType = _innerType;
+		v._ptr = _ptr;
+		v._published = true;
+		return v;
+	}
+
+	/// @brief  载荷是否被多处引用（引用计数 > 1，即经 share() 产生过别名）。
+	bool isShared() const {
+		return _ptr && _ptr.use_count() > 1;
+	}
+
+	/// @brief  载荷处于（或曾处于）共享发布状态：本句柄源自 share()，
+	///        或载荷仍被多处引用。发布过的载荷可能为冻结只读态——
+	///        出口需要可变所有权时应先 cloneOwned()（take 语义）。
+	bool isPublished() const {
+		return _published || isShared();
+	}
+
+	/// @brief  当前引用计数（空 Value 返回 0；诊断/测试用）。
+	long useCount() const {
+		return _ptr ? _ptr.use_count() : 0;
+	}
+
+	/// @brief  深度克隆：经 ValueCloneRegistry 复制载荷，产出独立可变副本。
+	///
+	/// 对共享/冻结载荷需要独占可变所有权时使用（如用户 take 产物）。
+	/// 未注册深拷贝函数（如 GPU 句柄类）则抛出 NodeException——
+	/// 此类型共享载荷只能只读消费，无法产出独占副本。
+	Value cloneOwned() const {
+		if (!_ptr)
+			return {};
+		const auto* fn = ValueCloneRegistry::instance().find(_innerType);
+		if (!fn) {
+			throw NodeException(NodeException::ErrorType::Other, "Value::cloneOwned",
+								"no clone registered for slot type " + std::to_string(_innerType) +
+									"; shared payload of this type is read-only");
+		}
+		Value v;
+		v._innerType = _innerType;
+		v._ptr = (*fn)(_ptr.get());
+		return v;
+	}
+
 private:
-	void* _ptr = nullptr; ///< 原始指针（类型擦除）。
+	std::shared_ptr<void> _ptr; ///< 类型擦除载荷（引用计数共享；保留原始类型删除器）。
 	SlotDataType _innerType = SlotDataTypeUnknown; ///< 内部数据类型的标签。
-	std::function<void(void*)> _deleter; ///< 自定义删除器。
+	bool _published = false; ///< 发布标记：本句柄经 share() 发布（随 move 流转）。
 };
 
 } // namespace DC

@@ -23,6 +23,74 @@ TensorData::TensorData()
 	: _dataSize(0), _dataMain({}), _dataCatalog({}), _dataCache({}), _shapeCache({}), _validFlags(0), _isScalar(false),
 	  _typeSize(0) {}
 
+// ── 拷贝/移动（自定义：内部互斥锁不可复制；拷贝产出非冻结副本）──
+
+TensorData::TensorData(const TensorData& other)
+	: _dataMain(other._dataMain), _dataCatalog(other._dataCatalog), _typeSize(other._typeSize),
+	  _dataSize(other._dataSize), _isScalar(other._isScalar), _dataCache(other._dataCache),
+	  _shapeCache(other._shapeCache), _validFlags(other._validFlags.load(std::memory_order_acquire)) {
+	// _frozen 默认 false：拷贝产出独立的可变副本（clone 语义）
+}
+
+TensorData& TensorData::operator=(const TensorData& other) {
+	if (this != &other) {
+		_dataMain = other._dataMain;
+		_dataCatalog = other._dataCatalog;
+		_typeSize = other._typeSize;
+		_dataSize = other._dataSize;
+		_isScalar = other._isScalar;
+		_dataCache = other._dataCache;
+		_shapeCache = other._shapeCache;
+		_validFlags.store(other._validFlags.load(std::memory_order_acquire), std::memory_order_release);
+		_frozen = false; // 拷贝产出独立的可变副本（clone 语义）
+	}
+	return *this;
+}
+
+TensorData::TensorData(TensorData&& other) noexcept
+	: _dataMain(std::move(other._dataMain)), _dataCatalog(std::move(other._dataCatalog)),
+	  _typeSize(other._typeSize), _dataSize(other._dataSize), _isScalar(other._isScalar),
+	  _dataCache(std::move(other._dataCache)), _shapeCache(std::move(other._shapeCache)),
+	  _validFlags(other._validFlags.load(std::memory_order_acquire)), _frozen(other._frozen) {
+	// 移动 = 载荷身份转移：冻结状态随行
+}
+
+TensorData& TensorData::operator=(TensorData&& other) noexcept {
+	if (this != &other) {
+		_dataMain = std::move(other._dataMain);
+		_dataCatalog = std::move(other._dataCatalog);
+		_typeSize = other._typeSize;
+		_dataSize = other._dataSize;
+		_isScalar = other._isScalar;
+		_dataCache = std::move(other._dataCache);
+		_shapeCache = std::move(other._shapeCache);
+		_validFlags.store(other._validFlags.load(std::memory_order_acquire), std::memory_order_release);
+		_frozen = other._frozen; // 移动 = 载荷身份转移：冻结状态随行
+	}
+	return *this;
+}
+
+// ── 冻结（共享发布）──
+
+void TensorData::_ensureMutable(const char* api) const {
+	if (_frozen) {
+		throw TensorException(TensorException::ErrorType::Frozen, api,
+							  "tensor is frozen (published to a shared connection, read-only); "
+							  "clone before mutating");
+	}
+}
+
+void TensorData::freeze() {
+	std::lock_guard lk(_lazyMutex);
+	if (_frozen) {
+		return;
+	}
+	if (!hasCache() && hasView()) {
+		buildCache(); // 预物化：冻结后只读路径零惰性物化（并发共享的前提）
+	}
+	_frozen = true;
+}
+
 TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseBytes)
 	: _dataSize(0), _dataMain({}), _dataCatalog({}), _dataCache({}), _shapeCache({}), _validFlags(0), _isScalar(false),
 	  _typeSize(0) {
@@ -74,6 +142,7 @@ size_t TensorData::size() const {
 }
 
 void TensorData::setTypeSize(size_t typeSize) {
+	_ensureMutable("TensorData::setTypeSize");
 	if (typeSize == 0) {
 		throw std::invalid_argument("TensorData::setTypeSize: typeSize must be > 0");
 	}
@@ -81,6 +150,7 @@ void TensorData::setTypeSize(size_t typeSize) {
 }
 
 void TensorData::clear() {
+	_ensureMutable("TensorData::clear");
 	_dataMain.clear();
 	_dataCatalog.clear();
 	_dataSize = 0;
@@ -113,6 +183,7 @@ TensorData::Shape TensorData::getCurrentShape() const {
 }
 
 void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes) {
+	_ensureMutable("TensorData::loadData");
 	clear();
 	setTypeSize(typeSize);
 	_dataCache = std::move(bytes);
@@ -127,6 +198,7 @@ void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes
 }
 
 void TensorData::editMode() {
+	_ensureMutable("TensorData::editMode");
 	// Ensure sparse view is materialized from dense cache when needed
 	ensureView();
 	if (hasCache()) {
@@ -156,21 +228,28 @@ void TensorData::syncDenseCacheMeta(const Shape& denseShape) {
 }
 
 void TensorData::ensureCache() {
+	if (hasCache()) {
+		return; // 快路径：已物化（含冻结发布后的全部只读访问）
+	}
+	std::lock_guard lk(_lazyMutex); // 双重检查：惰性物化的唯一构建路径
 	if (!hasCache() && hasView()) {
 		buildCache();
 	}
 }
 
 void DC::TensorData::ensureView() {
+	if (hasView()) {
+		setViewFlag();
+		return; // 快路径：已物化
+	}
+	std::lock_guard lk(_lazyMutex); // 双重检查：惰性物化的唯一构建路径
 	if (hasCache() && !hasView()) {
 		buildView();
 	}
 
-	if (!hasView()) {
-		return;
+	if (hasView()) {
+		setViewFlag();
 	}
-
-	setViewFlag();
 }
 
 size_t TensorData::blockOffset(const Shape& blockPath, const Shape& denseShape) const {
@@ -352,13 +431,13 @@ size_t TensorData::denseElementCount(const Shape& shape) {
 }
 
 void TensorData::clearCache() {
-	_validFlags &= static_cast<uint8_t>(~FlagCache);
+	_validFlags.fetch_and(static_cast<uint8_t>(~FlagCache), std::memory_order_release);
 	_dataCache.clear();
 	_shapeCache.clear();
 }
 
 void TensorData::clearView() {
-	_validFlags &= static_cast<uint8_t>(~FlagView);
+	_validFlags.fetch_and(static_cast<uint8_t>(~FlagView), std::memory_order_release);
 	_dataMain.clear();
 	_dataCatalog.clear();
 }
@@ -390,6 +469,7 @@ std::span<std::byte> TensorData::calcWriteRegion(const Shape& path) {
 }
 
 bool TensorData::writeCacheRaw(const Shape& path, DataBlock&& rawBytes, size_t typeSize, const char* apiName) {
+	_ensureMutable(apiName);
 	if (!checkType(typeSize, apiName)) {
 		setTypeSize(typeSize);
 	}
@@ -417,6 +497,7 @@ bool TensorData::writeCacheRaw(const Shape& path, DataBlock&& rawBytes, size_t t
 }
 
 TensorData::DataBlock TensorData::getData() {
+	_ensureMutable("TensorData::getData");
 	if (!hasCache()) {
 		ensureCache();
 	}
@@ -427,6 +508,7 @@ TensorData::DataBlock TensorData::getData() {
 }
 
 TensorData& TensorData::crop(const Shape& targetShape) {
+	_ensureMutable("TensorData::crop");
 	if (!hasCache()) {
 		ensureCache();
 	}

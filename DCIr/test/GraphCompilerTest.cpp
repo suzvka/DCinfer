@@ -333,6 +333,63 @@ void testRoundTrip() {
 	END_TEST();
 }
 
+void testExpandedFanOutRoundTrip() {
+	TEST("round-trip - auto-expanded fan-out: broadcast edges and re-serialization stability") {
+		// 构建：同一输出口两次 connect → 导线自动扩容为广播扇出
+		TestHarness harness;
+		harness.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "b", identitySchema(), identityRunFn()));
+		harness.addNode(std::make_unique<Node>("Builtin", "c", identitySchema(), identityRunFn()));
+		harness.connect("src", "y", "b", "x");
+		harness.connect("src", "y", "c", "x"); // 自动扩容
+		harness.bindOutput("y1", "b", "y");
+		harness.bindOutput("y2", "c", "y");
+		CHECK(harness.graph().nodeCount() == 4, "source: 3 biz + 1 expanded wire");
+
+		const std::string f1 = "test_expanded_fanout_1.json";
+		GraphCompiler::serialize(harness.graph(), f1);
+
+		// 1) IR1：两条同源 mode=broadcast 逻辑边（连接器折叠）
+		{
+			std::ifstream ifs(f1, std::ios::binary);
+			std::ostringstream oss;
+			oss << ifs.rdbuf();
+			auto root = nlohmann::json::parse(oss.str());
+			CHECK(root["edges"].size() == 2, "IR1: 2 logical edges");
+			for (auto& e : root["edges"]) {
+				CHECK(e.value("mode", "") == "broadcast", "IR1: edge carries mode:broadcast");
+				CHECK(e["srcNode"].get<std::string>() == "src", "IR1: edge source is the business node");
+			}
+		}
+
+		// 2) 读回：重建为显式 Broadcast + 包裹导线（3 biz + 1 bc + 3 wires = 7）
+		InferGraph graph2;
+		GraphCompiler::compileFile(graph2, f1);
+		CHECK(graph2.nodeCount() == 7, "rebuild: 3 biz + 1 bc + 3 wrapping wires");
+		CHECK(graph2.edgeCount() == 6, "rebuild: 6 edges");
+
+		// 3) 二次导出：穿透连接器链折叠，逻辑等价（round-trip 闭环）
+		const std::string f2 = "test_expanded_fanout_2.json";
+		GraphCompiler::serialize(graph2, f2);
+		{
+			std::ifstream ifs(f2, std::ios::binary);
+			std::ostringstream oss;
+			oss << ifs.rdbuf();
+			auto root = nlohmann::json::parse(oss.str());
+			CHECK(root["edges"].size() == 2, "IR2: 2 logical edges (chain folded through connectors)");
+			for (auto& e : root["edges"]) {
+				CHECK(e.value("mode", "") == "broadcast", "IR2: edge carries mode:broadcast");
+				std::string dst = e["dstNode"].get<std::string>();
+				CHECK(dst == "b" || dst == "c", "IR2: dst is a business node (no internal names leak)");
+			}
+		}
+
+		std::remove(f1.c_str());
+		std::remove(f2.c_str());
+	}
+	END_TEST();
+}
+
 void testSerializeToJsonString() {
 	TEST("serialize - JSON output is valid and parsable") {
 		TestHarness harness;
@@ -965,6 +1022,7 @@ int main() {
 		testCompileStringBroadcast();
 		testCompileStringRoutingRejected();
 		testRoundTrip();
+		testExpandedFanOutRoundTrip();
 		testSerializeToJsonString();
 		testModelPathHandling();
 		// 异常/边界路径

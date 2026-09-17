@@ -12,25 +12,15 @@ DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在*
 
 传统 DAG 框架将推理管线约束为线性或树形结构——这在多模型、多分支场景下很快会成为瓶颈。DCinfer 采用电路图语义的节点化、端口化、连接器化设计。得益于此模型，你可以轻松构建：
 
-- **多分支管线**：单输出同时驱动多个下游节点并行推理（1:N 分发须显式使用
-  `Connector.Broadcast(N)`，见下方示例）。
-- **汇聚模式**：多个上游输出合并注入同一节点。
+- **多分支管线**：单输出同时驱动多个下游节点并行推理（对同一输出口再次
+  `connect()` 即自动扩容为广播扇出，见下方示例）。
+- **汇聚模式**：多个上游输出经不同输入口汇入同一节点（同一输入口二次驱动会在构图期被拒绝）。
 - **成环拓扑**：支持反馈回路，用于迭代优化、强化学习或流式场景。
-
-1:N 分发的正确姿势——显式创建 Broadcast(N)，各输出口分别接线；同一输出端口
-二次 `connect()` 会在构图期抛出 `GraphException(DuplicateEdge)`（1→1 自动导线
-只承载单个下游，避免二次接线导致的数据静默丢失）：
 
 ```cpp
 // 1:N 分发：src.y 同时驱动 b、c 两个下游
-auto bc = std::make_unique<Node>("Connector.Broadcast", "bc",
-                                 Connector::broadcastSchema(2), Connector::broadcastRunFn(),
-                                 ThreadPoolAffinity::System);
-bc->setConnector(true);
-graph.addNode(std::move(bc));
-graph.connect("src", "y", "bc", "in");   // src.y → bc.in（该端口仅接一次）
-graph.connect("bc", "out_0", "b", "x");  // 分支 1
-graph.connect("bc", "out_1", "c", "x");  // 分支 2
+graph.connect("src", "y", "b", "x");  // 分支 1（自动插入广播连接器）
+graph.connect("src", "y", "c", "x");  // 分支 2（同一连接器原地扩容，返回同一引用）
 ```
 
 ### 原生并发执行

@@ -27,9 +27,7 @@ Node::Schema broadcastSchema(size_t downstreamCount) {
 
 Node::RunFn broadcastRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
-		const auto& inVal = ctx.peek("in");
-		const auto* inTensor = inVal.as<Tensor>();
-		if (!inTensor) {
+		if (!ctx.peek("in").as<Tensor>()) {
 			return ctx.failure(Node::Status::InvalidInput, "Broadcast: input is not a DC::Tensor");
 		}
 
@@ -37,16 +35,18 @@ Node::RunFn broadcastRunFn() {
 		const size_t n = outputs.size();
 
 		if (n == 1) {
-			// 单下游：零拷贝 move，等效导线直通
+			// 单下游：零拷贝 move，等效导线直通（保持可变，不冻结）
 			ctx.output(outputs[0].name, ctx.pop("in"));
-		} else {
-			// 多下游：拷贝 N-1 份，最后一份 move
-			for (size_t i = 1; i < n; ++i) {
-				ctx.output(outputs[i].name, Value(std::make_unique<Tensor>(*inTensor)));
-			}
-			ctx.output(outputs[0].name, ctx.pop("in"));
+			return ctx.success();
 		}
 
+		// 多下游：发布时一次性冻结 + 共享 N 份（零拷贝；只读共享，
+		// 出口经 isPublished 产出独立可变副本）
+		Value in = ctx.pop("in");
+		if (auto* t = in.as<Tensor>())
+			t->freeze();
+		for (const auto& p : outputs)
+			ctx.output(p.name, in.share());
 		return ctx.success();
 	};
 }

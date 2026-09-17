@@ -193,6 +193,21 @@ public:
 		return _data.hasCache();
 	}
 
+	// ── 冻结（共享发布）──
+
+	/// @brief 冻结：预物化稠密缓存并置冻结位（发布到共享网络前的一次性固化）。
+	/// @details 冻结后：一切写路径（write/fill/expand/crop/loadData/set 等）
+	///          抛 TensorException(Frozen)；只读访问不再触发任何惰性物化；
+	///          拷贝/克隆产出非冻结的可变副本。用于多消费者只读共享前的固化。
+	void freeze() {
+		_data.freeze();
+	}
+
+	/// @brief 是否已冻结（发布到共享网络后只读）。
+	bool isFrozen() const {
+		return _data.isFrozen();
+	}
+
 private:
 	TensorMeta _meta;
 	TensorData _data;

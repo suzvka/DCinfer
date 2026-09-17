@@ -50,14 +50,15 @@ public:
 	Node& addNode(std::unique_ptr<Node> node);
 
 	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
-	///         自动插入广播连接器（Broadcast Connector, N=1）
-	///         适用于两个业务节点之间的 1→1 直连场景
+	///         自动插入广播连接器（Broadcast Connector, N=1）——
+	///         1→1 直连；同一输出口再次 connect 时既有导线原地扩容为
+	///         N 路广播扇出（增加连接即多分一份，无需手写 Broadcast(N)）
 	/// @throws GraphException(NodeNotFound) 若节点不存在
 	/// @throws GraphException(PortNotFound) 若端口不存在
-	/// @throws GraphException(DuplicateEdge) 若该输出端口已有出边
-	///         （1:N 分发必须显式创建 Connector.Broadcast(N)，禁止二次 connect）
+	/// @throws GraphException(DuplicateEdge) 若该输入端口已有入边（多上游汇聚
+	///         必须使用不同输入口）；或输出口既有连接不可扩容（内部拓扑）
 	/// @throws GraphException(Frozen) 若拓扑已被封印（图已冻结）
-	/// @return 指向自动创建的广播连接器的引用
+	/// @return 指向承载该连接的广播连接器的引用（扩容返回同一对象）
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort);
 

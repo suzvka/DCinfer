@@ -142,7 +142,18 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 		}
 	}
 
-	// 遍历 processor → connector 边，展开为 processor → processor
+	// 连接器是否承担多路分发（Broadcast 且出边数 > 1）
+	auto isFanOutConnector = [&](const std::string& name) {
+		auto* n = graph.node(name);
+		if (!n || !n->isConnector() || n->type().find("Broadcast") == std::string::npos) return false;
+		auto it = connectorOut.find(name);
+		return it != connectorOut.end() && it->second.size() > 1;
+	};
+
+	// 遍历 processor 源边：若指向连接器，穿透连接器链（自动导线 / 显式
+	// Broadcast / 包裹导线的任意组合），展开为 processor → processor 逻辑边。
+	// 链上出现多路分发 Broadcast 时，展开出的每条逻辑边标 mode=broadcast
+	// （重建时还原为同一分发组）；纯 1:1 链折叠为无 mode 直连边。
 	for (auto& e : graph.edges()) {
 		auto* srcNode = graph.node(e.srcNode);
 		if (!srcNode || srcNode->isConnector()) continue;
@@ -160,29 +171,45 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 			continue;
 		}
 
-		// dstNode 是连接器：查下游
-		const std::string& cType = dstNode->type();
-		std::string mode;
-		if (cType.find("Broadcast") != std::string::npos) {
-			auto it = connectorOut.find(e.dstNode);
-			if (it != connectorOut.end() && it->second.size() > 1) {
-				mode = "broadcast";
-			}
-			// N=1 → 不输出 mode（反序列化用 connect 还原）
-		}
+		// 连接器链穿透：迭代收集所有逻辑终点（非连接器节点）
+		struct WalkItem {
+			std::string nodeName; ///< 当前到达的节点
+			std::string portName; ///< 进入该节点的输入口
+			bool fanOutPath;      ///< 路径上已出现多路分发 Broadcast
+		};
+		std::vector<WalkItem> stack;
+		stack.push_back({e.dstNode, e.dstPort, isFanOutConnector(e.dstNode)});
+		std::set<std::pair<std::string, std::string>> visited; // (节点, 入口) 防环
 
-		auto it = connectorOut.find(e.dstNode);
-		if (it == connectorOut.end()) continue;
-		for (auto* outE : it->second) {
-			nlohmann::json edge;
-			edge["srcNode"] = e.srcNode;
-			edge["srcPort"] = e.srcPort;
-			edge["dstNode"] = outE->dstNode;
-			edge["dstPort"] = outE->dstPort;
-			if (!mode.empty()) {
-				edge["mode"] = mode;
+		while (!stack.empty()) {
+			WalkItem item = std::move(stack.back());
+			stack.pop_back();
+			if (!visited.insert({item.nodeName, item.portName}).second) continue;
+
+			auto* cur = graph.node(item.nodeName);
+			if (!cur) continue;
+
+			if (!cur->isConnector()) {
+				// 逻辑终点：processor → processor
+				nlohmann::json edge;
+				edge["srcNode"] = e.srcNode;
+				edge["srcPort"] = e.srcPort;
+				edge["dstNode"] = item.nodeName;
+				edge["dstPort"] = item.portName;
+				if (item.fanOutPath) {
+					edge["mode"] = "broadcast";
+				}
+				edgesArr.push_back(std::move(edge));
+				continue;
 			}
-			edgesArr.push_back(std::move(edge));
+
+			// 中间连接器：继续穿透其所有出边
+			auto it = connectorOut.find(item.nodeName);
+			if (it == connectorOut.end()) continue; // 悬空连接器：无下游，丢弃
+			for (auto* outE : it->second) {
+				stack.push_back({outE->dstNode, outE->dstPort,
+								 item.fanOutPath || isFanOutConnector(outE->srcNode)});
+			}
 		}
 	}
 	return edgesArr;

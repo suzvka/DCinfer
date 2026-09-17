@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 
@@ -99,6 +100,37 @@ private:
 	ValidatorRegistry() = default;
 	mutable std::mutex _mutex;
 	std::unordered_map<SlotDataType, SlotCheckFn> _validators;
+};
+
+/// @brief Value 载荷深拷贝函数签名：输入为载荷指针（类型由注册时的 SlotDataType 决定）。
+/// @return 深拷贝结果（裸 shared_ptr<void>，保留原始类型的删除器）。
+using ValueCloneFn = std::function<std::shared_ptr<void>(const void*)>;
+
+/// @brief Value 克隆注册表：SlotDataType → 深拷贝函数。
+///
+/// 用途：共享/冻结载荷在 API 边界（用户 take 产物、显式 clone）需要产出
+/// 独占可变副本时调用。未注册类型的共享载荷只能只读消费（clone 请求将报错）。
+///
+/// 并发契约与 ValidatorRegistry 相同：启动期注册、运行期并发读取
+/// （unordered_map 节点地址稳定，find 返回的指针在运行期持续有效）。
+class ValueCloneRegistry {
+public:
+	/// @brief  获取全局单例。
+	static ValueCloneRegistry& instance();
+
+	/// @brief  注册克隆函数（通常在引擎/类型注册时调用）。
+	/// @param type 目标 SlotDataType。
+	/// @param fn   深拷贝函数。
+	void registerClone(SlotDataType type, ValueCloneFn fn);
+
+	/// @brief  查找克隆函数。
+	/// @return 克隆函数指针，未注册返回 nullptr。
+	const ValueCloneFn* find(SlotDataType type) const;
+
+private:
+	ValueCloneRegistry() = default;
+	mutable std::mutex _mutex;
+	std::unordered_map<SlotDataType, ValueCloneFn> _clones;
 };
 
 } // namespace DC

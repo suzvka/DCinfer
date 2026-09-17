@@ -37,7 +37,11 @@ bool NodeExecutor::hasOutput(const TaskId& taskId, const std::string& name) cons
 }
 
 Value NodeExecutor::takeOutput(const TaskId& taskId, const std::string& name) {
-	return _impl->exec.buffer.takeOutput(taskId, name);
+	Value v = _impl->exec.buffer.takeOutput(taskId, name);
+	// 发布残留载荷（广播共享/冻结）：产出独立可变副本，保证 take 即得可变所有权
+	if (v.isPublished())
+		return v.cloneOwned();
+	return v;
 }
 
 std::unordered_map<std::string, Value> NodeExecutor::collectOutputs(const TaskId& taskId) {
@@ -89,6 +93,7 @@ Tensor NodeExecutor::takeOutputTensor(const TaskId& taskId, const std::string& n
 							"output '" + name + "' is not a DC::Tensor (innerType=" +
 								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
+	// takeOutput 已保证独占可变（共享时已克隆），直接转移载荷
 	return std::move(*t);
 }
 
@@ -99,7 +104,12 @@ std::unordered_map<std::string, Tensor> NodeExecutor::collectOutputTensors(const
 	for (auto& [name, nt] : outputs) {
 		auto* t = nt.as<Tensor>();
 		if (t) {
-			result.emplace(name, std::move(*t));
+			// 发布残留载荷（广播共享/冻结）：深拷贝产出独立可变副本
+			// （move 会破坏其他持有者或冻结载荷的只读契约）
+			if (nt.isPublished())
+				result.emplace(name, Tensor(*t));
+			else
+				result.emplace(name, std::move(*t));
 		}
 	}
 	return result;

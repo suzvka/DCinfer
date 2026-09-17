@@ -17,6 +17,7 @@ public:
 		InvalidShape, ///< 无效形状：形状参数本身不合法
 		NotAScalar, ///< 非标量：试图将非单元素的子视图作为标量读取
 		NotData, ///< 无数据：尝试访问尚未填充数据的张量
+		Frozen, ///< 已冻结：张量已发布到共享连接（只读共享），拒绝突变
 		Other ///< 其他未分类的错误
 	};
 
@@ -57,6 +58,9 @@ private:
 			break;
 		case ErrorType::NotData:
 			errorStr = "Not Data";
+			break;
+		case ErrorType::Frozen:
+			errorStr = "Frozen";
 			break;
 		case ErrorType::Other:
 			errorStr = "Other";

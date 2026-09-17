@@ -385,6 +385,38 @@ static void test_wireOnlyCycleDropsFusedEdge() {
 	CHECK(directRejected, "direct connect between non-connectors should be rejected");
 }
 
+// ── 10. 升级扇出：同一输出口二次 connect 扩容的导线（N=2）保留，按 2 出边分发 ──
+
+static void test_expandedFanOutKept() {
+	InferGraph graph;
+	graph.addNode(makeId("a"));
+	graph.addNode(makeInc("b"));
+	graph.addNode(makeInc("c"));
+	graph.connect("a", "y", "b", "x"); // 自动导线 wire（Broadcast(1)）
+	graph.connect("a", "y", "c", "x"); // 原地扩容：wire 变 N=2，out_1 → c
+	graph.bindOutput("ob", "b", "y");
+	graph.bindOutput("oc", "c", "y");
+
+	// 源图视角：3 业务 + 1 扩容导线 = 4 节点、3 边
+	CHECK(graph.nodeCount() == 4, "source view: 3 biz + 1 expanded wire (4 nodes)");
+	CHECK(graph.edgeCount() == 3, "source view: 3 edges");
+
+	auto snap = graph.freeze();
+	// 扩容导线（N=2）承担分发职责，不擦除；图内无其他导线
+	CHECK(snap->loweringStats().erasedConnectors == 0, "expanded wire is kept (not erased)");
+	CHECK(snap->runtimeNodeCount() == 4, "runtime keeps the expanded wire (4 nodes)");
+	CHECK(snap->runtimeEdgeCount() == 3, "runtime: a→wire + 2 out-edges (3 edges)");
+
+	// 值分发：同一份数据到达两个分支
+	graph.feedInput("t1", "a", "x", floatTensor(10.0f));
+	graph.submit("t1", {{"b", "y"}, {"c", "y"}});
+	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete");
+	auto rb = graph.takeOutputTensor("t1", "b", "y");
+	auto rc = graph.takeOutputTensor("t1", "c", "y");
+	CHECK(std::abs(rb.item<float>() - 11.0f) < 1e-6f, "branch b receives a+1");
+	CHECK(std::abs(rc.item<float>() - 11.0f) < 1e-6f, "branch c receives a+1");
+}
+
 int main() {
 	test_autoWireErased();
 	test_broadcastN2NotErased();
@@ -393,10 +425,11 @@ int main() {
 	test_bindingProtectionKeepsWire();
 	test_errorPropagationThroughLoweredEdge();
 
-	// 组合语义：链式 wire / 链终止于保留连接器 / 纯 wire 环
+	// 组合语义：链式 wire / 链终止于保留连接器 / 纯 wire 环 / 升级扇出
 	test_chainedWiresErased();
 	test_chainThroughKeptConnector();
 	test_wireOnlyCycleDropsFusedEdge();
+	test_expandedFanOutKept();
 
 	if (g_failures == 0) {
 		std::printf("All %d checks passed\n", g_checks);

@@ -76,8 +76,12 @@ Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 							const std::string& portName) {
 	// 优先查 OutputZone（OutputZone 绑定端口的数据在 _propagateFrom 第二步已搬运至此）
 	auto ozVal = _state->output.take(taskId, nodeName, portName);
-	if (ozVal)
+	if (ozVal) {
+		// 发布残留载荷（广播共享/冻结）：产出独立可变副本
+		if (ozVal->isPublished())
+			return ozVal->cloneOwned();
 		return std::move(*ozVal);
+	}
 
 	auto* n = _topology().node(nodeName);
 	if (!n) {
@@ -90,7 +94,11 @@ Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 	if (!ns)
 		throw NodeException(NodeException::ErrorType::TaskNotFound, "TaskBuffer::takeOutput",
 							"task '" + taskId + "' not found");
-	return ns->buffer.takeOutput(taskId, portName);
+	Value v = ns->buffer.takeOutput(taskId, portName);
+	// 发布残留载荷（广播共享/冻结）：产出独立可变副本
+	if (v.isPublished())
+		return v.cloneOwned();
+	return v;
 }
 
 Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nodeName,
@@ -99,8 +107,12 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 	auto ozVal = _state->output.take(taskId, nodeName, portName);
 	if (ozVal) {
 		auto* t = ozVal->as<Tensor>();
-		if (t)
+		if (t) {
+			// 发布残留载荷（广播共享/冻结）：深拷贝产出独立可变副本
+			if (ozVal->isPublished())
+				return Tensor(*t);
 			return std::move(*t);
+		}
 		throw GraphException(GraphException::ErrorType::Other, "InferGraph::takeOutputTensor",
 							 "OutputZone artifact for '" + nodeName + "." + portName
 								 + "' is not a DC::Tensor");
@@ -123,6 +135,9 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 							"output '" + portName + "' is not a DC::Tensor (innerType=" +
 								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
+	// 发布残留载荷（广播共享/冻结）：深拷贝产出独立可变副本
+	if (nt.isPublished())
+		return Tensor(*t);
 	return std::move(*t);
 }
 

@@ -114,13 +114,42 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connect",
 							 "input port '" + dstPort + "' not found on node '" + dstNode + "'");
 
-	// 同源端口已有出边 → 构图期 fail-fast（错误消息指引用 Broadcast(N) 正确姿势）
+	// 同目标端口已有入边 → 构图期 fail-fast：同口多驱动在传播期静默覆盖
+	// （仅最后写入者生效，多上游数据仅存其一）。多上游汇聚必须使用不同
+	// 输入口（等齐合并节点）。
+	// TODO(串行化汇聚): 多上游共享同一输入口 + 串行投递（单值在途：下游消费
+	// 后才推下一份）为规划特性——待调度器模式重构后实现（放行本检查 +
+	// 投递层单值在途通道 + 消费触发）。
+	for (const auto& e : _edges) {
+		if (e.dstNode == dstNode && e.dstPort == dstPort) {
+			throw GraphException(GraphException::ErrorType::DuplicateEdge, "GraphStore::connect",
+								 "input port '" + dstNode + ":" + dstPort + "' already has an incoming edge; "
+								   "N:1 fan-in requires distinct input ports (multi-input merge node); "
+								   "serialized convergence connector is a planned feature");
+		}
+	}
+
+	// 同源端口已有出边 → 二态：
+	//  - 既有连接由广播导线承载（自动导线 / 显式 Broadcast 的 in 接线）→ 原地
+	//    扩容（多分一份）并接上新下游：增加连接即扩扇出，无需手写 Broadcast(N)；
+	//  - 其他拓扑（connectRaw 构造等）→ 构图期 fail-fast。
 	for (const auto& e : _edges) {
 		if (e.srcNode == srcNode && e.srcPort == srcPort) {
-			throw GraphException(GraphException::ErrorType::DuplicateEdge, "GraphStore::connect",
-								 "output port '" + srcNode + ":" + srcPort
-									 + "' already has an outgoing edge; 1:N fan-out requires an explicit "
-									   "Connector.Broadcast(N) (see README)");
+			const std::string wireName = e.dstNode; // 先复制：push_back 会使 e 失效
+			auto* wire = node(wireName);
+			if (!wire || !wire->isConnector() || wire->type() != "Connector.Broadcast"
+				|| e.dstPort != "in") {
+				throw GraphException(GraphException::ErrorType::DuplicateEdge, "GraphStore::connect",
+									 "output port '" + srcNode + ":" + srcPort
+										 + "' already has an outgoing edge; 1:N fan-out requires an explicit "
+										   "Connector.Broadcast(N) (see README)");
+			}
+			// 扩容：追加输出口 + 新下游边（既有下游保持原口序）
+			const size_t n = wire->schema().outputs.size();
+			const std::string outPort = "out_" + std::to_string(n);
+			wire->appendOutputPort({outPort, Node::TensorType::Void, 0, {}});
+			_edges.push_back({wireName, outPort, dstNode, dstPort});
+			return *wire;
 		}
 	}
 

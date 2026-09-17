@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <map>
 #include <unordered_set>
 #include <string>
@@ -6,12 +7,14 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <algorithm>
 #include <type_traits>
 #include <stdexcept>
 
 #include "DCtype.h"
+#include "TensorException.h"
 
 namespace DC {
 
@@ -33,11 +36,34 @@ public:
 	TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseBytes);
 	TensorData(const Shape& shape, DataBlock&& data);
 
+	// ── 拷贝/移动（自定义：内部互斥锁不可复制；拷贝产出非冻结副本）──
+
+	/// @brief 拷贝构造：深拷贝全部数据，产出独立的**非冻结**副本（clone 语义）。
+	TensorData(const TensorData& other);
+	/// @brief 拷贝赋值：深拷贝全部数据，目标变为非冻结副本（clone 语义）。
+	TensorData& operator=(const TensorData& other);
+	/// @brief 移动构造：接管资源；冻结状态随载荷身份转移。
+	TensorData(TensorData&& other) noexcept;
+	/// @brief 移动赋值：接管资源；冻结状态随载荷身份转移。
+	TensorData& operator=(TensorData&& other) noexcept;
+
+	// ── 冻结（共享发布）──
+
+	/// @brief 冻结：预物化稠密缓存并置冻结位（发布到共享网络前的一次性固化）。
+	///        冻结后：写路径抛 TensorException(Frozen)；只读访问不再触发任何惰性物化
+	///        （共享后的并发只读前提）。拷贝/克隆产出非冻结副本。
+	void freeze();
+
+	/// @brief 是否已冻结。
+	bool isFrozen() const {
+		return _frozen;
+	}
+
 	bool hasView() const {
-		return (_validFlags & FlagView) != 0;
+		return (_validFlags.load(std::memory_order_acquire) & FlagView) != 0;
 	}
 	bool hasCache() const {
-		return (_validFlags & FlagCache) != 0;
+		return (_validFlags.load(std::memory_order_acquire) & FlagCache) != 0;
 	}
 
 	// 获取当前数据的字节视图（优先返回稠密 cache，如果 cache 不存在则尝试从 view 构建 cache）。
@@ -149,6 +175,11 @@ public:
 	TensorData& crop(const Shape& targetShape);
 
 private:
+	/// @brief 冻结门校验：冻结后一切突变抛 TensorException(Frozen)。
+	///        仅覆盖载荷写路径（write/writeCache/fill/set/expand/editMode/getData/
+	///        crop/loadData/setTypeSize）；对象级赋值（拷贝/移动赋值）不在其列。
+	void _ensureMutable(const char* api) const;
+
 	// 更新 _shapeCache / _dataSize / _size 等缓存元信息以匹配给定的稠密形状。
 	// 参数 denseShape: 当前稠密表示的形状（最后一维为块内元素数）。
 	// 影响：修改 _shapeCache、_dataSize、_size。
@@ -172,13 +203,23 @@ private:
 	Shape _shapeCache;
 	static constexpr uint8_t FlagView = 0x1;
 	static constexpr uint8_t FlagCache = 0x2;
-	uint8_t _validFlags;
+	// 有效标志位（原子：读取快路径无锁，与惰性物化构建者以 release/acquire 配对；
+	// 构建者写标志时的 release 保证其写入的数据内容对快路径读方可见）。
+	std::atomic<uint8_t> _validFlags{0};
+
+	// 冻结位：载荷发布到共享网络（多消费者只读共享）前一次性固化。
+	// 冻结后一切写路径抛 TensorException(Frozen)；拷贝/克隆产出非冻结副本。
+	bool _frozen = false;
+
+	// 惰性物化串行化锁（双重检查构建）：ensureCache/ensureView 的唯一写点收敛。
+	// 共享发布（freeze）会预物化 cache，使共享后的只读路径零惰性物化；本锁为纵深保护。
+	mutable std::mutex _lazyMutex;
 
 	void setViewFlag() {
-		_validFlags |= FlagView;
+		_validFlags.fetch_or(FlagView, std::memory_order_release);
 	}
 	void setCacheFlag() {
-		_validFlags |= FlagCache;
+		_validFlags.fetch_or(FlagCache, std::memory_order_release);
 	}
 	template <typename T>
 	DataBlock deposit(std::span<const T> data);
@@ -261,6 +302,7 @@ std::span<const T> TensorData::data() const {
 template <typename T>
 bool TensorData::write(const Shape& path, std::span<const T> data) {
 	static_assert(std::is_trivially_copyable_v<T>, "TensorData::write requires trivially copyable element type");
+	_ensureMutable("TensorData::write");
 
 	if (!checkType(sizeof(T), "TensorData::write")) {
 		setTypeSize(sizeof(T));
@@ -275,6 +317,7 @@ bool TensorData::write(const Shape& path, std::span<const T> data) {
 }
 
 inline bool TensorData::write(const Shape& path, const std::vector<bool>& data) {
+	_ensureMutable("TensorData::write");
 	if (!checkType(sizeof(bool), "TensorData::write")) {
 		setTypeSize(sizeof(bool));
 	}
@@ -293,6 +336,7 @@ bool TensorData::write(const Shape& path, const std::vector<T>& data) {
 
 template <typename T>
 bool TensorData::write(const Shape& fullPath, const T& value) {
+	_ensureMutable("TensorData::write");
 	// Allow writing when stored element size is a multiple of incoming type size.
 	// If _typeSize is not initialized, adopt sizeof(T). Otherwise require divisibility.
 	if (!checkType(sizeof(T), "TensorData::write(element)")) {
@@ -465,6 +509,7 @@ bool TensorData::writeCacheByDeposit(const Shape& path, Range&& r, size_t typeSi
 template <typename T>
 TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	static_assert(std::is_trivially_copyable_v<T>, "expand requires trivially copyable T");
+	_ensureMutable("TensorData::expand");
 	if (!checkType(sizeof(T), "TensorData::expand"))
 		setTypeSize(sizeof(T));
 	ensureView();

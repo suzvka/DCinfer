@@ -39,6 +39,13 @@ void ValidatorRegistry::ensureDefaults() {
 		ValidatorRegistry::instance().registerValidator(
 			valueId,
 			[](const void*, SlotDataType, const TensorMeta&) -> SlotDataStatus { return SlotDataStatus{}; });
+
+		// DCTensor 克隆器：深拷贝产出独立可变副本（共享/冻结载荷的 clone 出口；
+		// 拷贝构造自带非冻结语义——clone 结果可直接突变）
+		ValueCloneRegistry::instance().registerClone(
+			dctensorId, [](const void* data) -> std::shared_ptr<void> {
+				return std::make_shared<Tensor>(*static_cast<const Tensor*>(data));
+			});
 	});
 }
 
@@ -61,6 +68,25 @@ SlotDataStatus ValidatorRegistry::validate(const void* data, SlotDataType type, 
 		return SlotDataStatus{};
 	}
 	return (*fn)(data, type, rule);
+}
+
+// ── ValueCloneRegistry ──
+
+ValueCloneRegistry& ValueCloneRegistry::instance() {
+	static ValueCloneRegistry inst;
+	return inst;
+}
+
+void ValueCloneRegistry::registerClone(SlotDataType type, ValueCloneFn fn) {
+	std::lock_guard lk(_mutex);
+	_clones[type] = std::move(fn);
+}
+
+const ValueCloneFn* ValueCloneRegistry::find(SlotDataType type) const {
+	std::lock_guard lk(_mutex);
+	auto it = _clones.find(type);
+	// 同 ValidatorRegistry：启动期注册、运行期并发读取（节点地址稳定）
+	return it != _clones.end() ? &it->second : nullptr;
 }
 
 } // namespace DC
