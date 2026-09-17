@@ -130,7 +130,7 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Time-sensitive tests x3 (until-fail)
-        run: ctest --test-dir build -C Release -R "InferGraphTest|GraphNodeTest" --repeat until-fail:3 --output-on-failure
+        run: ctest --test-dir build -C Release -R "InferGraphTest|GraphOperatorTest" --repeat until-fail:3 --output-on-failure
 
   # ──────────────────────────────────────────────
   # Windows / MSVC (Release)
@@ -252,7 +252,7 @@ jobs:
       - name: Concurrency tests under TSan
         run: >
           ctest --test-dir build-tsan
-          -R "FreezeBoundaryTest|GraphNodeTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest"
+          -R "FreezeBoundaryTest|GraphOperatorTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest"
           --output-on-failure
 
       - name: Freeze-boundary repeated (until-fail x3)

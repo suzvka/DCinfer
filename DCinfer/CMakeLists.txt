@@ -66,6 +66,7 @@ target_include_directories(DCinfer
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Tools>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Node>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Graph>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Compose>
         # INSTALL_INTERFACE：安装树（各子目录公开头扁平合并到 include/，见下方 install 规则）
         $<INSTALL_INTERFACE:include>
 )
@@ -86,7 +87,7 @@ include(GNUInstallDirs)
 # 未声明版本号时兜底（需与顶层 project() 版本同步维护）。
 set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 if(NOT DCINFER_PKG_VERSION)
-    set(DCINFER_PKG_VERSION "0.5.2")
+    set(DCINFER_PKG_VERSION "0.6.0")
 endif()
 
 install(TARGETS DCinfer EXPORT DCinferTargets
@@ -103,6 +104,7 @@ install(DIRECTORY
     include/Node/
     include/Tensor/
     include/Tools/
+    include/Compose/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     PATTERN "internal" EXCLUDE
 )

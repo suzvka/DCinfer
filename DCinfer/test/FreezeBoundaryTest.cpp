@@ -250,8 +250,6 @@ static void test_leakedNodeSettersRejectedAfterFreeze() {
 	CHECK(throwsNodeFrozen([&] { leakedNode.setTag("t"); }), "setTag after freeze throws NodeException(Frozen)");
 	CHECK(throwsNodeFrozen([&] { leakedNode.setModelPath("m.onnx"); }),
 		  "setModelPath after freeze throws NodeException(Frozen)");
-	CHECK(throwsNodeFrozen([&] { leakedNode.setBlockedOverride([](const Node::TaskId&) { return false; }); }),
-		  "setBlockedOverride after freeze throws NodeException(Frozen)");
 	CHECK(throwsNodeFrozen([&] { leakedNode.setReadyOverride([](const Node::TaskId&) { return false; }); }),
 		  "setReadyOverride after freeze throws NodeException(Frozen)");
 	CHECK(throwsNodeFrozen([&] {

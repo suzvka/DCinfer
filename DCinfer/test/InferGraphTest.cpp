@@ -2,10 +2,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -650,122 +652,207 @@ static Node::RunFn delayedRunFn(ConcurrencyDetector* detector, int delayMs = 50)
 }
 
 // ════════════════════════════════════════════
-// GraphNode 状态代理：声明通路检测
+// 迁移用例（原 GraphNodeTest 通用部分）：绑定内省 / wait / 并发压力 / 拓扑守卫
 // ════════════════════════════════════════════
 
-void testGraphNodeBranchBlocking() {
-	TEST("GraphNode: branch blocked, alternate path satisfies declaration -> not blocked") {
-		// 内部图：入口 id_in → Broadcast(2) → {idA(信号阻塞), idB}，声明 idB.y
-		InferGraph sub;
-		sub.addNode(std::make_unique<Node>("Builtin", "id_in", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
-		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc",
-			Connector::broadcastSchema(2), Connector::broadcastRunFn(), ThreadPoolAffinity::System);
-		bcNode->setConnector(true);
-		sub.addNode(std::move(bcNode));
-		sub.addNode(std::make_unique<Node>("Builtin", "idA", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
-		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
+void testInputZoneRoundTrip() {
+	TEST("inputZone serialization round-trip via GraphCompiler") {
+		// 需要 GraphCompiler，这里只做接口级别的单元验证
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "n2", addSchema(), addRunFn()));
 
-		sub.connect("id_in", "y", "bc", "in");
-		sub.connect("bc", "out_0", "idA", "x");
-		sub.connect("bc", "out_1", "idB", "x");
+		// bind multiple inputs
+		graph.bindInput("x", "n1", "x");
+		graph.bindInput("a", "n2", "a");
+		graph.bindInput("b", "n2", "b");
 
-		sub.bindInput("x", "id_in", "x");
-		sub.bindOutput("y", "idB", "y");
-
-		// idA 绑定信号并阻塞；idB 正常（旁路存在 → 子图不阻塞）
-		sub.node("idA")->bindSignal(sub.signalStore(), "enableA");
-		sub.setSignal("enableA", false);
-
-		auto gn = sub.exportNode("gn");
-		CHECK(!gn->isBlocked("t1"), "GraphNode should NOT be blocked when alternate path exists");
-
-		// 集成：父图 src → GraphNode，task 应经旁路正常完成
-		TestHarness parent;
-		parent.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
-		parent.addNode(std::move(gn));
-		parent.connect("src", "y", "gn", "x");
-
-		parent.feedInput("t1", "src", "x", makeFloatTensor(42.0f));
-		parent.submit("t1", "gn", "y", 1);
-		CHECK(parent.awaitCompletion("t1"), "t1 should complete via alternate path");
-		CHECK(parent.hasOutput("t1", "gn", "y"), "gn should have output");
-		auto r = parent.getOutputTensor("t1", "gn", "y");
-		CHECK(std::abs(r.item<float>() - 42.0f) < 1e-6f, "value should be 42.0");
+		auto& bindings = graph.inputBindings();
+		CHECK(bindings.size() == 3, "should have 3 input bindings");
+		CHECK(bindings[0].nodeName == "n1", "first binding node should be n1");
+		CHECK(bindings[0].portName == "x", "first binding port should be x");
+		CHECK(bindings[1].nodeName == "n2", "second binding node should be n2");
+		CHECK(bindings[1].portName == "a", "second binding port should be a");
+		CHECK(bindings[2].nodeName == "n2", "third binding node should be n2");
+		CHECK(bindings[2].portName == "b", "third binding port should be b");
 	}
 	END_TEST();
+}
 
-	TEST("GraphNode: sole path blocked -> blocked; recovery after signal restore") {
-		InferGraph sub;
-		sub.addNode(std::make_unique<Node>("Builtin", "id_in", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
-		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc",
-			Connector::broadcastSchema(2), Connector::broadcastRunFn(), ThreadPoolAffinity::System);
-		bcNode->setConnector(true);
-		sub.addNode(std::move(bcNode));
-		sub.addNode(std::make_unique<Node>("Builtin", "idA", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
-		sub.addNode(std::make_unique<Node>("Builtin", "idB", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
+void testWaitMechanism() {
+	TEST("InferGraph::waitForResult synchronization") {
+		InferGraph graph;
+		graph.addNode(std::make_unique<Node>("Builtin", "n1", identitySchema(), identityRunFn()));
 
-		sub.connect("id_in", "y", "bc", "in");
-		sub.connect("bc", "out_0", "idA", "x");
-		sub.connect("bc", "out_1", "idB", "x");
+		graph.feedInput("t1", "n1", "x", makeFloatTensor(99.0f));
 
-		sub.bindInput("x", "id_in", "x");
-		sub.bindOutput("y", "idB", "y");
+		// 通过回调在 _terminate 清理前捕获输出
+		auto mtx = std::make_shared<std::mutex>();
+		auto cv = std::make_shared<std::condition_variable>();
+		auto done = std::make_shared<bool>(false);
+		auto capturedOutput = std::make_shared<std::optional<Tensor>>();
 
-		// 两条分支全部阻塞（唯一通路切断）→ 子图边界应答阻塞
-		sub.node("idA")->bindSignal(sub.signalStore(), "enableA");
-		sub.node("idB")->bindSignal(sub.signalStore(), "enableB");
-		sub.setSignal("enableA", false);
-		sub.setSignal("enableB", false);
+		graph.setTaskCompleteCallback([mtx, cv, done, capturedOutput, &graph](const InferGraph::TaskId& tid) {
+			if (tid != "t1") return;
+			if (graph.hasOutput("t1", "n1", "y")) {
+				*capturedOutput = graph.takeOutputTensor("t1", "n1", "y");
+			}
+			{
+				std::lock_guard lk(*mtx);
+				*done = true;
+			}
+			cv->notify_one();
+		});
 
-		auto gn = sub.exportNode("gn");
-		CHECK(gn->isBlocked("t1"), "GraphNode should be blocked when no path to declaration exists");
+		// 回调先于 submit 设置：保证 _terminate 时回调必然就绪（避免时序竞态）
+		graph.submit("t1", "n1", "y", 1);
 
-		// 集成：父级传播跳过边，task 不完成
-		TestHarness parent;
-		parent.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
-		parent.addNode(std::move(gn));
-		parent.connect("src", "y", "gn", "x");
+		bool completed = graph.waitForResult("t1", std::chrono::milliseconds(5000)).status != TaskStatus::Running;
+		CHECK(completed, "waitForResult should return non-Running (completed within timeout)");
 
-		parent.feedInput("t1", "src", "x", makeFloatTensor(7.0f));
-		parent.submit("t1", "gn", "y", 1); // 阻塞期间 task 保持挂起，宿主 wait+cancel 解围
-		CHECK(!parent.awaitCompletion("t1", std::chrono::milliseconds(600)),
-			  "should NOT complete while path is blocked");
-		CHECK(!parent.hasOutput("t1", "gn", "y"), "blocked task should not produce output");
+		// 等待回调完成（捕获输出后再读取）
+		{
+			std::unique_lock lk(*mtx);
+			cv->wait(lk, [&] { return *done; });
+		}
 
-		// 恢复信号：通路口径重新导通
-		sub.setSignal("enableB", true);
-		CHECK(!std::as_const(parent).node("gn")->isBlocked("t1"), "GraphNode should unblock after signal restore");
-
-		// 新 task：恢复后正常完成
-		parent.feedInput("t2", "src", "x", makeFloatTensor(7.0f));
-		parent.submit("t2", "gn", "y", 1);
-		CHECK(parent.awaitCompletion("t2"), "t2 should complete after signal restore");
-		CHECK(parent.hasOutput("t2", "gn", "y"), "gn should have output for t2");
-		auto r = parent.getOutputTensor("t2", "gn", "y");
-		CHECK(std::abs(r.item<float>() - 7.0f) < 1e-6f, "value should be 7.0");
+		CHECK(capturedOutput->has_value(), "output should be captured");
+		CHECK(std::abs(capturedOutput->value().item<float>() - 99.0f) < 1e-6f, "output should be 99.0");
 	}
 	END_TEST();
+}
 
-	TEST("GraphNode: declared node itself blocked -> blocked") {
-		InferGraph sub;
-		sub.addNode(std::make_unique<Node>("Builtin", "idC", identitySchema(), identityRunFn(),
-			ThreadPoolAffinity::Operator));
-		sub.bindInput("x", "idC", "x");
-		sub.bindOutput("y", "idC", "y");
-		sub.node("idC")->bindSignal(sub.signalStore(), "enableC");
-		sub.setSignal("enableC", false);
+void testConcurrentTaskLifecycleStress() {
+	TEST("concurrent submit/cancel/wait/releaseTask stress (shared GraphRuntimeState)") {
+		InferGraph graph;
+		// 每线程独立节点：节点级互斥（Reentrant 丢弃）是既有设计，
+		// 本测试聚焦并发任务生命周期（TaskGate/任务 lambda/状态表/OutputZone）的安全性
+		constexpr int kThreads = 4;
+		constexpr int kIters = 150;
+		for (int t = 0; t < kThreads; ++t) {
+			auto name = "n" + std::to_string(t);
+			graph.addNode(std::make_unique<Node>("Builtin", name, identitySchema(), identityRunFn()));
+			graph.bindOutput("y_" + name, name, "y");
+		}
 
-		auto gn = sub.exportNode("gn");
-		CHECK(gn->isBlocked("t1"), "declared node blocked -> GraphNode blocked");
+		std::atomic<int> anomalies{0};
+		std::vector<std::thread> threads;
+		for (int t = 0; t < kThreads; ++t) {
+			threads.emplace_back([&, t] {
+				const std::string nodeName = "n" + std::to_string(t);
+				try {
+					for (int i = 0; i < kIters; ++i) {
+						// 每迭代唯一 taskId（贴近真实请求 ID 语义）：
+						// 取消后迟到的旧 lambda 经 gate 级检查安全退出（既有设计中
+						// 同 ID 复用在取消场景存在 tryExecute 副作用竞态，不属于本测试目标）
+						const std::string tid = "stress-" + std::to_string(t) + "-" + std::to_string(i);
+						Tensor in(TensorType::Float, sizeof(float));
+						in = static_cast<float>(i);
+						graph.feedInput(tid, nodeName, "x", Value(std::make_unique<Tensor>(std::move(in))));
+						graph.submit(tid, nodeName, "y", 1);
+						if (i % 2 == 0)
+							graph.cancel(tid); // 交错取消：终态为 Cancelled（或已完成的 Succeeded）
+						if (graph.waitForResult(tid, std::chrono::milliseconds(5000)).status == TaskStatus::Running) {
+							std::cerr << "\n  [stress] wait timeout: task=" << tid
+									  << " status=" << static_cast<int>(graph.taskStatus(tid))
+									  << " iter=" << i << std::endl;
+							for (auto& err : graph.taskErrors(tid))
+								std::cerr << "    [err] node=" << err.nodeName
+										  << " lvl=" << static_cast<int>(err.level)
+										  << " msg=" << err.message << std::endl;
+							++anomalies; // 终止超时视为异常
+						}
+						graph.releaseTask(tid); // 释放已终止任务全部资源
+					}
+				} catch (const std::exception& e) {
+					std::cerr << "\n  [stress] exception: thread=" << t
+							  << " what=" << e.what() << std::endl;
+					++anomalies;
+				}
+			});
+		}
+		for (auto& th : threads)
+			th.join();
+		CHECK(anomalies.load() == 0, "no anomalies under concurrent lifecycle stress");
+	}
+	END_TEST();
+}
 
-		sub.setSignal("enableC", true);
-		CHECK(!gn->isBlocked("t1"), "signal restore -> GraphNode not blocked");
+void testConnectAgainExpandsFanOut() {
+	TEST("second connect on the same output port expands the wire to broadcast (in-place)") {
+		InferGraph g;
+		g.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+		g.addNode(std::make_unique<Node>("Builtin", "b", identitySchema(), identityRunFn()));
+		g.addNode(std::make_unique<Node>("Builtin", "c", identitySchema(), identityRunFn()));
+		g.addNode(std::make_unique<Node>("Builtin", "d", identitySchema(), identityRunFn()));
+
+		// 首次 connect：src.y → b（自动导线）
+		auto& wire = g.connect("src", "y", "b", "x");
+		const size_t nodesAfterFirst = g.nodeCount();
+		const size_t edgesAfterFirst = g.edgeCount();
+
+		// 二次 connect 同源端口：导线原地扩容（多分一份），返回同一对象
+		auto& wire2 = g.connect("src", "y", "c", "x");
+		CHECK(&wire2 == &wire, "expansion returns the same wire object (reference stable)");
+		CHECK(g.nodeCount() == nodesAfterFirst, "no new node created (in-place expansion)");
+		CHECK(g.edgeCount() == edgesAfterFirst + 1, "one new edge added");
+		CHECK(wire.schema().outputs.size() == 2, "wire expanded to 2 output ports");
+
+		// 三次 connect：继续扩容
+		g.connect("src", "y", "d", "x");
+		CHECK(wire.schema().outputs.size() == 3, "wire expanded to 3 output ports");
+		CHECK(g.edgeCount() == edgesAfterFirst + 2, "two new edges in total");
+
+		// 重复同一 (src,dst) 对：目标输入口守卫拒绝（不产生重复入边）
+		bool reConnectRejected = false;
+		try {
+			g.connect("src", "y", "b", "x");
+		} catch (const GraphException& e) {
+			reConnectRejected = (e.getErrorType() == GraphException::ErrorType::DuplicateEdge);
+		}
+		CHECK(reConnectRejected, "same (src,dst) pair re-connect rejected by input-port guard");
+
+		// 端到端：扩容后的广播把数据分发给全部下游
+		// （CORE-01 防护语义保持：不产生两条同源直连边，无静默丢数）
+		g.feedInput("t1", "src", "x", makeFloatTensor(5.0f));
+		g.submit("t1", {{"b", "y"}, {"c", "y"}, {"d", "y"}});
+		CHECK(g.waitForResult("t1").status == TaskStatus::Succeeded, "task should succeed");
+		auto tb = g.takeOutputTensor("t1", "b", "y");
+		auto tc = g.takeOutputTensor("t1", "c", "y");
+		auto td = g.takeOutputTensor("t1", "d", "y");
+		CHECK(std::abs(tb.item<float>() - 5.0f) < 1e-6f, "fan-out branch b receives data");
+		CHECK(std::abs(tc.item<float>() - 5.0f) < 1e-6f, "fan-out branch c receives data");
+		CHECK(std::abs(td.item<float>() - 5.0f) < 1e-6f, "fan-out branch d receives data");
+	}
+	END_TEST();
+}
+
+void testDuplicateFanInConnectRejected() {
+	TEST("fan-in: second connect on the same input port rejects with DuplicateEdge") {
+		InferGraph g;
+		g.addNode(std::make_unique<Node>("Builtin", "a", identitySchema(), identityRunFn()));
+		g.addNode(std::make_unique<Node>("Builtin", "b", identitySchema(), identityRunFn()));
+		g.addNode(std::make_unique<Node>("Builtin", "sub", identitySchema(), identityRunFn()));
+
+		// 首次 connect：a → sub.x
+		g.connect("a", "y", "sub", "x");
+		const size_t edgesAfterFirst = g.edgeCount();
+
+		// 第二个上游接同一输入口：构图期 fail-fast
+		// （同口多驱动在传播期静默覆盖，仅最后写入者生效——多上游数据仅存其一）
+		bool threw = false;
+		std::string message;
+		try {
+			g.connect("b", "y", "sub", "x");
+		} catch (const GraphException& e) {
+			threw = true;
+			message = e.what();
+			CHECK(e.getErrorType() == GraphException::ErrorType::DuplicateEdge,
+				  "error type should be DuplicateEdge");
+		}
+		CHECK(threw, "second connect on the same input port must be rejected");
+		CHECK(message.find("sub:x") != std::string::npos, "message should name the input port");
+		CHECK(g.edgeCount() == edgesAfterFirst, "rejected connect must leave no partial edges");
 	}
 	END_TEST();
 }
@@ -1195,7 +1282,12 @@ int main() {
 		testWaitReturnsReadableResults();
 		testMultiDeclarationReadableAfterWait();
 
-		testGraphNodeBranchBlocking();
+		// 迁移用例（原 GraphNodeTest 通用部分）
+		testInputZoneRoundTrip();
+		testWaitMechanism();
+		testConcurrentTaskLifecycleStress();
+		testConnectAgainExpandsFanOut();
+		testDuplicateFanInConnectRejected();
 
 		if (failures == 0) {
 			std::cout << "\nAll InferGraph tests passed!" << std::endl;

@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-17
+
+### Added
+
+- **组合算子 `GraphOperator`（新增 `include/Compose/GraphOperator.h`）**：把一整张
+  推理图包装成普通 Node 的算子工厂（构造 → `makeNode` → `addNode`），仅使用
+  公开 API、不新增任何 InferGraph 特判。构造取 `shared_ptr<InferGraph>` 接管
+  共享所有权并立即 freeze（构造即定型：消灭懒冻结竞争与 schema 漂移窗口）；
+  按绑定推导 Schema（端口名 = 绑定 alias，类型/形状/required 从目标端口拷贝；
+  节点/端口缺失与连接器目标构造期 fail-fast）。执行语义：子任务 ID 按
+  "父任务ID|实例号|节点名" 命名空间隔离——同一子图被多个组合节点/多个父图
+  并发复用无 DuplicateTask 限制（旧设计公开缺陷解除）；内建协作式取消联动
+  （`Options.pollInterval` 默认 100ms 轮询父轮取消 → 取消子图任务解围，
+  等待型节点不再因内层信号停滞永久占住池线程）；终态自动回收子任务资源；
+  内层诊断带上下文转发（block 名 + 子任务 ID + 首条错误消息）。
+
+### Removed
+
+- **`InferGraph::exportNode` 及核心侧子图特判整组移除**（破坏性变更）：组合/
+  复用推理图改由算子层 `GraphOperator` 实现，核心图语义保持扁平。连带移除：
+  生命周期哨兵 `_lifeToken` 与"子图必须存活于导出节点使用期"契约（shared_ptr
+  接管后悬垂不可表示，CORE-04 整类问题消失）；`Node::setBlockedOverride`
+  与信号感知静态预演 `canSatisfyDeclarations`（运行期阻塞语义保持单点实现；
+  `canSatisfyTopologically` 保留，submit 提交期守卫在用）；
+  `GraphException::DuplicatePort`（alias 推导后接口层命名碰撞不可表示）；
+  README "嵌套子图（exportNode）的生命周期约定" 一节。
+
+### Changed
+
+- README：FAQ 一节改写为"如何组合/复用一张推理图？"（GraphOperator 用法、
+  shared_ptr 生命周期、等待型节点占池语义、序列化待遇）。
+- 测试重组：新增 `GraphOperatorTest`（13 用例：基本往返/分支/三层嵌套/环+TTL/
+  链式/Schema 推导/空接口拒绝/构造即冻结/父取消解围（自 NestedGraphCancelTest
+  迁移）/同一子图并发复用/共享所有权生命周期/诊断转发/构造校验）；
+  `GraphNodeTest` 的通用用例（绑定内省/wait/并发压力/CORE-01 扇出扩容/
+  扇入守卫）迁入 `InferGraphTest`；删除 `GraphNodeTest`、`NestedGraphCancelTest`；
+  `FreezeBoundaryTest` 移除 setBlockedOverride 冻结断言。
+- CI：until-fail 重复名单与 TSan 子集改用 `GraphOperatorTest`（原 `GraphNodeTest`）。
+
 ## [0.5.2] - 2026-09-16
 
 ### Fixed

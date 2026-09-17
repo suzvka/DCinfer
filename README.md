@@ -244,20 +244,35 @@ if (!x)
 
 ### 单输出如何同时驱动多个下游节点（1:N 分发）？
 
-必须显式创建 `Connector.Broadcast(N)`（见「灵活的图拓扑」示例）：同一输出端口
-二次 `connect()` 会在构图期抛出 `GraphException(DuplicateEdge)`——自动插入的
-1→1 导线只能承载单个下游，不存在“静默丢数据”的兼容行为。
+对同一输出端口再次 `connect()` 即可：引擎自动插入的广播连接器会原地扩容
+（多分一份），所有下游均获得数据副本——不存在“静默丢数据”的兼容行为。
+也可显式创建 `Connector.Broadcast(N)` 手动建模分发点。
 
-### 嵌套子图（exportNode）的生命周期约定？
+### 如何组合/复用一张推理图？
 
-`exportNode()` 返回的 Node 内部引用子图（`InferGraph`）——API 返回
-`unique_ptr<Node>` 仅转移 Node 所有权，**子图必须存活于导出节点的整个使用期
-（含全部父任务执行期间）**。子图先析构时执行导出节点将返回 `ExecutionFailed`
-（生命周期哨兵 best-effort 检测，避免悬垂段错误），但该检测存在并发窗口，
-不构成安全保证。
+使用组合算子 `GraphOperator`（[include/Compose/GraphOperator.h](DCinfer/include/Compose/GraphOperator.h)）
+把整张图包装成普通 Node——组合发生在算子层，核心图语义保持扁平：
 
-另注意：每个嵌套子图持有独立的三层线程池——深嵌套 + 高并发场景需按
-“每层线程池配置 × 嵌套层数”规划线程总量。
+```cpp
+auto sub = std::make_shared<InferGraph>();      // 构建子图并声明接口
+sub->addNode(...);
+sub->bindInput("x", "entry", "x");
+sub->bindOutput("y", "exit", "y");
+
+GraphOperator op(sub);                          // 构造即冻结，接管共享所有权
+parent.addNode(op.makeNode("Block"));           // 生成普通 Node 嵌入父图
+```
+
+- 端口名 = 绑定 alias；类型/形状/required 从目标端口拷贝——构造后子图即冻结，
+  再改拓扑抛 `GraphException(Frozen)`；
+- 生命周期由 `shared_ptr` 闭合：节点存活期间子图必然存活，无悬垂契约；
+- 同一子图可被多个组合节点/多个父图并发复用（子任务 ID 按节点实例命名空间
+  隔离，无 DuplicateTask 限制）；
+- 等待型节点语义：子图执行期间占住一个执行线程（线程池按“每层池配置 ×
+  并发组合节点数”规划）；内层信号停滞时宿主 `cancel()` 父任务可在
+  `Options.pollInterval`（默认 100ms）粒度解围，不会永久挂起；
+- 节点 type 为 `"Builtin"`：DCIr 序列化往返仅保留结构（Schema 骨架），
+  与注册算子同等待遇。
 
 ## License
 

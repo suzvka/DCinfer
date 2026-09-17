@@ -202,23 +202,23 @@ public:
 		_meta.isConnector = v;
 	}
 
+	/// @brief 追加输出端口（构建期）：自动连线的广播导线原地扩容为多下游分发。
+	///        新口按 "out_{N}"（N = 当前口数）命名，既有口序不变；
+	///        RunFn 按 schema 工作，扩容后自动多分一份。
+	/// @throws NodeException(Frozen) 若节点所在图已冻结
+	void appendOutputPort(Port port) {
+		std::lock_guard lk(_mutationMutex);
+		_ensureMutable("Node::appendOutputPort");
+		_meta.schema.outputs.push_back(std::move(port));
+	}
+
 	// ── 信号绑定 ──
 	/// @throws NodeException(Frozen) 若节点所在图已冻结
 	void bindSignal(std::shared_ptr<SignalStore> store, std::string name);
 	bool isBlocked() const;
 	bool isBlocked(const TaskId& taskId) const;
 
-	// ── 状态委托（组合节点：子图节点等）──
-
-	/// @brief  注册 task 级阻塞状态委托；注册后 isBlocked(taskId) 转发至此回调。
-	///         未注册时回退 SignalGate 逻辑。典型用途：exportNode 产物的
-	///         子图节点按内部"声明通路可达性"应答父级。
-	/// @throws NodeException(Frozen) 若节点所在图已冻结
-	void setBlockedOverride(std::function<bool(const TaskId&)> fn) {
-		std::lock_guard lk(_mutationMutex);
-		_ensureMutable("Node::setBlockedOverride");
-		_blockedOverride = std::move(fn);
-	}
+	// ── 状态委托 ──
 
 	/// @brief 注册 task 级就绪状态委托；注册后 isReady(taskId, buffer) 转发至此回调。
 	///         未注册时回退 TaskBuffer 逻辑。
@@ -284,8 +284,7 @@ private:
 	RunFn _fn;
 	CompletionFn _onComplete;
 
-	// 状态委托回调（组合节点注册后覆盖默认 isBlocked/isReady 语义）
-	std::function<bool(const TaskId&)> _blockedOverride;
+	// 状态委托回调（注册后覆盖默认 isReady 语义）
 	std::function<bool(const TaskId&)> _readyOverride;
 
 	// ── 冻结门（Build → Freeze 边界）──
@@ -348,8 +347,7 @@ public:
 	const std::string& name() const;
 
 	/// @brief  当前 task 标识（图路径为所属轮次 taskId；单节点路径为调用方给定值）。
-	/// @note   子图嵌套场景该 ID 空间贯穿父子边界（exportNode 以父任务 ID 驱动子图），
-	///         RunFn 内部等待/轮询以本 ID 寻址。
+	/// @note   RunFn 内的等待/轮询以本 ID 寻址；组合算子可据此派生子任务 ID。
 	const TaskId& taskId() const { return _taskId; }
 
 	/// @brief  取消感知（协作式）：所属 task 是否已被请求取消/已终止。
@@ -375,7 +373,7 @@ private:
 	const Node::Schema& _schema;
 	std::string _type;
 	std::string _name;
-	TaskId _taskId;                        ///< 所属 task（子图嵌套时贯穿父子边界）
+	TaskId _taskId;                        ///< 所属 task（图路径为所属轮次 taskId）
 	std::function<bool()> _cancelProbe;    ///< 取消感知谓词（可空：单节点路径无取消语义）
 };
 

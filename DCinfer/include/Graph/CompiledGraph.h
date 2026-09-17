@@ -43,8 +43,8 @@ public:
 ///   节点面（Node 冻结门）——冻结前泄漏的引用亦无法修改快照持有的对象；
 /// - 执行引擎与飞行任务经本快照读取拓扑与签名
 ///   （GraphRuntimeState::snapshot() 发布协议读取）；
-/// - 保留源图视角：图序列化、exportNode、nodeCount/edges 等内省
-///   均反映源图；运行时视图（runtimeView）为 lowering 后形态。
+/// - 保留源图视角：图序列化、nodeCount/edges 等内省均反映源图；
+///   运行时视图（runtimeView）为 lowering 后形态。
 
 class CompiledGraph {
 public:

@@ -112,8 +112,6 @@ bool Node::isBlocked() const {
 }
 
 bool Node::isBlocked(const TaskId& taskId) const {
-	if (_blockedOverride)
-		return _blockedOverride(taskId);
 	return _signal->isBlocked(taskId);
 }
 
