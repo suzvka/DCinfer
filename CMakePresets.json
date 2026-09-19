@@ -22,7 +22,7 @@
     {
       "name": "gcc-release",
       "displayName": "GCC Linux Release",
-      "description": "Linux GCC + Ninja (Release)（需 GCC ≥ 11）",
+      "description": "Linux GCC + Ninja (Release)（需 GCC ≥ 11；含 DCIr，与 CI 发布验证一致）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/gcc-release",
       "condition": {
@@ -34,6 +34,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "g++",
         "CMAKE_CXX_STANDARD": "20",
+        "DCINFER_BUILD_IR": "ON",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
     },
@@ -53,13 +54,14 @@
     {
       "name": "clang-release",
       "displayName": "Clang Release",
-      "description": "Clang + Ninja (Release)（跨平台，需 Clang ≥ 14）",
+      "description": "Clang + Ninja (Release)（跨平台，需 Clang ≥ 14；含 DCIr，与 CI 发布验证一致）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "clang++",
         "CMAKE_CXX_STANDARD": "20",
+        "DCINFER_BUILD_IR": "ON",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
     },
@@ -84,7 +86,7 @@
     {
       "name": "msvc-release",
       "displayName": "MSVC x64 Release",
-      "description": "Visual Studio MSVC x64 (Release)",
+      "description": "Visual Studio MSVC x64 (Release)（含 DCIr，与 CI 发布验证一致）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/msvc-release",
       "condition": {
@@ -96,6 +98,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "cl",
         "CMAKE_CXX_STANDARD": "20",
+        "DCINFER_BUILD_IR": "ON",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
     },

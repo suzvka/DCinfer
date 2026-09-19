@@ -29,10 +29,11 @@ target_sources(DCEngine_Builtin PRIVATE ${DCENGINE_BUILTIN_SRC})
 # 适配器依赖 vcpkg 重型依赖，暂不纳入安装导出，仍以 add_subdirectory 消费。
 include(GNUInstallDirs)
 
-# 包版本：与 DCinfer 模块同一约定（顶层 project(DCinfer VERSION) 权威 + 兜底）
-set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
-if(NOT DCINFER_PKG_VERSION)
-    set(DCINFER_PKG_VERSION "0.6.1")
+# 包版本：与 DCinfer 模块同一约定（仅顶层构建时 PROJECT_VERSION 权威，否则回落字面版本）
+if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
+    set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
+else()
+    set(DCINFER_PKG_VERSION "0.6.2")
 endif()
 
 set_target_properties(DCEngine_Builtin PROPERTIES EXPORT_NAME Builtin)

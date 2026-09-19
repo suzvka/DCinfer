@@ -3,9 +3,11 @@
 
 #include "DCNet/NetAdapter.h"
 #include "NodeExecutor.h"
-#include "DCNet/NetEndpoint.h"
-#include "DCNet/NetTransport.h"
 #include "DCNet/NetCodec.h"
+#include "DCNet/NetCodec_Tensor.h"
+#include "DCNet/NetEndpoint.h"
+#include "DCNet/NetError.h"
+#include "DCNet/NetTransport.h"
 
 #include "EngineRegistry.h"
 #include "Node.h"
@@ -17,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -57,6 +60,21 @@ static Tensor makeTextTensor(const std::string& s) {
 static std::string textOf(const Tensor& t) {
 	auto bytes = t.bytes();
 	return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+static Tensor makeFloatTensor(const std::vector<float>& vals) {
+	Tensor::DataBlock block(vals.size() * sizeof(float));
+	if (!vals.empty())
+		std::memcpy(block.data(), vals.data(), vals.size() * sizeof(float));
+	return Tensor(Tensor::TensorType::Float, sizeof(float), {static_cast<int64_t>(vals.size())}, std::move(block));
+}
+
+/// 真实 tensor codec 的本地形状规则（data → result）
+static Node::Schema makeTensorSchema() {
+	Node::Schema s;
+	s.inputs = {NodePort::in<float>("data")};
+	s.outputs = {NodePort::out<float>("result")};
+	return s;
 }
 
 // ── EchoCodec：request 端口 → 报文；报文 → response 端口 ──
@@ -269,6 +287,38 @@ TEST(remoteRejectedMapsToInvalidInput) {
 	CHECK_MSG_PREFIX(result.message, "remote:invalid_request");
 }
 
+// ── codec 契约回归：远端响应结构异常必须升为 DcCodecRemoteError 派生的分类 ──
+//   修复前：tensor/text codec 直接漏出 nlohmann::parse_error / std::runtime_error，
+//   落入标准 RunFn 的通用 std::exception 分支 → InternalError 且丢 dcnet 诊断码，
+//   与 OpenAI codec 行为不一致。契约见 NetCodec.h：decode 结构异常 → DcCodecRemoteError。
+
+TEST(malformedRemoteResponseMapsToRemoteMalformed) {
+	auto fake = std::make_shared<FakeTransport>();
+	DcNetAdapterDesc desc;
+	desc.engineType = "Test.NetTensor";
+	desc.schema = makeTensorSchema();
+	desc.transportFactory = [fake]() -> std::shared_ptr<DcNetTransport> { return fake; };
+	desc.codec = makeTensorJsonCodec(); // 真实 tensor codec（非 EchoCodec）
+	registerDcNetAdapter(g_reg, std::move(desc));
+
+	auto node = makeNetNode("Test.NetTensor", "m1", "http://127.0.0.1:9100/v1");
+	CHECK(node != nullptr, "node with real tensor codec should be created");
+	fake->response = "this is not json at all";
+
+	NodeExecutor exec(*node);
+	exec.setInput("m1", "data", makeFloatTensor({1.0f, 2.0f}));
+	auto result = exec.tryExecute("m1");
+	CHECK(!result.ok(), "垃圾远端响应 → 运行失败");
+	CHECK(result.status == Node::Status::ExecutionFailed, "结构异常 → ExecutionFailed（不再是 InternalError）");
+	CHECK_MSG_PREFIX(result.message, "DCNet: malformed remote response");
+	CHECK(result.diagnostic.has_value(), "必须携带领域诊断（调用方可按码分类/重试决策）");
+	if (result.diagnostic.has_value()) {
+		CHECK(result.diagnostic->domain == "dcnet", "诊断域为 dcnet");
+		CHECK(result.diagnostic->code == static_cast<int>(NetErrorCategory::RemoteMalformed),
+			  "诊断码为 RemoteMalformed");
+	}
+}
+
 int main() {
 	test_endpointParse();
 	test_createNodeSchemaAndAffinity();
@@ -278,6 +328,7 @@ int main() {
 	test_sendFailureNormalized();
 	test_recvFailureNormalized();
 	test_remoteRejectedMapsToInvalidInput();
+	test_malformedRemoteResponseMapsToRemoteMalformed();
 	std::printf("NetAdapterTest: %d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

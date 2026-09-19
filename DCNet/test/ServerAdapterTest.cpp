@@ -23,6 +23,10 @@
 #include "NetBase64.h"
 
 #include <nlohmann/json.hpp>
+#include <Poco/Exception.h>
+#include <Poco/Net/SocketAddress.h>
+#include <Poco/Net/StreamSocket.h>
+#include <Poco/Timespan.h>
 
 #include <atomic>
 #include <chrono>
@@ -176,7 +180,8 @@ struct ServerHandle {
 	int port = -1;
 };
 
-static ServerHandle startServer(std::string authToken = {}, int maxInFlight = 8) {
+static ServerHandle startServer(std::string authToken = {}, int maxInFlight = 8, int maxConnections = 32,
+								  std::chrono::milliseconds requestTimeout = {}) {
 	DcNetServerAdapterDesc desc;
 	desc.engineType = kEngineType;
 	desc.localModelRef = kModelRef;
@@ -186,8 +191,19 @@ static ServerHandle startServer(std::string authToken = {}, int maxInFlight = 8)
 	desc.endpoint.basePath = "/v1";
 	desc.endpoint.authToken = std::move(authToken);
 	desc.endpoint.maxInFlight = maxInFlight;
+	desc.endpoint.maxConnections = maxConnections;
+	if (requestTimeout.count() > 0)
+		desc.endpoint.requestTimeout = requestTimeout;
 	auto svc = registerDcNetServerAdapter(EngineRegistry::instance(), std::move(desc));
 	return {svc, svc->port()};
+}
+
+/// 裸连接辅助：只发半行请求头即静默——服务端 worker 阻塞在 readRequest，
+/// 该连接不计入在途请求（正是排水必须覆盖的阶段）
+static void openHalfOpenConnection(Poco::Net::StreamSocket& conn, int port) {
+	conn.connect(Poco::Net::SocketAddress("127.0.0.1", static_cast<Poco::UInt16>(port)));
+	const std::string partial = "POST /v1/infer HTTP/1.1\r\n";
+	conn.sendBytes(partial.data(), static_cast<int>(partial.size()));
 }
 
 static Node::Result runLocalDoubler(const std::string& taskId, std::unordered_map<std::string, Tensor> inputs,
@@ -398,6 +414,122 @@ TEST(configErrorsThrow) {
 	CHECK(threw, "unknown engineType → NodeException at config period");
 }
 
+// ── P0 回归：半开连接（请求未读完、不计在途）期间的 stop() 必须等 worker 退净 ──
+//   旧行为：排水只看 _inFlight → stop() 立即返回、监听器析构，分离 worker 醒来后
+//   访问已析构成员（UAF）。现排水以线程存活计数为准，并在 grace 到期强制关闭在册连接。
+//   ASan/TSan 构建下本用例即内存安全强证明；Release 下验证排水语义与收尾关连。
+
+TEST(stopDrainsHalfOpenConnection) {
+	ensureDoublerEngine();
+	auto srv = startServer({}, 8, 32, std::chrono::milliseconds(300));
+
+	Poco::Net::StreamSocket halfOpen;
+	openHalfOpenConnection(halfOpen, srv.port);
+	std::this_thread::sleep_for(std::chrono::milliseconds(80)); // 让 worker 进入阻塞读
+
+	const auto t0 = std::chrono::steady_clock::now();
+	srv.svc->stop();
+	const auto elapsed =
+		std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+	CHECK(elapsed < std::chrono::seconds(3), "stop 在有限时间内完成排水（不挂死）");
+	CHECK(!srv.svc->alive(), "service not alive after stop");
+
+	// stop 返回即 worker 已退净并已关闭连接：对端读到 EOF/异常
+	bool closedByServer = false;
+	try {
+		halfOpen.setReceiveTimeout(Poco::Timespan(0, 1000 * 1000));
+		char buf[8];
+		closedByServer = halfOpen.receiveBytes(buf, sizeof(buf)) <= 0;
+	} catch (const Poco::Exception&) {
+		closedByServer = true;
+	}
+	halfOpen.close();
+	CHECK(closedByServer, "stop 返回时半开连接已被服务端关闭（排水完成）");
+
+	// 停止后新连接被拒
+	bool refused = false;
+	try {
+		Poco::Net::StreamSocket c;
+		c.connect(Poco::Net::SocketAddress("127.0.0.1", static_cast<Poco::UInt16>(srv.port)));
+		c.close();
+	} catch (const Poco::Exception&) {
+		refused = true;
+	}
+	CHECK(refused, "stop 后新连接被拒");
+	// 进程存活至此前进一步说明无 use-after-free（本文件末尾的汇总输出即证明）
+}
+
+// ── 连接级闸门：超出 maxConnections 的连接在 accept 期即被拒（不起线程、不入在途）──
+
+TEST(connectionCapRejectsExcess) {
+	ensureDoublerEngine();
+	auto srv = startServer({}, 8, /*maxConnections*/ 1, std::chrono::milliseconds(2000));
+
+	Poco::Net::StreamSocket hog; // 占满唯一连接名额（半开，不产生请求）
+	openHalfOpenConnection(hog, srv.port);
+	std::this_thread::sleep_for(std::chrono::milliseconds(80));
+
+	// 第二个连接即使带着完整请求也在 accept 期被关（慢速/满载时不耗尽线程）
+	bool dropped = false;
+	try {
+		Poco::Net::StreamSocket extra;
+		extra.connect(Poco::Net::SocketAddress("127.0.0.1", static_cast<Poco::UInt16>(srv.port)));
+		const std::string full = "POST /v1/infer HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}";
+		extra.sendBytes(full.data(), static_cast<int>(full.size()));
+		extra.setReceiveTimeout(Poco::Timespan(0, 2000 * 1000));
+		char buf[64];
+		dropped = extra.receiveBytes(buf, sizeof(buf)) <= 0; // 无应答即被关 = 拒绝
+		extra.close();
+	} catch (const Poco::Exception&) {
+		dropped = true;
+	}
+	CHECK(dropped, "超限连接被直接关闭（未起 worker 线程）");
+	CHECK(srv.svc->alive(), "拒绝超限连接不得影响监听存活");
+
+	hog.close();
+	srv.svc->stop();
+}
+
+// ── P1 回归：两节点共享同一 transport（同端点）时交换串行且不串号 ──
+//   引擎实例按 engineType:modelPath 缓存复用，而执行闸在节点级——两线程并发进入
+//   同一 HttpTransport。修复前：_session/_response 无锁竞争，A 的 send 可接上 B 的 recv。
+
+TEST(transportSerializesSharedEndpointExchanges) {
+	ensureDoublerEngine();
+	ensureOutbound();
+	auto srv = startServer();
+
+	const std::string endpoint = "http://127.0.0.1:" + std::to_string(srv.port) + "/v1";
+	std::atomic<int> mismatches{0};
+	auto worker = [&](int base) {
+		for (int i = 0; i < 20 && mismatches.load() == 0; ++i) {
+			auto node = EngineRegistry::instance().createNode(
+				"DCNet.Tensor", "conc-" + std::to_string(base) + "-" + std::to_string(i), endpoint);
+			if (!node) {
+				++mismatches;
+				return;
+			}
+			const std::vector<float> in{static_cast<float>(base * 100 + i), 1.0f};
+			NodeExecutor exec(*node);
+			exec.setInput("t", "data", makeFloatTensor(in));
+			auto res = exec.tryExecute("t");
+			if (!res.ok()) {
+				++mismatches;
+				return;
+			}
+			Tensor out = exec.takeOutputTensor("t", "result");
+			const auto vals = out.getData<float>();
+			if (vals.size() != 2 || vals[0] != in[0] * 2.0f || vals[1] != 2.0f)
+				++mismatches; // 拿到另一线程的响应即为串号
+		}
+	};
+	std::thread ta(worker, 1), tb(worker, 2);
+	ta.join();
+	tb.join();
+	CHECK(mismatches.load() == 0, "并发共享 transport：每次交换各自配对，无请求/响应错配");
+	srv.svc->stop();
+}
+
 int main() {
 	struct Case {
 		const char* name;
@@ -410,6 +542,9 @@ int main() {
 						  {"rateLimited", test_rateLimited},
 						  {"unknownPath404", test_unknownPath404},
 						  {"lifecycle", test_lifecycle},
+						  {"stopDrainsHalfOpenConnection", test_stopDrainsHalfOpenConnection},
+						  {"connectionCapRejectsExcess", test_connectionCapRejectsExcess},
+						  {"transportSerializesSharedEndpointExchanges", test_transportSerializesSharedEndpointExchanges},
 						  {"configErrorsThrow", test_configErrorsThrow}};
 	for (const auto& c : cases) {
 		std::printf("RUN %s\n", c.name);

@@ -95,6 +95,21 @@ Tensor decodeTensor(const nlohmann::json& j) {
 	return Tensor(type, typeSize, std::move(shape), std::move(block));
 }
 
+/// 解远端响应帧：解析/dtype/字段异常统一改抛 DcCodecRemoteError（契约：NetCodec.h
+/// “decode 结构异常 → DcCodecRemoteError”，与 OpenAI codec 一致）——由标准 RunFn
+/// 映射为 ExecutionFailed + dcnet 领域诊断（RemoteMalformed），不再漏到通用
+/// std::exception 分支而丢诊断码。本地端口写入（ctx.output）不在此处，以免把
+/// 本地形状/端口异常误分类为远端报文异常。
+Tensor decodeRemoteTensorFrame(const Payload& payload, const char* context) {
+	try {
+		return decodeTensor(nlohmann::json::parse(payload));
+	} catch (const DcCodecRemoteError&) {
+		throw; // 已是契约类型：不二次包装
+	} catch (const std::exception& e) {
+		throw DcCodecRemoteError(std::string(context) + e.what());
+	}
+}
+
 } // namespace
 
 /// 数值张量端口（in "data" Float → out "result" Float）
@@ -118,8 +133,8 @@ public:
 	}
 
 	void decodeResponse(Payload& payload, Node::RunContext& ctx) override {
-		const auto j = nlohmann::json::parse(payload);
-		ctx.output("result", Value(std::make_unique<Tensor>(decodeTensor(j))));
+		Tensor t = decodeRemoteTensorFrame(payload, "tensor response is not a valid frame: ");
+		ctx.output("result", Value(std::make_unique<Tensor>(std::move(t))));
 	}
 };
 
@@ -144,8 +159,8 @@ public:
 	}
 
 	void decodeResponse(Payload& payload, Node::RunContext& ctx) override {
-		const auto j = nlohmann::json::parse(payload);
-		ctx.output("result", Value(std::make_unique<Tensor>(decodeTensor(j))));
+		Tensor t = decodeRemoteTensorFrame(payload, "text response is not a valid frame: ");
+		ctx.output("result", Value(std::make_unique<Tensor>(std::move(t))));
 	}
 };
 

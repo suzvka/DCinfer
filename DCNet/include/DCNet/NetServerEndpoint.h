@@ -22,8 +22,11 @@ struct NetServerEndpoint {
 	// ── 鉴权（可选；仅 Bearer token，mTLS 后置）──
 	std::string authToken;                ///< 非空时启用 Authorization 校验（裸 key 或 "Bearer xxx"）
 
-	// ── 并发与过载 ──
+	// ── 并发与过载（两级闸门，DESIGN.md §6.1）──
 	int backlog = 16;                     ///< listen backlog
+	int maxConnections = 32;              ///< 并发连接（工作线程）上限；0 = 不限制。accept 期即生效，
+	                                      ///< 约束"已接受但请求尚未读完"的连接（含慢速/半开连接），
+	                                      ///< 这类连接不计入 maxInFlight，故需独立上限
 	int maxInFlight = 8;                  ///< 在途请求上限；超出立即 wire 429（不排队、不静默丢弃）
 
 	// ── 超时 ──

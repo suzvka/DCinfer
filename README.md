@@ -199,11 +199,15 @@ cmake --install build/core-only --prefix <安装前缀>
 宿主工程 CMakeLists 示例：
 
 ```cmake
-find_package(DCinfer 0.5 CONFIG REQUIRED)
+find_package(DCinfer 0.6 CONFIG REQUIRED)   # 版本请求需与当前 minor 一致（见下）
 find_package(DCEngine CONFIG REQUIRED)   # 需要 Builtin 引擎时
 
 target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)
 ```
+
+> 各包导出文件采用 `SameMinorVersion` 兼容策略：`find_package` 请求的 major.minor
+> 必须与已安装版本完全一致（0.x 阶段 minor 升级含破坏性变更）。无需版本约束时
+> 省略版本号即可：`find_package(DCinfer CONFIG REQUIRED)`。
 
 > 安装闭环 [examples/install_smoke](examples/install_smoke/CMakeLists.txt)。
 

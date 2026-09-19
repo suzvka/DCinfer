@@ -14,9 +14,12 @@
 #include <Poco/URI.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <istream>
 #include <memory>
+#include <mutex>
 #include <ostream>
+#include <thread>
 #include <utility>
 
 namespace DC::Net {
@@ -47,11 +50,46 @@ Poco::Timespan toTimespan(const std::chrono::milliseconds& ms) {
 HttpTransport::HttpTransport() = default;
 
 HttpTransport::~HttpTransport() {
-	close();
+	// 析构期不等交换权（持有者仍在跑即调用方违约）：强制清占用后丢会话
+	{
+		std::lock_guard lk(_ioMutex);
+		_claimed = false;
+		_claimOwner = std::thread::id{};
+	}
+	_ioCv.notify_all();
+	dropSession();
+}
+
+void HttpTransport::acquireClaim() {
+	std::unique_lock lk(_ioMutex);
+	const auto self = std::this_thread::get_id();
+	// 同线程遗留占用（上次交换未由 recv 收尾）直接回收：不自锁
+	_ioCv.wait(lk, [this, self] { return !_claimed || _claimOwner == self; });
+	_claimed = true;
+	_claimOwner = self;
+}
+
+void HttpTransport::releaseClaimIfOwned() {
+	{
+		std::lock_guard lk(_ioMutex);
+		if (!_claimed || _claimOwner != std::this_thread::get_id())
+			return; // 非本线程占用：不动他人租约
+		_claimed = false;
+		_claimOwner = std::thread::id{};
+	}
+	_ioCv.notify_all();
+}
+
+void HttpTransport::resetLocked() {
+	dropSession(); // 调用者已持交换权：无并发交换可误伤
+	_failed = false;
+	_connectError = {};
 }
 
 NetError HttpTransport::connect(const NetEndpoint& ep) {
-	close();
+	acquireClaim();
+	const ClaimScope scope{this}; // 所有出口回收占用（_ep 写入也受占用保护）
+	resetLocked();
 	_ep = ep;
 
 	// 解析端点 URL → scheme/host/port/basePath（Poco::URI 处理默认端口与 IPv6）
@@ -106,6 +144,10 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 }
 
 NetError HttpTransport::send(const Payload& payload) {
+	// 一次交换的起点：领取占用，连同后续 recv 整体串行化（多节点共享同一实例时
+	// 不得出现 A 的 send 接上 B 的 recv）；maxRetries 重试路径由 acquireClaim 自动回收
+	acquireClaim();
+	ClaimScope scope{this};
 	if (!_session || _failed)
 		return _connectError.ok() ? normalizeTransportError(NetTransportError::Other, "not connected")
 								  : _connectError;
@@ -161,6 +203,8 @@ NetError HttpTransport::send(const Payload& payload) {
 			_response = nullptr;
 			return normalizeHttpResponse(status, body);
 		}
+		// 2xx：交换未结束——占用延续给 recv（否则响应流会被另一交换接管）
+		scope.dismiss();
 		return {};
 	} catch (const Poco::Exception& e) {
 		abortResponse();
@@ -174,21 +218,37 @@ NetError HttpTransport::send(const Payload& payload) {
 }
 
 NetError HttpTransport::recv(Payload& out) {
-	if (!_response)
+	if (!_response) {
+		releaseClaimIfOwned(); // 无挂起响应：回收本线程遗留占用
 		return normalizeTransportError(NetTransportError::Other, "no pending response");
+	}
 	out = readBody();
 	_response = nullptr;
+	releaseClaimIfOwned(); // 交换结束：释放占用并唤醒等待者
 	return {};
 }
 
 bool HttpTransport::alive() const {
+	std::lock_guard lk(_ioMutex);
 	return !_failed && _session != nullptr;
 }
 
 void HttpTransport::close() {
+	std::unique_lock lk(_ioMutex);
+	// 等他人交换收尾至多 5s（超时即占用泄漏——强制回收，close 不得挂死）
+	const auto self = std::this_thread::get_id();
+	const bool freeOrMine = !_claimed || _claimOwner == self;
+	const bool acquired = freeOrMine || _ioCv.wait_for(lk, std::chrono::seconds(5),
+													   [this, self] { return !_claimed || _claimOwner == self; });
+	if (!acquired) {
+		_claimed = false;
+		_claimOwner = std::thread::id{};
+	}
 	dropSession();
 	_failed = false;
 	_connectError = {};
+	lk.unlock();
+	_ioCv.notify_all();
 }
 
 Payload HttpTransport::readBody() {

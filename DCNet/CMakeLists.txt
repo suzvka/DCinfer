@@ -60,10 +60,11 @@ target_sources(DCNet PRIVATE ${DCNET_SRC})
 # （经 DCNet::DCNet 传递包含），随包安装以保持该用法可用。
 include(GNUInstallDirs)
 
-# 包版本：与 DCinfer 模块同一约定（顶层 project(DCinfer VERSION) 权威 + 兜底）
-set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
-if(NOT DCINFER_PKG_VERSION)
-    set(DCINFER_PKG_VERSION "0.6.1")
+# 包版本：与 DCinfer 模块同一约定（仅顶层构建时 PROJECT_VERSION 权威，否则回落字面版本）
+if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
+    set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
+else()
+    set(DCINFER_PKG_VERSION "0.6.2")
 endif()
 
 install(TARGETS DCNet EXPORT DCNetTargets

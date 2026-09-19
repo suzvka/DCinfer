@@ -83,11 +83,13 @@ target_sources(DCinfer PRIVATE ${DCINFER_SRC_FILES})
 # find_package(DCinfer CONFIG REQUIRED)（INSTALL_INTERFACE 相对路径）。
 include(GNUInstallDirs)
 
-# 包版本：顶层 project(DCinfer VERSION) 为权威；宿主经 add_subdirectory 引入且
-# 未声明版本号时兜底（需与顶层 project() 版本同步维护）。
-set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
-if(NOT DCINFER_PKG_VERSION)
-    set(DCINFER_PKG_VERSION "0.6.1")
+# 包版本：仅顶层构建（自身 project() 即 DCinfer）时 PROJECT_VERSION 才权威；
+# 宿主直接 add_subdirectory 本目录时它指向宿主版本，必须回落到字面版本，
+# 否则写出的 *ConfigVersion.cmake 会带宿主版本号（需与顶层 project() 同步维护）。
+if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
+    set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
+else()
+    set(DCINFER_PKG_VERSION "0.6.2")
 endif()
 
 install(TARGETS DCinfer EXPORT DCinferTargets

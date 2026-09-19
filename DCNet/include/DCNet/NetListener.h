@@ -33,8 +33,11 @@ struct DcNetListener {
 	/// @brief 开始 accept（未 bind 先调用 → NodeException；重复调用 → NodeException）。
 	virtual void start(RequestHandler handler) = 0;
 
-	/// @brief 优雅停止：停止 accept，等待在途请求完成（graceful drain，受
-	/// requestTimeout 约束）。重复调用安全。
+	/// @brief 优雅停止（同步、阻塞）：停 accept 并 join accept 线程 → 以 requestTimeout
+	/// 为 grace 等待已接受连接的工作线程自然退出（已完成请求正常应答）→ grace 到期
+	/// 后强制关闭在册连接（把阻塞在读/写上的线程立即放倒）→ 等其全部退出。
+	/// 因此本函数返回即蕴含：无任何工作线程再持有监听器状态（不存在"线程存活而
+	/// 对象已析构"的窗口），紧随其后的析构安全。重复调用安全。
 	virtual void stop() = 0;
 
 	/// @brief 服务端健康镜像（对端 alive() 的镜像语义）。
@@ -46,7 +49,8 @@ struct DcNetListener {
 
 /// @brief HTTP/1.1 监听器（POCO ServerSocket，跨平台）。
 /// v1 边界：仅 Content-Length 请求体（不支持 chunked）；逐请求应答后关闭连接；
-/// 服务端 TLS 监听暂不支持。
+/// 服务端 TLS 监听暂不支持；thread-per-connection，并发连接数受
+/// NetServerEndpoint::maxConnections 约束（超限连接就地关闭，不起线程）。
 std::unique_ptr<DcNetListener> makeHttpListener();
 
 } // namespace DC::Net

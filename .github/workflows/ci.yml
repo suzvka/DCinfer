@@ -252,7 +252,7 @@ jobs:
       - name: Concurrency tests under TSan
         run: >
           ctest --test-dir build-tsan
-          -R "FreezeBoundaryTest|GraphOperatorTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest"
+          -R "FreezeBoundaryTest|GraphOperatorTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest|ExecutionConcurrencyTest|ThreadPoolTest|ValueSharingTest|FailureClosureTest"
           --output-on-failure
 
       - name: Freeze-boundary repeated (until-fail x3)

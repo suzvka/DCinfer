@@ -1,9 +1,14 @@
 // HTTP/1.1 监听器（POCO ServerSocket；DESIGN.md §3.6）
 //
-// 闸门顺序（DESIGN.md §6.1）：accept → 读请求 → 过载 429 → 方法 405 → 鉴权 401 →
-// 路径 404 → 业务 handler → 应答。连接中途断开无应答（对端自行归一化超时）。
+// 闸门顺序（DESIGN.md §6.1）：accept →（连接级配额 maxConnections）→ 读请求 →
+// 过载 429 → 方法 405 → 鉴权 401 → 路径 404 → 业务 handler → 应答。
+// 连接中途断开无应答（对端自行归一化超时）。
+// 两级闸门分层：连接级配额在 accept 期生效（含半开/慢速连接，它们不计入在途请求）；
 // 过载计数在请求完整读入后进行——出站 connect 的 TCP 就绪探测连接（读即断）
 // 不入计，避免误限流。
+// 生命周期不变量：worker 线程在 accept 期（起线程之前）就以 _activeThreads 记账，
+// stop() 排水等其归零后才返回——因此“已创建但尚未开始调度”的线程也在账内，
+// 分离线程不可能再访问已析构的监听器状态。
 // v1 边界：仅 Content-Length 请求体（不支持 chunked）；逐请求应答后关闭连接。
 
 #include "DCNet/NetListener.h"
@@ -25,11 +30,13 @@
 #include <cstdlib>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace DC::Net {
 
@@ -37,6 +44,9 @@ namespace {
 
 constexpr std::size_t kMaxHeaderBytes = 64 * 1024;		   // 请求头预算
 constexpr std::size_t kMaxBodyBytes = 64ull * 1024 * 1024; // 请求体预算（超限 413）
+constexpr std::chrono::milliseconds kDefaultRequestTimeout{30000}; ///< 预算非法时的兜底
+constexpr std::chrono::milliseconds kMinDrainGrace{5000};	// stop() 排水 grace 下限
+constexpr std::chrono::milliseconds kStopPollInterval{10};	// stop() 排水轮询步长
 
 Poco::Timespan toTimespan(const std::chrono::milliseconds& ms) {
 	return Poco::Timespan(0, std::chrono::duration_cast<std::chrono::microseconds>(ms).count());
@@ -53,6 +63,18 @@ struct RawRequest {
 struct InFlightGuard {
 	std::atomic<std::size_t>& counter;
 	~InFlightGuard() { counter.fetch_sub(1, std::memory_order_acq_rel); }
+};
+
+/// worker 线程退出时回收存活账（递减-only）：计数在 accept 期与入册同一临界区内
+/// 完成（见 admitConnection）——若改为在 worker 线程体内自增，“线程已创建但
+/// 尚未被调度”的窗口会使排水看到 0 而提前放行，仍是 use-after-free。
+/// stop() 排水以此账为准：_inFlight 只覆盖“完整读入后”的阶段，不能充当线程存活性依据。
+struct ThreadReleaseGuard {
+	std::atomic<std::size_t>& counter;
+	explicit ThreadReleaseGuard(std::atomic<std::size_t>& c) : counter(c) {}
+	ThreadReleaseGuard(const ThreadReleaseGuard&) = delete;
+	ThreadReleaseGuard& operator=(const ThreadReleaseGuard&) = delete;
+	~ThreadReleaseGuard() { counter.fetch_sub(1, std::memory_order_acq_rel); }
 };
 
 /// "Bearer xxx" / 裸 key 统一去前缀比较（出站 authToken 按原样注入请求头）。
@@ -91,11 +113,12 @@ public:
 			if (!_bound)
 				throw NodeException(NodeException::ErrorType::InternalError, "DcNetListener::start",
 									"bind() must be called before start()");
-			if (_started)
+			if (_started.load())
 				throw NodeException(NodeException::ErrorType::InternalError, "DcNetListener::start",
 									"listener already started");
 			_handler = std::move(handler);
-			_started = true;
+			_stopped.store(false);
+			_started.store(true);
 		}
 		_acceptThread = std::thread([this] { acceptLoop(); });
 	}
@@ -103,9 +126,9 @@ public:
 	void stop() override {
 		{
 			std::lock_guard lk(_mutex);
-			if (!_started || _stopped)
+			if (!_started.load() || _stopped.load())
 				return;
-			_stopped = true;
+			_stopped.store(true);
 		}
 		try {
 			_socket.close(); // 中断 accept（轮询循环在 50ms 内感知 _stopped）
@@ -113,15 +136,11 @@ public:
 		}
 		if (_acceptThread.joinable())
 			_acceptThread.join();
-		// graceful drain：等待在途请求完成（受 requestTimeout 约束，兜底防挂死）
-		const auto deadline = std::chrono::steady_clock::now() +
-							  std::max(_endpoint.requestTimeout * 2, std::chrono::milliseconds(5000));
-		while (_inFlight.load(std::memory_order_acquire) > 0 && std::chrono::steady_clock::now() < deadline)
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		drainConnections();
 	}
 
 	bool alive() const override {
-		return _started && !_stopped;
+		return _started.load(std::memory_order_acquire) && !_stopped.load(std::memory_order_acquire);
 	}
 
 	int port() const override {
@@ -133,38 +152,138 @@ public:
 	}
 
 private:
+	/// 连接在册登记（RAII 收尾）：worker 退出即从在册集合摘除。
+	/// 在册集合同时是 maxConnections 的配额依据与 stop() 强制关闭的目标。
+	struct ConnScope {
+		HttpListener* self;
+		std::shared_ptr<Poco::Net::StreamSocket> conn;
+		~ConnScope() { self->unregisterConnection(conn); }
+	};
+
+	/// 排水：grace 内等工作线程自然退出（已完成请求正常应答）；到期后强制关闭
+	/// 在册连接，把阻塞在慢速对端读/写上的线程立即放倒，再等其全部退出。
+	/// socket 层面的阻塞已由单请求读预算与本处强制关闭双重有界；若本地引擎在
+	/// handler 内永久挂起，stop() 会随之挂起——宁挂起也不让分离线程访问已析构对象。
+	void drainConnections() {
+		const auto budget = _endpoint.requestTimeout > std::chrono::milliseconds(0) ? _endpoint.requestTimeout
+																					: kDefaultRequestTimeout;
+		const auto graceDeadline = std::chrono::steady_clock::now() +
+									std::max(budget + std::chrono::seconds(1), kMinDrainGrace);
+		while (_activeThreads.load(std::memory_order_acquire) > 0 &&
+			   std::chrono::steady_clock::now() < graceDeadline)
+			std::this_thread::sleep_for(kStopPollInterval);
+		if (_activeThreads.load(std::memory_order_acquire) == 0)
+			return;
+		// grace 到期仍有在服连接：强制关闭后无条件等待（此时 worker 不再可能阻塞）
+		std::vector<std::shared_ptr<Poco::Net::StreamSocket>> snapshot;
+		{
+			std::lock_guard lk(_connMutex);
+			snapshot = _conns; // 快照后锁外关闭：不在持锁期间做 syscall
+		}
+		for (auto& conn : snapshot)
+			if (conn)
+				forceClose(*conn);
+		while (_activeThreads.load(std::memory_order_acquire) > 0)
+			std::this_thread::sleep_for(kStopPollInterval);
+	}
+
+	static void forceClose(Poco::Net::StreamSocket& conn) {
+		try {
+			conn.shutdownReceive();
+		} catch (...) {
+		}
+		try {
+			conn.shutdownSend();
+		} catch (...) {
+		}
+		try {
+			conn.close();
+		} catch (...) {
+		}
+	}
+
+	/// accept 后同步入册：配额检查、存活记账与登记同一临界区（既无超限窗口，
+	/// 也无“线程已创建但未调度”时排水误判归零的窗口）。记账由 worker 退出时回收。
+	/// 返回 null = 超出 maxConnections（已就地关闭，调用方不得起线程）。
+	std::shared_ptr<Poco::Net::StreamSocket> admitConnection(Poco::Net::StreamSocket conn) {
+		auto holder = std::make_shared<Poco::Net::StreamSocket>(std::move(conn));
+		{
+			std::lock_guard lk(_connMutex);
+			const int cap = _endpoint.maxConnections;
+			if (cap > 0 && _conns.size() >= static_cast<std::size_t>(cap)) {
+				forceClose(*holder); // 连接级过载：不排队、不起线程
+				return nullptr;
+			}
+			_activeThreads.fetch_add(1, std::memory_order_acq_rel); // 起线程前先记账
+			_conns.push_back(holder);
+		}
+		return holder;
+	}
+
+	void unregisterConnection(const std::shared_ptr<Poco::Net::StreamSocket>& holder) {
+		std::lock_guard lk(_connMutex);
+		for (auto it = _conns.begin(); it != _conns.end(); ++it) {
+			if (it->get() == holder.get()) {
+				_conns.erase(it);
+				return;
+			}
+		}
+	}
+
+	/// 线程创建失败（资源不足）回滚：摘册 + 回收 accept 期的存活账 + 关连接。
+	/// 不回滚则排水会永远等一个不存在的 worker。
+	void rejectAdmittedConnection(const std::shared_ptr<Poco::Net::StreamSocket>& holder) {
+		forceClose(*holder);
+		unregisterConnection(holder);
+		_activeThreads.fetch_sub(1, std::memory_order_acq_rel);
+	}
+
 	void acceptLoop() {
 		for (;;) {
-			if (_stopped)
+			if (_stopped.load(std::memory_order_acquire))
 				break;
 			// 轮询而非阻塞 accept：stop 时 close+join 跨平台安全（POSIX close 不唤醒阻塞 accept）
 			try {
 				if (!_socket.poll(Poco::Timespan(0, 50 * 1000), Poco::Net::Socket::SELECT_READ))
 					continue;
 				auto conn = _socket.acceptConnection();
-				std::thread([this, conn = std::move(conn)]() mutable {
-					serveConnection(std::move(conn));
-				}).detach(); // v1：worker 分离；排水以在途计数为准（stop() 等待归零）
+				auto holder = admitConnection(std::move(conn));
+				if (!holder)
+					continue; // 连接级闸门已拦截（429 之前的第一道防线）
+				auto tracked = holder; // worker 接走 holder 后仍可回滚
+				std::thread worker;
+				try {
+					worker = std::thread([this, conn = std::move(holder)]() mutable {
+						serveConnection(std::move(conn));
+					});
+				} catch (...) {
+					rejectAdmittedConnection(tracked); // 线程未能启动：回收 accept 期的账
+					continue;
+				}
+				worker.detach(); // 分离：join 责任由 _activeThreads 排水承担
 			} catch (const Poco::Exception&) {
-				if (_stopped)
+				if (_stopped.load(std::memory_order_acquire))
 					break; // socket 已关闭（stop）
 				// 单连接异常不终止监听（不得崩溃）
 			} catch (...) {
-				if (_stopped)
+				if (_stopped.load(std::memory_order_acquire))
 					break;
 			}
 		}
 	}
 
-	void serveConnection(Poco::Net::StreamSocket conn) {
+	void serveConnection(std::shared_ptr<Poco::Net::StreamSocket> conn) {
+		// 回收 accept 期登记的存活账；连接收尾从在册集摘除（两者均先于成员访问建立）
+		const ThreadReleaseGuard threadsGuard{_activeThreads};
+		const ConnScope connScope{this, conn};
 		try {
-			conn.setReceiveTimeout(toTimespan(_endpoint.requestTimeout));
-			conn.setSendTimeout(toTimespan(_endpoint.requestTimeout));
+			conn->setReceiveTimeout(toTimespan(_endpoint.requestTimeout));
+			conn->setSendTimeout(toTimespan(_endpoint.requestTimeout));
 
 			RawRequest req;
-			const int readStatus = readRequest(conn, req);
+			const int readStatus = readRequest(*conn, req, _endpoint.requestTimeout);
 			if (readStatus != 0) {
-				respond(conn,
+				respond(*conn,
 						WireResponse{readStatus, detail::wireErrorBody(readStatus == 413 ? "payload_too_large" : "bad_request",
 																	   readStatus == 413 ? "request body too large"
 																						 : "malformed HTTP request")});
@@ -176,23 +295,23 @@ private:
 			if (_inFlight.fetch_add(1, std::memory_order_acq_rel) + 1 >
 				static_cast<std::size_t>(_endpoint.maxInFlight)) {
 				_inFlight.fetch_sub(1, std::memory_order_acq_rel);
-				respond(conn, WireResponse{429, detail::wireErrorBody(
+				respond(*conn, WireResponse{429, detail::wireErrorBody(
 													"overloaded", "server overloaded: in-flight limit reached")});
 				return;
 			}
 			InFlightGuard guard{_inFlight};
 
 			if (req.method != "POST") {
-				respond(conn, WireResponse{405, detail::wireErrorBody("method_not_allowed", "only POST is supported")});
+				respond(*conn, WireResponse{405, detail::wireErrorBody("method_not_allowed", "only POST is supported")});
 				return;
 			}
 			if (!authorized(req)) {
-				respond(conn, WireResponse{401, detail::wireErrorBody("unauthorized", "missing or invalid token")});
+				respond(*conn, WireResponse{401, detail::wireErrorBody("unauthorized", "missing or invalid token")});
 				return;
 			}
 			const std::string expected = _endpoint.basePath + _endpoint.requestPath;
 			if (req.path != expected) {
-				respond(conn, WireResponse{404, detail::wireErrorBody("not_found", "no such endpoint")});
+				respond(*conn, WireResponse{404, detail::wireErrorBody("not_found", "no such endpoint")});
 				return;
 			}
 
@@ -205,19 +324,26 @@ private:
 			} catch (...) {
 				resp = WireResponse{500, detail::wireErrorBody("server_error", "unknown handler exception")};
 			}
-			respond(conn, resp);
+			respond(*conn, resp);
 		} catch (...) {
 			// 连接中途断开 / 请求中止：无应答（对端自行归一化超时），线程静默退出
 		}
 	}
 
 	// 读取并解析请求；成功返回 0，否则返回应答的 HTTP 错误状态码（400/413）。
-	static int readRequest(Poco::Net::StreamSocket& conn, RawRequest& req) {
+	// budget 为单请求读总预算：每次 receiveBytes 前把连接 receive 超时收紧到剩余
+	// 时间，慢速滴灌连接到点自行释放线程（与 maxConnections 构成两道防线）。
+	static int readRequest(Poco::Net::StreamSocket& conn, RawRequest& req, std::chrono::milliseconds budget) {
+		const std::chrono::milliseconds total =
+			budget.count() > 0 ? budget : kDefaultRequestTimeout;
+		const auto deadline = std::chrono::steady_clock::now() + total;
 		std::string raw;
 		char buf[4096];
 		int n;
-		// ① 头部：读到 \r\n\r\n（受连接读超时与预算约束，慢速连接自行释放线程）
+		// ① 头部：读到 \r\n\r\n（受单请求总预算约束，慢速连接自行释放线程）
 		while (raw.size() < kMaxHeaderBytes) {
+			if (!armRemainingBudget(conn, deadline))
+				return 400; // 读预算耗尽
 			n = conn.receiveBytes(buf, sizeof(buf));
 			if (n <= 0)
 				return 400;
@@ -268,6 +394,8 @@ private:
 		if (req.body.size() > bodyLen)
 			req.body.resize(bodyLen);
 		while (req.body.size() < bodyLen) {
+			if (!armRemainingBudget(conn, deadline))
+				return 400; // 读预算耗尽（慢速滴灌请求体）
 			n = conn.receiveBytes(buf, sizeof(buf));
 			if (n <= 0)
 				return 400;
@@ -276,6 +404,20 @@ private:
 				req.body.resize(bodyLen);
 		}
 		return 0;
+	}
+
+	/// 把连接 receive 超时收紧到剩余读预算；预算耗尽返回 false。
+	static bool armRemainingBudget(Poco::Net::StreamSocket& conn,
+								   const std::chrono::steady_clock::time_point& deadline) {
+		const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+			deadline - std::chrono::steady_clock::now());
+		if (remaining <= std::chrono::milliseconds(0))
+			return false;
+		try {
+			conn.setReceiveTimeout(toTimespan(remaining));
+		} catch (...) {
+		}
+		return true;
 	}
 
 	bool authorized(const RawRequest& req) const {
@@ -307,11 +449,14 @@ private:
 	Poco::Net::ServerSocket _socket;
 	RequestHandler _handler;
 	std::thread _acceptThread;
-	std::atomic<std::size_t> _inFlight{0};
-	bool _bound = false;
-	bool _started = false;
-	bool _stopped = false;
+	std::atomic<std::size_t> _inFlight{0};	   ///< 已完整读入的在途请求（仅 429 闸门）
+	std::atomic<std::size_t> _activeThreads{0};  ///< 在服工作线程数（stop() 排水依据）
+	bool _bound = false;						   ///< 仅 _mutex 下访问（bind/start）
+	std::atomic<bool> _started{false};			   ///< accept 已启动（acceptLoop/alive 无锁读）
+	std::atomic<bool> _stopped{false};			   ///< stop() 已发起（acceptLoop 轮询无锁读）
 	std::mutex _mutex; // 仅保护 bind/start/stop 状态字段（ADR-5/6：不保护请求路径）
+	std::mutex _connMutex; ///< 保护 _conns（accept 入册 / worker 注销 / stop 快照）
+	std::vector<std::shared_ptr<Poco::Net::StreamSocket>> _conns; ///< 在册连接（配额 + 强制关闭目标）
 };
 
 } // namespace

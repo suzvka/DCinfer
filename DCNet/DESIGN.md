@@ -152,7 +152,7 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 | 4 | `bind` 错误出口 | **配置期抛 `NodeException`**（对齐 `createEngine` 先例与 DESIGN.md §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（不崩溃、不静默丢弃） |
 | 5 | RunContext 生命周期 / 并发隔离 | **一请求一节点实例**（`EngineRegistry::createNode` 每请求构造，实例级隔离）；引擎实例按 `engineType + localModelRef` 缓存复用，本地执行互斥串行（引擎单任务语义）；**server codec 不暴露 `RunContext`**，以「端口名 ↔ 张量」为界 |
 | 6 | 装配入口命名 | 采用 **`registerDcNetServerAdapter(reg, DcNetServerAdapterDesc)`**；本地模型标识命名 **`localModelRef`**，避免与 modelPath=远端端点的全局约定冲突 |
-| 7 | 服务端配置结构 | **派生独立结构 `NetServerEndpoint`**（listenHost/port/basePath/requestPath/authToken/backlog/maxInFlight/requestTimeout），不复用出站 `NetEndpoint` 全套 |
+| 7 | 服务端配置结构 | **派生独立结构 `NetServerEndpoint`**（listenHost/port/basePath/requestPath/authToken/backlog/maxConnections/maxInFlight/requestTimeout），不复用出站 `NetEndpoint` 全套 |
 
 **wire 逆向映射原则（语义一致性）**：归一化两段式的第一段由服务端产出 wire
 应答；本地执行结果状态 → HTTP 状态码的映射归核心统一维护（ADR-4），即
@@ -279,7 +279,8 @@ R DcNetSync::syncAwait(const std::function<void(std::function<void(R)>)>& submit
 struct DcNetListener {                       // 监听端生命周期（DcNetTransport 的服务端镜像）
     virtual void bind(const NetServerEndpoint&) = 0;   // 配置期；失败抛 NodeException（ADR-7）
     virtual void start(RequestHandler) = 0;  // 内部自持 I/O 线程 / accept 循环（ADR-6(3)）
-    virtual void stop() = 0;                 // graceful drain（受 requestTimeout 约束）
+    virtual void stop() = 0;                 // graceful drain：等已接受连接的工作线程退净
+                                             //（grace 到期强制关闭在册连接）；返回即析构安全
     virtual bool alive() const = 0;          // 服务端健康镜像
     virtual int port() const = 0;            // 实际端口（port=0 时 bind 后回读）
 };
@@ -298,9 +299,13 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 //         → collectOutputs → encodeResponse；失败经 wireStatusFor 逆向映射（§6.1）
 ```
 
-闸门顺序（§6.1）：accept → 读请求 → 过载 429（`maxInFlight`，探测连接不入计）
-→ 方法 405 → 鉴权 401 → 路径 404 → 业务处理。请求体仅支持 Content-Length
-（不支持 chunked）；逐请求应答后关闭。
+闸门顺序（§6.1）：accept → 连接级配额（在册连接达 `maxConnections` → 就地关闭，
+不起线程）→ 读请求（单请求读总预算 = `requestTimeout`，慢速滴灌自行释放线程）
+→ 过载 429（`maxInFlight`，探测连接不入计）→ 方法 405 → 鉴权 401 → 路径 404
+→ 业务处理。请求体仅支持 Content-Length（不支持 chunked）；逐请求应答后关闭。
+两级闸门分层：`maxConnections` 约束连接级资源（含请求未读完的半开连接），
+`maxInFlight` 约束已完整读入请求的过载——前者不拦截则 thread-per-connection 会被
+慢速客户端耗尽（后者拦截不到未读完的请求，故必须两级）。
 
 ---
 
@@ -406,6 +411,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | 鉴权失败 | 401 / 403 | RemoteAuth → `InternalError`（`remote:auth`） |
 | wire 级垃圾报文（codec decodeRequest 抛异常） | 415（未列举，[ADR-7 #3]） | RemoteMalformed → `ExecutionFailed`（`remote:malformed`） |
 | 过载（在途超 `maxInFlight`） | 429 | RemoteRateLimited → `ExecutionFailed`（retryable） |
+| 连接级过载（在册连接达 `maxConnections`） | 无应答（accept 期就地关闭） | 对端自行归一化 `net:timeout` / 连接重置 |
 | 未知路径 / 非 POST | 404 / 405 | RemoteRejected → `InvalidInput` / RemoteMalformed → `ExecutionFailed` |
 | 请求中止（对端已断开） | 无应答 | 对端自行归一化 `net:timeout` |
 

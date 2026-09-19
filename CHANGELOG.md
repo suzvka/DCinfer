@@ -5,6 +5,68 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-09-19
+
+发布前全库审查发现的 DCNet 并发/内存安全与发布链路缺陷修复。0.6.1 未打 tag、
+未对外发布，其变更随本版本一并发布。
+
+### Fixed
+
+- **P0-1 监听器停止期 use-after-free**：`HttpListener` 排水改以**工作线程存活计数**
+  `_activeThreads` 为准，且计数在 accept 期与连接入册同一临界区内完成（**先于起线程**，
+  故“线程已创建但尚未调度”也在账内；worker 退出时回收），不再依赖“请求完整读入
+  后”才自增的 `_inFlight`——半开/慢速连接（请求未读完、不计在途）不再存在
+  “`stop()` 已返回、分离 worker 仍访问已析构成员”的窗口。`stop()` 返回即蕴含全部
+  worker 已退出，紧随其后的析构安全；线程创建失败时同步回滚该账（不致挂起）。
+- **P1-2 `HttpTransport` 共享实例并发交换竞态**：引擎实例按 `engineType:modelPath`
+  缓存复用，而执行互斥粒度在节点级——两节点可并发进入同一 transport。现以
+  「交换权」（标志 + 条件变量，非跨线程解锁互斥）把一次 `send → recv` 整体串行化：
+  `send` 领取占用，`recv`/失败/异常/`close` 释放，`_session`/`_response`/`_failed` 的
+  访问均受占用保护，消除请求/响应错配与数据竞争（DESIGN.md §2.3 “适配器必须
+  呈现同步、线程安全接口”契约达成）。
+- **P1-3 监听器状态标志数据竞争**：`_started`/`_stopped` 改 `std::atomic<bool>`——
+  此前 `acceptLoop` 与 `alive()` 的无锁读与 `stop()` 的锁内写构成 data race（UB）。
+- **P1-4 慢速连接致线程耗尽（DoS）**：新增连接级闸门 `maxConnections`（默认 32，
+  0 = 不限制），配额检查与连接入册同一临界区（无超限窗口），超限连接在 accept 期
+  就地关闭、不起工作线程；同时 `readRequest` 引入**单请求读总预算**（每次 receive 前
+  把超时收紧到剩余时间），滴灌连接到点自行释放线程。
+- **P2-5 tensor/text codec 违反错误分类契约**：`decodeResponse` 的 JSON 解析与 dtype
+  解码异常统一改抛 `DcCodecRemoteError`（此前直接漏出 `nlohmann::parse_error` /
+  `std::runtime_error`，被标准 RunFn 归入 `InternalError` 并丢失 dcnet 诊断码），
+  现与 OpenAI codec 一致，映射为 `ExecutionFailed` + `Diagnostic{dcnet, RemoteMalformed}`。
+- **P2-6 安装冒烟与文档版本请求在 0.6.x 下必然失败**：`examples/install_smoke` 与
+  README 引入示例的 `find_package(DCinfer 0.5)` 与本包 `SameMinorVersion` 兼容策略
+  冲突（请求的 major.minor 必须与已安装版本一致），升 minor 后按文档执行即报
+  “not compatible”。两处均改为 `0.6`，并说明每次 minor 升级需同步、或可省略版本请求。
+- **P2-7 安装版本元数据可被宿主版本污染**：四个模块的 `DCINFER_PKG_VERSION` 此前
+  无条件取 `PROJECT_VERSION`，宿主直接 `add_subdirectory` 单模块目录时会写入宿主
+  版本号；现仅当 `PROJECT_NAME` 为 DCinfer 时采用 `PROJECT_VERSION`，否则用字面版本。
+- **P2-8 CI 覆盖缺口**：`DCINFER_BUILD_IR` 默认转 OFF 后，所有 release 预设均不再
+  构建 DCIr——`DcgArchiveSecurityTest` 等反序列化安全用例在 CI 中零覆盖。三个
+  release 预设（gcc/clang/msvc）显式置 `DCINFER_BUILD_IR=ON`；TSan job 并发过滤集
+  补入 v0.6.1 新增的 `ExecutionConcurrencyTest|ThreadPoolTest|ValueSharingTest|FailureClosureTest`。
+
+### Added
+
+- `NetServerEndpoint::maxConnections`：服务端并发连接（工作线程）上限，与
+  `maxInFlight`（在途请求 429 闸门）分层——前者约束连接级资源（含半开连接），
+  后者约束请求级过载。
+- DCNet 回归用例：`stopDrainsHalfOpenConnection`（P0 排水）、
+  `connectionCapRejectsExcess`（连接闸门）、
+  `transportSerializesSharedEndpointExchanges`（共享 transport 并发不串号）、
+  `malformedRemoteResponseMapsToRemoteMalformed`（codec 分类契约）。
+
+### Changed
+
+- **`DcNetListener::stop()` 语义收紧**：由“等待在途请求（受 requestTimeout 约束）”
+  改为“等待全部已接受连接的工作线程退出；grace（`max(requestTimeout + 1s, 5s)`）
+  到期后强制关闭在册连接再等其退净”。返回后对象可安全析构。socket 层面的阻塞
+  由单请求读预算与强制关闭双重有界；但本地引擎若在 handler 内永久挂起，stop()
+  会随之挂起——以挂起换内存安全（不再提前放行排水）。
+- **`HttpTransport` 并发行为**：同一实例上的并发 `send/recv` 由未定义行为改为
+  串行执行（连接复用、交换串行）。`send` 与 `recv` 应成对在同一线程调用（RunFn
+  契约）；跨线程未收尾的占用由同线程下一次 `send` / `close` / 析构回收。
+
 ## [0.6.1] - 2026-09-17
 
 ### Fixed
@@ -752,6 +814,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single example**: Only `01_hello_graph` is provided. More complex scenarios (multi-branch, cyclic, cloud offload) are documented but not exemplified.
 - **No Python bindings**: C++ only; no language bindings or scripting interface.
 
+[0.6.2]: https://github.com/suzvka/DCinfer/releases/tag/v0.6.2
 [0.6.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.6.0
 [0.5.2]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.2
 [0.5.1]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.1
