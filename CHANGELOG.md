@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+发布前功能审查发现的张量视图公共 API 语义缺陷与 README 功能虚宣修正。
+
+### Fixed
+
+- **P0 `Tensor::View` / `ConstView` 分叉二次索引丢前缀**：`operator[]` 原以
+  `std::move(_shape)` 把视图内部路径直接搬运到返回对象，自身 `_shape` 处于
+  moved-from 置空状态——从同一命名视图二次分叉
+  （`auto row = t[0]; row[1]; row[2];`）时第二次路径丢失前缀
+  （`[0]` → `[]` → `[2]` 而非 `[0, 2]`），轻则写入错误偏移，重则触发越界访问。
+  改为“拷贝前缀 + 追加”的值语义派生，使视图可从任意位置多次分叉得到独立
+  路径（NumPy 风格基本用法）；同步去除 `_shape` 的 `mutable` 修饰（不再修改
+  自身）。`ConstView` 同修。`TensorTest` 新增用例 #13 覆盖：View 分叉写 /
+  循环分叉写 / ConstView 分叉读——此前测试仅走一次性线性链，无法暴露。
+
+### Changed
+
+- README “类 NumPy 链式视图索引”段改写：明确当前 `View` 仅支持逐维标量索引
+  与分叉（仍为零拷贝），区间切片/重塑/转置**未实现**、属规划特性——原描述自
+  v0.1.0 起即与实现对齐不符（`git log --all -S 'Tensor::reshape|transpose|slice'`
+  零命中），本次直接取消该描述。
+- README 新增顶层“已知限制”节，上提以下项目到显眼位置：N:1 串行化汇聚未支持
+  （原仅 FAQ 末尾小字注）；视图区间切片/重塑/转置未实现；单个 >4 GiB 模型文件
+  不能入 .dcg（zip64 未启用）；macOS 不在 CI 验证矩阵；图拓扑保持扁平，子图能力
+  由 `GraphOperator` 封装。
+
 ## [0.6.2] - 2026-09-19
 
 发布前全库审查发现的 DCNet 并发/内存安全与发布链路缺陷修复。0.6.1 未打 tag、

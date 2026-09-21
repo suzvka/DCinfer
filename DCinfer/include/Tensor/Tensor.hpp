@@ -261,13 +261,13 @@ public:
 	/// @brief 从可变张量构造视图。
 	View(Shape&& shape, Tensor& top) : _shape(std::move(shape)), _top(top) {}
 
-
-	/// @brief 继续索引下一维，返回新的 View 节点以支持链式调用。
+	/// @brief 继续索引下一维，返回新的 View 节点以支持链式/分叉调用。
 	/// @param index 维度索引，支持负数（从末尾倒序）。
-	/// @return 包含扩展路径的新 View 对象。
+	/// @return 新 View；与源视图共享前缀、互不影响，可从同一视图多次分叉。
 	View operator[](int64_t index) const {
-		_shape.push_back(index);
-		return View(std::move(_shape), _top);
+		Shape next = _shape;
+		next.push_back(index);
+		return View(std::move(next), _top);
 	}
 
 	/// @brief 通过 View 向张量写入值（等价于 set(value)）。
@@ -306,7 +306,7 @@ public:
 		return _top.read<T>(_shape);
 	}
 
-	mutable Shape _shape;
+	Shape _shape;
 	Tensor& _top;
 };
 
@@ -326,12 +326,13 @@ public:
 	/// @brief 从常量张量构造只读视图。
 	ConstView(Shape&& shape, const Tensor& top) : _shape(std::move(shape)), _top(top) {}
 
-	/// @brief 继续索引下一维，返回新的 ConstView 节点以支持链式调用。
+	/// @brief 继续索引下一维，返回新的 ConstView 节点以支持链式/分叉调用。
 	/// @param index 维度索引，支持负数（从末尾倒序）。
-	/// @return 包含扩展路径的新 ConstView 对象。
+	/// @return 新 ConstView；与源视图共享前缀、互不影响，可从同一视图多次分叉。
 	ConstView operator[](int64_t index) const {
-		_shape.push_back(index);
-		return ConstView(std::move(_shape), _top);
+		Shape next = _shape;
+		next.push_back(index);
+		return ConstView(std::move(next), _top);
 	}
 
 	/// @brief 从 View 读取标量值。
@@ -350,7 +351,7 @@ public:
 		return _top.read<T>(_shape);
 	}
 
-	mutable Shape _shape;
+	Shape _shape;
 	const Tensor& _top;
 };
 

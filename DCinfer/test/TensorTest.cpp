@@ -148,6 +148,47 @@ static void runTensorTests() {
 			throw std::runtime_error("getData on empty tensor should return empty vector");
 	}
 
+	// 13) View / ConstView 分叉语义：从同一命名视图多次派生应各自拥有
+	//     包含前缀的独立路径（NumPy 风格基本用法）。
+	{
+		Tensor tf = Tensor::Create<float>({3, 4});
+		auto row = tf[0];
+		auto a = row[1];
+		auto b = row[2];
+		if (a._shape != Tensor::Shape{0, 1})
+			throw std::runtime_error("view fork: a path corrupted");
+		if (b._shape != Tensor::Shape{0, 2})
+			throw std::runtime_error("view fork: b path corrupted (prefix lost)");
+		// 回写验证分叉后路径相互独立
+		a.set<float>(11.0f);
+		b.set<float>(22.0f);
+		auto row0 = tf.data<float>();
+		if (std::abs(row0[1] - 11.0f) > 1e-6f || std::abs(row0[2] - 22.0f) > 1e-6f)
+			throw std::runtime_error("view fork: writes landed at wrong offsets");
+
+		// 三次以上分叉 + 循环模式
+		auto row1 = tf[1];
+		for (int i = 0; i < 4; ++i) {
+			row1[i].set<float>(static_cast<float>(100 + i));
+		}
+		auto row1span = tf.data<float>();
+		for (int i = 0; i < 4; ++i) {
+			if (std::abs(row1span[4 + i] - static_cast<float>(100 + i)) > 1e-6f)
+				throw std::runtime_error("view fork in loop: wrong element written");
+		}
+
+		// ConstView 同修同测
+		const Tensor& ctf = tf;
+		auto crow = ctf[0];
+		auto ca = crow[1];
+		auto cb = crow[2];
+		if (ca._shape != Tensor::Shape{0, 1} || cb._shape != Tensor::Shape{0, 2})
+			throw std::runtime_error("const view fork: path corrupted");
+		if (std::abs(ca.readScalar<float>() - 11.0f) > 1e-6f ||
+			std::abs(cb.readScalar<float>() - 22.0f) > 1e-6f)
+			throw std::runtime_error("const view fork: reads returned wrong values");
+	}
+
 	std::cout << "Tensor tests passed" << std::endl;
 }
 
