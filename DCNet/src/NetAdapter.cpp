@@ -126,10 +126,10 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 	ed.getInputPorts = [localSchema](const EngineInstance&) { return localSchema.inputs; };
 	ed.getOutputPorts = [localSchema](const EngineInstance&) { return localSchema.outputs; };
 
-	// ── factory：构造节点（System affinity）并绑定引擎实例 ──
+	// ── factory：构造节点（System 资源类）并绑定引擎实例 ──
 	ed.factory = [engineType, runFn](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>(engineType, p.nodeName, p.schema, runFn,
-										   ThreadPoolAffinity::System);
+										   ResourceClass::System);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;

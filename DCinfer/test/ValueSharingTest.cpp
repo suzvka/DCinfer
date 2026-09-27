@@ -343,7 +343,7 @@ void testGraphFanOutSharedFrozen() {
 
 		// 显式广播连接器：src → bc → s0/s1/s2（1:N 分发姿势）
 		auto bc = std::make_unique<Node>("Connector.Broadcast", "bc", Connector::broadcastSchema(3),
-										 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+										 Connector::broadcastRunFn(), ResourceClass::System);
 		bc->setConnector(true);
 		harness.addNode(std::move(bc));
 		harness.connect("src", "y", "bc", "in");
@@ -383,7 +383,7 @@ void testBoundOutputTakeMutable() {
 		g.addNode(std::make_unique<Node>("Builtin", "s0", identitySchema(), identityRunFn()));
 		g.addNode(std::make_unique<Node>("Builtin", "s1", identitySchema(), identityRunFn()));
 		auto bc = std::make_unique<Node>("Connector.Broadcast", "bc", Connector::broadcastSchema(2),
-										 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+										 Connector::broadcastRunFn(), ResourceClass::System);
 		bc->setConnector(true);
 		g.addNode(std::move(bc));
 		g.connect("src", "y", "bc", "in");

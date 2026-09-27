@@ -56,7 +56,7 @@ struct DcNetAdapterDesc {
 /// - createEngine(modelPath) 解析端点为 NetEndpoint → transportFactory 创建实例
 ///   → connect（失败抛 NodeException，配置期报错）
 /// - getInputPorts/getOutputPorts 返回本地静态形状规则（不依赖远端）
-/// - 节点归属 ThreadPoolAffinity::System（I/O 池，README 分工）
+/// - 节点归属 ResourceClass::System（I/O 资源类，README 分工）
 /// - RunFn 失败经 NetError 归一化出口上报（NodeResult + ErrorTracker 兼容）
 ///
 /// @param reg  目标注册表，默认为全局单例 EngineRegistry::instance()

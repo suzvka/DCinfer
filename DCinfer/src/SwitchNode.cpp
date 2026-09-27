@@ -9,7 +9,7 @@ std::pair<std::unique_ptr<Node>, SwitchHandle>
 createSwitchNode(std::string name,
                  Node::Schema schema,
                  std::vector<SwitchCandidate> candidates,
-                 ThreadPoolAffinity affinity) {
+                 ResourceClass affinity) {
     if (candidates.empty())
         throw std::invalid_argument("createSwitchNode: '" + name + "' has no candidates");
 

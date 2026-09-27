@@ -55,7 +55,7 @@ struct SwitchHandle {
 /// @param  name        节点名（图中唯一标识）
 /// @param  schema      对外统一的端口契约（所有候选共享同一 IO 接口）
 /// @param  candidates  候选列表（至少 1 个）
-/// @param  affinity    线程池归属（默认 Compute）
+/// @param  affinity    资源类归属（默认 Compute）
 /// @return (node, handle)：node 入图，handle 外部持有用于切换
 ///
 /// @throws std::invalid_argument 若 candidates 为空
@@ -63,6 +63,6 @@ std::pair<std::unique_ptr<Node>, SwitchHandle>
 createSwitchNode(std::string name,
                  Node::Schema schema,
                  std::vector<SwitchCandidate> candidates,
-                 ThreadPoolAffinity affinity = ThreadPoolAffinity::Compute);
+                 ResourceClass affinity = ResourceClass::Compute);
 
 } // namespace DC

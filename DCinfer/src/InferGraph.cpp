@@ -9,10 +9,10 @@ namespace DC {
 // 构造
 // ════════════════════════════════════════════
 
-InferGraph::InferGraph(const PoolConfig& computeCfg,
-					   const PoolConfig& operatorCfg, const PoolConfig& systemCfg)
+InferGraph::InferGraph(std::shared_ptr<ResourceScheduler> scheduler)
 	: _state(std::make_shared<GraphRuntimeState>()),
-	  _engine(std::make_unique<ExecutionEngine>(computeCfg, operatorCfg, systemCfg)) {}
+	  _scheduler(scheduler ? std::move(scheduler) : ResourceScheduler::instance()),
+	  _engine(std::make_unique<ExecutionEngine>(_scheduler)) {}
 
 // ════════════════════════════════════════════
 // 数据注入

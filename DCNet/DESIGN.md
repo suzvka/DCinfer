@@ -344,7 +344,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 |---|---|
 | `createEngine(modelPath)` | `modelPath` 即远端端点（URL / host:port）；创建 transport + 连接 + 就绪探测；失败抛 `NodeException`（配置期错误） |
 | `getInputPorts/getOutputPorts` | 返回静态本地形状规则表（§3.4），不依赖远端推导 |
-| `factory` | 构造节点：`ThreadPoolAffinity::System` + RunFn + 绑定实例 |
+| `factory` | 构造节点：`ResourceClass::System` + RunFn + 绑定实例 |
 | `converter` | 不需要（文本经 `TensorType::Data` 承载）；tensor 级原生协议另行评估 |
 | `RunFn` | 见 §5.1 请求流程 |
 | `synchronize` | 留空（阻塞式 HTTP 同步返回） |
@@ -431,7 +431,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 transport 内部自持 I/O 线程 / 事件循环（异步 SDK、流式、多路复用场景），
 对运行时仍是同步接口；子进程仅用于外来运行时 / 崩溃隔离。
 
-- 节点归属 `ThreadPoolAffinity::System`（README：System Pool 承担 I/O、网络传输），
+- 节点归属 `ResourceClass::System`（README：System 资源类承担 I/O、网络传输），
   阻塞式 HTTP 调用天然适合；
 - 适配器内不加锁：连接线程安全由 transport 实现保证（POCO HTTPClientSession
   每线程独立创建 / 互斥保护共享连接）；

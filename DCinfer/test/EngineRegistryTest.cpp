@@ -94,7 +94,7 @@ static void registerLifecycleEngine(EngineRegistry& reg, const std::string& type
 	};
 	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>("Lifecycle", p.nodeName, p.schema, lifecycleRunImpl,
-										   ThreadPoolAffinity::Operator);
+										   ResourceClass::Operator);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
@@ -141,7 +141,7 @@ static void registerFlightEngine(EngineRegistry& reg, const std::string& type) {
 	};
 	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>("Flight", p.nodeName, p.schema, noopRunImpl,
-										   ThreadPoolAffinity::Operator);
+										   ResourceClass::Operator);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
@@ -169,7 +169,7 @@ static void registerFailingEngine(EngineRegistry& reg, const std::string& type) 
 	desc.getOutputPorts = [](const EngineInstance&) { return std::vector<Node::Port>{}; };
 	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>("Failing", p.nodeName, p.schema, noopRunImpl,
-										   ThreadPoolAffinity::Operator);
+										   ResourceClass::Operator);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
@@ -232,7 +232,7 @@ static void registerPhaseEngine(EngineRegistry& reg, const std::string& type) {
 	};
 	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>("Phase", p.nodeName, p.schema, phaseRunImpl,
-										   ThreadPoolAffinity::Operator);
+										   ResourceClass::Operator);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
@@ -291,7 +291,7 @@ static void registerMockModelEngine(EngineRegistry& reg, const std::string& type
 		if (!p.schema.inputs.empty())
 			++mockFactorySchemaSeen;
 		auto node = std::make_unique<Node>("MockModel", p.nodeName, p.schema, mockModelRunImpl,
-										   ThreadPoolAffinity::Operator);
+										   ResourceClass::Operator);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;

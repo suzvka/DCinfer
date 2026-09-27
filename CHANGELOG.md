@@ -31,6 +31,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   （原仅 FAQ 末尾小字注）；视图区间切片/重塑/转置未实现；单个 >4 GiB 模型文件
   不能入 .dcg（zip64 未启用）；macOS 不在 CI 验证矩阵；图拓扑保持扁平，子图能力
   由 `GraphOperator` 封装。
+- **资源调度器升级为进程级共享模型（破坏性，0.x）**：资源隔离不再依赖“每图
+  自建三线程池”的线程副作用，改由进程级 `ResourceScheduler` 承载。
+  `ThreadPoolAffinity` 更名 `ResourceClass`（无兼容别名；`Node::affinity()`
+  返回类型与 `makeNode` 默认参数/`NodeMeta` 同步，JSON wire 字符串
+  "Compute"/"Operator"/"System" 不变，图档兼容）；`InferGraph` 构造由池
+  配置改为调度器注入（缺省 `nullptr` = `ResourceScheduler::instance()`，多图
+  默认共享进程预算；默认各类 1 槽位，对齐旧单图默认），`ExecutionEngine`
+  构造改为调度器注入（空指针抛 `std::invalid_argument`）。等待型节点
+  （`GraphOperator`）等待期间占住资源类槽位：进程预算需覆盖全部并发等待
+  节点数，嵌套等待链按“同类槽位叠加”规划，否则可能自锁。执行引擎析构改为
+  自排水（停止新派发 → 标记轮次终止 → 等待在飞任务完成；调度器已关闭时
+  走放弃等待逃逸路径）。
+
+### Added
+
+- `ResourceScheduler` / `SchedulerConfig`：进程级共享调度器与用户可控预算
+  （每资源类 worker 数，非法配置抛 `std::invalid_argument`）；每类惰性创建
+  独立 `ThreadPool`，`submit`/`shutdown`/`isStopped` 契约与池一致；
+  `instance()` / `configureInstance()`（仅首次创建前有效）/ `resetInstance()`
+  静态接口支撑进程默认实例与测试隔离；`InferGraph` 支持注入自定义实例。
+- `Graph/ResourceClass.h`：`ResourceClass {Compute, Operator, System}` 自
+  `Node.h` 迁出为独立头文件（含语义文档注释）。
+- `ResourceSchedulerTest`：调度器串行/并发上限、资源类隔离、配置校验、
+  关闭拒绝、全局实例语义（幂等/首配/重置）与引擎析构排水回归用例。
 
 ## [0.6.2] - 2026-09-19
 

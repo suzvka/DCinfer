@@ -107,7 +107,7 @@ static void testParallelBranchPartialFailure() {
 
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
-			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+			Connector::broadcastRunFn(), ResourceClass::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
 		harness.connect("id_a", "y", "bc", "in");

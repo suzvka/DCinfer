@@ -87,7 +87,7 @@ static std::unique_ptr<Tensor> floatTensor(float v) {
 // 手动构造 Broadcast 连接器（fanOut=1 为等效导线，可被 lowering 擦除）
 static std::unique_ptr<Node> makeWire(const std::string& name, size_t fanOut = 1) {
 	auto w = std::make_unique<Node>("Connector.Broadcast", name, Connector::broadcastSchema(fanOut),
-								 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+								 Connector::broadcastRunFn(), ResourceClass::System);
 	w->setConnector(true);
 	return w;
 }
@@ -130,7 +130,7 @@ static void test_broadcastN2NotErased() {
 
 	auto bcSchema = Connector::broadcastSchema(2);
 	auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
-										 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+										 Connector::broadcastRunFn(), ResourceClass::System);
 	bcNode->setConnector(true);
 	graph.addNode(std::move(bcNode));
 

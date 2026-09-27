@@ -184,7 +184,7 @@ TEST(createNodeSchemaAndAffinity) {
 	CHECK(node != nullptr, "node should be created");
 	CHECK(node->type() == "Test.Net", "node type should match engine type");
 	CHECK(node->modelPath() == "http://127.0.0.1:8080/v1", "modelPath should carry endpoint");
-	CHECK(node->affinity() == ThreadPoolAffinity::System, "affinity should be System (I/O pool)");
+	CHECK(node->affinity() == ResourceClass::System, "affinity should be System (I/O pool)");
 	CHECK(node->schema().inputs.size() == 1 && node->schema().inputs[0].name == "request",
 		  "input schema from local rules");
 	CHECK(node->schema().outputs.size() == 1 && node->schema().outputs[0].name == "response",

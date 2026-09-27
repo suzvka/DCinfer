@@ -3,7 +3,7 @@
 #include "Node.h"
 #include "OutputZone.h"
 #include "TaskStatus.h"
-#include "ThreadPool.h"
+#include "ResourceScheduler.h"
 
 #include <atomic>
 #include <chrono>
@@ -44,18 +44,16 @@ public:
 	/// @brief  默认最大跳数（TTL），防止循环无限传播
 	static constexpr uint32_t kDefaultMaxHops = 10000;
 
-	/// @brief  构造引擎：自动创建三个线程池（Compute / Operator / System）
-	/// @param  computeCfg    计算线程池配置
-	/// @param  operatorCfg   算子线程池配置
-	/// @param  systemCfg     系统线程池配置
-	explicit ExecutionEngine(const PoolConfig& computeCfg = {},
-							const PoolConfig& operatorCfg = {},
-							const PoolConfig& systemCfg = {});
+	/// @brief  构造引擎：绑定资源调度器（进程级共享的执行载体）。
+	/// @param  scheduler 调度器共享句柄（不得为空）
+	/// @throws std::invalid_argument scheduler 为空
+	explicit ExecutionEngine(std::shared_ptr<ResourceScheduler> scheduler);
 
-	/// @brief  析构：先显式关闭三个线程池（全部 join，在飞传播完结），
-	///         再移出并释放轮次表——此后无并发生产者访问引擎状态。
-	/// @note   定义于 .cpp（避免逐个成员逆序析构时，其余池的在飞 lambda
-	///         向已析构池提交的 UB，#4）。
+	/// @brief  析构：自排水——停止新派发、标记全部轮次终止、等待在飞与
+	///         已排队任务 lambda 全部退出（引擎回访归零），再移出并释放
+	///         轮次表。共享调度器不受影响（仅引擎自身退出）。
+	/// @note   定义于 .cpp；析构不得从调度器 worker 线程上调用（任务
+	///         lambda 内析构图会自我等待）。
 	~ExecutionEngine();
 
 	ExecutionEngine(const ExecutionEngine&) = delete;
@@ -63,6 +61,11 @@ public:
 	// 含不可移动成员（线程池/互斥），移动操作显式删除（此前 = default 实为删除）
 	ExecutionEngine(ExecutionEngine&&) = delete;
 	ExecutionEngine& operator=(ExecutionEngine&&) = delete;
+
+	// ── 执行载体 ──
+
+	/// @brief  资源调度器共享句柄（执行派发载体；跨图共享承载进程预算）
+	const std::shared_ptr<ResourceScheduler>& scheduler() const { return _scheduler; }
 
 	// ── 执行驱动 ──
 
@@ -187,7 +190,7 @@ private:
 	/// @brief  提交一个节点执行任务（tryExecute + 成功后就地传播）
 	/// @note   由 submit 入口与传播下游共用；执行态经 round->execState
 	///         捕获寻址（同 ID 复用后旧 lambda 不消费新一轮输入）；
-	///         任务在节点 affinity 对应线程池执行
+	///         任务在节点亲和资源类（affinity）对应的调度器槽位执行
 	void _submitNodeRun(const Node* node, const std::string& nodeName,
 						std::shared_ptr<TaskGate> round, uint32_t remainingHops);
 
@@ -215,18 +218,9 @@ private:
 	/// @param  reason  终止原因描述（如 "propagation exhausted with failed node 'x'"）
 	void _diagnoseAbnormal(const std::shared_ptr<TaskGate>& round, const std::string& reason);
 
-	// ── 线程池分发（消除重复的 affinity switch-case）──
-
-	/// @brief  提交到 affinity 对应线程池。
-	/// @return false = 池已关闭或入队失败（内存压力），任务未被接受
-	bool _dispatchToPool(ThreadPoolAffinity affinity, std::function<void()> task);
-
 	// ── 成员 ──
-	// 声明顺序即析构顺序约束：
-	//   状态成员最先声明 → 最后析构；线程池最后声明 → 最先析构。
-	// 析构顺序：池(shutdown/join worker) → 轮次表 → 状态。
-	// 保证池 worker 上的任务 lambda 在 join 期间经轮次访问引擎状态、
-	// 以及向池提交任务时，所有对象均存活。
+	// 析构顺序约定：析构函数体（自排水）在所有成员存活时执行——排水等待
+	// 归零后，无任务 lambda 再访问引擎状态；成员逆序析构仅作兜底。
 	// （图组件生命周期由 GraphRuntimeState shared_ptr 保证，不依赖本表顺序。）
 	//
 	// 轮次表：taskId → 当前轮次 TaskGate（含终态轮次，供 status/wait/
@@ -245,9 +239,18 @@ private:
 	TaskCompleteCallback _taskCompleteCb;
 	mutable std::mutex _cbMutex; // 保护 _taskCompleteCb 的跨线程读写
 
-	ThreadPool _computePool;
-	ThreadPool _operatorPool;
-	ThreadPool _systemPool;
+	// 执行载体：进程级共享资源调度器（跨图共享，承载资源隔离预算）
+	std::shared_ptr<ResourceScheduler> _scheduler;
+
+	// ── 析构自排水 ──
+	// 共享调度器下不能靠“关闭自己的池” join 在飞任务，改为显式排水：
+	// 派发登记（_shuttingDown 检查 + _pendingRuns +1）在 _drainMutex 内
+	// 原子完成；任务 lambda 经 RunDone 在全部引擎回访完成后递减计数，
+	// 归零者持锁唤醒析构等待者。
+	std::mutex _drainMutex;
+	std::condition_variable _drainCv;       ///< 排水等待（谓词：_pendingRuns == 0）
+	bool _shuttingDown = false;             ///< 由 _drainMutex 保护；置位后新派发早退
+	std::atomic<uint32_t> _pendingRuns{0};  ///< 在飞 + 已排队任务 lambda 计数
 };
 
 } // namespace DC

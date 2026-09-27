@@ -46,9 +46,10 @@ namespace DC {
 /// ── 执行语义：等待型节点 ──
 /// RunFn 内同步喂入 → 提交 → 分段等待子图任务，并周期性感知父任务取消
 /// （协作式解围：宿主 cancel 父任务后，子图任务在 pollInterval 粒度内被
-/// 取消，池线程有界释放，不会因内层信号停滞永久挂起）。
-/// 注意：等待期间本节点占住一个执行线程——线程池容量需按
-/// "每层池配置 × 并发组合节点数"规划。
+/// 取消，执行槽位有界释放，不会因内层信号停滞永久挂起）。
+/// 注意：等待期间本节点占住其资源类的一个执行槽位（默认 Operator）——进程级
+/// 预算（SchedulerConfig）需覆盖全部并发等待节点数；父子图共享同一调度器时，
+/// 嵌套等待链按"同类槽位叠加"规划，否则可能自锁。
 ///
 /// ── 序列化 ──
 /// 节点 type 为 "Builtin"，与注册算子待遇一致：DCIr 往返仅保留结构
@@ -87,9 +88,9 @@ public:
 
 	/// @brief 生成组合节点（普通 Node；可多次调用——同一子图可被多个节点共享）。
 	/// @param  nodeName  父图内节点名（唯一性由父图 addNode 校验）
-	/// @param  affinity  执行线程池归属；等待型节点的占池语义见类注释
+	/// @param  affinity  执行资源类归属；等待型节点的资源类占用语义见类注释
 	std::unique_ptr<Node> makeNode(const std::string& nodeName,
-								   ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator) const {
+								   ResourceClass affinity = ResourceClass::Operator) const {
 		const uint64_t instanceId = _nextInstanceId.fetch_add(1, std::memory_order_relaxed) + 1;
 
 		auto runFn = [graph = _graph, opts = _opts, nodeName, instanceId](Node::RunContext& ctx) -> Node::Result {

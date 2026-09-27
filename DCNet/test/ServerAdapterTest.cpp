@@ -118,7 +118,7 @@ static void ensureDoublerEngine() {
 	ed.getOutputPorts = [](const EngineInstance&) { return doublerSchema().outputs; };
 	ed.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>(kEngineType, p.nodeName, p.schema, doublerRunFn(),
-										   ThreadPoolAffinity::System);
+										   ResourceClass::System);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;

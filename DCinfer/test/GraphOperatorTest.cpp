@@ -14,6 +14,7 @@
 #include "Connector.h"
 #include "GraphException.h"
 #include "GraphOperator.h"
+#include "ResourceScheduler.h"
 #include "Tensor.hpp"
 
 using namespace DC;
@@ -106,7 +107,7 @@ static void testBasicEmbedding() {
 		parent.addNode(std::make_unique<Node>("Builtin", "sink", identitySchema(), identityRunFn()));
 
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "source_bc", Connector::broadcastSchema(2),
-											 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+											 Connector::broadcastRunFn(), ResourceClass::System);
 		bcNode->setConnector(true);
 		parent.addNode(std::move(bcNode));
 		parent.connect("source", "y", "source_bc", "in");
@@ -136,7 +137,7 @@ static void testBranchSubgraph() {
 		sub->addNode(std::make_unique<Node>("Builtin", "sub_src", identitySchema(), identityRunFn()));
 
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "sub_bc", Connector::broadcastSchema(2),
-											 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+											 Connector::broadcastRunFn(), ResourceClass::System);
 		bcNode->setConnector(true);
 		sub->addNode(std::move(bcNode));
 		sub->addNode(std::make_unique<Node>("Builtin", "sub_a", identitySchema(), identityRunFn()));
@@ -293,7 +294,7 @@ static void testChainedSubgraphs() {
 
 		// src1 扇出到 Adder1.a 与 Adder2.a
 		auto bc1Node = std::make_unique<Node>("Connector.Broadcast", "bc1", Connector::broadcastSchema(2),
-											  Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+											  Connector::broadcastRunFn(), ResourceClass::System);
 		bc1Node->setConnector(true);
 		parent.addNode(std::move(bc1Node));
 		parent.connect("src1", "y", "bc1", "in");
@@ -302,7 +303,7 @@ static void testChainedSubgraphs() {
 
 		// src2 扇出到 Adder1.b 与 Adder2.b
 		auto bc2Node = std::make_unique<Node>("Connector.Broadcast", "bc2", Connector::broadcastSchema(2),
-											  Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+											  Connector::broadcastRunFn(), ResourceClass::System);
 		bc2Node->setConnector(true);
 		parent.addNode(std::move(bc2Node));
 		parent.connect("src2", "y", "bc2", "in");
@@ -422,13 +423,16 @@ static void testEagerFreezeOnConstruction() {
 }
 
 // ════════════════════════════════════════════
-// 9. 父取消解围：内层信号阻塞不再永久占住池线程（协作式取消跨组合边界）
+// 9. 父取消解围：内层信号阻塞不再永久占住执行槽位（协作式取消跨组合边界）
 // ════════════════════════════════════════════
 
 static void testParentCancelUnwindsBlockedSubgraph() {
-	TEST("cancel(parent) unwinds blocked composed node and frees the pool thread") {
+	TEST("cancel(parent) unwinds blocked composed node and frees the compute slot") {
+		// 专属 1/1/1 调度器（sub 与 parent 共享）：保持"唯一 Compute 槽位被占"断言语义——
+		// 父 block（Compute）等待期间占槽、q（Compute）排队；子图节点属 Operator 类，类间隔离。
+		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 1, 1});
 		// 子图：n → m（m 绑定信号，未置位 → 默认阻塞）→ 声明输出 m.y。
-		auto sub = std::make_shared<InferGraph>();
+		auto sub = std::make_shared<InferGraph>(sched);
 		sub->addNode(std::make_unique<Node>("test", "n", identitySchema(), identityRunFn()));
 		auto m = std::make_unique<Node>("test", "m", identitySchema(), identityRunFn());
 		m->bindSignal(sub->signalStore(), "gate"); // 绑定后未置位 → 默认阻断
@@ -438,32 +442,32 @@ static void testParentCancelUnwindsBlockedSubgraph() {
 		sub->bindOutput("y", "m", "y");
 
 		GraphOperator op(sub);
-		auto blockNode = op.makeNode("sub", ThreadPoolAffinity::Compute); // 复刻旧导出节点的池占位
+		auto blockNode = op.makeNode("sub", ResourceClass::Compute); // 复刻旧导出节点的资源类占位
 
-		// 父图：默认 Compute 单线程——挂起的父任务独占唯一 Compute 线程
-		InferGraph parent;
+		// 父图：共享专属 1/1/1 调度器——挂起的父任务独占唯一 Compute 槽位
+		InferGraph parent(sched);
 		parent.addNode(std::move(blockNode));
-		// 独立直通节点 q（显式 Compute）：验证解围后线程恢复可用
+		// 独立直通节点 q（显式 Compute）：验证解围后槽位恢复可用
 		parent.addNode(std::make_unique<Node>("test", "q", identitySchema(), identityRunFn(),
-											  ThreadPoolAffinity::Compute));
+											  ResourceClass::Compute));
 		parent.bindInput("x", "sub", "x");
 		parent.bindOutput("y", "sub", "y");
 
-		// p1：经组合节点（内部信号阻塞 → RunFn 挂起，占住 Compute 线程）
+		// p1：经组合节点（内部信号阻塞 → RunFn 挂起，占住 Compute 槽位）
 		parent.feedInput("p1", "sub", "x", floatValue(1.0f));
 		parent.submit("p1", "sub", "y", 1);
 
-		// p2：经独立节点 q（Compute）——排在 p1 之后等待线程释放
+		// p2：经独立节点 q（Compute）——排在 p1 之后等待槽位释放
 		parent.feedInput("p2", "q", "x", floatValue(2.0f));
 		parent.submit("p2", "q", "y", 1);
 
-		// 挂起确认：p1 因内部阻塞无法完成；p2 因唯一 Compute 线程被占而排队
+		// 挂起确认：p1 因内部阻塞无法完成；p2 因唯一 Compute 槽位被占而排队
 		CHECK(parent.waitForResult("p1", 400ms).status == TaskStatus::Running,
 			  "composed task blocked by inner signal must stay Running");
 		CHECK(parent.waitForResult("p2", 200ms).status == TaskStatus::Running,
-			  "queued compute task must not run while the thread is held");
+			  "queued compute task must not run while the slot is held");
 
-		// 宿主解围：cancel(p1) → RunFn 轮询感知 → 取消子图任务 → 返回 → 线程释放
+		// 宿主解围：cancel(p1) → RunFn 轮询感知 → 取消子图任务 → 返回 → 槽位释放
 		CHECK(parent.cancel("p1"), "cancel on active task should be accepted");
 		CHECK(parent.waitForResult("p1", 2s).status == TaskStatus::Cancelled,
 			  "cancelled parent must reach Cancelled state");
@@ -634,7 +638,7 @@ static void testConstructorValidation() {
 		{
 			auto sub = std::make_shared<InferGraph>();
 			auto bcNode = std::make_unique<Node>("Connector.Broadcast", "wire", Connector::broadcastSchema(2),
-												 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+												 Connector::broadcastRunFn(), ResourceClass::System);
 			bcNode->setConnector(true);
 			sub->addNode(std::move(bcNode));
 			sub->bindInput("x", "wire", "in");
@@ -718,6 +722,13 @@ static void testMissingBoundOutputFailFast() {
 
 int main() {
 	try {
+		// 组合算子等待型节点在等待期间占住资源类槽位（进程级共享预算）：嵌套等待链
+		// 需要 Operator 预算覆盖全部并发等待节点——默认实例放宽为 1/8/1；
+		// configureInstance 仅在实例首次创建前有效（检查返回值）。
+		if (!ResourceScheduler::configureInstance(SchedulerConfig{1, 8, 1})) {
+			std::cerr << "FAIL: ResourceScheduler::configureInstance rejected (instance pre-created)" << std::endl;
+			return 1;
+		}
 		testBasicEmbedding();
 		testBranchSubgraph();
 		testThreeLevelNesting();

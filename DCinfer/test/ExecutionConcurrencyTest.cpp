@@ -16,6 +16,7 @@
 #include <thread>
 
 #include "InferGraph.h"
+#include "ResourceScheduler.h"
 #include "GraphException.h"
 #include "Tensor.hpp"
 
@@ -91,8 +92,9 @@ static bool hasErrorLevel(const std::vector<TaskError>& errors) {
 
 static void testConcurrentFanInTriggersOnce() {
 	TEST("H-1: concurrent fan-in triggers join node exactly once (atomic ready)") {
-		// 双线程 Operator 池：两上游分支真正并发完成并同时向汇聚节点传播
-		InferGraph g({1}, {2}, {1});
+		// 双线程 Operator 资源类：两上游分支真正并发完成并同时向汇聚节点传播（进程级调度器注入）
+		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 2, 1});
+		InferGraph g(sched);
 
 		std::atomic<int> joinRuns{0};
 		std::promise<void> u1In, u2In;
@@ -160,7 +162,8 @@ static void testConcurrentFanInTriggersOnce() {
 
 static void testSharedGraphNodeContention() {
 	TEST("H-1: two tasks contending on the same node both complete via retry") {
-		InferGraph g({1}, {2}, {1});
+		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 2, 1});
+		InferGraph g(sched);
 
 		std::atomic<int> runs{0};
 		std::promise<void> firstEntered, releaseFirst;

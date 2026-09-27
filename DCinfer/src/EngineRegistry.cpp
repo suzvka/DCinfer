@@ -79,7 +79,7 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, 
 std::unique_ptr<Node> EngineRegistry::createNode(const std::string& nodeName, Node::Schema schema,
 												 Node::RunFn fn) const {
 	return std::make_unique<Node>("Builtin", nodeName, std::move(schema), std::move(fn),
-								  ThreadPoolAffinity::Operator);
+								  ResourceClass::Operator);
 }
 
 std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, const std::string& nodeName,
@@ -289,7 +289,7 @@ bool EngineRegistry::registerOperator(const std::string& operatorName, Node::Sch
 	// 工厂：捕获 schema 和 fn，创建算子节点
 	desc.factory = [schema = std::move(schema),
 					fn = std::move(fn)](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		return std::make_unique<Node>("Builtin", p.nodeName, schema, fn, ThreadPoolAffinity::Operator);
+		return std::make_unique<Node>("Builtin", p.nodeName, schema, fn, ResourceClass::Operator);
 	};
 
 	std::lock_guard lk(_mutex);

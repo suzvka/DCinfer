@@ -24,8 +24,9 @@ class ThreadPool;
 
 // ── FIFO 工作线程池 ──
 //
-// 三层隔离（Compute / Operator / System）由 Engine 按节点 affinity 分发实现；
-// 池本身只保证任务串行出队执行，并发上限即 worker 数量。
+// 作为 ResourceScheduler 的内部执行器：资源类隔离（Compute / Operator / System）
+// 由调度器按节点亲和（Node::affinity）分发承载，池本身只保证任务串行出队执行，
+// 并发上限即 worker 数量。
 class ThreadPool {
 public:
 	/// @brief  构造线程池

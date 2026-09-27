@@ -343,7 +343,7 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>(
 			"OnnxRuntime", p.nodeName, p.schema, onnxRunFn(),
-			ThreadPoolAffinity::Compute);
+			ResourceClass::Compute);
 
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());

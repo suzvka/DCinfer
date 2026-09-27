@@ -71,7 +71,7 @@ bool NodeSchema::valid() const {
 // ── 构造/析构 ──
 
 Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
-		   ThreadPoolAffinity affinity)
+		   ResourceClass affinity)
 	: _fn(std::move(fn)) {
 	_meta.type = std::move(type);
 	_meta.name = std::move(name);

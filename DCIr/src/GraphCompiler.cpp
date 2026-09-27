@@ -30,20 +30,20 @@ namespace DC::Ir {
 // 辅助：affinity 字符串转换
 // ════════════════════════════════════════════
 
-static std::string affinityToString(ThreadPoolAffinity a) {
+static std::string affinityToString(ResourceClass a) {
 	switch (a) {
-	case ThreadPoolAffinity::Compute: return "Compute";
-	case ThreadPoolAffinity::Operator: return "Operator";
-	case ThreadPoolAffinity::System: return "System";
+	case ResourceClass::Compute: return "Compute";
+	case ResourceClass::Operator: return "Operator";
+	case ResourceClass::System: return "System";
 	}
 	return "Operator";
 }
 
-static ThreadPoolAffinity stringToAffinity(const std::string& s) {
-	if (s == "Compute") return ThreadPoolAffinity::Compute;
-	if (s == "Operator") return ThreadPoolAffinity::Operator;
-	if (s == "System") return ThreadPoolAffinity::System;
-	return ThreadPoolAffinity::Operator;
+static ResourceClass stringToAffinity(const std::string& s) {
+	if (s == "Compute") return ResourceClass::Compute;
+	if (s == "Operator") return ResourceClass::Operator;
+	if (s == "System") return ResourceClass::System;
+	return ResourceClass::Operator;
 }
 
 // ════════════════════════════════════════════
@@ -351,7 +351,7 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 
 			auto connNode = std::make_unique<DC::Node>(
 				connType, connName, std::move(connSchema), std::move(connRunFn),
-				ThreadPoolAffinity::System);
+				ResourceClass::System);
 			connNode->setConnector(true);
 			graph.addNode(std::move(connNode));
 

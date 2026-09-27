@@ -156,7 +156,7 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 	// 自动创建广播连接器（1 下游 → 零拷贝 move 直通，等效导线）
 	auto wireName = "__wire_" + std::to_string(_nextWireId.fetch_add(1));
 	auto wireNode = std::make_unique<Node>("Connector.Broadcast", wireName, Connector::broadcastSchema(1),
-										   Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+										   Connector::broadcastRunFn(), ResourceClass::System);
 	wireNode->setConnector(true);
 	auto& wireRef = _addNodeImpl(std::move(wireNode));
 

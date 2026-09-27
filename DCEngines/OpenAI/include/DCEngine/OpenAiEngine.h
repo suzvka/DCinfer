@@ -54,7 +54,7 @@ struct OpenAiOptions {
 ///   → out response（Data；响应缺 choices[0].message.content 报 ExecutionFailed，
 ///   附 dcnet 领域诊断 code=RemoteMalformed）
 /// - 请求路径：{basePath}/chat/completions（OpenAI 兼容协议面）
-/// - 节点归属 ThreadPoolAffinity::System（I/O 池）；失败经
+/// - 节点归属 ResourceClass::System（I/O 资源类）；失败经
 ///   Node::Result + NodeStatus + ErrorTracker 诊断，图级语义与本地引擎一致
 ///
 /// @param reg 目标注册表，默认为全局单例 EngineRegistry::instance()

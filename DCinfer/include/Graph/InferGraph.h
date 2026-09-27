@@ -5,6 +5,7 @@
 #include "GraphBuilder.h"
 #include "GraphInterface.h"
 #include "ExecutionEngine.h"
+#include "ResourceScheduler.h"
 #include "GraphException.h"
 #include "TaskStatus.h"
 
@@ -43,19 +44,17 @@ public:
 	/// @brief  默认最大跳数（TTL），防止循环无限传播
 	static constexpr uint32_t kDefaultMaxHops = ExecutionEngine::kDefaultMaxHops;
 
-	/// @brief  构造推理图（默认线程池配置；可通过参数自定义三层线程池）
-	/// @param  computeCfg    计算线程池配置
-	/// @param  operatorCfg   算子线程池配置
-	/// @param  systemCfg     系统线程池配置（连接器、数据搬运等基础设施）
-	explicit InferGraph(const PoolConfig& computeCfg = {}, const PoolConfig& operatorCfg = {},
-						const PoolConfig& systemCfg = {});
+	/// @brief  构造推理图（默认共享进程级调度器；可注入自定义调度器）。
+	/// @param  scheduler 资源调度器共享句柄；nullptr = 进程级默认实例
+	///         （ResourceScheduler::instance()——多图默认共享进程预算）
+	explicit InferGraph(std::shared_ptr<ResourceScheduler> scheduler = nullptr);
 	~InferGraph() = default;
 
 	InferGraph(const InferGraph&) = delete;
 	InferGraph& operator=(const InferGraph&) = delete;
 
-	// 移动语义禁止：ExecutionEngine 持有活跃线程池状态与任务状态表，
-	// 移动后线程池内飞行任务的 this 捕获会悬空。
+	// 移动语义禁止：ExecutionEngine 持有活跃任务状态表与引擎级状态，
+	// 移动后调度器 worker 上飞行任务的 this 捕获会悬空。
 	InferGraph(InferGraph&&) = delete;
 	InferGraph& operator=(InferGraph&&) = delete;
 
@@ -264,6 +263,12 @@ public:
 	/// @brief  获取所有输出绑定的只读引用
 	const std::vector<OutputBinding>& outputBindings() const { return _outputBindingsView(); }
 
+	// ── 执行载体 ──
+
+	/// @brief  资源调度器共享句柄（本图执行派发载体；默认与其它图共享
+	///         进程级实例，注入自定义调度器可独立预算）
+	const std::shared_ptr<ResourceScheduler>& scheduler() const { return _scheduler; }
+
 	// ── 冻结 ──
 
 	/// @brief  显式冻结（高级用法）：立即编译构建面为不可变快照。
@@ -359,9 +364,11 @@ private:
 	// 飞行任务经 TaskGate/任务 lambda 持有同一 shared_ptr，图组件的
 	// 存活期由引用计数保证，不再依赖成员声明顺序约定。
 	// _builder 为构建期唯一可变面（compile 时拓扑所有权移交快照）；
-	// ExecutionEngine 保持与图同生命周期：engine 最后声明 → 最先析构，
-	// 线程池 shutdown（join 全部 worker）先于 state 释放发生。
+	// _scheduler 共享句柄与 _engine 随图生命周期：engine 最后声明 →
+	// 最先析构（自排水完成后无在飞任务引用图组件），调度器引用随之
+	// 释放（池本身跨图共享，不随单图析构关停）。
 	std::shared_ptr<GraphRuntimeState> _state;
+	std::shared_ptr<ResourceScheduler> _scheduler;
 	std::unique_ptr<GraphBuilder> _builder = std::make_unique<GraphBuilder>();
 	std::unique_ptr<ExecutionEngine> _engine;
 	mutable std::mutex _freezeMutex; ///< 惰性冻结串行化（快照填充一次性）

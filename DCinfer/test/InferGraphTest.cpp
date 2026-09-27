@@ -195,7 +195,7 @@ void testBroadcastConnectorInGraph() {
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcRunFn = Connector::broadcastRunFn();
 		auto bcNode =
-			std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn, ThreadPoolAffinity::System);
+			std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema, bcRunFn, ResourceClass::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
 
@@ -396,7 +396,7 @@ void testPartialBlockKeepsOtherPath() {
 		// 使用广播连接器扇出（避免 connect 同端口 takeOutput 抢消费）
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
-			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+			Connector::broadcastRunFn(), ResourceClass::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
 		harness.connect("id_a", "y", "bc", "in");
@@ -584,7 +584,7 @@ void testTaskScopedSignalWithPartialBlock() {
 		// 扇出：id_a → bc → [id_b, id_c]
 		auto bcSchema = Connector::broadcastSchema(2);
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", bcSchema,
-			Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+			Connector::broadcastRunFn(), ResourceClass::System);
 		bcNode->setConnector(true);
 		harness.addNode(std::move(bcNode));
 		harness.connect("id_a", "y", "bc", "in");
@@ -937,7 +937,7 @@ void testDuplicateActiveSubmitRejected() {
 	TEST("lifecycle: duplicate submit of a running task is rejected") {
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "slow", identitySchema(),
-				delayedRunFn(nullptr, 200), ThreadPoolAffinity::Operator));
+				delayedRunFn(nullptr, 200), ResourceClass::Operator));
 
 		graph.feedInput("t1", "slow", "x", makeFloatTensor(1.0f));
 		graph.submit("t1", "slow", "y");
@@ -1220,7 +1220,7 @@ void testMultiDeclarationReadableAfterWait() {
 
 		// 扇出：Broadcast(2) 保留连接器
 		auto bcNode = std::make_unique<Node>("Connector.Broadcast", "bc", Connector::broadcastSchema(2),
-											 Connector::broadcastRunFn(), ThreadPoolAffinity::System);
+											 Connector::broadcastRunFn(), ResourceClass::System);
 		bcNode->setConnector(true);
 		graph.addNode(std::move(bcNode));
 		graph.connect("id_a", "y", "bc", "in");

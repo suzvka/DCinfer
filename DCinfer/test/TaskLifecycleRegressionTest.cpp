@@ -21,6 +21,7 @@
 #include <thread>
 
 #include "InferGraph.h"
+#include "ResourceScheduler.h"
 #include "GraphException.h"
 #include "Tensor.hpp"
 
@@ -92,7 +93,7 @@ static bool hasMessage(const std::vector<TaskError>& errors, const std::string& 
 
 static void testReuseAfterCancelRace() {
 	TEST("F04: reuse after cancel (queued stale lambda must not consume fresh input)") {
-		// 单线程池（默认）：阻塞节点占住唯一 worker，使 b 的旧轮次 lambda
+		// 单槽位（默认 1/1/1）：阻塞节点占住唯一 worker，使 b 的旧轮次 lambda
 		// 在取消与复用期间滞留于队列——报告复现场景的确定性复刻
 		std::promise<void> entered, go;
 		auto ready = go.get_future().share();
@@ -496,7 +497,8 @@ static void testConcurrentSubmitSameId() {
 		auto enteredF = entered.get_future();
 		auto goF = go.get_future().share();
 
-		InferGraph g({1}, {2}, {1}); // 双 Operator 线程：两线程真正并发进入 submit
+		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 2, 1}); // 双 Operator 槽位：两线程真正并发进入 submit
+		InferGraph g(sched);
 		g.addNode(std::make_unique<Node>("test", "n", passSchema(),
 			[&](Node::RunContext& ctx) -> Node::Result {
 				entered.set_value();
@@ -554,7 +556,8 @@ static void testZombieRetryAfterFinalize() {
 		auto ready = go.get_future().share(); // shared_future：僵尸重试再次进入不挂起
 		std::atomic<bool> firstEntry{true};
 
-		InferGraph g({2}, {2}, {2}); // 多 worker：门被占期间 B 的提交可真实执行
+		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{2, 2, 2}); // 多槽位：门被占期间 B 的提交可真实执行
+		InferGraph g(sched);
 		g.addNode(std::make_unique<Node>("test", "gate", passSchema(),
 			[&](Node::RunContext& ctx) -> Node::Result {
 				if (firstEntry.exchange(false))
@@ -608,8 +611,10 @@ static void testZombieRetryAfterFinalize() {
 
 static void testCancelVsCompletionRace() {
 	TEST("#3: cancel x completion race loop with same-ID reuse (no state residue)") {
+		// 调度器循环外建一次、循环内注入（预算复用；任务按轮次串行，语义对齐旧独立池）
+		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{2, 2, 2});
 		for (int round = 0; round < 30; ++round) {
-			InferGraph g({2}, {2}, {2});
+			InferGraph g(sched);
 			g.addNode(std::make_unique<Node>("test", "n", passSchema(),
 				[](Node::RunContext& ctx) -> Node::Result {
 					const auto* x = ctx.input<Tensor>("x");
@@ -656,8 +661,10 @@ static void testCancelVsCompletionRace() {
 
 static void testConcurrentFeedDuringFinalize() {
 	TEST("#8-12: concurrent feed during active/finalizing task -> accepted or DuplicateTask only") {
+		// 调度器循环外建一次、循环内注入（预算复用；任务按轮次串行，语义对齐旧独立池）
+		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{2, 2, 2});
 		for (int round = 0; round < 20; ++round) {
-			InferGraph g({2}, {2}, {2});
+			InferGraph g(sched);
 			g.addNode(std::make_unique<Node>("test", "n", passSchema(), passRunFn()));
 
 			const std::string tid = "cf";

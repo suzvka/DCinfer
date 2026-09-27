@@ -11,6 +11,7 @@
 #include "Node/internal/ExecutionPipeline.h"
 
 #include <chrono>
+#include <stdexcept>
 
 namespace DC {
 
@@ -21,32 +22,55 @@ namespace DC {
 ExecutionEngine::TaskGate::~TaskGate() {
 	// 纯资源回收（无副作用）：轮次生命周期由 shared_ptr 驱动。
 	// 引用归零只发生在两类场景——① 终态收尾（_terminate）完成后表引用
-	// 移除且无在飞 lambda / 等待者；② 引擎析构时轮次表整体移出。
+	// 移除且无在飞 lambda / 等待者；② 引擎析构时轮次表整体移出
+	// （自排水已完成，无在飞消费者）。
 	// 两类场景均无需（也不应）再触发耗尽检测：前者终态已发布，后者
-	// 线程池即将 shutdown/join，不再有并发消费者。
+	// 引擎已无并发生产者。
 }
 
 // ════════════════════════════════════════════
 // 构造 / 析构
 // ════════════════════════════════════════════
 
-ExecutionEngine::ExecutionEngine(const PoolConfig& computeCfg,
-								 const PoolConfig& operatorCfg,
-								 const PoolConfig& systemCfg)
-	: _computePool(computeCfg),
-	  _operatorPool(operatorCfg),
-	  _systemPool(systemCfg) {}
+ExecutionEngine::ExecutionEngine(std::shared_ptr<ResourceScheduler> scheduler)
+	: _scheduler(std::move(scheduler)) {
+	if (!_scheduler)
+		throw std::invalid_argument("ExecutionEngine: scheduler must not be null");
+}
 
 ExecutionEngine::~ExecutionEngine() {
-	// 先显式依次关闭三池并等待全部 join（#4）：池 shutdown-join 期间其余池
-	// 的在飞 lambda 仍可经 _dispatchToPool 提交——此时引擎全部状态成员存活，
-	// 被关闭池的 submit 拒绝返回 false，调用方按失败语义收尾（#7），不再
-	// 出现"向逐个析构中的池成员提交"的 UB。join 完成后不再有并发生产者。
-	_computePool.shutdown();
-	_operatorPool.shutdown();
-	_systemPool.shutdown();
+	// 自排水（共享调度器下不能靠“关闭自己的池”来 join 在飞任务）：
+	//
+	// ① 停止新派发：派发登记（_shuttingDown 检查 + _pendingRuns +1）在
+	//    _drainMutex 内原子完成——置位后不再产生新登记，排水不漏计数。
+	{
+		std::lock_guard lk(_drainMutex);
+		_shuttingDown = true;
+	}
 
-	// 再移出轮次表（锁外释放）：析构中的轮次对象不再触发任何引擎回访。
+	// ② 标记全部轮次终止：队列中已排队的任务 lambda 执行时经 terminated
+	//    早退（不消费输入、不回访引擎状态），近似旧“池 shutdown 丢弃队列
+	//    任务”的语义。
+	{
+		std::lock_guard lk(_roundsMutex);
+		for (auto& entry : _rounds)
+			entry.second->terminated.store(true, std::memory_order_release);
+	}
+
+	// ③ 等待在飞/排队任务 lambda 全部退出：RunDone / 拒绝路径均在完成
+	//    全部引擎回访（_exhaustedCheck/_terminate/传播）后才递减计数，
+	//    归零者唤醒本等待——此后无任务 lambda 访问引擎状态。
+	//    调度器已关停时放弃等待：排队任务已被池丢弃（不会执行、不访问
+	//    引擎），在飞任务由调度器 shutdown 的 join 兜底；wait_for 周期
+	//    复查仅兜底“关停后无人 notify”的逃逸场景。
+	{
+		std::unique_lock lk(_drainMutex);
+		while (_pendingRuns.load(std::memory_order_acquire) != 0 && !_scheduler->isStopped()) {
+			_drainCv.wait_for(lk, std::chrono::milliseconds(100));
+		}
+	}
+
+	// ④ 移出轮次表（锁外释放）：析构中的轮次对象不再触发任何引擎回访。
 	decltype(_rounds) leftover;
 	{
 		std::lock_guard lk(_roundsMutex);
@@ -56,21 +80,8 @@ ExecutionEngine::~ExecutionEngine() {
 }
 
 // ════════════════════════════════════════════
-// 线程池分发
+// 节点执行派发
 // ════════════════════════════════════════════
-
-bool ExecutionEngine::_dispatchToPool(ThreadPoolAffinity affinity,
-									  std::function<void()> task) {
-	switch (affinity) {
-	case ThreadPoolAffinity::Compute:
-		return _computePool.submit(std::move(task));
-	case ThreadPoolAffinity::Operator:
-		return _operatorPool.submit(std::move(task));
-	case ThreadPoolAffinity::System:
-		return _systemPool.submit(std::move(task));
-	}
-	return false; // 枚举全覆盖（防御：未知 affinity 按拒绝处置）
-}
 
 void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeName,
 									 std::shared_ptr<TaskGate> round, uint32_t remainingHops) {
@@ -79,16 +90,28 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 		return;
 
 	// 在飞计数 +1：submit 入口扫描与传播下游提交统一经本函数促发。
-	// 派发可能被拒（池已关闭）或因内存压力抛异常（入队/lambda 构造）——
+	// 派发可能被拒（调度器已关闭）或因内存压力抛异常（入队/lambda 构造）——
 	// 统一按失败语义回滚计数并收尾（#7）：否则在飞计数泄漏使
 	// _exhaustedCheck 永不触发，任务无限 Running 绕过 maxHops 与宿主护栏。
+	//
+	// 排水登记：_shuttingDown 检查与 _pendingRuns +1 在 _drainMutex 内
+	// 原子完成（引擎析构自排水的不漏计数前提——置位后不再有新登记，
+	// 排水等待的归零观察即覆盖全部已派发任务）。
+	{
+		std::lock_guard lk(_drainMutex);
+		if (_shuttingDown)
+			return; // 引擎析构中：不再派发（轮次已全终止，队列将被排空）
+		_pendingRuns.fetch_add(1, std::memory_order_acq_rel);
+	}
 	round->inflight.fetch_add(1, std::memory_order_acq_rel);
 	bool dispatched = false;
 	try {
-		dispatched = _dispatchToPool(node->affinity(),
+		dispatched = _scheduler->submit(node->affinity(),
 									 [this, node, nodeName, round, remainingHops] {
 		// 在飞计数收尾（RAII）：任何退出路径均经本析构递减；归零且本轮
-		// 未终止时由最后完成的 lambda 触发耗尽检测。
+		// 未终止时由最后完成的 lambda 触发耗尽检测。排水计数随后递减
+		// ——先完成全部引擎回访（_exhaustedCheck → _terminate/传播），
+		// 再递减排水计数：析构等待归零即保证无残留回访。
 		struct RunDone {
 			std::shared_ptr<TaskGate> round;
 			ExecutionEngine* engine;
@@ -97,6 +120,12 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 				if (round->inflight.fetch_sub(1, std::memory_order_acq_rel) == 1
 					&& !round->terminated.load(std::memory_order_acquire)) {
 					engine->_exhaustedCheck(round);
+				}
+				if (engine->_pendingRuns.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+					// 归零：唤醒引擎析构的排水等待者（持排水锁通知，
+					// 与谓词复查同锁互斥，无丢失唤醒窗口）
+					std::lock_guard lk(engine->_drainMutex);
+					engine->_drainCv.notify_all();
 				}
 			}
 		} done{round, this};
@@ -194,14 +223,19 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 		// 派发中分配失败（lambda/std::function 构造）：按拒绝处理
 	}
 	if (!dispatched) {
-		// 派发被拒（池已关闭或入队失败）：回滚在飞计数 + 诊断 + 触发耗尽
-		// 检测（归零语义与 RunDone 一致 → 因 Error 诊断收尾为 Failed）
+		// 派发被拒（调度器已关闭或入队失败）：回滚在飞计数 + 诊断 + 触发
+		// 耗尽检测（归零语义与 RunDone 一致 → 因 Error 诊断收尾为 Failed）
 		auto& errors = round->state->errors;
 		errors.recordError(round->taskId, nodeName, "ExecutionEngine::_submitNodeRun",
-						   "task dispatch rejected (pool stopped or memory pressure)");
+						   "task dispatch rejected (scheduler stopped or memory pressure)");
 		if (round->inflight.fetch_sub(1, std::memory_order_acq_rel) == 1
 			&& !round->terminated.load(std::memory_order_acquire)) {
 			_exhaustedCheck(round);
+		}
+		// 排水计数镜像递减（全部引擎回访完成后；归零唤醒析构等待者）
+		if (_pendingRuns.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+			std::lock_guard lk(_drainMutex);
+			_drainCv.notify_all();
 		}
 	}
 }

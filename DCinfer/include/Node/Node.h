@@ -20,6 +20,7 @@
 #include "Value.h"
 #include "NodeException.h"
 #include "Diagnostic.h"
+#include "ResourceClass.h"
 
 namespace DC {
 
@@ -39,12 +40,6 @@ class TaskBuffer;
 class SlotWorkspace;
 class SignalGate;
 class EngineAdapter;
-
-enum class ThreadPoolAffinity {
-	Compute,
-	Operator,
-	System,
-};
 
 // ── 提取为顶层类型的 Node 嵌套类型（消除循环依赖）──
 
@@ -165,7 +160,7 @@ public:
 	using CompletionFn = std::function<void(const TaskId& taskId, const Result& result)>;
 
 	Node(std::string type, std::string name, Schema schema, RunFn fn,
-		 ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator);
+		 ResourceClass affinity = ResourceClass::Operator);
 	~Node();
 
 	Node(const Node&) = delete;
@@ -184,8 +179,8 @@ public:
 	const std::string& name() const { return _meta.name; }
 	const Schema& schema() const { return _meta.schema; }
 
-	// ── 线程池归属与元数据 ──
-	ThreadPoolAffinity affinity() const { return _meta.affinity; }
+	// ── 资源类归属与元数据 ──
+	ResourceClass affinity() const { return _meta.affinity; }
 	/// @brief  自由标签（纯序列化元数据，随 JSON/.dcg 图序列化往返；无调度语义）
 	/// @throws NodeException(Frozen) 若节点所在图已冻结
 	void setTag(std::string tag) {
@@ -271,7 +266,7 @@ private:
 		std::string type;
 		std::string name;
 		Schema schema;
-		ThreadPoolAffinity affinity = ThreadPoolAffinity::Operator;
+		ResourceClass affinity = ResourceClass::Operator;
 		std::string tag;
 		bool isConnector = false;
 		std::string modelPath;
