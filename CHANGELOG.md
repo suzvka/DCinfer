@@ -5,9 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-09-28
 
-发布前功能审查发现的张量视图公共 API 语义缺陷与 README 功能虚宣修正。
+发布前审查发现的张量视图公共 API 语义缺陷与 README 功能虚宣修正；
+资源调度器升级为进程级共享模型（破坏性，0.x）。
 
 ### Fixed
 
@@ -865,6 +866,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single example**: Only `01_hello_graph` is provided. More complex scenarios (multi-branch, cyclic, cloud offload) are documented but not exemplified.
 - **No Python bindings**: C++ only; no language bindings or scripting interface.
 
+[Unreleased]: https://github.com/suzvka/DCinfer/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.7.0
 [0.6.2]: https://github.com/suzvka/DCinfer/releases/tag/v0.6.2
 [0.6.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.6.0
 [0.5.2]: https://github.com/suzvka/DCinfer/releases/tag/v0.5.2

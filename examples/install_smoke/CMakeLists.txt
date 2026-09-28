@@ -22,7 +22,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 版本请求必须与当前 minor 对齐：本包导出文件用 SameMinorVersion 兼容策略，
 # 请求的 major.minor 与已安装版本不同则 find_package 直接失败。
 # → 每次 minor 升级需同步更新下面的版本号。
-find_package(DCinfer 0.6 CONFIG REQUIRED)
+find_package(DCinfer 0.7 CONFIG REQUIRED)
 message(STATUS "DCinfer_VERSION = ${DCinfer_VERSION}")
 
 add_executable(install_smoke main.cpp)

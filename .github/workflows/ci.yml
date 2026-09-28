@@ -252,7 +252,7 @@ jobs:
       - name: Concurrency tests under TSan
         run: >
           ctest --test-dir build-tsan
-          -R "FreezeBoundaryTest|GraphOperatorTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest|ExecutionConcurrencyTest|ThreadPoolTest|ValueSharingTest|FailureClosureTest"
+          -R "FreezeBoundaryTest|GraphOperatorTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest|ExecutionConcurrencyTest|ThreadPoolTest|ValueSharingTest|FailureClosureTest|ResourceSchedulerTest"
           --output-on-failure
 
       - name: Freeze-boundary repeated (until-fail x3)
@@ -261,3 +261,51 @@ jobs:
           -R "FreezeBoundaryTest"
           --repeat until-fail:3
           --output-on-failure
+
+  # ──────────────────────────────────────────────
+  # 安装闭环冒烟（README「引入」路径）：构建 → cmake --install → 独立工程
+  # find_package(DCinfer 0.7) → 链接 → 运行。版本请求由 install_smoke 的
+  # CMakeLists 强约束（SameMinorVersion），minor 升级漏同步时本作业红灯
+  # （P2-6 类发布链路缺陷的回归守护）。
+  # ──────────────────────────────────────────────
+  install-smoke:
+    name: Install smoke (find_package loopback)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++ pkg-config
+
+      # core-ir 预设：DCIr 开启，安装树同时覆盖 DCinfer 与 DCIr 两个包
+      - name: Configure (core-ir preset)
+        run: cmake --preset core-ir
+
+      - name: Build
+        run: cmake --build build/core-ir -j
+
+      - name: Install to prefix
+        run: cmake --install build/core-ir --prefix "${{ github.workspace }}/install-prefix"
+
+      # 冒烟一：core（DCinfer 单包 + 强约束版本请求）
+      - name: Smoke test (core)
+        run: |
+          cmake -B build-smoke-core -S examples/install_smoke \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix"
+          cmake --build build-smoke-core -j
+          ./build-smoke-core/install_smoke | grep -q "install smoke OK"
+
+      # 冒烟二：DCIr 安装链（传递依赖经 install_smoke 自身 manifest 的 feature 'ir' 解析）
+      - name: Smoke test (with DCIr)
+        run: |
+          cmake -B build-smoke-ir -S examples/install_smoke \
+            -DSMOKE_WITH_IR=ON \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix" \
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/cmake/vcpkg-toolchain.cmake" \
+            -DDCINFER_BUILD_IR=ON
+          cmake --build build-smoke-ir -j
+          ./build-smoke-ir/install_smoke | grep -q "install smoke OK"

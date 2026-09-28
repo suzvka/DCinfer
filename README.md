@@ -199,7 +199,7 @@ cmake --install build/core-only --prefix <安装前缀>
 宿主工程 CMakeLists 示例：
 
 ```cmake
-find_package(DCinfer 0.6 CONFIG REQUIRED)   # 版本请求需与当前 minor 一致（见下）
+find_package(DCinfer 0.7 CONFIG REQUIRED)   # 版本请求需与当前 minor 一致（见下）
 find_package(DCEngine CONFIG REQUIRED)   # 需要 Builtin 引擎时
 
 target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)
