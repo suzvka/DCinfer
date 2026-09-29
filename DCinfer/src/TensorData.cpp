@@ -185,6 +185,32 @@ TensorData::Shape TensorData::getCurrentShape() const {
 
 void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes) {
 	_ensureMutable("TensorData::loadData");
+	// 入口校验（与三参构造同一不变量）：shape 元素总数 × typeSize 必须精确
+	// 等于缓冲区字节数——稠密直通语义是"全部数据都在本缓冲区"，声明与
+	// 实际不一致时下游按 shape 寻址将越过缓冲区。校验先于 clear：失败时
+	// 对象状态不变。注意：校验对象是调用方自身声明的自洽性（元数据），
+	// 字节载荷本身仍原样进入 cache，不做任何解释（"不透明传递"哲学
+	// 仅适用于载荷内容，不适用于用于寻址的元数据）。
+	if (typeSize == 0)
+		throw std::invalid_argument("TensorData::loadData: typeSize must be > 0");
+	size_t elementCount = 1;
+	for (auto d : shape) {
+		if (d == 0)
+			throw std::invalid_argument("TensorData::loadData: shape dimensions must be > 0");
+		if (elementCount > std::numeric_limits<size_t>::max() / d)
+			throw std::invalid_argument("TensorData::loadData: shape element count overflows");
+		elementCount *= static_cast<size_t>(d);
+	}
+	if (elementCount > std::numeric_limits<size_t>::max() / typeSize)
+		throw std::invalid_argument("TensorData::loadData: required byte size overflows");
+	const size_t expectedBytes = elementCount * typeSize;
+	if (bytes.size() != expectedBytes) {
+		throw std::invalid_argument("TensorData::loadData: bytes.size() ("
+									+ std::to_string(bytes.size())
+									+ ") does not match shape product * typeSize ("
+									+ std::to_string(expectedBytes) + ")");
+	}
+
 	clear();
 	setTypeSize(typeSize);
 	_dataCache = std::move(bytes);
@@ -538,12 +564,49 @@ TensorData& TensorData::crop(const Shape& targetShape) {
 	for (auto d : targetShape) {
 		newElementCount *= static_cast<size_t>(d);
 	}
-	size_t newByteSize = newElementCount * typeSize();
+	const size_t newByteSize = newElementCount * typeSize();
 	if (newByteSize > _dataCache.size()) {
 		throw std::runtime_error("TensorData::crop: calculated byte size exceeds current cache size");
 	}
-	_dataCache.resize(newByteSize);
+
+	// 多维前缀裁剪（行主序）：保留每个维度的前 targetShape[i] 个坐标所
+	// 寻址的元素。旧的"扁平 resize 到新元素总数"只对一维正确——对
+	// {2,3}→{2,2} 会保留 1,2,3,4（裁成 [[1,2],[3,4]]），而每维前缀
+	// 语义应为 1,2,4,5（[[1,2],[4,5]]）。
+	// 实现：新建目标缓冲；外层按 row-major 遍历去掉最后一维的块坐标，
+	// 对每行在源/目标布局下分别计算块偏移，整行 memcpy（最后一维长度
+	// 个元素）；一维退化为 root 单块拷贝，与旧扁平行为一致。
+	DataBlock cropped;
+	cropped.resize(newByteSize);
+	if (targetShape.empty()) {
+		// 0-D 标量：单元素原样保留
+		std::memcpy(cropped.data(), _dataCache.data(), typeSize());
+	} else if (newElementCount > 0) {
+		const size_t blockRank = targetShape.size() - 1;
+		const size_t rowBytes = targetShape.back() * typeSize();
+		Shape blockPath(blockRank, 0);
+		while (true) {
+			const size_t srcOffset = blockOffset(blockPath, currentShape);
+			const size_t dstOffset = blockOffset(blockPath, targetShape);
+			std::memcpy(cropped.data() + dstOffset, _dataCache.data() + srcOffset, rowBytes);
+			// 字典序递增（带进位，最内维最先）；最高位进位溢出即遍历完成
+			bool carry = true;
+			for (size_t i = blockRank; i-- > 0;) {
+				if (++blockPath[i] < targetShape[i]) {
+					carry = false;
+					break;
+				}
+				blockPath[i] = 0;
+			}
+			if (carry)
+				break;
+		}
+	}
+
+	_dataCache = std::move(cropped);
 	syncDenseCacheMeta(targetShape);
+	// 稀疏视图仍指向旧形状的块布局：一并失效，后续读写经惰性重建保持一致
+	clearView();
 	return *this;
 }
 } // namespace DC

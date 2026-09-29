@@ -117,9 +117,6 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 	// 同目标端口已有入边 → 构图期 fail-fast：同口多驱动在传播期静默覆盖
 	// （仅最后写入者生效，多上游数据仅存其一）。多上游汇聚必须使用不同
 	// 输入口（等齐合并节点）。
-	// TODO(串行化汇聚): 多上游共享同一输入口 + 串行投递（单值在途：下游消费
-	// 后才推下一份）为规划特性——待调度器模式重构后实现（放行本检查 +
-	// 投递层单值在途通道 + 消费触发）。
 	for (const auto& e : _edges) {
 		if (e.dstNode == dstNode && e.dstPort == dstPort) {
 			throw GraphException(GraphException::ErrorType::DuplicateEdge, "GraphStore::connect",

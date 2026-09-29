@@ -29,6 +29,34 @@ ExecutionEngine::TaskGate::~TaskGate() {
 }
 
 // ════════════════════════════════════════════
+// 排水票据
+// ════════════════════════════════════════════
+
+struct ExecutionEngine::DrainTicket {
+	ExecutionEngine* engine = nullptr;
+	// 登记配对标志：仅当对应的 _pendingRuns +1 已在排水锁内完成后置位。
+	// make_shared 在临界区外进行——分配失败时票据尚未 arm，析构零副作用，
+	// 不产生"已 +1 却无票据回收"的计数泄漏；未登记路径（引擎析构中拒派发）
+	// 同样不递减。
+	bool armed = false;
+
+	~DrainTicket() {
+		if (!armed)
+			return;
+		// 票据回收：lambda 执行完成（worker 线程）与被池弃置（调度器 shutdown
+		// 清队析构 function，在 shutdown 调用者线程）的公共必经点——无论
+		// 哪条路径，持有本票据的 lambda 已不可能再回访引擎。
+		// 锁内递减：递减与 notify 原子于排水锁——析构者只可能在持锁复查谓词
+		// 时观察到 0（wait_for 期间锁已释放），此刻本票据的全部引擎访问已完成。
+		// 先减后锁的旧写法存在生命周期窗口：归零与拿锁之间析构者可越过第③步
+		// 走完整析构（含成员销毁），worker 再触碰已销毁的 _drainMutex/_drainCv。
+		std::lock_guard lk(engine->_drainMutex);
+		if (engine->_pendingRuns.fetch_sub(1, std::memory_order_acq_rel) == 1)
+			engine->_drainCv.notify_all();
+	}
+};
+
+// ════════════════════════════════════════════
 // 构造 / 析构
 // ════════════════════════════════════════════
 
@@ -57,15 +85,18 @@ ExecutionEngine::~ExecutionEngine() {
 			entry.second->terminated.store(true, std::memory_order_release);
 	}
 
-	// ③ 等待在飞/排队任务 lambda 全部退出：RunDone / 拒绝路径均在完成
-	//    全部引擎回访（_exhaustedCheck/_terminate/传播）后才递减计数，
-	//    归零者唤醒本等待——此后无任务 lambda 访问引擎状态。
-	//    调度器已关停时放弃等待：排队任务已被池丢弃（不会执行、不访问
-	//    引擎），在飞任务由调度器 shutdown 的 join 兜底；wait_for 周期
-	//    复查仅兜底“关停后无人 notify”的逃逸场景。
+	// ③ 等待全部已登记任务 lambda 回收：执行中的任务跑完后由票据回收
+	//    （RunDone 完成全部引擎回访 → lambda 体退出 → function 析构）；
+	//    被调度器 shutdown 弃置的排队任务在清队时析构 function——票据同样
+	//    回收。归零即无任何 lambda 可再回访引擎。调度器关停窗口亦安全：
+	//    shutdown 先弃置排队票据、再 join 在飞任务（票据回收先于其返回），
+	//    本等待必然终止，无需逃逸判定（P0：原逃逸条件 isStopped() 取的
+	//    是关停标志而非 join 完成点，窗口内析构引擎会与在飞回访竞态）。
+	//    wait_for 周期复查仅作防御性兜底（弃置路径持池锁等排水锁的慢
+	//    唤醒场景）。
 	{
 		std::unique_lock lk(_drainMutex);
-		while (_pendingRuns.load(std::memory_order_acquire) != 0 && !_scheduler->isStopped()) {
+		while (_pendingRuns.load(std::memory_order_acquire) != 0) {
 			_drainCv.wait_for(lk, std::chrono::milliseconds(100));
 		}
 	}
@@ -97,21 +128,31 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 	// 排水登记：_shuttingDown 检查与 _pendingRuns +1 在 _drainMutex 内
 	// 原子完成（引擎析构自排水的不漏计数前提——置位后不再有新登记，
 	// 排水等待的归零观察即覆盖全部已派发任务）。
+	// 排水票据先于登记构造（临界区外：make_shared 分配失败时零副作用，
+	// 不产生"已 +1 却无票据回收"的计数泄漏）；登记成功才 arm——未登记
+	// 路径（析构中拒派发）票据析构不递减。票据随 lambda 转移（拷贝捕获，
+	// 外层引用在本函数结束时释放），lambda 执行完成或被池弃置时 function
+	// 析构 → 票据回收计数；派发被拒时外层引用析构即回收——shared 引用
+	// 计数归零唯一，恰好一次递减，无需各失败路径手动回滚。
+	auto ticket = std::make_shared<DrainTicket>();
+	ticket->engine = this;
 	{
 		std::lock_guard lk(_drainMutex);
 		if (_shuttingDown)
 			return; // 引擎析构中：不再派发（轮次已全终止，队列将被排空）
 		_pendingRuns.fetch_add(1, std::memory_order_acq_rel);
+		ticket->armed = true;
 	}
 	round->inflight.fetch_add(1, std::memory_order_acq_rel);
 	bool dispatched = false;
 	try {
 		dispatched = _scheduler->submit(node->affinity(),
-									 [this, node, nodeName, round, remainingHops] {
+									 [this, node, nodeName, round, remainingHops, ticket] {
 		// 在飞计数收尾（RAII）：任何退出路径均经本析构递减；归零且本轮
-		// 未终止时由最后完成的 lambda 触发耗尽检测。排水计数随后递减
-		// ——先完成全部引擎回访（_exhaustedCheck → _terminate/传播），
-		// 再递减排水计数：析构等待归零即保证无残留回访。
+		// 未终止时由最后完成的 lambda 触发耗尽检测。排水计数由票据独立
+		// 回收（function 析构晚于 lambda 体，故全部引擎回访——
+		// _exhaustedCheck → _terminate/传播——先于票据递减：析构等待归零
+		// 即保证无残留回访）。
 		struct RunDone {
 			std::shared_ptr<TaskGate> round;
 			ExecutionEngine* engine;
@@ -120,12 +161,6 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 				if (round->inflight.fetch_sub(1, std::memory_order_acq_rel) == 1
 					&& !round->terminated.load(std::memory_order_acquire)) {
 					engine->_exhaustedCheck(round);
-				}
-				if (engine->_pendingRuns.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-					// 归零：唤醒引擎析构的排水等待者（持排水锁通知，
-					// 与谓词复查同锁互斥，无丢失唤醒窗口）
-					std::lock_guard lk(engine->_drainMutex);
-					engine->_drainCv.notify_all();
 				}
 			}
 		} done{round, this};
@@ -232,11 +267,8 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 			&& !round->terminated.load(std::memory_order_acquire)) {
 			_exhaustedCheck(round);
 		}
-		// 排水计数镜像递减（全部引擎回访完成后；归零唤醒析构等待者）
-		if (_pendingRuns.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-			std::lock_guard lk(_drainMutex);
-			_drainCv.notify_all();
-		}
+		// 排水计数由票据回收（ticket 于本函数结束时析构——晚于上方全部
+		// 回访，维持“回访先于排水递减”不变量）
 	}
 }
 

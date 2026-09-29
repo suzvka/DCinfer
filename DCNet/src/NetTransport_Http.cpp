@@ -50,7 +50,8 @@ Poco::Timespan toTimespan(const std::chrono::milliseconds& ms) {
 HttpTransport::HttpTransport() = default;
 
 HttpTransport::~HttpTransport() {
-	// 析构期不等交换权（持有者仍在跑即调用方违约）：强制清占用后丢会话
+	// 析构期不等交换权（持有者仍在跑即调用方违约）：强制清占用后丢会话。
+	// 交换方持有的 session 副本保活对象，dropSession 的 abort 仅中断其阻塞读。
 	{
 		std::lock_guard lk(_ioMutex);
 		_claimed = false;
@@ -122,11 +123,11 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 	try {
 		const std::string host = uri.getHost();
 		const Poco::UInt16 port = static_cast<Poco::UInt16>(uri.getPort());
-		std::unique_ptr<Poco::Net::HTTPClientSession> session;
+		std::shared_ptr<Poco::Net::HTTPClientSession> session;
 		if (_useTls)
-			session = std::make_unique<Poco::Net::HTTPSClientSession>(host, port);
+			session = std::make_shared<Poco::Net::HTTPSClientSession>(host, port);
 		else
-			session = std::make_unique<Poco::Net::HTTPClientSession>(host, port);
+			session = std::make_shared<Poco::Net::HTTPClientSession>(host, port);
 		session->setKeepAlive(true);
 		session->setConnectTimeout(toTimespan(ep.connectTimeout));
 		session->setSendTimeout(toTimespan(ep.requestTimeout));
@@ -148,7 +149,15 @@ NetError HttpTransport::send(const Payload& payload) {
 	// 不得出现 A 的 send 接上 B 的 recv）；maxRetries 重试路径由 acquireClaim 自动回收
 	acquireClaim();
 	ClaimScope scope{this};
-	if (!_session || _failed)
+	// 会话快照（与 close/析构强收的 _ioMutex 临界区互斥）：close 超时强收
+	// 仅 abort 并释放其侧引用，本交换继续使用的 session 由副本保活，
+	// 不因强收期间的 _session 置空而悬垂
+	std::shared_ptr<Poco::Net::HTTPClientSession> session;
+	{
+		std::lock_guard lk(_ioMutex);
+		session = _session;
+	}
+	if (!session || _failed)
 		return _connectError.ok() ? normalizeTransportError(NetTransportError::Other, "not connected")
 								  : _connectError;
 
@@ -184,7 +193,7 @@ NetError HttpTransport::send(const Payload& payload) {
 		}
 		req.setContentLength(static_cast<int>(payload.size()));
 
-		std::ostream& os = _session->sendRequest(req);
+		std::ostream& os = session->sendRequest(req);
 		if (!payload.empty())
 			os.write(payload.data(), static_cast<std::streamsize>(payload.size()));
 		if (!os) {
@@ -193,14 +202,22 @@ NetError HttpTransport::send(const Payload& payload) {
 			return normalizeTransportError(NetTransportError::Reset, "send request body failed");
 		}
 
-		// 状态码：2xx → None（体由 recv 读取）；非 2xx → 读错误体并归一化
+		// 状态码：2xx → None（体由 recv 读取）；非 2xx（含 3xx：不自动
+		// 跟随重定向）→ 读错误体并归一化
 		Poco::Net::HTTPResponse res;
-		std::istream& rs = _session->receiveResponse(res);
-		_response = &rs;
+		std::istream& rs = session->receiveResponse(res);
+		{
+			std::lock_guard lk(_ioMutex);
+			_response = &rs;
+		}
 		const int status = res.getStatus();
-		if (status >= 400) {
-			const Payload body = readBody();
-			_response = nullptr;
+		if (status < 200 || status >= 300) {
+			// 错误体仅作诊断：允许截断到 maxResponseBody，不再读取
+			const Payload body = readBody(rs, _ep.maxResponseBody, nullptr);
+			{
+				std::lock_guard lk(_ioMutex);
+				_response = nullptr;
+			}
 			return normalizeHttpResponse(status, body);
 		}
 		// 2xx：交换未结束——占用延续给 recv（否则响应流会被另一交换接管）
@@ -218,12 +235,54 @@ NetError HttpTransport::send(const Payload& payload) {
 }
 
 NetError HttpTransport::recv(Payload& out) {
-	if (!_response) {
-		releaseClaimIfOwned(); // 无挂起响应：回收本线程遗留占用
+	const auto self = std::this_thread::get_id();
+	std::shared_ptr<Poco::Net::HTTPClientSession> session;
+	std::istream* rs = nullptr;
+	{
+		std::lock_guard lk(_ioMutex);
+		if (_response) {
+			// claim 内快照交换状态（与 close/析构的强制回收同锁互斥）：
+			// 本地副本保活 session——close 超时强收仅 abort 中断读并释放
+			// close 侧引用，本函数继续使用的 session 对象由副本持有至
+			// 读取结束，不悬垂
+			session = _session;
+			rs = _response;
+		} else if (_claimed && _claimOwner == self) {
+			_claimed = false; // 无挂起响应：回收本线程遗留占用
+			_claimOwner = std::thread::id{};
+		}
+	}
+	if (!rs) {
+		_ioCv.notify_all();
 		return normalizeTransportError(NetTransportError::Other, "no pending response");
 	}
-	out = readBody();
-	_response = nullptr;
+	bool truncated = false;
+	out = readBody(*rs, _ep.maxResponseBody, &truncated);
+	bool preempted = false;
+	{
+		std::lock_guard lk(_ioMutex);
+		_response = nullptr;
+		// 交换期间会话被 close/析构强收（其侧引用已置空/替换）：本次读取被
+		// abort 中断，返回错误而非静默短读（部分 body 不是有效交换结果）
+		preempted = (_session != session);
+	}
+	if (session && (truncated || preempted)) {
+		try {
+			session->abort(); // 丢弃未读完的挂起响应（残留报文不污染下次交换）
+		} catch (...) {
+		}
+	}
+	if (truncated) {
+		// 成功体超限：按错误归一化，session 由副本存活至本函数结束
+		releaseClaimIfOwned(); // 交换异常结束：释放占用并唤醒等待者
+		return normalizeTransportError(NetTransportError::Other,
+									   "response body exceeds maxResponseBody ("
+										   + std::to_string(_ep.maxResponseBody) + " bytes)");
+	}
+	if (preempted) {
+		releaseClaimIfOwned(); // 交换异常结束：释放占用并唤醒等待者
+		return normalizeTransportError(NetTransportError::Reset, "transport closed while reading response");
+	}
 	releaseClaimIfOwned(); // 交换结束：释放占用并唤醒等待者
 	return {};
 }
@@ -244,40 +303,70 @@ void HttpTransport::close() {
 		_claimed = false;
 		_claimOwner = std::thread::id{};
 	}
-	dropSession();
-	_failed = false;
-	_connectError = {};
 	lk.unlock();
+	dropSession(); // 自持锁：abort 中断仍在进行的读（读方副本保活 session）
+	{
+		std::lock_guard lk2(_ioMutex);
+		_failed = false;
+		_connectError = {};
+	}
 	_ioCv.notify_all();
 }
 
-Payload HttpTransport::readBody() {
+Payload HttpTransport::readBody(std::istream& rs, size_t limit, bool* truncated) {
 	Payload out;
-	if (!_response)
-		return out;
-	Poco::StreamCopier::copyToString(*_response, out);
+	// 分块读取替代无界 copyToString：达到 limit 即截断返回（是否视为错误
+	// 由调用方按语义决定——成功体超限报错，错误体仅作诊断）
+	char buffer[64 * 1024];
+	while (true) {
+		rs.read(buffer, sizeof(buffer));
+		const size_t got = static_cast<size_t>(rs.gcount());
+		if (got > 0) {
+			if (limit != 0 && out.size() + got > limit) {
+				const size_t room = limit - out.size();
+				out.append(buffer, room);
+				if (truncated)
+					*truncated = true;
+				return out;
+			}
+			out.append(buffer, got);
+		}
+		if (!rs)
+			break; // eof/fail：读取结束
+	}
 	return out;
 }
 
 void HttpTransport::abortResponse() {
 	// 响应状态未知（异常路径）：丢弃挂起响应并关闭底层连接
-	_response = nullptr;
-	if (_session) {
+	std::shared_ptr<Poco::Net::HTTPClientSession> session;
+	{
+		std::lock_guard lk(_ioMutex);
+		_response = nullptr;
+		session = _session;
+	}
+	if (session) {
 		try {
-			_session->abort(); // 关闭底层 socket，下次 send 重连（残留报文不致污染后续响应）
+			session->abort(); // 关闭底层 socket，下次 send 重连（残留报文不致污染后续响应）
 		} catch (...) {
 		}
 	}
 }
 
 void HttpTransport::dropSession() {
-	_response = nullptr;
-	if (_session) {
+	// 自持锁置空成员；session 在锁外释放——交换方持有的本地副本保活对象
+	// （abort 中断其阻塞读，对象延迟析构至读取结束）
+	std::shared_ptr<Poco::Net::HTTPClientSession> session;
+	{
+		std::lock_guard lk(_ioMutex);
+		_response = nullptr;
+		session = std::move(_session);
+	}
+	if (session) {
 		try {
-			_session->abort();
+			session->abort();
 		} catch (...) {
 		}
-		_session = nullptr;
 	}
 }
 

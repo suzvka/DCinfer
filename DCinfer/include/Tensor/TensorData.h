@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -367,19 +368,26 @@ bool TensorData::write(const Shape& fullPath, const T& value) {
 	Shape blockPath(fullPath.begin(), fullPath.end() - 1);
 	size_t elementIndex = static_cast<size_t>(fullPath.back());
 
+	// Guard against multiplication overflow before any catalog/view mutation
+	//（检查前置：巨大/负索引（int64 负值经 static_cast 回绕为巨大 size_t）
+	// 不得先污染 catalog 再被拒）。
+	// 精确安全界：targetBlockSize = (elementIndex + 1) * typeSize 不回绕
+	// ⟺ elementIndex < SIZE_MAX / typeSize。旧条件 ">" 放行了边界值
+	// elementIndex == SIZE_MAX / typeSize：其 (elementIndex+1)*typeSize
+	// 恰好回绕（typeSize 为 2 的幂时归零），而写入偏移仍是天文数字，
+	// 后续 memcpy 将越界写。
+	if (typeSize() == 0)
+		throw std::out_of_range("TensorData::write(element): typeSize not initialized");
+	{
+		const size_t maxElems = std::numeric_limits<size_t>::max() / typeSize();
+		if (elementIndex >= maxElems)
+			throw std::out_of_range("TensorData::write(element): index too large");
+	}
+	const size_t targetBlockSize = (elementIndex + 1) * typeSize();
+
 	// 复用路径准备和物化逻辑
 	updateCatalog(blockPath, "TensorData::write(element)");
 	ensureView();
-
-	// Guard against multiplication overflow before computing target block byte
-	// size（#8-6：删除被覆盖的死代码式预计算，检查后只计算一次）
-	if (typeSize() != 0) {
-		size_t maxElems = std::numeric_limits<size_t>::max() / typeSize();
-		if (elementIndex > maxElems) {
-			throw std::out_of_range("TensorData::write(element): index too large");
-		}
-	}
-	const size_t targetBlockSize = (elementIndex + 1) * typeSize();
 	auto it = _dataMain.find(blockPath);
 	DataBlock block;
 	if (it == _dataMain.end()) {
@@ -432,6 +440,11 @@ std::span<const T> TensorData::read(const Shape& path) const {
 			if (path[i] >= denseShape[i])
 				throw std::out_of_range("TensorData::readSpan: element index out of range");
 		size_t offsetBytes = elementOffset(path, denseShape);
+		// 纵深防御：单元素路径与前缀路径同样校验不越过稠密缓存——
+		// 声明与数据不一致的脏数据在此显式暴露，而非静默越界读
+		const size_t spanBytes = ratio * sizeof(T);
+		if (offsetBytes + spanBytes > _dataCache.size())
+			throw std::out_of_range("TensorData::readSpan: element view exceeds dense cache size");
 		return std::span<const T>(reinterpret_cast<const T*>(_dataCache.data() + offsetBytes), ratio);
 	}
 
@@ -533,26 +546,48 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	size_t rank = targetShape.size();
 	size_t blockRank = (rank >= 1) ? rank - 1 : 0;
 	size_t blockLen = targetShape.back();
+	const size_t blockBytes = blockLen * typeSize();
+
+	// fill pattern：单元素 deposit 为 typeSize 字节（sizeof(T) < typeSize
+	// 时尾随 0，与 write(element) 的元素槽位语义一致）
+	auto pattern = deposit(std::span<const T>(&fillData, 1));
+
+	// 块一致性保证：扩块后存储与形状同表 targetShape——缺失块整块填充
+	// （原语义）；已有块扩容到目标块长且仅新区域按 fillData 填充（旧值
+	// 保留）。每维 targetShape >= current 校验 + current 最后一维 =
+	// _dataSize/typeSize（历史最大块）保证块只扩不缩。
+	auto ensureBlock = [&](const Shape& path) {
+		auto it = _dataMain.find(path);
+		if (it == _dataMain.end()) {
+			updateCatalog(path, "TensorData::expand");
+			std::vector<T> vals(blockLen, fillData);
+			commitData(path, deposit(std::span<const T>(vals.data(), vals.size())));
+		} else if (it->second.size() < blockBytes) {
+			// 已有块小于目标块长：扩容并仅对新区域填充（修复：原实现
+			// 对已存在块完全不扩，导致 {2}→{4} 后形状与存储仍停留 {2}）
+			const size_t oldBytes = it->second.size();
+			DataBlock block = std::move(it->second);
+			block.resize(blockBytes, std::byte(0));
+			for (size_t off = oldBytes; off < blockBytes; off += pattern.size())
+				std::memcpy(block.data() + off, pattern.data(), pattern.size());
+			updateCatalog(path, "TensorData::expand");
+			commitData(path, std::move(block));
+		} else {
+			// 块已不小于目标块长：仅补登记 catalog（幂等），确保
+			// getCurrentShape() 与 targetShape 一致
+			updateCatalog(path, "TensorData::expand");
+		}
+	};
 
 	if (blockRank == 0) {
-		// 一维目标：整个数据即单块（root path）——缺失则以 fillData 整块填充
-		if (_dataMain.find({}) == _dataMain.end()) {
-			updateCatalog({}, "TensorData::expand");
-			std::vector<T> vals(blockLen, fillData);
-			auto bytes = deposit(std::span<const T>(vals.data(), vals.size()));
-			commitData({}, std::move(bytes));
-		}
+		// 一维目标：整个数据即单块（root path）
+		ensureBlock({});
 	} else {
 		// iterate over all block paths (multi-index loop)
 		Shape blockPath(blockRank, 0);
 		bool done = false;
 		while (!done) {
-			if (_dataMain.find(blockPath) == _dataMain.end()) {
-				updateCatalog(blockPath, "TensorData::expand");
-				std::vector<T> vals(blockLen, fillData);
-				auto bytes = deposit(std::span<const T>(vals.data(), vals.size()));
-				commitData(blockPath, std::move(bytes));
-			}
+			ensureBlock(blockPath);
 			// increment blockPath lexicographically with carry
 			for (size_t i = 0; i < blockRank; ++i) {
 				if (++blockPath[i] < targetShape[i])

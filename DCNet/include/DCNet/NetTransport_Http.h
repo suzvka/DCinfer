@@ -22,8 +22,10 @@ namespace DC::Net {
 ///   （HTTPClientSession / HTTPSClientSession，keep-alive 复用）；
 ///   探测失败即返回归一化错误（createEngine 配置期报告）
 /// - send()：POST {basePath}{requestPath}，2xx → None（响应体留待 recv 读取）；
-///   非 2xx → 读取错误体并归一化（normalizeHttpResponse）
-/// - recv()：读取 2xx 响应体
+///   非 2xx（含 3xx：不自动跟随重定向，Poco 默认亦不跟随）→ 读取错误体
+///   并归一化（normalizeHttpResponse）
+/// - recv()：读取 2xx 响应体；超过 NetEndpoint::maxResponseBody 的成功体
+///   按错误归一化（0 = 宿主显式豁免不限制）
 ///
 /// 实现策略：transport 内部为同步阻塞调用，无 I/O 线程——简单 HTTP/JSON 场景
 /// 直接跑在 RunFn 所在 System 池线程（ADR-6 判定矩阵第一行）。
@@ -49,7 +51,11 @@ public:
 	void close() override;
 
 private:
-	Payload readBody();
+	/// 分块读取响应体（上限 limit 字节，0 = 不限制）：rs 为本地持有的流
+	/// 引用（对象生命期由 session 副本保证，不触碰成员状态）；truncated
+	/// 置位表示达上限被截断——2xx 成功体超限由调用方按错误处理，非 2xx
+	/// 错误体仅作诊断允许截断。
+	Payload readBody(std::istream& rs, size_t limit, bool* truncated);
 	void abortResponse();
 	void dropSession();
 	/// 重置会话与错误位（调用者必须已持有交换权）。
@@ -76,8 +82,12 @@ private:
 	std::condition_variable _ioCv;                  ///< 交换权释放时唤醒等待者
 	bool _claimed = false;                          ///< 一次交换进行中（connect/send→recv/close）
 	std::thread::id _claimOwner{};                  ///< 交换权持有线程（同线程重入回收依据）
-	std::unique_ptr<Poco::Net::HTTPClientSession> _session; ///< HTTPS 时指向 HTTPSClientSession
-	std::istream* _response = nullptr;              ///< 挂起的响应流（send → recv 之间有效）
+	/// 会话（shared_ptr：交换中途被 close/析构强收时，交换方持有的本地
+	/// 副本保活对象直至读取结束，close 侧 abort 仅中断阻塞读不致悬垂）
+	std::shared_ptr<Poco::Net::HTTPClientSession> _session; ///< HTTPS 时指向 HTTPSClientSession
+	/// 挂起的响应流（send → recv 之间有效；指向 session 内部流，仅在
+	/// 交换权持有期间访问——跨线程收尾方（close/析构）经 _ioMutex 置空）
+	std::istream* _response = nullptr;
 	std::string _basePath;                          ///< 端点 basePath（不含 requestPath）
 	bool _useTls = false;
 	bool _failed = false;

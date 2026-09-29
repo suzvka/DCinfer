@@ -1,11 +1,16 @@
 #include "ThreadPool.h"
 
+#include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <system_error>
 
 namespace DC {
 
 // ── ThreadPool ──
+
+// 测试注入钩子（生产路径恒为空，见 ThreadPool.h 注释）
+std::function<bool(size_t)> ThreadPool::s_spawnFilter = nullptr;
 
 ThreadPool::ThreadPool(const PoolConfig& config)
 	: _totalThreads(config.totalThreads) {
@@ -13,10 +18,21 @@ ThreadPool::ThreadPool(const PoolConfig& config)
 		throw std::invalid_argument("ThreadPool: config.totalThreads must be > 0");
 	}
 
-	// 启动工作线程
+	// 启动工作线程：任一 std::thread 构造失败（含测试注入）时，先回收
+	// 已启动 worker 再传播异常——否则构造未完成、成员 _workers 析构时
+	// 对 joinable 线程触发 std::terminate（构造异常安全）
 	_workers.reserve(_totalThreads);
 	for (size_t i = 0; i < _totalThreads; ++i) {
-		_workers.emplace_back(&ThreadPool::_workerLoop, this);
+		try {
+			if (s_spawnFilter && !s_spawnFilter(i)) {
+				throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again),
+										"ThreadPool: thread creation failed");
+			}
+			_workers.emplace_back(&ThreadPool::_workerLoop, this);
+		} catch (...) {
+			_drainWorkers();
+			throw;
+		}
 	}
 }
 
@@ -44,7 +60,11 @@ bool ThreadPool::submit(std::function<void()> task) {
 }
 
 void ThreadPool::shutdown() {
-	_running = false;
+	_drainWorkers();
+}
+
+void ThreadPool::_drainWorkers() {
+	_running.store(false, std::memory_order_release);
 
 	{
 		std::lock_guard lk(_mutex);

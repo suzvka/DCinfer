@@ -245,12 +245,21 @@ private:
 	// ── 析构自排水 ──
 	// 共享调度器下不能靠“关闭自己的池” join 在飞任务，改为显式排水：
 	// 派发登记（_shuttingDown 检查 + _pendingRuns +1）在 _drainMutex 内
-	// 原子完成；任务 lambda 经 RunDone 在全部引擎回访完成后递减计数，
-	// 归零者持锁唤醒析构等待者。
+	// 原子完成；每次派发同时签发一张排水票据（DrainTicket）随任务 lambda
+	// 转移——lambda 执行完成（worker 线程）或被池弃置（调度器 shutdown 清队，
+	// function 随之析构，发生在 shutdown 调用者线程）时票据析构，在排水锁
+	// 内递减计数、归零者唤醒析构等待者（递减与 notify 同锁——归零观察
+	// 不可能越过票据的最后一次引擎访问）。两条路径必经其一（RAII）→
+	// 析构可无条件等待归零，无需对调度器关停状态做逃逸判定。
 	std::mutex _drainMutex;
 	std::condition_variable _drainCv;       ///< 排水等待（谓词：_pendingRuns == 0）
 	bool _shuttingDown = false;             ///< 由 _drainMutex 保护；置位后新派发早退
-	std::atomic<uint32_t> _pendingRuns{0};  ///< 在飞 + 已排队任务 lambda 计数
+	std::atomic<uint32_t> _pendingRuns{0};  ///< 已登记未回收的任务 lambda 计数（票据制）
+
+	/// @brief 排水票据：派发登记时签发，随任务 lambda 转移；lambda（含被
+	///        弃置未执行的）析构时回收计数。定义于 ExecutionEngine.cpp
+	///        （回收需访问本类私有排水状态）。
+	struct DrainTicket;
 };
 
 } // namespace DC

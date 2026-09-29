@@ -33,7 +33,7 @@ DCinfer 采用**数据驱动执行模型**：节点在所有输入就绪后自�
 - **Operator**：承担 CPU 预处理、后处理、特征工程等算子（节点默认归属此类）。
 - **System**：处理 I/O、网络传输和系统维护任务。
 
-资源类隔离由进程级共享调度器（`ResourceScheduler`）承载：每类资源拥有独立的执行槽位上限（同类任务超出排队、异类互不干扰），重计算不会拖慢系统响应，I/O 延迟也不会阻塞推理吞吐。进程预算（`SchedulerConfig`，默认各类 1 槽位）由用户可控——多图默认共享同一调度器，服务器场景下无需为每张图重复分配线程；需要放宽时用 `ResourceScheduler::configureInstance()` 调整全局预算，或向 `InferGraph` 注入自定义调度器（测试隔离、多租户分池等）。
+资源类隔离由进程级共享调度器（`ResourceScheduler`）承载：每类资源拥有独立的执行槽位上限（同类任务超出排队、异类互不干扰），重计算不会拖慢系统响应，I/O 延迟也不会阻塞推理吞吐。进程预算（`SchedulerConfig`，默认 Compute/Operator 各 1 槽位、System 4 槽位——后者承载 I/O、连接器与等待型编排节点）由用户可控——多图默认共享同一调度器，服务器场景下无需为每张图重复分配线程；需要放宽时用 `ResourceScheduler::configureInstance()` 调整全局预算，或向 `InferGraph` 注入自定义调度器（测试隔离、多租户分池等）。
 
 ### Schema 安全的张量系统
 
@@ -196,6 +196,11 @@ cmake --install build/core-only --prefix <安装前缀>
 | DCIr | `find_package(DCIr CONFIG REQUIRED)` | `DCIr::DCIr` | DCinfer, zlib |
 | DCNet | `find_package(DCNet CONFIG REQUIRED)` | `DCNet::DCNet` | DCinfer, Poco |
 
+> **引擎适配器的安装支持范围**：v0.7 安装 SDK 仅导出 `DCEngine::Builtin`（零
+> 依赖引擎）。OnnxRuntime / OpenAI 适配器依赖 vcpkg 重型依赖，当前仅支持
+> 源码树消费（`add_subdirectory`，仓库内构建），不在安装导出范围内——
+> 安装后 `find_package(DCEngine)` 只能取到 `DCEngine::Builtin` 目标。
+
 宿主工程 CMakeLists 示例：
 
 ```cmake
@@ -289,9 +294,13 @@ parent.addNode(op.makeNode("Block"));           // 生成普通 Node 嵌入父�
 - 生命周期由 `shared_ptr` 闭合：节点存活期间子图必然存活，无悬垂契约；
 - 同一子图可被多个组合节点/多个父图并发复用（子任务 ID 按节点实例命名空间
   隔离，无 DuplicateTask 限制）；
-- 等待型节点语义：子图执行期间占住一个资源类执行槽位（进程级预算需覆盖
-  全部并发等待节点数；父子图共享同一调度器时，嵌套等待链按“同类槽位叠加”
-  规划）；内层信号停滞时宿主 `cancel()` 父任务可在
+- 等待型节点语义：子图执行期间占住一个资源类执行槽位。默认亲和为
+  `System`（基础设施类），与子图业务节点默认的 `Operator` 类天然分离；
+  `System` 类同时承载图连接器，子图内连接器与嵌套等待链深度均占用同类
+  槽位——默认进程预算（System 4 槽位）已按此预留，开箱覆盖 ≤3 层嵌套；
+  显式收紧 System 预算或指定其它亲和（尤其是 `Operator`）时，进程级预算
+  需覆盖全部并发等待节点数，嵌套等待链按“同类槽位叠加”规划，否则可能
+  自锁；内层信号停滞时宿主 `cancel()` 父任务可在
   `Options.pollInterval`（默认 100ms）粒度解围，不会永久挂起；
 - 节点 type 为 `"Builtin"`：DCIr 序列化往返仅保留结构（Schema 骨架），
   与注册算子同等待遇。

@@ -1,4 +1,7 @@
 #include "Tensor.hpp"
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <iostream>
 
@@ -278,14 +281,22 @@ static void runTensorDataExceptionTests() {
 			fail("expand 2-D must fill missing block with fillData");
 	}
 
-	// 13c) expand 1-D 目标：已有 root 块保持数据（不再走"循环零迭代"静默分支）
+	// 13c) expand 1-D 目标：已有 root 块扩容（旧值保留 + 新区域 fillData；
+	//      修复后存储与形状同表 targetShape，不再停留旧块长）
 	{
 		TensorData td;
 		td.write({}, std::vector<float>{1.0f, 2.0f, 3.0f}); // 1-D root block
 		td.expand(std::vector<size_t>{5}, 7.0f); // 目标 {5} ≥ {3}
 		auto span = td.data<float>();
-		if (span.size() != 3 || std::abs(span[0] - 1.0f) > 1e-6f)
-			fail("expand 1-D must keep existing data and not corrupt");
+		if (span.size() != 5)
+			fail("expand 1-D must enlarge storage to target block length");
+		if (std::abs(span[0] - 1.0f) > 1e-6f || std::abs(span[1] - 2.0f) > 1e-6f
+			|| std::abs(span[2] - 3.0f) > 1e-6f)
+			fail("expand 1-D must keep existing data");
+		if (std::abs(span[3] - 7.0f) > 1e-6f || std::abs(span[4] - 7.0f) > 1e-6f)
+			fail("expand 1-D must fill the new region with fillData");
+		if (td.getCurrentShape() != TensorData::Shape{5})
+			fail("expand 1-D must update current shape to target");
 	}
 
 	// 13d) expand 标量目标：等 shape 提前返回（no-op）
@@ -296,6 +307,114 @@ static void runTensorDataExceptionTests() {
 		auto v = td.readElement<float>({});
 		if (std::abs(v - 3.5f) > 1e-6f)
 			fail("expand scalar target must be a no-op");
+	}
+
+	// 14) loadData：shape/typeSize/bytes 声明自洽性校验（载荷本身不被解释）
+	{
+		expectInvalidArgument(
+			[&] {
+				TensorData td;
+				td.loadData(std::vector<size_t>{2}, sizeof(float),
+							TensorData::DataBlock(sizeof(float), std::byte(0))); // 少一半
+			},
+			"loadData bytes smaller than shape product");
+		expectInvalidArgument(
+			[&] {
+				TensorData td;
+				td.loadData(std::vector<size_t>{2}, sizeof(float),
+							TensorData::DataBlock(3 * sizeof(float), std::byte(0))); // 多一半
+			},
+			"loadData bytes larger than shape product");
+		expectInvalidArgument(
+			[&] {
+				TensorData td;
+				td.loadData(std::vector<size_t>{2, 0}, sizeof(float), TensorData::DataBlock(0));
+			},
+			"loadData zero dimension rejected");
+		expectInvalidArgument(
+			[&] {
+				TensorData td;
+				td.loadData(std::vector<size_t>{2}, 0, TensorData::DataBlock(0));
+			},
+			"loadData zero typeSize rejected");
+		// 合法路径行为不变：字节载荷原样进入 cache，不解释内容
+		TensorData td;
+		TensorData::DataBlock bytes(2 * sizeof(float));
+		const float payload[2] = {42.0f, -1.5f};
+		std::memcpy(bytes.data(), payload, sizeof(payload));
+		td.loadData(std::vector<size_t>{2}, sizeof(float), std::move(bytes));
+		auto span = td.data<float>();
+		if (span.size() != 2 || span[0] != 42.0f || span[1] != -1.5f)
+			fail("loadData must pass payload bytes through uninterpreted");
+	}
+
+	// 15) write(element)：溢出边界与回绕负索引在污染 catalog 前拒绝
+	{
+		TensorData td;
+		td.write(std::vector<size_t>{0}, std::vector<float>{1.0f, 2.0f, 3.0f}); // typeSize=4
+		constexpr size_t maxElems = std::numeric_limits<size_t>::max() / sizeof(float);
+		expectOutOfRange(
+			[&] {
+				// 边界值 elementIndex == SIZE_MAX/typeSize：(elementIndex+1)*typeSize
+				// 恰好回绕，旧条件 ">" 放行后 memcpy 越界写
+				td.write(std::vector<size_t>{0, maxElems}, 1.0f);
+			},
+			"write(element) at SIZE_MAX/typeSize boundary");
+		expectOutOfRange(
+			[&] {
+				// int64 负索引经 static_cast<size_t> 回绕为巨大值
+				td.write(std::vector<size_t>{0, static_cast<size_t>(-1)}, 1.0f);
+			},
+			"write(element) with wrapped negative index");
+		// catalog 未被污染：拒绝后正常写入仍有效
+		td.write(std::vector<size_t>{0, 1}, 9.0f);
+		if (td.readElement<float>(std::vector<size_t>{0, 1}) != 9.0f)
+			fail("write(element) after rejected oversized index must still work");
+	}
+
+	// 16) crop：多维前缀裁剪（修复前 {2,3}→{2,2} 得 1,2,3,4）
+	{
+		TensorData td;
+		std::vector<std::byte> dense(2 * 3 * sizeof(float));
+		const float vals[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+		std::memcpy(dense.data(), vals, sizeof(vals));
+		td.loadData(std::vector<size_t>{2, 3}, sizeof(float), std::move(dense));
+		td.crop(std::vector<size_t>{2, 2});
+		auto span = td.data<float>();
+		if (span.size() != 4)
+			fail("crop 2-D must shrink storage to new element count");
+		const float expected[4] = {1.0f, 2.0f, 4.0f, 5.0f}; // [[1,2],[4,5]]
+		for (size_t i = 0; i < 4; ++i)
+			if (std::abs(span[i] - expected[i]) > 1e-6f)
+				fail("crop 2-D must preserve per-dimension prefix elements");
+		// 1-D 回归：扁平前缀截断行为不变
+		TensorData td1d;
+		std::vector<std::byte> dense1d(4 * sizeof(float));
+		const float vals1d[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+		std::memcpy(dense1d.data(), vals1d, sizeof(vals1d));
+		td1d.loadData(std::vector<size_t>{4}, sizeof(float), std::move(dense1d));
+		td1d.crop(std::vector<size_t>{2});
+		auto span1d = td1d.data<float>();
+		if (span1d.size() != 2 || std::abs(span1d[0] - 1.0f) > 1e-6f
+			|| std::abs(span1d[1] - 2.0f) > 1e-6f)
+			fail("crop 1-D must keep the flat prefix");
+	}
+
+	// 17) expand 扩已有块：{2,2}→{2,4}（修复前已有行块不扩容，形状仍停留 {2,2}）
+	{
+		TensorData td;
+		td.write(std::vector<size_t>{0}, std::vector<float>{1.0f, 2.0f}); // 块{0}
+		td.write(std::vector<size_t>{1}, std::vector<float>{3.0f, 4.0f}); // 块{1}
+		td.expand(std::vector<size_t>{2, 4}, 9.0f);
+		auto span = td.data<float>();
+		if (span.size() != 8)
+			fail("expand 2-D must enlarge existing blocks to new block length");
+		const float expected[8] = {1.0f, 2.0f, 9.0f, 9.0f, 3.0f, 4.0f, 9.0f, 9.0f};
+		for (size_t i = 0; i < 8; ++i)
+			if (std::abs(span[i] - expected[i]) > 1e-6f)
+				fail("expand 2-D must keep old values and fill only the new region");
+		if (td.getCurrentShape() != TensorData::Shape({2, 4}))
+			fail("expand 2-D must update current shape to target");
 	}
 
 	std::cout << "TensorData exception tests passed" << std::endl;

@@ -53,6 +53,9 @@ public:
 
 private:
 	void _workerLoop();
+	/// @brief  关停收尾（构造失败回收与 shutdown 共用）：置停 → 清队 →
+	///         唤醒 → join 全部已启动 worker → 清空。幂等。
+	void _drainWorkers();
 
 	size_t _totalThreads;
 	std::vector<std::thread> _workers;
@@ -62,6 +65,11 @@ private:
 	std::queue<std::function<void()>> _taskQueue;
 
 	std::atomic<bool> _running{true};
+
+	// 测试注入点：线程创建过滤器（返回 false 模拟 std::thread 构造失败）。
+	// 仅测试 TU 经 friend 访问设置；生产路径恒为空，不参与公共契约。
+	static std::function<bool(size_t)> s_spawnFilter;
+	friend struct ThreadPoolSpawnProbe;
 };
 
 } // namespace DC

@@ -6,8 +6,8 @@
 > NetError 归一化。与 OnnxRuntime（本地模型后端）对称并列，同属
 > EngineDescriptor 家族。
 >
-> **发布状态**：实验性组件，本次不交付；不承诺 API 稳定性，
-> **禁止用于网络暴露部署**（见根 [README.md](../../README.md) 发布状态）。
+> **发布状态**：实验性组件，不承诺 API 稳定性；
+> **禁止用于网络暴露部署**。
 
 ## 使用
 
@@ -83,4 +83,4 @@ cmake -B build -S . -DDCINFER_BUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON
   的翻译器；协议错误码精确映射可调用 DCNet 核心归一化函数
   （`NetError.h`）扩展，分类规则归核心统一维护
 - **本地形状规则**：端口 Schema 静态声明，不依赖远端元数据
-- 流式输出 / embedding 端口 / mTLS 属展望（不随本次交付）。
+- 流式输出 / embedding 端口 / mTLS 属展望，尚未实现。

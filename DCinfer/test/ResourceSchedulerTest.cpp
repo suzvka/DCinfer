@@ -9,6 +9,7 @@
 //   - 引擎排水：慢节点在飞时析构图——引擎析构等待任务完成后返回
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -199,8 +200,8 @@ static void testGlobalInstanceSemantics() {
 		auto b = ResourceScheduler::instance();
 		CHECK(a != nullptr && a == b, "instance() must be idempotent (same pointer)");
 		CHECK(a->workersFor(ResourceClass::Compute) == 1 && a->workersFor(ResourceClass::Operator) == 1 &&
-				  a->workersFor(ResourceClass::System) == 1,
-			  "default instance budget must be 1/1/1");
+				  a->workersFor(ResourceClass::System) == 4,
+			  "default instance budget must be 1/1/4 (System carries connectors + waiting nodes)");
 
 		CHECK(!ResourceScheduler::configureInstance(SchedulerConfig{3, 2, 1}),
 			  "configureInstance after lazy creation must be rejected");
@@ -259,6 +260,88 @@ static void testEngineDestructorDrainsInflight() {
 	END_TEST();
 }
 
+// ── 8. shutdown 死锁回归：worker 任务内递归提交 + 并发 shutdown ──
+//
+// 回归场景：worker 正在执行的任务 lambda 再次提交（经 _poolFor），若已穿过
+// 第一道 _stopped 快检后遇 shutdown 持 _initMutex join——修复前为循环等待。
+// 压力循环 + shared_future 看门狗：shutdown 未在时限内返回即判定失败。
+
+static void testShutdownRacesRecursiveSubmit() {
+	TEST("shutdown: concurrent shutdown x recursive submit must not deadlock") {
+		for (int iter = 0; iter < 100; ++iter) {
+			auto sched = std::make_unique<ResourceScheduler>(SchedulerConfig{2, 2, 2});
+			// 放入一个持续经 _poolFor 递归提交的任务，然后立即并发 shutdown
+			sched->submit(ResourceClass::Operator, [&] {
+				for (int i = 0; i < 8; ++i) {
+					sched->submit(ResourceClass::Operator, [] {});
+					sched->submit(ResourceClass::Compute, [] {});
+					std::this_thread::sleep_for(1ms);
+				}
+			});
+			// shared_future 析构不阻塞：死锁分支下不拖死测试线程
+			auto watchdog = std::async(std::launch::async, [&] { sched->shutdown(); }).share();
+			if (watchdog.wait_for(30s) != std::future_status::ready) {
+				std::cerr << "FAIL: shutdown deadlocked with recursive submit (iteration " << iter << ")"
+						  << std::endl;
+				++failures;
+				sched.release(); // 故意泄漏：避免析构再次进入死锁的 shutdown
+				return;
+			}
+		}
+	}
+	END_TEST();
+}
+
+// ── 9. 析构与调度器 shutdown 并发：排水与关停互相竞速仍必终止 ──
+//
+// 覆盖两条路径：
+//   a) 引擎自排水（DrainTicket 递减）与在飞任务完成路径竞速；
+//   b) 调度器 shutdown 弃置排队任务（票据随 function 析构回收）+ join 在飞。
+// 任一侧挂起即失败（shared_future 看门狗 + 故意泄漏避免二次挂死）。
+
+static void testTeardownRacingSchedulerShutdown() {
+	TEST("teardown: engine drain racing scheduler shutdown must terminate") {
+		for (int iter = 0; iter < 40; ++iter) {
+			auto sched = std::make_unique<ResourceScheduler>(SchedulerConfig{2, 2, 2});
+			std::atomic<bool> started{false};
+			// 不拥有所有权的 shared_ptr 视图（InferGraph 接口要求 shared_ptr；
+			// 生命期由 sched unique_ptr 独立管理，失败分支下二者同步泄漏）
+			std::shared_ptr<ResourceScheduler> schedView(sched.get(), [](ResourceScheduler*) {});
+			auto g = std::make_unique<InferGraph>(schedView);
+			g->addNode(std::make_unique<Node>("test", "slow", passSchema(),
+				[&](Node::RunContext& ctx) -> Node::Result {
+					started.store(true);
+					std::this_thread::sleep_for(2ms);
+					const auto* x = ctx.input<Tensor>("x");
+					if (!x)
+						return ctx.failure(Node::Status::InvalidInput, "not a Tensor");
+					ctx.output("y", Value(std::make_unique<Tensor>(*x)));
+					return ctx.success();
+				}));
+			g->bindOutput("y", "slow", "y");
+			for (int t = 0; t < 4; ++t) {
+				const std::string id = "t" + std::to_string(t);
+				g->feedInput(id, "slow", "x", Value(std::make_unique<Tensor>(floatTensor(1.0f))));
+				g->submit(id, "slow", "y");
+			}
+			CHECK(waitForValue(started, true, 5s), "slow task must enter RunFn before teardown");
+
+			// 引擎析构（自排水）与调度器 shutdown（弃置排队票据 + join 在飞）并发
+			auto drained = std::async(std::launch::async, [&] { g.reset(); }).share();
+			auto stopped = std::async(std::launch::async, [&] { sched->shutdown(); }).share();
+			if (drained.wait_for(30s) != std::future_status::ready
+				|| stopped.wait_for(30s) != std::future_status::ready) {
+				std::cerr << "FAIL: teardown/shutdown race hung (iteration " << iter << ")" << std::endl;
+				++failures;
+				g.release();   // 故意泄漏：避免析构再次进入挂起路径
+				sched.release();
+				return;
+			}
+		}
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testGlobalInstanceSemantics();
@@ -268,6 +351,8 @@ int main() {
 		testConfigValidation();
 		testShutdownRejection();
 		testEngineDestructorDrainsInflight();
+		testShutdownRacesRecursiveSubmit();
+		testTeardownRacingSchedulerShutdown();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;
 		return 1;

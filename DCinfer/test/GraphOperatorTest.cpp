@@ -719,13 +719,55 @@ static void testMissingBoundOutputFailFast() {
 }
 
 // ════════════════════════════════════════════
+// 15. 默认预算开箱安全：进程默认预算下父子嵌套可运行
+//     回归守护：等待型组合节点默认归 System 类（与子图业务节点默认的
+//     Operator 类分离），且 System 默认预算为 4（连接器与嵌套等待链深度
+//     均占用同类槽位）。若亲和默认 Operator：父节点占满 Operator 槽位后
+//     子图任务排队同一池永不执行；若亲和 System 而预算仍 1：子图内
+//     连接器与嵌套链同类自锁——两者均已作为回归用例覆盖
+// ════════════════════════════════════════════
+
+static void testDefaultBudgetNesting() {
+	TEST("default budget: parent-subgraph nesting runs out of the box") {
+		auto sub = std::make_shared<InferGraph>();
+		sub->addNode(std::make_unique<Node>("Builtin", "sub_id", identitySchema(), identityRunFn()));
+		sub->bindInput("x", "sub_id", "x");
+		sub->bindOutput("y", "sub_id", "y");
+
+		GraphOperator op(sub); // makeNode 默认亲和 System（开箱安全的关键）
+
+		InferGraph parent;
+		parent.addNode(std::make_unique<Node>("Builtin", "source", identitySchema(), identityRunFn()));
+		parent.addNode(op.makeNode("Block"));
+		parent.connect("source", "y", "Block", "x");
+		parent.feedInput("t1", "source", "x", floatValue(3.0f));
+		parent.submit("t1", "Block", "y", 1);
+
+		const auto res = parent.waitForResult("t1", 5s);
+		CHECK(res.status == TaskStatus::Succeeded,
+			  "nested graph must complete under default budget (no operator-slot self-starvation)");
+		const auto out = parent.takeOutput("t1", "Block", "y");
+		const auto* t = out.as<Tensor>();
+		CHECK(t && std::fabs(t->item<float>() - 3.0f) < 1e-5f, "subgraph passthrough result must be 3.0");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
-		// 组合算子等待型节点在等待期间占住资源类槽位（进程级共享预算）：嵌套等待链
-		// 需要 Operator 预算覆盖全部并发等待节点——默认实例放宽为 1/8/1；
+		// 默认预算开箱安全回归：必须最先运行——使用进程默认实例（1/1/1），
+		// 早于下方 configureInstance 放宽预算
+		testDefaultBudgetNesting();
+
+		// 组合算子等待型节点在等待期间占住资源类槽位（进程级共享预算）：显式
+		// 指定亲和的嵌套等待链需要同类预算覆盖全部并发等待节点——本测试放宽
+		// 为 1/8/8（System 槽位需同时覆盖：branch 用例的父图连接器 + 等待
+		// 节点 + 子图内连接器 ≈ 3，三层嵌套的等待链 ≈ 2）；
 		// configureInstance 仅在实例首次创建前有效（检查返回值）。
-		if (!ResourceScheduler::configureInstance(SchedulerConfig{1, 8, 1})) {
+		ResourceScheduler::resetInstance(); // 回归用例已创建默认实例：重置后重新预配置
+		if (!ResourceScheduler::configureInstance(SchedulerConfig{1, 8, 8})) {
 			std::cerr << "FAIL: ResourceScheduler::configureInstance rejected (instance pre-created)" << std::endl;
 			return 1;
 		}

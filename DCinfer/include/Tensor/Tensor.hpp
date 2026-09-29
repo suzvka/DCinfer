@@ -13,11 +13,10 @@
 namespace DC {
 
 /// @brief 推理框架的核心张量对象，作为输入/输出数据的统一载体。
-/// @brief 提供类型安全的创建、索引访问、形状变换和数据序列化能力。
+/// 提供类型安全的创建、索引访问、形状变换和数据序列化能力。
 ///
-/// @par 典型用法
-/// - 构造推理图的输入张量
-
+/// 序列化/形状/视图能力的入口见 data()/loadData()/expand()/crop() 与 View/ConstView。
+///
 class Tensor {
 public:
 	using TensorType = TensorMeta::TensorType; ///< 张量逻辑类型枚举（Float/Int/Uint/Bool/Char/Data/Void）。

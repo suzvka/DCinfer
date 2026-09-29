@@ -1,5 +1,6 @@
 #include "ResourceScheduler.h"
 
+#include <array>
 #include <optional>
 #include <stdexcept>
 
@@ -71,11 +72,16 @@ ThreadPool* ResourceScheduler::_poolFor(ResourceClass cls) {
 	// 快路径：已关停直接拒绝（锁外原子读）
 	if (_stopped.load(std::memory_order_acquire))
 		return nullptr;
-	// 慢路径：惰性创建与关停遍历互斥（防"关停后新池创建"漏 join）
+	// 防御：非法枚举值（经 static_cast 强转传入）按拒绝处理，与
+	// workersFor 的注释契约一致——禁止以下标形式越界定长数组（P2）
+	const size_t index = _indexOf(cls);
+	if (index >= 3)
+		return nullptr;
+	// 慢路径：惰性创建与关停遍历互斥（防“关停后新池创建”漏 join）
 	std::lock_guard lk(_initMutex);
 	if (_stopped.load(std::memory_order_relaxed))
 		return nullptr;
-	auto& pool = _pools[_indexOf(cls)];
+	auto& pool = _pools[index];
 	if (!pool)
 		pool = std::make_unique<ThreadPool>(PoolConfig{_config.workersFor(cls)});
 	return pool.get();
@@ -91,9 +97,26 @@ bool ResourceScheduler::submit(ResourceClass cls, std::function<void()> task) {
 }
 
 void ResourceScheduler::shutdown() {
+	// 先置位拒绝新提交，再逐池关停：join 在飞任务、清队弃置排队任务
+	// （std::function 随队列析构——提交方的排水票据在弃置路径同样回收，
+	// ExecutionEngine 析构的自排水等待因此必然终止，无逃逸依赖本函数
+	// 的完成顺序）。
 	_stopped.store(true, std::memory_order_release);
-	std::lock_guard lk(_initMutex);
-	for (auto& pool : _pools) {
+	// 锁内仅快照现有池指针，join 在锁外进行：若持 _initMutex join，
+	// 在飞任务经 _poolFor 阻塞在同一把锁上（已通过第一道 _stopped 检查
+	// 后关停插入），worker 永不退出而 shutdown 永等其退出——循环等待。
+	// 锁外 join 后，被阻塞 worker 获得锁、经第二道检查按拒绝返回，
+	// 任务收尾退出，join 正常完成。
+	// 池对象生命期：shutdown 只关停不销毁，成员活到调度器析构，
+	// 快照指针在锁外使用安全；置位后 _poolFor 双检查均拒绝，
+	// 不会出现快照之外的新池漏 join。
+	std::array<ThreadPool*, 3> pools{};
+	{
+		std::lock_guard lk(_initMutex);
+		for (size_t i = 0; i < 3; ++i)
+			pools[i] = _pools[i].get();
+	}
+	for (auto* pool : pools) {
 		if (pool)
 			pool->shutdown();
 	}

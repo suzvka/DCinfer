@@ -6,7 +6,9 @@
 //   - submit 与 shutdown 并发安全（shutdown 返回后提交必被拒）
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <iostream>
+#include <system_error>
 #include <thread>
 
 #include "ThreadPool.h"
@@ -96,12 +98,59 @@ static void testConcurrentSubmitDuringShutdown() {
 }
 
 // ════════════════════════════════════════════
+// 构造期线程创建失败：异常安全（回收已启动 worker 后传播，不 terminate）
+// ════════════════════════════════════════════
+
+// 测试注入入口（friend 声明于 DC::ThreadPool，故定义在 DC 命名空间内）：
+// 设置线程创建过滤器（返回 false 模拟创建失败）
+namespace DC {
+struct ThreadPoolSpawnProbe {
+	static void set(std::function<bool(size_t)> f) { ThreadPool::s_spawnFilter = std::move(f); }
+};
+} // namespace DC
+
+static void testConstructorPartialFailureRecovers() {
+	TEST("thread creation failure mid-construction -> propagates exception, no terminate") {
+		// 允许前 2 个成功，第 3 个注入失败（模拟 std::thread 构造抛出）
+		ThreadPoolSpawnProbe::set([](size_t i) { return i < 2; });
+		bool threw = false;
+		try {
+			ThreadPool pool({4});
+			(void)pool;
+		} catch (...) {
+			threw = true;
+		}
+		ThreadPoolSpawnProbe::set(nullptr);
+		CHECK(threw, "partial thread creation failure must propagate as exception");
+		// 进程存活（未 std::terminate、未挂死）即为本用例的主要断言
+	}
+	END_TEST();
+}
+
+static void testConstructionAfterInjectionRecovers() {
+	TEST("pool works normally after injection-cleared construction") {
+		ThreadPoolSpawnProbe::set([](size_t) { return true; });
+		ThreadPoolSpawnProbe::set(nullptr);
+		ThreadPool pool({2});
+		std::atomic<int> ran{0};
+		CHECK(pool.submit([&] { ++ran; }), "submit must work after construction");
+		const auto deadline = std::chrono::steady_clock::now() + 2s;
+		while (ran.load() < 1 && std::chrono::steady_clock::now() < deadline)
+			std::this_thread::sleep_for(1ms);
+		CHECK(ran.load() == 1, "task must execute after recovered construction");
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
 		testSubmitExecutes();
 		testSubmitAfterShutdownRejected();
 		testConcurrentSubmitDuringShutdown();
+		testConstructorPartialFailureRecovers();
+		testConstructionAfterInjectionRecovers();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;
 		return 1;

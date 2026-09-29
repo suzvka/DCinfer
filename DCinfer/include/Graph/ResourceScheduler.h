@@ -13,13 +13,16 @@ namespace DC {
 
 /// @brief 进程级资源预算：每资源类的执行槽位上限（worker 数）。
 ///
-/// 默认 1/1/1 对齐单图历史默认；进程级共享语义下多图共存，服务器场景
-/// 建议按 CPU 核数与任务画像显式配置（经 ResourceScheduler 构造或
-/// configureInstance 预配置）。
+/// 默认 Compute/Operator 各 1 槽位（对齐单图历史默认）；System 默认 4——
+/// System 类除 I/O/网络外还承载图连接器与等待型编排节点（GraphOperator
+/// 默认亲和），嵌套等待链深度与子图内连接器并发均占用同类槽位，4 为
+/// 开箱安全的保守值（覆盖 ≤3 层嵌套 + 并发连接器）。进程级共享语义下
+/// 多图共存，服务器场景建议按 CPU 核数与任务画像显式配置（经
+/// ResourceScheduler 构造或 configureInstance 预配置）。
 struct SchedulerConfig {
 	size_t computeWorkers = 1;
 	size_t operatorWorkers = 1;
-	size_t systemWorkers = 1;
+	size_t systemWorkers = 4;
 
 	bool valid() const {
 		return computeWorkers > 0 && operatorWorkers > 0 && systemWorkers > 0;
@@ -53,6 +56,9 @@ struct SchedulerConfig {
 /// 每资源类持有一个内部 ThreadPool，首次提交时创建（未使用的类不占线程）；
 /// 池在调度器析构前保持存在——shutdown() 只关停（拒绝新提交、join 在飞），
 /// 不销毁对象（并发提交方持有的池指针始终有效，与关停的竞态由池内锁串行）。
+/// 内部池队列为无界 FIFO（无内置背压/丢弃）：提交速率长期超过执行速率时
+/// 队列与任务载荷随之增长，长驻/服务部署由宿主以提交节流或扩大线程数
+/// 控制队列规模（与 ThreadPool.h 契约一致）。
 ///
 /// ── 阻塞语义（预算规划约束） ──
 /// worker 被阻塞任务（网络 I/O、等待型节点）占住是池化执行的固有语义：
@@ -76,9 +82,11 @@ public:
 	bool submit(ResourceClass cls, std::function<void()> task);
 
 	/// @brief 关停调度器（幂等）：此后拒绝新提交；已创建的池关停并等待
-	///        在飞任务完成（排队未执行的任务按内部池语义丢弃）。
+	///        在飞任务完成（排队未执行的任务按内部池语义丢弃——提交方的
+	///        排水票据随 function 析构回收，消费方析构排水无需逃逸判定）。
 	/// @note   建议先析构使用方（图/引擎），再关停调度器——反序亦安全
-	///         （引擎析构对已关停调度器走放弃等待逃逸路径）。
+	///         （在飞任务由本函数 join 兜底执行完毕，排队任务弃置即回收，
+	///         关停返回后无任何任务 lambda 可再回访使用方）。
 	void shutdown();
 
 	/// @brief 是否已关停（shutdown() 调用后为 true）

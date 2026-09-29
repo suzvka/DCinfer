@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - 2026-09-28
+## [0.7.0] - 2026-09-29
 
 发布前审查发现的张量视图公共 API 语义缺陷与 README 功能虚宣修正；
 资源调度器升级为进程级共享模型（破坏性，0.x）。
@@ -21,9 +21,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   路径（NumPy 风格基本用法）；同步去除 `_shape` 的 `mutable` 修饰（不再修改
   自身）。`ConstView` 同修。`TensorTest` 新增用例 #13 覆盖：View 分叉写 /
   循环分叉写 / ConstView 分叉读——此前测试仅走一次性线性链，无法暴露。
+- **P1 引擎析构逃逸路径 use-after-free 竞态（发布前审查二轮发现）**：
+  原自排水等待以 `ResourceScheduler::isStopped()` 为逃逸条件，而 `shutdown()`
+  先置位关停标志、后逐池 join——两者之间存在窗口，此时析构引擎会越过排水
+  等待与在飞任务的引擎回访竞态（UAF）。排水计数改票据制（`DrainTicket`）：
+  每次派发随任务 lambda 签发票据，执行完成（worker）与被池弃置（shutdown
+  清队析构 function）两条路径均经票据析构回收计数——析构可无条件等待归零，
+  逃逸路径整体删除。`GraphOperatorTest` 起首的默认预算回归用例顺带覆盖
+  `resetInstance()` 关停路径。
+- **P1 默认预算下 GraphOperator 父子嵌套开箱自死锁（发布前审查二轮发现）**：
+  默认 `SchedulerConfig{1,1,1}` 且组合节点默认亲和 Operator 时，父图等待型
+  节点占住 Operator 类唯一槽位，子图节点排队同一池永不执行——无诊断永久
+  挂起（旧版每图私有池时代默认安全的场景回归）。修复分两层：
+  `makeNode` 默认亲和改为 `System`（等待型编排节点归基础设施类，与子图
+  业务节点默认 Operator 类分离）；因 System 类同时承载图连接器，单独改
+  亲和会让子图内连接器与嵌套等待链在 System 默认 1 槽位下同类自锁
+  （回归用例实测暴露），故同步将 `SchedulerConfig` 默认 System 预算
+  放宽为 4（Compute/Operator 保持 1）——开箱覆盖 ≤3 层嵌套 + 并发连接器，
+  显式收紧或指定其它亲和时仍需按叠加规则规划。`GraphOperatorTest`
+  新增默认预算嵌套回归用例（早于显式预算放宽运行）。
+- **P2 调度器杂项**：`_poolFor` 对非法枚举值加范围防御（与 `workersFor`
+  “未知资源类按拒绝处理”契约一致，防越界下标）；`DCEngines` 缺 DCNet 的
+  FATAL_ERROR 提示改用主名 `-DDCINFER_BUILD_DCNET=ON`（原引导旧别名）。
+- **P0 引擎排水票据生命周期窗口**：票据析构原为“先递减 `_pendingRuns` 后
+  拿排水锁唤醒”——归零与拿锁之间析构者可越过排水等待走完整析构（含成员
+  销毁），worker 再触碰已销毁的 `_drainMutex/_drainCv`。改为锁内递减（递减
+  与 notify 原子于排水锁）；同时票据登记改为“临界区外构造 + 登记成功才
+  armed”——票据分配失败不再泄漏已加的排水计数，未登记路径析构零副作用。
+  `ResourceSchedulerTest` 新增析构与调度器 shutdown 并发压力回归。
+- **P0 调度器 shutdown 持锁 join 死锁**：`shutdown()` 原持 `_initMutex`
+  逐池 join worker，而 worker 正在执行的任务 lambda 经 `_poolFor` 阻塞在
+  同一把锁上（已过第一道关停快检后关停插入）——循环等待。改为锁内仅快照
+  现有池指针、锁外逐池关停：置位后双检查均拒绝新池创建，锁外 join 期间
+  被阻塞 worker 按拒绝收尾退出。`ResourceSchedulerTest` 新增任务内递归
+  提交 × 并发 shutdown 的压力回归（shared_future 看门狗）。
+- **P1 HttpTransport close 与 recv 竞态（use-after-free）**：close 等交换
+  收尾 5s 超时后强收并销毁 session，而 recv 正在读的响应流指向 session
+  内部——悬垂。会话改 `shared_ptr`：交换方（send/recv）持本地副本保活
+  对象，强收仅 abort 中断阻塞读；成员访问（`_response/_session`）全部
+  收敛到 `_ioMutex` 临界区；被中断的读取返回归一化错误而非静默短读。
+  `HttpTransportTest` 新增慢响应 × 并发 close 用例（慢 body 测试服务）。
+- **P1 `TensorData::crop` 多维截断语义错误**：原实现扁平 resize 到新元素
+  总数，对 `{2,3}→crop({2,2})` 得 `1,2,3,4`（`[[1,2],[3,4]]`）而非每维
+  前缀的 `1,2,4,5`（`[[1,2],[4,5]]`）。重写为按行主序逐块 memcpy 的多维
+  前缀裁剪（一维行为不变），并失效稀疏视图保持 cache/view 一致。
+- **P1 `TensorData::expand` 不扩已有块**：原实现只填充缺失块，`{2}→{4}`
+  时既有 root 块不扩容、形状停留 `{2}`。改为遍历全部块路径：缺失块整块
+  填充（原语义），已有块扩容到目标块长且仅新区域按 fillData 填充（旧值
+  保留），并补登记 catalog 使 `getCurrentShape()` 与目标一致。
+- **P2 `TensorData::loadData` 缺 shape/尺寸自洽性校验**：原直接接受任意
+  shape/typeSize/bytes 组合，声明元素数大于实际缓冲时下游按 shape 寻址
+  越界读。加与三参构造同一不变量校验（拒绝 0 维、防连乘/乘积溢出、精确
+  字节数匹配）；`read<T>` 单元素路径补越界检查（前缀路径已有）。校验对象
+  是调用方声明的自洽性（元数据），字节载荷仍原样进入 cache 不做解释。
+- **P2 `TensorData::write(element)` 整数溢出边界**：溢出检查由
+  `elementIndex > SIZE_MAX/typeSize` 收紧为 `>=`——旧条件放行的边界值
+  `(elementIndex+1)*typeSize` 恰好回绕（typeSize 为 2 的幂时归零），写入
+  偏移仍是天文数字，后续 memcpy 越界写；检查同时移到 `updateCatalog`
+  之前，巨大/回绕负索引不再先污染 catalog 再被拒。
+- **P2 ThreadPool 构造期线程创建失败触发 std::terminate**：构造循环中
+  任一 `std::thread` 抛出时，构造未完成、已启动 worker 随成员析构对
+  joinable 线程 terminate。提取 `_drainWorkers()` 供 shutdown 与构造
+  catch 共用：失败时回收已启动 worker 后传播异常。`ThreadPoolTest`
+  经注入钩子（仅测试 TU 可设）覆盖中途失败用例。
+- **P2 HttpTransport 3xx 状态码与文档不符**：文档承诺“2xx 成功、非 2xx
+  归一化”，实现仅 `status >= 400` 走错误路径——3xx 被当成功且响应体当
+  payload。改为 2xx 窗口判定（不做自动重定向跟随，头文件注释显式化）。
+- **P2 HttpTransport 响应体无大小上限**：`copyToString` 无界拷贝，异常/
+  恶意远端可致客户端无界分配。`NetEndpoint` 新增 `maxResponseBody`
+  （默认 512 MiB，0 = 宿主显式豁免），读取改分块循环：成功体超限报错、
+  非 2xx 错误体仅诊断允许截断。
 
 ### Changed
 
+- **类型注册表死 API 收窄（破坏性，0.x）**：`Tools/DCtype.h` 删除全库零调用的
+  接口——`setFallback`/`tryGetFallback` 与 fallback 查询分支（从未有任何调用方
+  设置过 fallback）；显式 `freeze()`/`isFrozen()`（冻结由首次读查询自动触发，
+  语义已注释于 `ensureFrozen`）；`getTypeOr`/`tryGetType` 全部重载；按 C++
+  类型查询的 `getSize<T>()`/`getSizeOr<T>()`（文档声称“未找到返回 0/备用值”，
+  实现恒返回 `sizeof(T)`，与注册表语义无关）。`ITypeRegistry` 同步收缩为纯
+  类型擦除基类。保留在用接口：`registerType` / `getType` / `getSize(enum)`。
+- **文档清理**：`DCNet/DESIGN.md` 与 `DCEngines/OpenAI/README.md` 移除指向根
+  README“发布状态”章节的悬空引用（该章节已不存在）及“本次交付”快照式措辞，
+  改为自洽的实验性声明；`GraphStore.cpp` 删除串行化汇聚 TODO 演进注释（限制
+  已由 README“已知限制”与异常消息承载）；`Tensor.hpp` 类头合并重复 `@brief`
+  并移除空壳“典型用法”段。
+- **输入/协议边界行为收紧（有意为之）**：`TensorData::loadData` 拒绝
+  shape/尺寸不一致的声明、非 2xx（含 3xx）一律归一化、成功响应体超限
+  报错——三者均为“声明与实际不一致/超预期输入在入口显式拒绝”，不影响
+  合法调用；“载荷字节原样传递、不解释内容”的哲学不变（校验对象是调用方
+  自身声明的元数据自洽性，非数据含义）。
 - README “类 NumPy 链式视图索引”段改写：明确当前 `View` 仅支持逐维标量索引
   与分叉（仍为零拷贝），区间切片/重塑/转置**未实现**、属规划特性——原描述自
   v0.1.0 起即与实现对齐不符（`git log --all -S 'Tensor::reshape|transpose|slice'`
@@ -38,12 +125,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   返回类型与 `makeNode` 默认参数/`NodeMeta` 同步，JSON wire 字符串
   "Compute"/"Operator"/"System" 不变，图档兼容）；`InferGraph` 构造由池
   配置改为调度器注入（缺省 `nullptr` = `ResourceScheduler::instance()`，多图
-  默认共享进程预算；默认各类 1 槽位，对齐旧单图默认），`ExecutionEngine`
+  默认共享进程预算；默认 Compute/Operator 各 1 槽位、System 4 槽位——
+  前者对齐旧单图默认，后者承载连接器与等待型编排节点、按嵌套深度预留），
+  `ExecutionEngine`
   构造改为调度器注入（空指针抛 `std::invalid_argument`）。等待型节点
-  （`GraphOperator`）等待期间占住资源类槽位：进程预算需覆盖全部并发等待
-  节点数，嵌套等待链按“同类槽位叠加”规划，否则可能自锁。执行引擎析构改为
-  自排水（停止新派发 → 标记轮次终止 → 等待在飞任务完成；调度器已关闭时
-  走放弃等待逃逸路径）。
+  （`GraphOperator`）等待期间占住资源类槽位：默认亲和 `System` 与子图业务
+  节点默认 `Operator` 分离（默认预算开箱安全）；显式收紧 System 预算或
+  指定其它亲和时，
+  进程预算需覆盖全部并发等待节点数，嵌套等待链按“同类槽位叠加”规划，
+  否则可能自锁。执行引擎析构改为自排水（停止新派发 → 标记轮次终止 →
+  以排水票据等待全部任务 lambda 回收——执行完成与被弃置两条路径均经
+  RAII 回收，对调度器关停窗口亦安全，无逃逸路径）。
 
 ### Added
 

@@ -29,7 +29,7 @@ if (BUILD_ENGINE_OPENAI)
     else()
         # 显式失败：静默跳过会让"配置成功"被误认为功能已构建（issue P1-7）
         message(FATAL_ERROR
-            "BUILD_ENGINE_OPENAI=ON requires BUILD_DCNET=ON (OpenAI adapter uses DCNet HTTP transport).\n"
-            "Re-configure with: -DBUILD_DCNET=ON")
+            "BUILD_ENGINE_OPENAI=ON requires DCINFER_BUILD_DCNET=ON (OpenAI adapter uses DCNet HTTP transport).\n"
+            "Re-configure with: -DDCINFER_BUILD_DCNET=ON")
     endif()
 endif()

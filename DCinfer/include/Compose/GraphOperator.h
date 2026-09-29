@@ -47,9 +47,14 @@ namespace DC {
 /// RunFn 内同步喂入 → 提交 → 分段等待子图任务，并周期性感知父任务取消
 /// （协作式解围：宿主 cancel 父任务后，子图任务在 pollInterval 粒度内被
 /// 取消，执行槽位有界释放，不会因内层信号停滞永久挂起）。
-/// 注意：等待期间本节点占住其资源类的一个执行槽位（默认 Operator）——进程级
-/// 预算（SchedulerConfig）需覆盖全部并发等待节点数；父子图共享同一调度器时，
-/// 嵌套等待链按"同类槽位叠加"规划，否则可能自锁。
+/// 注意：等待期间本节点占住其资源类的一个执行槽位。默认亲和为
+/// System（基础设施类）：与子图业务节点默认的 Operator 类天然分离；
+/// System 类同时承载图连接器，子图内的连接器与嵌套等待链深度均占用
+/// 同类槽位——默认进程预算（SchedulerConfig{1,1,4}）已按此预留
+/// （开箱覆盖 ≤3 层嵌套 + 并发连接器）；显式收紧 System 预算或指定
+/// 其它亲和（尤其是 Operator）时，进程级预算需覆盖全部并发等待节点
+/// 数——父子图共享同一调度器时，嵌套等待链按“同类槽位叠加”规划，
+/// 否则可能自锁。
 ///
 /// ── 序列化 ──
 /// 节点 type 为 "Builtin"，与注册算子待遇一致：DCIr 往返仅保留结构
@@ -88,9 +93,11 @@ public:
 
 	/// @brief 生成组合节点（普通 Node；可多次调用——同一子图可被多个节点共享）。
 	/// @param  nodeName  父图内节点名（唯一性由父图 addNode 校验）
-	/// @param  affinity  执行资源类归属；等待型节点的资源类占用语义见类注释
+	/// @param  affinity  执行资源类归属；默认 System——等待型节点归基础设施类，
+	///                   与子图业务节点默认的 Operator 类分离（默认预算下
+	///                   开箱安全）；显式指定时按类注释的叠加规则规划预算
 	std::unique_ptr<Node> makeNode(const std::string& nodeName,
-								   ResourceClass affinity = ResourceClass::Operator) const {
+								   ResourceClass affinity = ResourceClass::System) const {
 		const uint64_t instanceId = _nextInstanceId.fetch_add(1, std::memory_order_relaxed) + 1;
 
 		auto runFn = [graph = _graph, opts = _opts, nodeName, instanceId](Node::RunContext& ctx) -> Node::Result {

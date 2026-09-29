@@ -27,6 +27,12 @@ struct NetEndpoint {
 	std::chrono::milliseconds requestTimeout{30000};
 	int maxRetries = 0;
 
+	// ── 响应 ──
+	/// 响应体大小上限（字节）；超限的成功响应按错误归一化，非 2xx 错误体
+	/// 仅作诊断允许截断。0 = 宿主显式豁免（不限制）。默认 512 MiB：
+	/// 防异常/恶意远端致客户端无界分配（issue：响应体无大小限制）。
+	size_t maxResponseBody = 512u * 1024u * 1024u;
+
 	// ── 鉴权与附加头 ──
 	std::string authToken;             ///< "Bearer xxx" 或裸 key，按协议注入请求头
 	std::vector<std::string> headers;  ///< "Name: value"

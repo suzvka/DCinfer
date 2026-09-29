@@ -181,6 +181,152 @@ TEST(connectionRefusedNormalized) {
 // 注：POCO 传输级超时（connect/send/receive 独立设置）已覆盖响应头等待；
 // Timeout 分类/映射已由 NetErrorTest 纯单测覆盖，此处不设服务端延迟超时用例。
 
+// ── 3xx：不自动跟随重定向，按非 2xx 归一化（文档-实现一致）──
+
+TEST(status302Normalized) {
+	MockHttpServer server;
+	server.start([](const std::string&, const std::string&, int& status) {
+		status = 302; // 无 Location 自动跟随：按文档语义归一化为错误
+		return std::string("redirect body");
+	});
+	HttpTransport t;
+	t.connect(epFor(server.port(), "/moved"));
+	Payload resp;
+	auto err = t.send("x");
+	CHECK(!err.ok(), "302 (no auto-redirect) → failure, not success");
+	CHECK(err.category == NetErrorCategory::RemoteMalformed, "302 → RemoteMalformed fallback");
+	t.close();
+}
+
+// ── 响应体上限：成功体超限报错；非 2xx 错误体仅诊断允许截断 ──
+
+TEST(responseBodyLimitEnforced) {
+	MockHttpServer server;
+	server.start([](const std::string&, const std::string&, int& status) {
+		status = 200;
+		return std::string("AAAAAAAAAAAAAAAA"); // 16 字节
+	});
+	HttpTransport t;
+	auto ep = epFor(server.port(), "/infer");
+	ep.maxResponseBody = 8; // 人为压低上限
+	CHECK(t.connect(ep).ok(), "connect");
+	CHECK(t.send("x").ok(), "send ok (2xx)");
+	Payload resp;
+	auto err = t.recv(resp);
+	CHECK(!err.ok(), "oversized success body must be rejected");
+	t.close();
+}
+
+TEST(errorBodyTruncated) {
+	MockHttpServer server;
+	server.start([](const std::string&, const std::string&, int& status) {
+		status = 500;
+		return std::string(4096, 'x'); // 4KB 非 JSON 错误体
+	});
+	HttpTransport t;
+	auto ep = epFor(server.port(), "/infer");
+	ep.maxResponseBody = 1024;
+	CHECK(t.connect(ep).ok(), "connect");
+	auto err = t.send("x");
+	CHECK(!err.ok(), "500 → failure");
+	CHECK(err.category == NetErrorCategory::RemoteServer,
+		  "truncated error body is diagnostic only (no size error)");
+	t.close();
+}
+
+// ── close 与慢 recv 竞速：强收中断读而非悬垂/挂死（副本保活 + abort）──
+
+// 慢 body 测试服务器（仅本用例）：先发响应头，剩余 body 延迟发送——
+// 构造“读持续超过 close 的 5s 强收窗口”的竞速场景
+namespace {
+class SlowBodyServer {
+public:
+	int start() {
+		try {
+			_socket.bind(Poco::Net::SocketAddress("127.0.0.1", 0), false);
+			_socket.listen();
+			_port = static_cast<int>(_socket.address().port());
+		} catch (...) {
+			return -1;
+		}
+		_thread = std::thread([this] {
+			try {
+				// 连接 1 = connect() 的就绪探测 socket（连接后立即关闭，读即 EOF）；
+				// 连接 2 = 真实交换。对两者统一读请求头，探测连接读到 EOF 后跳过。
+				Poco::Net::StreamSocket c;
+				for (int i = 0; i < 2; ++i) {
+					try {
+						c = _socket.acceptConnection();
+					} catch (...) {
+						return;
+					}
+					char buf[4096];
+					std::string req;
+					int n;
+					while ((n = c.receiveBytes(buf, sizeof(buf))) > 0) {
+						req.append(buf, static_cast<size_t>(n));
+						if (req.find("\r\n\r\n") != std::string::npos)
+							break;
+					}
+					if (req.find("\r\n\r\n") != std::string::npos)
+						break; // 真实请求：进入慢响应
+					// 探测连接（req 空）：丢弃并接受下一个连接
+				}
+				const std::string head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+								 "Content-Length: 16\r\nConnection: close\r\n\r\n";
+				c.sendBytes(head.data(), static_cast<int>(head.size()));
+				c.sendBytes("AAAA", 4); // 先给 4 字节
+				std::this_thread::sleep_for(std::chrono::milliseconds(8000)); // 剩余 12 字节延迟 8s
+				c.sendBytes("AAAAAAAAAAAA", 12);
+				c.close();
+			} catch (...) {
+				// 线程函数内异常不得逃逸（std::terminate）——对端 abort 后
+				// 剩余 sendBytes 可能抛 ConnectionReset 等，吞掉即可
+			}
+		});
+		return _port;
+	}
+	void stop() {
+		try {
+			_socket.close();
+		} catch (...) {
+		}
+		if (_thread.joinable())
+			_thread.join();
+	}
+	int port() const { return _port; }
+
+private:
+	int _port = -1;
+	std::thread _thread;
+	Poco::Net::ServerSocket _socket;
+};
+} // namespace
+
+TEST(closeRacingSlowRecv) {
+	SlowBodyServer server;
+	CHECK(server.start() > 0, "slow-body server should start");
+	HttpTransport t;
+	auto ep = epFor(server.port(), "/slow");
+	ep.requestTimeout = std::chrono::milliseconds(15000); // 覆盖慢 body 窗口
+	CHECK(t.connect(ep).ok(), "connect");
+	CHECK(t.send("x").ok(), "send ok; response header received, body pending");
+
+	// 另一线程 close：等交换收尾 5s 超时 → 强收 abort（读方副本保活 session）
+	std::thread closer([&] { t.close(); });
+	Payload resp;
+	const auto t0 = std::chrono::steady_clock::now();
+	const auto err = t.recv(resp); // 阻塞读 body → 被 abort 中断 → 错误返回
+	const auto elapsed = std::chrono::steady_clock::now() - t0;
+	closer.join();
+	server.stop();
+	CHECK(!err.ok(), "recv interrupted by racing close must return error (not a partial success)");
+	CHECK(elapsed < std::chrono::seconds(7),
+		  "abort must interrupt the read well before the server's remaining 8s delay");
+	CHECK(resp.size() <= 16, "no garbage beyond declared body length");
+	t.close(); // 幂等收尾（进程不崩溃即核心断言）
+}
+
 // ── 端到端：DCNet.Tensor 节点 + 张量 JSON codec（真实 HTTP 往返）──
 
 TEST(endToEndTensorOverHttp) {
@@ -277,7 +423,11 @@ int main() {
 	test_successRoundtrip();
 	test_status404Normalized();
 	test_status500Normalized();
+	test_status302Normalized();
+	test_responseBodyLimitEnforced();
+	test_errorBodyTruncated();
 	test_connectionRefusedNormalized();
+	test_closeRacingSlowRecv();
 	test_endToEndTensorOverHttp();
 	test_endToEndTextOverHttp();
 	std::printf("HttpTransportTest: %d checks, %d failures\n", g_checks.load(), g_failures.load());
