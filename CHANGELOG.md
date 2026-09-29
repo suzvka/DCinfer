@@ -5,22 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - 2026-09-29
+## [0.7.1] - 2026-09-29
 
-发布前审查发现的张量视图公共 API 语义缺陷与 README 功能虚宣修正；
-资源调度器升级为进程级共享模型（破坏性，0.x）。
+v0.7.0 发布后收尾审查的调度器/引擎生命周期与 DCNet 传输层并发缺陷修复，
+张量数据块语义修正；类型注册表死 API 收窄（破坏性，0.x）。
 
 ### Fixed
 
-- **P0 `Tensor::View` / `ConstView` 分叉二次索引丢前缀**：`operator[]` 原以
-  `std::move(_shape)` 把视图内部路径直接搬运到返回对象，自身 `_shape` 处于
-  moved-from 置空状态——从同一命名视图二次分叉
-  （`auto row = t[0]; row[1]; row[2];`）时第二次路径丢失前缀
-  （`[0]` → `[]` → `[2]` 而非 `[0, 2]`），轻则写入错误偏移，重则触发越界访问。
-  改为“拷贝前缀 + 追加”的值语义派生，使视图可从任意位置多次分叉得到独立
-  路径（NumPy 风格基本用法）；同步去除 `_shape` 的 `mutable` 修饰（不再修改
-  自身）。`ConstView` 同修。`TensorTest` 新增用例 #13 覆盖：View 分叉写 /
-  循环分叉写 / ConstView 分叉读——此前测试仅走一次性线性链，无法暴露。
 - **P1 引擎析构逃逸路径 use-after-free 竞态（发布前审查二轮发现）**：
   原自排水等待以 `ResourceScheduler::isStopped()` 为逃逸条件，而 `shutdown()`
   先置位关停标志、后逐池 join——两者之间存在窗口，此时析构引擎会越过排水
@@ -111,6 +102,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   报错——三者均为“声明与实际不一致/超预期输入在入口显式拒绝”，不影响
   合法调用；“载荷字节原样传递、不解释内容”的哲学不变（校验对象是调用方
   自身声明的元数据自洽性，非数据含义）。
+
+## [0.7.0] - 2026-09-28
+
+发布前审查发现的张量视图公共 API 语义缺陷与 README 功能虚宣修正；
+资源调度器升级为进程级共享模型（破坏性，0.x）。
+
+### Fixed
+
+- **P0 `Tensor::View` / `ConstView` 分叉二次索引丢前缀**：`operator[]` 原以
+  `std::move(_shape)` 把视图内部路径直接搬运到返回对象，自身 `_shape` 处于
+  moved-from 置空状态——从同一命名视图二次分叉
+  （`auto row = t[0]; row[1]; row[2];`）时第二次路径丢失前缀
+  （`[0]` → `[]` → `[2]` 而非 `[0, 2]`），轻则写入错误偏移，重则触发越界访问。
+  改为“拷贝前缀 + 追加”的值语义派生，使视图可从任意位置多次分叉得到独立
+  路径（NumPy 风格基本用法）；同步去除 `_shape` 的 `mutable` 修饰（不再修改
+  自身）。`ConstView` 同修。`TensorTest` 新增用例 #13 覆盖：View 分叉写 /
+  循环分叉写 / ConstView 分叉读——此前测试仅走一次性线性链，无法暴露。
+
+### Changed
+
 - README “类 NumPy 链式视图索引”段改写：明确当前 `View` 仅支持逐维标量索引
   与分叉（仍为零拷贝），区间切片/重塑/转置**未实现**、属规划特性——原描述自
   v0.1.0 起即与实现对齐不符（`git log --all -S 'Tensor::reshape|transpose|slice'`
@@ -125,17 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   返回类型与 `makeNode` 默认参数/`NodeMeta` 同步，JSON wire 字符串
   "Compute"/"Operator"/"System" 不变，图档兼容）；`InferGraph` 构造由池
   配置改为调度器注入（缺省 `nullptr` = `ResourceScheduler::instance()`，多图
-  默认共享进程预算；默认 Compute/Operator 各 1 槽位、System 4 槽位——
-  前者对齐旧单图默认，后者承载连接器与等待型编排节点、按嵌套深度预留），
-  `ExecutionEngine`
+  默认共享进程预算；默认各类 1 槽位，对齐旧单图默认），`ExecutionEngine`
   构造改为调度器注入（空指针抛 `std::invalid_argument`）。等待型节点
-  （`GraphOperator`）等待期间占住资源类槽位：默认亲和 `System` 与子图业务
-  节点默认 `Operator` 分离（默认预算开箱安全）；显式收紧 System 预算或
-  指定其它亲和时，
-  进程预算需覆盖全部并发等待节点数，嵌套等待链按“同类槽位叠加”规划，
-  否则可能自锁。执行引擎析构改为自排水（停止新派发 → 标记轮次终止 →
-  以排水票据等待全部任务 lambda 回收——执行完成与被弃置两条路径均经
-  RAII 回收，对调度器关停窗口亦安全，无逃逸路径）。
+  （`GraphOperator`）等待期间占住资源类槽位：进程预算需覆盖全部并发等待
+  节点数，嵌套等待链按“同类槽位叠加”规划，否则可能自锁。执行引擎析构改为
+  自排水（停止新派发 → 标记轮次终止 → 等待在飞任务完成；调度器已关闭时
+  走放弃等待逃逸路径）。
 
 ### Added
 
@@ -958,7 +964,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Single example**: Only `01_hello_graph` is provided. More complex scenarios (multi-branch, cyclic, cloud offload) are documented but not exemplified.
 - **No Python bindings**: C++ only; no language bindings or scripting interface.
 
-[Unreleased]: https://github.com/suzvka/DCinfer/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/suzvka/DCinfer/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/suzvka/DCinfer/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.7.0
 [0.6.2]: https://github.com/suzvka/DCinfer/releases/tag/v0.6.2
 [0.6.0]: https://github.com/suzvka/DCinfer/releases/tag/v0.6.0
