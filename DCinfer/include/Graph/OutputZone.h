@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "GraphException.h"
 #include "Value.h"
 
 namespace DC {
@@ -121,6 +122,15 @@ private:
 // ════════════════════════════════════════════
 
 inline void OutputZone::declare(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
+	// P2-11：count=0 的声明立即视为满足，无任何诊断价值——显式 0 视为调用方
+	// 错误（"无需该输出"的正确语义是不声明），入口拒绝（校验先于写入，
+	// 拒绝路径零副作用）
+	for (const auto& d : declarations) {
+		if (d.count == 0)
+			throw GraphException(GraphException::ErrorType::NoDeclaration, "OutputZone::declare",
+								 "output declaration count must be > 0 (node '" + d.nodeName
+									 + "', port '" + d.portName + "'; omit the declaration instead)");
+	}
 	std::lock_guard lk(_mutex);
 	auto& existing = _declarations[taskId];
 	existing.reserve(existing.size() + declarations.size());
@@ -131,6 +141,11 @@ inline void OutputZone::declare(const TaskId& taskId, std::vector<OutputDeclarat
 
 inline void OutputZone::declare(const TaskId& taskId, const std::string& nodeName,
 								const std::string& portName, size_t count) {
+	// P2-11：同上——count=0 在入口拒绝
+	if (count == 0)
+		throw GraphException(GraphException::ErrorType::NoDeclaration, "OutputZone::declare",
+							 "output declaration count must be > 0 (node '" + nodeName
+								 + "', port '" + portName + "'; omit the declaration instead)");
 	std::lock_guard lk(_mutex);
 	_declarations[taskId].push_back({nodeName, portName, count});
 }

@@ -3,6 +3,7 @@
 #include "Node.h"
 #include "Value.h"
 
+#include <chrono>
 #include <functional>
 #include <future>
 #include <memory>
@@ -193,6 +194,11 @@ private:
 
 	static std::string _makeEngineKey(const std::string& engineType, const std::string& modelPath);
 
+	/// @brief 缓存容量超限驱逐（调用方须持有 _mutex，P2-13）：按 LRU（lastAccess
+	/// 最旧）逐出非 loading 槽位至上限内；返回被逐句柄供锁外析构（用户
+	/// releaseEngine 钩子不持 _mutex）。keepKey = 刚发布/命中的条目，不逐。
+	std::vector<EngineHandle> _evictOverflowLocked(const std::string& keepKey);
+
 	// 容器访问互斥：注册表支持并发建图（多个线程同时 getOrCreateEngine/createNode）
 	// 用户回调（factory / createEngine / 端口推导）一律在锁外调用（single-flight）
 	mutable std::mutex _mutex;
@@ -200,9 +206,11 @@ private:
 	/// 引擎槽位：ready = 已就绪实例（缓存条目）；
 	/// loading = single-flight 创建中条目（同 key 并发首个创建者登记，
 	/// 其余调用者经 shared_future 等待同一结果，创建回调在锁外执行）。
+	/// lastAccess = LRU 访问序（P2-13 缓存上限驱逐依据）。
 	struct EngineSlot {
 		EngineHandle ready;
 		std::shared_future<EngineHandle> loading;
+		std::chrono::steady_clock::time_point lastAccess{};
 	};
 
 	std::unordered_map<std::string, EngineDescriptor> _engines;

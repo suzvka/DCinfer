@@ -98,13 +98,17 @@ public:
 	/// @brief  获取所有节点名的列表
 	std::vector<std::string> nodeNames() const;
 
-	/// @brief  获取所有边的只读引用
+	/// @brief  获取所有边的只读引用（内部 API）。
+	/// @note   仅限持锁（构图路径）或封印后（无写者）调用；公开消费者
+	///         一律走 GraphBuilder/InferGraph 的值副本 edges()——引用外泄
+	///         与并发 addNode/connect 的 push_back 重分配构成悬空风险
 	const std::vector<Edge>& edges() const { return _edges; }
 
 	/// @brief  获取所有输入绑定（值副本）
 	std::vector<InputBinding> inputBindings() const { return _inputZone.bindings(); }
 
-	/// @brief  获取所有节点的只读引用
+	/// @brief  获取所有节点的只读引用（内部 API；约束同 edges()：仅限
+	///         持锁或封印后调用——封印后拓扑无写者，Node 对象地址稳定）
 	const std::unordered_map<std::string, std::unique_ptr<Node>>& nodes() const { return _nodes; }
 
 private:

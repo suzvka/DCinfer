@@ -64,6 +64,11 @@ private:
 	std::condition_variable _cv;
 	std::queue<std::function<void()>> _taskQueue;
 
+	/// 排水互斥：串行化并发 shutdown（P2-13）——两个线程同时对同一 worker
+	/// joinable+join 是竞态（UB）；顺序重复调用本已幂等，本锁补齐并发面。
+	/// 构造失败回收路径（单线程）无竞争，同锁复用。
+	std::mutex _drainMutex;
+
 	std::atomic<bool> _running{true};
 
 	// 测试注入点：线程创建过滤器（返回 false 模拟 std::thread 构造失败）。

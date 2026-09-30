@@ -55,6 +55,17 @@ NodeResult ExecutionPipeline::execute(
 
 	NodeResult result;
 
+	// 完成回调至多一次（P1）：正常路径与异常路径共用同一门闩——回调自身
+	// 抛出时 completed 已置位，catch 路径的重试通知为 no-op，不重复提交
+	// 状态/通知/释放资源；第二次抛出也不会覆盖首次错误语义。
+	bool completed = false;
+	auto notifyOnce = [&](const NodeResult& r) {
+		if (!onComplete || completed)
+			return;
+		completed = true;
+		onComplete(taskId, r);
+	};
+
 	try {
 		// ① 加载输入：task 缓冲区 → 工作输入槽位
 		buffer.drainInputsTo(taskId, workspace, schema);
@@ -123,18 +134,15 @@ NodeResult ExecutionPipeline::execute(
 		// ⑥ 清理输入缓冲（输出缓冲保留，供调用方拉取）
 		buffer.eraseInputs(taskId);
 
-		// ⑦ 调用回调
-		if (onComplete) {
-			onComplete(taskId, result);
-		}
+		// ⑦ 调用回调（至多一次）
+		notifyOnce(result);
 	} catch (const std::exception& e) {
-		// 加载阶段或执行阶段抛出未捕获异常，必须通知完成回调；
+		// 加载阶段或执行阶段抛出未捕获异常，必须通知完成回调（经门闩，
+		// 若异常源自回调自身则此处 no-op——回调已执行且只执行过一次）；
 		// 租约由 GateGuard 统一释放（含回调在此再次抛出的路径）
 		result.status = NodeStatus::ExecutionFailed;
 		result.message = e.what();
-		if (onComplete) {
-			onComplete(taskId, result);
-		}
+		notifyOnce(result);
 		throw;
 	}
 

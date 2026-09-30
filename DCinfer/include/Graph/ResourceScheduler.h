@@ -132,6 +132,7 @@ private:
 	SchedulerConfig _config;
 	std::atomic<bool> _stopped{false};
 	std::mutex _initMutex;                 ///< 保护惰性创建与关停遍历
+	std::mutex _shutdownMutex;             ///< 串行化并发 shutdown（P2-13）：快照+逐池 join 不再交叠
 	std::unique_ptr<ThreadPool> _pools[3]; ///< 每资源类一个执行器（下标 = ResourceClass 值）
 };
 

@@ -64,6 +64,10 @@ void ThreadPool::shutdown() {
 }
 
 void ThreadPool::_drainWorkers() {
+	// 排水锁（P2-13）：并发 shutdown 时两个线程同时 joinable+join 同一
+	// worker 是竞态（UB）——串行化后第二个调用者看到已清空的 _workers，
+	// 顺序幂等性保持（joinable 检查 + clear）
+	std::lock_guard drainLk(_drainMutex);
 	_running.store(false, std::memory_order_release);
 
 	{

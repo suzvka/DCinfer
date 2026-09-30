@@ -1,4 +1,5 @@
 #include "Node.h"
+#include "Node/NodeException.h"
 #include "Node/internal/SignalGate.h"
 #include "Node/internal/TaskBuffer.h"
 #include "Node/internal/SlotWorkspace.h"
@@ -73,6 +74,13 @@ bool NodeSchema::valid() const {
 Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
 		   ResourceClass affinity)
 	: _fn(std::move(fn)) {
+	// Schema 入口校验（P1）：重复端口名/typeSize=0 的非 Void 端口/默认值
+	// 类型与宽度不一致，在构造期即拒绝——缺陷前置暴露，而非流入运行时
+	// 后按错误元素宽度解释数据
+	if (!schema.valid())
+		throw NodeException(NodeException::ErrorType::SchemaError, "Node::Node",
+							"invalid node schema: duplicate port names, typeSize=0 on "
+							"non-Void port, or default value type/typeSize mismatch");
 	_meta.type = std::move(type);
 	_meta.name = std::move(name);
 	_meta.affinity = affinity;

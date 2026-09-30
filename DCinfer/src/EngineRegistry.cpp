@@ -6,6 +6,16 @@
 
 namespace DC {
 
+namespace {
+
+/// 实例缓存容量上限（P2-13）：唯一 modelPath 的引擎实例槽位在长驻服务
+/// 场景下只增不减（每路径一槽，无 TTL）→ 内存无界增长。达到上限后按
+/// LRU 驱逐非 loading 槽位；仍被节点持有的实例由共享句柄保活（生命周期
+/// 模型见 releaseEngine 注释）。
+constexpr std::size_t kMaxCachedEngineInstances = 64;
+
+} // namespace
+
 // ── EngineInstance 生命周期 ──
 
 EngineInstance::~EngineInstance() {
@@ -135,8 +145,10 @@ EngineHandle EngineRegistry::getOrCreateEngine(const std::string& engineType, co
 	{
 		std::lock_guard lk(_mutex);
 		auto it = _engineInstances.find(key);
-		if (it != _engineInstances.end() && it->second.ready)
+		if (it != _engineInstances.end() && it->second.ready) {
+			it->second.lastAccess = std::chrono::steady_clock::now(); // LRU 触碰
 			return it->second.ready;
+		}
 	}
 
 	// single-flight 登记：同 key 首个调用者成为领导者，其余成为跟随者
@@ -188,18 +200,23 @@ EngineHandle EngineRegistry::getOrCreateEngine(const std::string& engineType, co
 
 	// 发布：锁内写 ready / 清失败槽位；set_value 唤醒等待者放锁外，
 	// 避免被唤醒者立即抢锁阻塞发布者自身
+	std::vector<EngineHandle> overflow;
 	{
 		std::lock_guard lk(_mutex);
 		if (handle) {
 			auto& slot = _engineInstances[key];
 			slot.ready = handle;
 			slot.loading = {}; // 清除 loading 条目（valid() 变 false）
+			slot.lastAccess = std::chrono::steady_clock::now();
+			overflow = _evictOverflowLocked(key); // 容量收敛（P2-13）
 		} else {
 			auto it = _engineInstances.find(key);
 			if (it != _engineInstances.end() && !it->second.ready)
 				_engineInstances.erase(it); // 失败：清槽位，后续调用重试创建
 		}
 	}
+	// overflow 在锁外析构：被逐句柄可能是最后持有者，析构链触发用户
+	// releaseEngine 钩子——不持 _mutex（对齐 releaseEngine 的释放模式）
 	// 注意：exception_ptr 移动后源对象按标准置空（libstdc++ 严格执行，MSVC 宽松）。
 	// 若此处 move 进 promise，后续 error 判定恒 false，异常在 GCC/Clang 上静默丢失
 	// （跟随者仍经共享状态收到异常，领导者反而拿不到）。必须拷贝进 promise，
@@ -210,6 +227,29 @@ EngineHandle EngineRegistry::getOrCreateEngine(const std::string& engineType, co
 	}
 	promise.set_value(handle);
 	return handle;
+}
+
+std::vector<EngineHandle> EngineRegistry::_evictOverflowLocked(const std::string& keepKey) {
+	std::vector<EngineHandle> doomed;
+	while (_engineInstances.size() > kMaxCachedEngineInstances) {
+		auto victim = _engineInstances.end();
+		auto oldest = std::chrono::steady_clock::time_point::max();
+		for (auto it = _engineInstances.begin(); it != _engineInstances.end(); ++it) {
+			if (it->first == keepKey)
+				continue; // 刚发布/命中的条目不逐
+			if (it->second.loading.valid())
+				continue; // single-flight 创建中：无可释放对象，保留
+			if (it->second.lastAccess < oldest) {
+				oldest = it->second.lastAccess;
+				victim = it;
+			}
+		}
+		if (victim == _engineInstances.end())
+			break; // 全部在创建中或仅剩 keepKey：暂超限，待后续发布收敛
+		doomed.push_back(std::move(victim->second.ready));
+		_engineInstances.erase(victim);
+	}
+	return doomed;
 }
 
 void EngineRegistry::releaseEngine(const std::string& engineType, const std::string& modelPath) {

@@ -9,6 +9,7 @@
 #include "NodeExecutor.h"
 #include "NodeException.h"
 #include "EngineRegistry.h"
+#include "OutputZone.h"
 
 using namespace DC;
 using TensorType = DC::Tensor::TensorType;
@@ -579,6 +580,60 @@ void runTests() {
 
 		CHECK(completed, "vector task should complete");
 		CHECK(match, "vector add values should match");
+	}
+	END_TEST();
+
+	// ── Test: 非法 schema 构造期拒绝（P1-4：SchemaError 前置暴露）──
+	TEST("invalid schema rejected at Node construction (duplicate port names)") {
+		Node::Schema s;
+		s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("a")};
+		s.outputs = {Node::Port::out<float>("s")};
+		CHECK_THROWS(Node("t", "dup", s, addRunImpl), NodeException,
+					 "duplicate port names must be rejected at construction");
+	}
+	END_TEST();
+
+	TEST("invalid schema rejected at Node construction (typeSize=0 on non-Void port)") {
+		Node::Schema s;
+		auto p = Node::Port::in<float>("a");
+		p.typeSize = 0;
+		s.inputs = {p};
+		s.outputs = {Node::Port::out<float>("s")};
+		CHECK_THROWS(Node("t", "ts0", s, addRunImpl), NodeException,
+					 "typeSize=0 on non-Void port must be rejected at construction");
+	}
+	END_TEST();
+
+	// GraphStore::addNode 的双保险校验依赖 Node 构造门（单测内不存在绕过
+	// 构造的可达路径），不变量由上方两个构造期用例覆盖。
+
+	// ── Test: 元素宽度校验（P1-4：typeSize mismatch 拒绝）──
+	TEST("typeSize mismatch rejected at execution") {
+		auto node = reg.createNode("addTS", scalarAddSchema(), addRunImpl);
+		NodeExecutor exec(*node);
+		exec.setInput("t1", "a", makeScalarNative(1.0f));
+		// Float 逻辑类型相同但元素宽度 8 ≠ 端口声明的 4：schema 声明与实际
+		// 内存布局不符，drainInputsTo 必须拒绝
+		auto wide = std::make_unique<Tensor>(TensorType::Float, sizeof(double));
+		*wide = 2.0;
+		exec.setInput("t1", "b", Value(std::move(wide)));
+		// 与逻辑类型不一致同路径：执行期 NodeException(TypeMismatch) 传播
+		CHECK_THROWS(exec.tryExecute("t1"), NodeException,
+					 "4-byte port must reject 8-byte tensor (typeSize mismatch)");
+	}
+	END_TEST();
+
+	// ── Test: OutputDeclaration count=0 拒绝（P2-11）──
+	TEST("output declaration count=0 rejected") {
+		OutputZone zone;
+		CHECK_THROWS(zone.declare("t1", "n", "y", 0), GraphException,
+					 "count=0 declaration must be rejected (omit instead)");
+		std::vector<OutputDeclaration> batch = {{"n", "y", 0}, {"n", "z", 1}};
+		CHECK_THROWS(zone.declare("t1", std::move(batch)), GraphException,
+					 "batch declaration containing count=0 must be rejected atomically");
+		CHECK(!zone.hasDeclaration("t1"), "rejected declarations must leave no residue");
+		zone.declare("t2", "n", "y", 1);
+		CHECK(zone.hasDeclaration("t2"), "count=1 declaration must be accepted");
 	}
 	END_TEST();
 

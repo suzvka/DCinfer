@@ -108,8 +108,9 @@ public:
 		return _snapshot ? _snapshot->store().nodeNames() : _store->nodeNames();
 	}
 
-	/// @brief  获取所有边的只读引用
-	const std::vector<Edge>& edges() const {
+	/// @brief  获取所有边（值副本）：内部容器引用永不外泄——并发构图修改
+	/// （如 connect 扩容 push_back）可能使引用悬空，按值返回隔离此风险
+	std::vector<Edge> edges() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().edges() : _store->edges();
 	}

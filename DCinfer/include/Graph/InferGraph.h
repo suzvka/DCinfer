@@ -254,8 +254,9 @@ public:
 	/// @brief  获取所有节点名的列表
 	std::vector<std::string> nodeNames() const { return _topology().nodeNames(); }
 
-	/// @brief  获取所有边的只读引用
-	const std::vector<Edge>& edges() const { return _topology().edges(); }
+	/// @brief  获取所有边（值副本）：内部容器引用永不外泄（并发/冻结边界
+	/// 下引用悬空风险归零；GraphStore 内部引用版仅限持锁或封印后路径）
+	std::vector<Edge> edges() const { return _topology().edges(); }
 
 	/// @brief  获取所有输入绑定（值副本）
 	std::vector<InputBinding> inputBindings() const { return _inputBindingsView(); }

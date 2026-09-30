@@ -768,6 +768,45 @@ static void runTests() {
 	}
 	std::cout << "Test 19 passed: onError's own exception swallowed, no secondary propagation" << std::endl;
 
+// ── Test 20: 实例缓存 LRU 驱逐（P2-13 容量上限）──
+	{
+		static std::atomic<int> g_lruCreateCount{0};
+		if (!reg.hasEngine("LruMock")) {
+			EngineDescriptor desc;
+			desc.engineType = "LruMock";
+			desc.converter = {mockToNative, mockToDC};
+			desc.createEngine = [](const std::string& path) -> EngineInstance {
+				++g_lruCreateCount;
+				return EngineInstance(std::make_shared<MockSession>(path));
+			};
+			if (!reg.registerEngine(desc))
+				throw std::runtime_error("register LruMock engine failed");
+		}
+
+		// 创建 70 个不同 modelPath 的实例（> 上限 64）：最旧条目按 LRU 逐出，
+		// 仍被句柄持有的实例由共享计数保活（不销毁）
+		std::vector<EngineHandle> recent;
+		for (int i = 0; i < 70; ++i)
+			recent.push_back(reg.getOrCreateEngine("LruMock", "lru-model-" + std::to_string(i)));
+		if (!recent.back())
+			throw std::runtime_error("latest instance must be cached");
+
+		const int createsBefore = g_lruCreateCount.load();
+		// 最早创建的条目已被驱逐：再次请求触发重建
+		auto evicted = reg.getOrCreateEngine("LruMock", "lru-model-0");
+		if (!evicted)
+			throw std::runtime_error("evicted instance must be recreated on demand");
+		if (g_lruCreateCount.load() != createsBefore + 1)
+			throw std::runtime_error("recreating evicted instance must hit createEngine again");
+		// 最近条目仍在缓存：同一句柄且不重建
+		auto latest = reg.getOrCreateEngine("LruMock", "lru-model-69");
+		if (latest != recent.back())
+			throw std::runtime_error("recent entry must remain cached (same handle)");
+		if (g_lruCreateCount.load() != createsBefore + 1)
+			throw std::runtime_error("cached instance must not trigger re-creation");
+	}
+	std::cout << "Test 20 passed: instance cache LRU eviction at capacity limit" << std::endl;
+
 	std::cout << "\nAll EngineRegistry tests passed!" << std::endl;
 }
 

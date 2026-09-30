@@ -46,6 +46,13 @@ Node& GraphStore::_addNodeImpl(std::unique_ptr<Node> node) {
 		throw GraphException(GraphException::ErrorType::DuplicateNode, "GraphStore::addNode",
 							 "node name is empty");
 
+	// Schema 入口校验（双保险，P1）：Node 构造已拒绝非法 schema，此处
+	// 防御绕过常规构造路径的入口，保持图存储不变量（端口唯一性/默认值/
+	// 元素宽度声明自洽）
+	if (!node->schema().valid())
+		throw GraphException(GraphException::ErrorType::Other, "GraphStore::addNode",
+							 "invalid schema on node '" + node->name() + "'");
+
 	const auto& name = node->name();
 	if (_nodes.contains(name))
 		throw GraphException(GraphException::ErrorType::DuplicateNode, "GraphStore::addNode",

@@ -143,6 +143,27 @@ static void testConstructionAfterInjectionRecovers() {
 }
 
 // ════════════════════════════════════════════
+// 并发 shutdown × N：无竞态崩溃（P2-13 的 _drainMutex 串行化验证）
+// ════════════════════════════════════════════
+
+static void testConcurrentShutdowns() {
+TEST("concurrent shutdown x8 -> no crash, serial drain, post-shutdown submit rejected") {
+		ThreadPool pool({4});
+		std::atomic<int> ran{0};
+		CHECK(pool.submit([&] { ++ran; }), "submit while running");
+		std::vector<std::thread> shutdowners;
+		for (int i = 0; i < 8; ++i)
+			shutdowners.emplace_back([&pool] { pool.shutdown(); });
+		for (auto& t : shutdowners)
+			t.join();
+		pool.shutdown(); // 收尾幂等
+		CHECK(ran.load() <= 1, "at most the queued task may execute");
+		CHECK(!pool.submit([] {}), "post-shutdown submit must be rejected");
+	}
+END_TEST();
+}
+
+// ════════════════════════════════════════════
 
 int main() {
 	try {
@@ -151,6 +172,7 @@ int main() {
 		testConcurrentSubmitDuringShutdown();
 		testConstructorPartialFailureRecovers();
 		testConstructionAfterInjectionRecovers();
+		testConcurrentShutdowns();
 	} catch (const std::exception& e) {
 		std::cerr << "UNEXPECTED EXCEPTION: " << e.what() << std::endl;
 		return 1;

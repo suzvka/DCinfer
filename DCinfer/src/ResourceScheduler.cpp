@@ -97,6 +97,10 @@ bool ResourceScheduler::submit(ResourceClass cls, std::function<void()> task) {
 }
 
 void ResourceScheduler::shutdown() {
+	// 关停锁（P2-13）：并发 shutdown 时两个线程可能同时对同一池发起
+	// join（ThreadPool 侧已由 _drainMutex 兜底串行化，本锁消除调度器级
+	// 快照+逐池关停的交叠，双保险）；顺序重复调用幂等性不变。
+	std::lock_guard shutdownLk(_shutdownMutex);
 	// 先置位拒绝新提交，再逐池关停：join 在飞任务、清队弃置排队任务
 	// （std::function 随队列析构——提交方的排水票据在弃置路径同样回收，
 	// ExecutionEngine 析构的自排水等待因此必然终止，无逃逸依赖本函数

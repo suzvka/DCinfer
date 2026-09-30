@@ -219,9 +219,12 @@ static void testNonNodeExceptionClosure() {
 		InferGraph g;
 
 		auto n = std::make_unique<Node>("test", "n", passSchema(), passRunFn());
-		// 完成回调总是抛出：execute 异常分支的二次回调再次抛出 → 异常逃逸流水线。
-		// 修复前穿过调度层直达池 worker（仅 stderr），任务无诊断永久挂起。
-		n->setCompletionCallback([](const Node::TaskId&, const Node::Result&) {
+		// 完成回调总是抛出：回归守护 P1“完成回调至多一次”——回调自身抛出后，
+		// catch 路径的重试通知必须为 no-op（修复前同一回调被调用两次，
+		// 第二次抛出的异常覆盖首次错误语义逃逸流水线）。
+		std::atomic<int> callbackCalls{0};
+		n->setCompletionCallback([&](const Node::TaskId&, const Node::Result&) {
+			++callbackCalls;
 			throw std::runtime_error("deliberate completion callback throw");
 		});
 		g.addNode(std::move(n));
@@ -236,6 +239,8 @@ static void testNonNodeExceptionClosure() {
 			  "task must be finalized as Failed, not stuck Running");
 		CHECK(hasMessage(r.errors, "non-NodeException escaped node execution"),
 			  "escaping exception must be recorded as Error diagnostic");
+		CHECK(callbackCalls.load() == 1,
+			  "completion callback must be invoked exactly once even when it throws");
 	}
 	END_TEST();
 }
