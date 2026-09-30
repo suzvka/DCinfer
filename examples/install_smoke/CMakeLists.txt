@@ -16,8 +16,10 @@
 # Builtin 引擎安装链（零外部依赖，无需 vcpkg）：
 #   cmake -B build -S . -DSMOKE_WITH_BUILTIN=ON -DCMAKE_PREFIX_PATH=<prefix>
 #
-# DCNet 安装链（POCO 传递依赖由本目录 vcpkg.json 的 feature 'net' 提供）：
-#   cmake -B build -S . -DSMOKE_WITH_NET=ON -DCMAKE_PREFIX_PATH=<prefix> \
+# DCNet 安装链（POCO 传递依赖由本目录 vcpkg.json 的 feature 'net' 提供，
+# feature 由 toolchain wrapper 按 -DDCINFER_BUILD_DCNET=ON 注入，与 ir 同机制）：
+#   cmake -B build -S . -DSMOKE_WITH_NET=ON -DDCINFER_BUILD_DCNET=ON \
+#     -DCMAKE_PREFIX_PATH=<prefix> \
 #     -DCMAKE_TOOLCHAIN_FILE=<主仓>/cmake/vcpkg-toolchain.cmake
 
 cmake_minimum_required(VERSION 3.17)

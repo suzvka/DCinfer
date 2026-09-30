@@ -348,11 +348,14 @@ jobs:
           cmake --build build-smoke-builtin -j
           ./build-smoke-builtin/install_smoke | grep -q "install smoke OK"
 
-      # 冒烟四：DCNet 安装链（传递依赖经 install_smoke manifest 的 feature 'net' 解析）
+      # 冒烟四：DCNet 安装链（传递依赖经 install_smoke manifest 的 feature 'net'
+      # 解析；feature 由 toolchain wrapper 按 -DDCINFER_BUILD_DCNET=ON 注入，
+      # 与冒烟二的 -DDCINFER_BUILD_IR=ON 同机制）
       - name: Smoke test (with DCNet)
         run: |
           cmake -B build-smoke-net -S examples/install_smoke \
             -DSMOKE_WITH_NET=ON \
+            -DDCINFER_BUILD_DCNET=ON \
             -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix-net" \
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/cmake/vcpkg-toolchain.cmake"
           cmake --build build-smoke-net -j
