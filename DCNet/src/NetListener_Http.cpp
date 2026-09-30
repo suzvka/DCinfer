@@ -28,6 +28,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <charconv>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -85,6 +86,16 @@ std::string stripBearer(const std::string& value) {
 	return value;
 }
 
+/// 回环监听判定（P1）：默认 127.0.0.1 保持无认证可用；其余地址视为
+/// 对外监听，强制要求 authToken（服务端 TLS 未实现前的部署边界）。
+bool isLoopbackHost(const std::string& host) {
+	std::string lower;
+	lower.reserve(host.size());
+	for (char c : host)
+		lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+	return lower == "127.0.0.1" || lower == "::1" || lower == "[::1]" || lower == "localhost";
+}
+
 class HttpListener final : public DcNetListener {
 public:
 	~HttpListener() override { stop(); }
@@ -94,6 +105,34 @@ public:
 		if (_bound)
 			throw NodeException(NodeException::ErrorType::InternalError, "DcNetListener::bind",
 								"listener already bound");
+
+		// 配置期全量校验（P1/P2-10）：非法范围在 bind 期 fail-fast（DESIGN.md §6
+		// 配置期抛异常约定），杜绝运行期静默异常行为（如负 maxInFlight 转
+		// size_t 后绕过 429 限流、空白 token 形成认证绕过、对外监听无认证）
+		auto reject = [&](const std::string& why) {
+			throw NodeException(NodeException::ErrorType::ExecutionFailed, "DcNetListener::bind", why);
+		};
+		if (endpoint.port < 0 || endpoint.port > 65535)
+			reject("port " + std::to_string(endpoint.port) + " out of range [0,65535]");
+		if (endpoint.backlog <= 0)
+			reject("backlog must be > 0");
+		if (endpoint.maxConnections < 0)
+			reject("maxConnections must be >= 0 (0 = unlimited)");
+		if (endpoint.maxInFlight <= 0)
+			reject("maxInFlight must be > 0");
+		if (endpoint.requestTimeout < std::chrono::milliseconds(0))
+			reject("requestTimeout must be >= 0");
+		if (!endpoint.authToken.empty()) {
+			const std::string bare = stripBearer(endpoint.authToken);
+			if (bare.empty() || bare.find_first_not_of(" \t") == std::string::npos)
+				reject("authToken is blank after 'Bearer ' prefix stripping; configure a real token"
+					   " or leave it empty to disable auth on loopback");
+		}
+		if (!isLoopbackHost(endpoint.listenHost) && endpoint.authToken.empty())
+			reject("non-loopback listen host '" + endpoint.listenHost
+				   + "' requires authToken; server-side TLS is not implemented yet, so"
+					 " an unauthenticated non-loopback listener is refused");
+
 		try {
 			_socket.bind(Poco::Net::SocketAddress(endpoint.listenHost, static_cast<Poco::UInt16>(endpoint.port)),
 						 false);
@@ -379,15 +418,29 @@ private:
 				std::string value = raw.substr(colon + 1, lineEnd - colon - 1);
 				while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
 					value.erase(value.begin());
-				req.headers.emplace(std::move(key), std::move(value));
+				auto [it, inserted] = req.headers.emplace(std::move(key), std::move(value));
+				// 重复 Content-Length 拒绝（P2-10）：多值混淆是请求走私的
+				// 经典向量，显式 400 而非首值静默生效
+				if (!inserted && it->first == "content-length")
+					return 400;
 			}
 			pos = lineEnd + 2;
 		}
 
-		// ④ 请求体：Content-Length（v1 不支持 chunked）
+		// ④ 请求体：Content-Length（v1 不支持 chunked）。严格解析（P2-10）：
+		// 全串十进制、无符号、无溢出——strtoull 时代 "100abc" 被静默解析为
+		// 100、负数回绕为巨大值（行为安全但语义错），现在一律 400
 		std::size_t bodyLen = 0;
-		if (auto it = req.headers.find("content-length"); it != req.headers.end())
-			bodyLen = static_cast<std::size_t>(std::strtoull(it->second.c_str(), nullptr, 10));
+		if (auto it = req.headers.find("content-length"); it != req.headers.end()) {
+			const std::string& v = it->second;
+			if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos)
+				return 400;
+			unsigned long long parsed = 0;
+			const auto [ptr, ec] = std::from_chars(v.data(), v.data() + v.size(), parsed, 10);
+			if (ec != std::errc() || ptr != v.data() + v.size())
+				return 400; // 溢出 / 全串未消费
+			bodyLen = static_cast<std::size_t>(parsed);
+		}
 		if (bodyLen > kMaxBodyBytes)
 			return 413;
 		req.body = raw.substr(headerEnd + 4);
@@ -436,7 +489,18 @@ private:
 			"Content-Length: " + std::to_string(resp.body.size()) + "\r\n"
 			"Connection: close\r\n\r\n" + resp.body;
 		try {
-			conn.sendBytes(http.data(), static_cast<int>(http.size()));
+			// 循环补发（P2-2）：sendBytes 允许发送少于请求字节数（发送缓冲
+			// 满 / SO_SNDTIMEO 剩余窗口不足）——单次发送 + 不查返回值会
+			// 静默截断响应，客户端看到的实际字节数与 Content-Length 不符。
+			// 补发失败/超时/异常仍静默关闭连接（现状语义，对端归一化）
+			std::size_t sent = 0;
+			while (sent < http.size()) {
+				const int n = conn.sendBytes(http.data() + sent,
+											 static_cast<int>(http.size() - sent));
+				if (n <= 0)
+					break; // 发送失败/超时：无法继续，关闭连接
+				sent += static_cast<std::size_t>(n);
+			}
 		} catch (...) {
 		}
 		try {

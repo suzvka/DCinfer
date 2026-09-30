@@ -140,7 +140,18 @@ private:
 			"Content-Type: application/json\r\n"
 			"Content-Length: " + std::to_string(respBody.size()) + "\r\n"
 			"Connection: close\r\n\r\n" + respBody;
-		c.sendBytes(resp.data(), static_cast<int>(resp.size()));
+		// 循环补发（P2-2）：与 HttpListener::respond 同一修复——单次
+		// sendBytes 允许短写，不补齐会使测试基础设施自身产生截断假象
+		try {
+			std::size_t sent = 0;
+			while (sent < resp.size()) {
+				const int n = c.sendBytes(resp.data() + sent, static_cast<int>(resp.size() - sent));
+				if (n <= 0)
+					break;
+				sent += static_cast<std::size_t>(n);
+			}
+		} catch (...) {
+		}
 		c.close();
 	}
 

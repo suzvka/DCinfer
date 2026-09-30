@@ -13,6 +13,7 @@
 #include "NodeExecutor.h"
 #include "DCNet/NetCodec_Tensor.h"
 #include "DCNet/NetError.h"
+#include "DCNet/NetListener.h"
 #include "DCNet/NetServerAdapter.h"
 #include "DCNet/NetTransport_Http.h"
 #include "EngineRegistry.h"
@@ -530,6 +531,134 @@ TEST(transportSerializesSharedEndpointExchanges) {
 	srv.svc->stop();
 }
 
+// ── bind 配置期全量校验（P1/P2-10）：非法配置 fail-fast，不再静默运行 ──
+
+static bool bindRejected(const NetServerEndpoint& ep) {
+	auto l = makeHttpListener();
+	try {
+		l->bind(ep);
+	} catch (const NodeException&) {
+		return true;
+	}
+	return false;
+}
+
+TEST(bindConfigValidation) {
+	// 默认形态（回环 + 无认证）保持可用
+	{
+		auto l = makeHttpListener();
+		NetServerEndpoint ok;
+		ok.port = 0; // 随机端口
+		bool threw = false;
+		try {
+			l->bind(ok);
+		} catch (const NodeException&) {
+			threw = true;
+		}
+		CHECK(!threw, "loopback + no token (default dev form) must bind");
+		CHECK(l->port() > 0, "port 0 binds to a random port");
+	}
+	// 负 maxInFlight：转 size_t 后会绕过 429 限流 → bind 期拒绝
+	{
+		NetServerEndpoint ep;
+		ep.maxInFlight = -1;
+		CHECK(bindRejected(ep), "negative maxInFlight must be rejected at bind");
+	}
+	// backlog / maxConnections / port 范围
+	{
+		NetServerEndpoint ep;
+		ep.backlog = 0;
+		CHECK(bindRejected(ep), "backlog <= 0 must be rejected at bind");
+	}
+	{
+		NetServerEndpoint ep;
+		ep.maxConnections = -3;
+		CHECK(bindRejected(ep), "negative maxConnections must be rejected at bind");
+	}
+	{
+		NetServerEndpoint ep;
+		ep.port = 70000;
+		CHECK(bindRejected(ep), "port > 65535 must be rejected at bind");
+	}
+	// 空白 token：'Bearer ' 前缀剥后为空 → 认证绕过形态 → 拒绝
+	{
+		NetServerEndpoint ep;
+		ep.authToken = "Bearer ";
+		CHECK(bindRejected(ep), "blank authToken after prefix stripping must be rejected");
+	}
+	{
+		NetServerEndpoint ep;
+		ep.authToken = "   ";
+		CHECK(bindRejected(ep), "all-whitespace authToken must be rejected");
+	}
+	// 对外监听强制认证：0.0.0.0 无 token → 拒绝；带合法 token → 成功
+	{
+		NetServerEndpoint ep;
+		ep.listenHost = "0.0.0.0";
+		ep.authToken.clear();
+		CHECK(bindRejected(ep), "non-loopback listener without authToken must be rejected");
+	}
+	{
+		auto l = makeHttpListener();
+		NetServerEndpoint ok;
+		ok.listenHost = "0.0.0.0";
+		ok.port = 0;
+		ok.authToken = "Bearer real-secret";
+		bool threw = false;
+		try {
+			l->bind(ok);
+		} catch (const NodeException&) {
+			threw = true;
+		}
+		CHECK(!threw, "non-loopback + valid authToken must bind");
+	}
+}
+
+// ── 畸形 Content-Length → 400（P2-10 严格解析）──
+
+static void postRawExpectStatus(int port, const std::string& raw, int expected) {
+	Poco::Net::StreamSocket c;
+	c.connect(Poco::Net::SocketAddress("127.0.0.1", static_cast<unsigned short>(port)),
+			  Poco::Timespan(2, 0));
+	c.setReceiveTimeout(Poco::Timespan(2, 0));
+	c.sendBytes(raw.data(), static_cast<int>(raw.size()));
+	std::string resp;
+	char buf[512];
+	int n;
+	while (resp.find("\r\n\r\n") == std::string::npos &&
+		   (n = c.receiveBytes(buf, sizeof(buf))) > 0)
+		resp.append(buf, static_cast<size_t>(n));
+	c.close();
+	CHECK(resp.rfind("HTTP/1.1 " + std::to_string(expected) + " ", 0) == 0,
+		  (std::string("malformed Content-Length must be answered with ") + std::to_string(expected))
+			  .c_str());
+}
+
+TEST(malformedContentLengthRejected) {
+	auto l = makeHttpListener();
+	NetServerEndpoint ep;
+	ep.port = 0;
+	ep.requestPath = "/infer"; // expected = basePath(/v1) + requestPath
+	l->bind(ep);
+	l->start([](const std::string&, const std::string&) {
+		return WireResponse{200, "{}"};
+	});
+	const int port = l->port();
+
+	// 负数：strtoull 时代回绕为巨大值（行为安全但语义错）→ 现在 400
+	postRawExpectStatus(port, "POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: -5\r\n\r\n", 400);
+	// 部分数字："100abc" 时代解析为 100 → 现在 400
+	postRawExpectStatus(port, "POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: 100abc\r\n\r\n", 400);
+	// 重复 header：多值混淆走私向量 → 400
+	postRawExpectStatus(port,
+						"POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\nContent-Length: 999\r\n\r\n",
+						400);
+	// 合法请求仍 200
+	postRawExpectStatus(port, "POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\n\r\n", 200);
+
+	l->stop();
+}
+
 int main() {
 	struct Case {
 		const char* name;
@@ -545,6 +674,8 @@ int main() {
 						  {"stopDrainsHalfOpenConnection", test_stopDrainsHalfOpenConnection},
 						  {"connectionCapRejectsExcess", test_connectionCapRejectsExcess},
 						  {"transportSerializesSharedEndpointExchanges", test_transportSerializesSharedEndpointExchanges},
+						  {"bindConfigValidation", test_bindConfigValidation},
+						  {"malformedContentLengthRejected", test_malformedContentLengthRejected},
 						  {"configErrorsThrow", test_configErrorsThrow}};
 	for (const auto& c : cases) {
 		std::printf("RUN %s\n", c.name);

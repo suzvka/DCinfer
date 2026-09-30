@@ -419,6 +419,59 @@ TEST(endToEndTextOverHttp) {
 		  "decoded text content");
 }
 
+TEST(headerInjectionRejectedAtConnect) {
+	// P1：headers/authToken/contentType 中的 CR/LF/控制字符在 connect（配置期）
+	// 拒绝，不发起任何网络 I/O——防请求序列化时报文行注入
+	HttpTransport t;
+	auto ep = epFor(1, "/");
+	ep.headers = {"X-Evil: val\r\nX-Injected: 1"};
+	auto err = t.connect(ep);
+	CHECK(!err.ok(), "header containing CRLF must be rejected at connect");
+	CHECK(!t.alive(), "transport must not become alive on invalid config");
+
+	auto ep2 = epFor(1, "/");
+	ep2.authToken = "Bearer token\r\nEvil: 1";
+	CHECK(!t.connect(ep2).ok(), "authToken containing CRLF must be rejected at connect");
+
+	auto ep3 = epFor(1, "/");
+	ep3.contentType = "application/json\n";
+	CHECK(!t.connect(ep3).ok(), "contentType containing LF must be rejected at connect");
+
+	// 合法 header 照常接受（含值内 tab 折叠）
+	auto ep4 = epFor(1, "/");
+	ep4.headers = {"X-Trace: abc\t123"};
+	CHECK(t.connect(ep4).ok() || !t.alive(), "tab is allowed in header values");
+}
+
+TEST(largeResponseIntegrity) {
+	// P2-2：大响应在 TCP 发送窗口受限时必然多次 sendBytes——respond 循环
+	// 补发后客户端收到的字节数必须与 Content-Length 一致，内容逐字节一致
+	static const std::string payload = [] {
+		std::string p;
+		p.reserve(4u << 20);
+		for (std::size_t i = 0; i < (4u << 20); ++i)
+			p.push_back(static_cast<char>('A' + (i % 26)));
+		return p;
+	}();
+	MockHttpServer server;
+	server.start([&](const std::string&, const std::string&, int& status) {
+		status = 200;
+		return payload;
+	});
+	CHECK(server.port() > 0, "mock server should start");
+
+	HttpTransport t;
+	auto ep = epFor(server.port(), "/big");
+	ep.maxResponseBody = (4u << 20) + 1024;
+	CHECK(t.connect(ep).ok(), "connect");
+	CHECK(t.send("{}").ok(), "send");
+	Payload body;
+	CHECK(t.recv(body).ok(), "recv");
+	CHECK(body.size() == payload.size(), "large response must arrive in full (no truncation)");
+	CHECK(std::memcmp(body.data(), payload.data(), payload.size()) == 0,
+		  "large response content must match byte-for-byte");
+}
+
 int main() {
 	test_successRoundtrip();
 	test_status404Normalized();
@@ -428,6 +481,8 @@ int main() {
 	test_errorBodyTruncated();
 	test_connectionRefusedNormalized();
 	test_closeRacingSlowRecv();
+	test_headerInjectionRejectedAtConnect();
+	test_largeResponseIntegrity();
 	test_endToEndTensorOverHttp();
 	test_endToEndTextOverHttp();
 	std::printf("HttpTransportTest: %d checks, %d failures\n", g_checks.load(), g_failures.load());

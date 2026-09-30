@@ -7,6 +7,7 @@
 #include <Poco/Net/HTTPSClientSession.h>
 #include <Poco/Net/NetException.h>
 #include <Poco/Net/SSLException.h>
+#include <Poco/Net/SSLManager.h>
 #include <Poco/Net/SocketAddress.h>
 #include <Poco/Net/StreamSocket.h>
 #include <Poco/StreamCopier.h>
@@ -43,6 +44,47 @@ NetTransportError classifyPocoException(const Poco::Exception& e) {
 
 Poco::Timespan toTimespan(const std::chrono::milliseconds& ms) {
 	return Poco::Timespan(0, std::chrono::duration_cast<std::chrono::microseconds>(ms).count());
+}
+
+/// header 值安全检查（P1）：拒绝 CR/LF、内嵌 NUL 与其余控制字符——
+/// 这些字节会经请求序列化注入伪造报文行（header 注入/请求走私）。
+bool isPrintableHeaderBytes(const std::string& v) {
+	for (unsigned char c : v) {
+		if (c == '\t')
+			continue; // 字段值内的空白折叠是合法形式
+		if (c < 0x20 || c == 0x7f)
+			return false;
+	}
+	return true;
+}
+
+/// 客户端 TLS 上下文（P1）：宿主已初始化 SSLManager（defaultClientContext
+/// 可用）时按宿主管辖；否则框架兕底初始化 VERIFY_STRICT（证书链 + 主机名
+/// 校验 + 默认 CA）——不再依赖宿主全局配置，HTTPS 开箱即安全可用。
+/// 宿主自定义信任锚：在首次 connect 前调用
+///   Poco::Net::SSLManager::instance().initializeClient(context)
+/// 即可接管（本函数检测到已初始化时不覆盖）。
+Poco::Net::Context::Ptr ensureClientTlsContext() {
+	try {
+		return Poco::Net::SSLManager::instance().defaultClientContext();
+	} catch (const Poco::Exception&) {
+#if defined(_WIN32)
+		// SChannel 后端（NetSSL_Win）：Context(usage, certPath, verMode, options,
+		// storeName)，信任链来自系统证书库。注：本分支未经 CI 验证（DCNet CI
+		// 仅 Ubuntu/OpenSSL），发布前需在 Windows 上人工验证。
+		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
+			Poco::Net::Context::CLIENT_USE, "", Poco::Net::Context::VERIFY_STRICT));
+		Poco::Net::SSLManager::instance().initializeClient(nullptr, nullptr, ctx);
+#else
+		// OpenSSL 后端：显式加载系统默认 CA 并禁用废弃协议版本
+		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
+			Poco::Net::Context::CLIENT_USE, "", "", "",
+			Poco::Net::Context::VERIFY_STRICT, 9, true,
+			"ALL:!SSLv2:!SSLv3:!TLSv1:!TLSv1.1"));
+		Poco::Net::SSLManager::instance().initializeClient(nullptr, nullptr, ctx);
+#endif
+		return Poco::Net::SSLManager::instance().defaultClientContext();
+	}
 }
 
 } // namespace
@@ -91,6 +133,37 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 	acquireClaim();
 	const ClaimScope scope{this}; // 所有出口回收占用（_ep 写入也受占用保护）
 	resetLocked();
+
+	// 配置期校验（P1）：headers/authToken/contentType 中的 CR/LF/控制字符
+	// 会在请求序列化时注入伪造报文行——connect 即就绪探测 + 配置报错点，
+	// 此处拒绝不发起任何网络 I/O
+	for (const auto& h : ep.headers) {
+		const auto colon = h.find(':');
+		const std::string name = (colon == std::string::npos) ? h : h.substr(0, colon);
+		const std::string value =
+			(colon == std::string::npos) ? std::string() : h.substr(colon + 1);
+		if (name.empty() || !isPrintableHeaderBytes(name) || !isPrintableHeaderBytes(value)
+			|| name.find(' ') != std::string::npos || name.find(':') != std::string::npos) {
+			_failed = true;
+			_connectError = normalizeTransportError(
+				NetTransportError::Other,
+				"invalid header in endpoint config (name/value must be printable, no CR/LF): '" + h + "'");
+			return _connectError;
+		}
+	}
+	if (!isPrintableHeaderBytes(ep.authToken)) {
+		_failed = true;
+		_connectError = normalizeTransportError(NetTransportError::Other,
+												"invalid authToken (CR/LF/control chars not allowed)");
+		return _connectError;
+	}
+	if (!isPrintableHeaderBytes(ep.contentType)) {
+		_failed = true;
+		_connectError = normalizeTransportError(NetTransportError::Other,
+												"invalid contentType (CR/LF/control chars not allowed)");
+		return _connectError;
+	}
+
 	_ep = ep;
 
 	// 解析端点 URL → scheme/host/port/basePath（Poco::URI 处理默认端口与 IPv6）
@@ -119,13 +192,15 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 		return _connectError;
 	}
 
-	// 会话：HTTP 或 HTTPS（HTTPSClientSession 使用默认客户端 TLS 上下文）
+	// 会话：HTTP 或 HTTPS（HTTPSClientSession 使用显式客户端 TLS 上下文——
+	// 宿主已初始化则用宿主的，否则兕底 VERIFY_STRICT，不依赖全局默认）
 	try {
 		const std::string host = uri.getHost();
 		const Poco::UInt16 port = static_cast<Poco::UInt16>(uri.getPort());
 		std::shared_ptr<Poco::Net::HTTPClientSession> session;
 		if (_useTls)
-			session = std::make_shared<Poco::Net::HTTPSClientSession>(host, port);
+			session = std::make_shared<Poco::Net::HTTPSClientSession>(host, port,
+																  ensureClientTlsContext());
 		else
 			session = std::make_shared<Poco::Net::HTTPClientSession>(host, port);
 		session->setKeepAlive(true);
