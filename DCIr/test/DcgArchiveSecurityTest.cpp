@@ -3,7 +3,10 @@
 // 覆盖：
 //   - isSafeArchiveRelPath：空/内嵌 NUL/绝对路径/盘符/UNC/父目录跳转拒绝，正常相对路径放行；
 //     IR-03：Windows 保留设备名 / ADS 冒号 / 尾点尾空格拒绝
-//   - extractOne 端到端：../ 条目拒绝且无文件逃逸解包目录
+//   - isSafeArchiveEntryName（P2-12）：与目录无关的纯词法校验（写入侧复用）
+//   - addModelFile 写入侧（P2-12）：不安全条目名在写入期拒绝，拒绝路径零副作用
+//   - extractOne 端到端：../ 条目拒绝且无文件逃逸解包目录（经 minizip 底层构造，
+//     写入侧 API 已拒此类条目，端到端用例验证读取侧防线独立成立）
 //   - 符号链接祖先目录拒绝（无 symlink 权限的环境自动跳过）
 //   - 截断归档明确报错；高压缩比（zip bomb 形态）条目按预算拒绝
 //   - IR-04/05：解包条目数聚合预算、归档全局条目数上限、graph.json 专用体积预算
@@ -13,7 +16,10 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
+
+#include <minizip/zip.h>
 
 #include "Ir/DcgArchive.h"
 #include "GraphException.h"
@@ -61,6 +67,27 @@ std::string readFile(const std::filesystem::path& path) {
 	return content;
 }
 
+/// 经 minizip 底层 API 写入任意条目名（绕过 DcgArchive 写入侧校验）：
+/// 仅供读取侧防线的端到端验证（DcgArchive::addModelFile 已拒绝不安全条目名）。
+void writeRawEntry(const std::filesystem::path& dcgPath, const std::string& entryName,
+				   const std::string& content) {
+	zipFile z = ::zipOpen64(dcgPath.string().c_str(), APPEND_STATUS_CREATE);
+	if (!z)
+		throw std::runtime_error("zipOpen64 failed");
+	if (::zipOpenNewFileInZip64(z, entryName.c_str(), nullptr, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0) !=
+		ZIP_OK) {
+		::zipClose(z, nullptr);
+		throw std::runtime_error("zipOpenNewFileInZip64 failed");
+	}
+	if (::zipWriteInFileInZip(z, content.data(), static_cast<unsigned>(content.size())) != ZIP_OK) {
+		::zipCloseFileInZip(z);
+		::zipClose(z, nullptr);
+		throw std::runtime_error("zipWriteInFileInZip failed");
+	}
+	::zipCloseFileInZip(z);
+	::zipClose(z, nullptr);
+}
+
 } // namespace
 
 // ════════════════════════════════════════════
@@ -104,6 +131,45 @@ static void testSafePathValidator() {
 	END_TEST();
 }
 
+static void testAddModelFileRejectsUnsafeEntryName() {
+	TEST("addModelFile: unsafe entry names rejected at write side (P2-12)") {
+		const auto workDir = makeWorkDir("writesafe");
+		const auto dcgPath = workDir / "writesafe.dcg";
+		writePayload(workDir / "payload.bin", "payload");
+
+		auto w = DcgArchive::openWrite(dcgPath);
+		w->writeGraphJson("{}");
+		auto expectRejected = [&](const std::string& name, const char* what) {
+			bool rejected = false;
+			try {
+				w->addModelFile(name, workDir / "payload.bin");
+			} catch (const GraphException&) {
+				rejected = true;
+			}
+			CHECK(rejected, what);
+		};
+		expectRejected("../escaped.bin", "'..' entry must be rejected at write side");
+		expectRejected("/abs.bin", "absolute entry must be rejected at write side");
+		expectRejected("C:/drive.bin", "drive-letter entry must be rejected at write side");
+		expectRejected(std::string("models/x") + '\0' + "y.bin",
+					   "embedded-NUL entry must be rejected at write side");
+		expectRejected("models/CON", "device-name entry must be rejected at write side");
+		expectRejected("models/a:ads", "ADS colon entry must be rejected at write side");
+
+		// 拒绝路径零副作用：归档保持可用，安全名照常写入
+		w->addModelFile("models/ok.bin", workDir / "payload.bin");
+		w->finalize();
+		auto r = DcgArchive::openRead(dcgPath);
+		const auto p = r->extractOne("models/ok.bin");
+		CHECK(readFile(p) == "payload", "safe entry after rejections must round-trip");
+
+		r.reset();
+		std::error_code cleanupEc;
+		std::filesystem::remove_all(workDir, cleanupEc);
+	}
+	END_TEST();
+}
+
 // ════════════════════════════════════════════
 // 端到端：../ 条目拒绝且无逃逸写入
 // ════════════════════════════════════════════
@@ -117,12 +183,9 @@ static void testExtractOneRejectsTraversal() {
 		const auto escapedPath = std::filesystem::temp_directory_path() / escapedName;
 
 		writePayload(workDir / "payload.bin", "review-only marker");
-		{
-			auto w = DcgArchive::openWrite(dcgPath);
-			w->writeGraphJson("{}");
-			w->addModelFile("../" + escapedName, workDir / "payload.bin");
-			w->finalize();
-		}
+		// 写入侧 API 已拒绝不安全条目名（testAddModelFileRejectsUnsafeEntryName）；
+		// 端到端防线经 minizip 底层构造恶意归档独立验证（读取侧不信任写入方）
+		writeRawEntry(dcgPath, "../" + escapedName, "review-only marker");
 
 		auto r = DcgArchive::openRead(dcgPath);
 		bool rejected = false;
@@ -410,6 +473,7 @@ static void testMultiChunkModelRoundTrip() {
 int main() {
 	try {
 		testSafePathValidator();
+		testAddModelFileRejectsUnsafeEntryName();
 		testExtractOneRejectsTraversal();
 		testSymlinkAncestorRejected();
 		testTruncatedArchiveRejected();

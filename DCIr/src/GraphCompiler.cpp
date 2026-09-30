@@ -15,6 +15,18 @@
 
 namespace DC::Ir {
 
+namespace {
+
+// ── 图编译输入预算（P2-13）──
+/// JSON 输入总字节上限：不可信/异常来源的图定义在入口拒绝，防无界分配
+/// （nlohmann 解析内存与输入体积同量级）。.dcg 路径的解压侧已有逐条目
+/// 与聚合预算（DcgArchive），本常量补齐 graph.json 字符串层面的防线。
+constexpr std::size_t kMaxGraphJsonBytes = 32ull * 1024 * 1024;
+/// 节点数上限：图规模边界（buildGraph 为全部编译路径的必经点）。
+constexpr std::size_t kMaxGraphNodes = 4096;
+
+} // namespace
+
 // ════════════════════════════════════════════
 // 端口 shape 的类型与 -1 语义
 // ════════════════════════════════════════════
@@ -134,8 +146,12 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 	nlohmann::json edgesArr = nlohmann::json::array();
 
 	// 索引：connector 名 → 其所有输出边
+	// edges() 返回值副本（P2-13 引用收窄）：connectorOut 存储元素指针，
+	// 必须先把快照钉在局部变量上延长生命周期至函数尾，否则 range-for
+	// 的临时容器在循环结束后析构，指针全部悬垂
+	const auto edgesSnapshot = graph.edges();
 	std::map<std::string, std::vector<const InferGraph::Edge*>, std::less<>> connectorOut;
-	for (auto& e : graph.edges()) {
+	for (const auto& e : edgesSnapshot) {
 		auto* srcNode = graph.node(e.srcNode);
 		if (srcNode && srcNode->isConnector()) {
 			connectorOut[e.srcNode].push_back(&e);
@@ -381,6 +397,14 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root, const std::filesystem::path& baseDir,
 							   bool restrictModelPaths) {
 
+	// 节点数预算（P2-13）：全部编译路径（json 字符串/.dcg）的必经点
+	if (root.contains("nodes") && root["nodes"].is_array()
+		&& root["nodes"].size() > kMaxGraphNodes) {
+		throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::buildGraph",
+							 "too many nodes in graph definition (" + std::to_string(root["nodes"].size())
+								 + " > limit " + std::to_string(kMaxGraphNodes) + ")");
+	}
+
 	// 节点
 	for (auto& j : root.at("nodes")) {
 		std::string name = j.at("name").get<std::string>();
@@ -497,8 +521,14 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 		// ── .dcg 反序列化 ──
 		auto archive = DcgArchive::openRead(p);
 
-		// 1. 读取并解析 graph.json
+		// 1. 读取并解析 graph.json（大小预算（P2-13）：解析前拒超限输入）
 		std::string json = archive->readGraphJson();
+		if (json.size() > kMaxGraphJsonBytes) {
+			throw GraphException(GraphException::ErrorType::Other,
+				"GraphCompiler::compileFile",
+				"graph.json in .dcg exceeds size limit (" + std::to_string(json.size()) + " > "
+					+ std::to_string(kMaxGraphJsonBytes) + " bytes)");
+		}
 
 		nlohmann::json root;
 		try {
@@ -580,6 +610,12 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 }
 
 void GraphCompiler::compileString(InferGraph& graph, std::string_view json, std::filesystem::path baseDir) {
+	// 大小预算（P2-13）：不可信来源的图定义在解析前拒绝，防无界分配
+	if (json.size() > kMaxGraphJsonBytes) {
+		throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::compileString",
+							 "graph definition exceeds size limit (" + std::to_string(json.size()) + " > "
+								 + std::to_string(kMaxGraphJsonBytes) + " bytes)");
+	}
 	try {
 		auto root = nlohmann::json::parse(json);
 		compileInternal(graph, root, baseDir, /*restrictModelPaths=*/false);

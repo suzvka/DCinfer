@@ -7,7 +7,9 @@
 
 namespace DC::Ir::detail {
 
-/// @brief 校验归档条目相对路径是否安全（可解压到 baseDir 之内）。
+namespace fs = std::filesystem;
+
+/// @brief 校验归档条目名的纯词法安全性（与解压目标目录无关，P2-12）。
 ///
 /// 拒绝规则（跨平台一致，不依赖宿主平台路径语义）：
 ///   - 空路径 / 内嵌 NUL；
@@ -15,18 +17,17 @@ namespace DC::Ir::detail {
 ///   - 盘符前缀（"C:" 形式——ZIP 路径规范不允许，且解包目录可能被移动到
 ///     不同平台后获得新语义）；
 ///   - 任意 ".." 组件（父目录跳转）；
-///   - 归一化后逃出 baseDir（组件级前缀比较，非字符串比较，防 base 前缀误判）。
+///   - Windows 罪名字形（保留设备名 / ADS 冒号 / 尾点尾空格）。
 ///
-/// 注：反斜杠统一归一为 '/'（ZIP 规范分隔符），避免 Windows/POSIX 语义分歧。
-/// 本函数只做词法校验，不触碰文件系统；符号链接逃逸由调用侧另行防御。
+/// 注：反斜杠统一归一为 '/'（ZIP 规范分隔符）。本函数只做词法校验，
+/// 不触碰文件系统。
 ///
-/// @param rel     归档内条目路径（如 "models/resnet.onnx"）
-/// @param baseDir 解包目标基目录（临时目录）
-/// @param reason  可选输出：拒绝原因描述
+/// @param rel      归档内条目路径（如 "models/resnet.onnx"）
+/// @param normPath 可选输出：归一化（'\\'→'/'）后的条目名
+/// @param reason   可选输出：拒绝原因描述
 /// @return true 安全；false 拒绝
-inline bool isSafeArchiveRelPath(std::string_view rel, const std::filesystem::path& baseDir,
-								 std::string* reason = nullptr) {
-	namespace fs = std::filesystem;
+inline bool isSafeArchiveEntryName(std::string_view rel, std::string* normPath = nullptr,
+								   std::string* reason = nullptr) {
 	auto fail = [reason](const char* why) {
 		if (reason)
 			*reason = why;
@@ -87,10 +88,37 @@ inline bool isSafeArchiveRelPath(std::string_view rel, const std::filesystem::pa
 			return fail("Windows reserved device name in archive path is not allowed");
 	}
 
+	if (normPath)
+		*normPath = normalized;
+	return true;
+}
+
+/// @brief 校验归档条目相对路径是否安全（可解压到 baseDir 之内）。
+///
+/// 两层校验（P2-12 拆分）：先 isSafeArchiveEntryName 纯词法校验
+/// （空/NUL/绝对/盘符/".."/Windows 罪名字形），再归一化组件级包含检查
+/// （防 base 前缀误判）。符号链接逃逸由调用侧另行防御。
+///
+/// @param rel     归档内条目路径（如 "models/resnet.onnx"）
+/// @param baseDir 解包目标基目录（临时目录）
+/// @param reason  可选输出：拒绝原因描述
+/// @return true 安全；false 拒绝
+inline bool isSafeArchiveRelPath(std::string_view rel, const std::filesystem::path& baseDir,
+								 std::string* reason = nullptr) {
+	auto fail = [reason](const char* why) {
+		if (reason)
+			*reason = why;
+		return false;
+	};
+
+	std::string normalized;
+	if (!isSafeArchiveEntryName(rel, &normalized, reason))
+		return false;
+
 	// 归一化 + 组件级包含校验（lexically_normal 为纯词法运算，不触碰文件系统）：
 	// (baseDir / rel) 的归一化结果必须以 baseDir 的归一化组件序列为前缀
 	const auto base = baseDir.lexically_normal();
-	const auto full = (base / p).lexically_normal();
+	const auto full = (base / fs::path(normalized)).lexically_normal();
 	auto baseIt = base.begin();
 	auto fullIt = full.begin();
 	for (; baseIt != base.end(); ++baseIt, ++fullIt) {

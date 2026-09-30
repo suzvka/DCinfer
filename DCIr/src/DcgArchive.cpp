@@ -415,6 +415,16 @@ void DcgArchive::writeGraphJson(std::string_view json) {
 }
 
 void DcgArchive::addModelFile(const std::string& archivePath, const std::filesystem::path& diskPath) {
+	// 条目名安全校验（P2-12）：与读取侧（extractOne）同一不变量——写入侧
+	// 拒绝空/绝对路径/盘符/".."/内嵌 NUL/Windows 罪名字形，防止构造出的
+	// 归档经无防护解压器造成 Zip Slip，保持归档格式不变量
+	std::string reason;
+	if (!detail::isSafeArchiveEntryName(archivePath, nullptr, &reason)) {
+		throw GraphException(GraphException::ErrorType::Other,
+			"DcgArchive::addModelFile",
+			"unsafe archive path '" + archivePath + "': " + reason);
+	}
+
 	// 读取整个文件
 	std::ifstream ifs(diskPath, std::ios::binary | std::ios::ate);
 	if (!ifs.is_open()) {
