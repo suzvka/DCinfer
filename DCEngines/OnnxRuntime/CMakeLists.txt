@@ -40,6 +40,24 @@ target_include_directories(DCEngine_OnnxRuntime
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# ORT 1.28 起导出 target 不再携带 include 路径（上游移除了
+# $<INSTALL_INTERFACE:...> 声明，头文件改经 PUBLIC_HEADER 安装到
+# <prefix>/include/onnxruntime 平铺目录）——1.23 的动态导入 target 自带
+# INTERFACE_INCLUDE_DIRECTORIES，1.28 的静态导入 target（x64-linux 默认
+# static linkage）则完全缺失。按需补齐，保证 #include <onnxruntime_cxx_api.h>
+# 在两种 linkage 下均可解析。
+get_target_property(_ort_include_dirs onnxruntime::onnxruntime
+                    INTERFACE_INCLUDE_DIRECTORIES)
+if(NOT _ort_include_dirs OR _ort_include_dirs STREQUAL "_ort_include_dirs-NOTFOUND")
+	find_path(onnxruntime_INCLUDE_DIR
+		NAMES onnxruntime_cxx_api.h
+		HINTS "${onnxruntime_DIR}/../../../include/onnxruntime"
+		NO_DEFAULT_PATH
+		REQUIRED)
+	target_include_directories(DCEngine_OnnxRuntime SYSTEM
+		PUBLIC "${onnxruntime_INCLUDE_DIR}")
+endif()
+
 file(GLOB_RECURSE DCENGINE_ONNX_SRC CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
 )
