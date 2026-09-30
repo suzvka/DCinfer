@@ -1,17 +1,30 @@
 // HttpTransport TLS 显式校验 回归测试（P1：HTTPS 不再依赖宿主全局 SSLManager 配置）
 //
+// 语义前提：connect() 契约为「TCP 就绪探测 + 配置报错点」，TLS 握手延迟到首次
+// send 时发生——所有证书校验断言必须在 send/recv 层验证，而非 connect 层
+//（connect 层只能断言 TCP 可达性；曾因在 connect 层断言 TLS 拒绝产生假阳性）。
+//
 // 覆盖：
 //   - 默认兜底上下文：宿主未初始化 SSLManager 时框架兜底 VERIFY_STRICT，
-//     不受信任的自签证书 → TlsFailed（不再是"未初始化即异常/依赖全局"）
+//     不受信任的自签证书 → send 时握手失败 → Unreachable 家族
 //   - 宿主自定义信任锚：initializeClient 注入信任自签 CA 的上下文 →
 //     hostname 匹配（localhost）→ 正常 TLS 交换
 //   - hostname 校验被强制：信任证书但 host=127.0.0.1（证书仅含 SAN=localhost）
-//     → TlsFailed
+//     → send 时握手失败 → Unreachable 家族
+//
+// 服务端基础设施注记（均曾为真实缺陷）：
+//   - 监听 [::]:0（Linux 默认双栈）：host="localhost" 在 Ubuntu 可能解析为
+//     ::1（IPv6 优先），仅绑 127.0.0.1 时拒连 → 拒连被误判为拒证书（假阳性）
+//   - acceptConnection() 抛异常（裸 TCP probe / 握手失败）不可退出服务循环：
+//     单线程服务器被 probe 杀死后，后续用例误报
+//   - caLocation 必须传文件路径：OpenSSL 目录模式要求 hash 命名，普通文件名
+//     找不到 → 信任锚静默无效
 // 注：Windows SChannel（NetSSL_Win）后端的证书加载 API 不同，本测试首版
 // 仅覆盖 OpenSSL 后端（CI 的 DCNet job 在 Ubuntu 运行）；Windows 侧人工验证。
 #if !defined(_WIN32)
 
 #include "DCNet/NetEndpoint.h"
+#include "DCNet/NetError.h"
 #include "DCNet/NetTransport_Http.h"
 
 #include <Poco/Net/Context.h>
@@ -22,6 +35,7 @@
 #include <Poco/Timespan.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -112,8 +126,10 @@ public:
 			Poco::Net::Context::Ptr sctx(new Poco::Net::Context(
 				Poco::Net::Context::SERVER_USE, (dir / "key.pem").string(),
 				(dir / "cert.pem").string(), "", Poco::Net::Context::VERIFY_NONE));
+			// 双栈监听：host="localhost" 可能解析为 ::1 或 127.0.0.1，仅绑 IPv4 时
+			// ::1 拒连会被测试误判为“拒证书成功”（假阳性）；Linux 默认 dual-stack
 			_socket = std::make_unique<Poco::Net::SecureServerSocket>(
-				Poco::Net::SocketAddress("127.0.0.1", 0), 16, sctx);
+				Poco::Net::SocketAddress("[::]:0"), 16, sctx);
 			_port = static_cast<int>(_socket->address().port());
 			_stop = false;
 			_thread = std::thread([this] { run(); });
@@ -143,7 +159,12 @@ private:
 			try {
 				c = _socket->acceptConnection();
 			} catch (...) {
-				break; // socket 已关闭（stop）
+				// 主动关闭（stop）→ 退出；客户端侧握手失败/裸 TCP probe（
+				// connect 就绪探测先连接后立即关闭）→ 服务循环必须存活，
+				// 否则单线程服务器被 probe 杀死，后续用例全部误报
+				if (_stop)
+					break;
+				continue;
 			}
 			serve(c);
 		}
@@ -158,27 +179,30 @@ private:
 			int n;
 			while ((n = c.receiveBytes(buf, sizeof(buf))) > 0) {
 				req.append(buf, static_cast<size_t>(n));
-				if (req.find("\r\n\r\n") != std::string::npos)
+				const size_t headerEnd = req.find("\r\n\r\n");
+				if (headerEnd == std::string::npos)
+					continue;
+				// 按 Content-Length 读全请求体（TLS 分段下 body 可能与 headers
+				// 不同 record 到达，读到 header 即回包会回显缺字）
+				std::size_t cl = 0;
+				if (auto pos = req.find("Content-Length:"); pos != std::string::npos) {
+					cl = static_cast<std::size_t>(
+						std::strtoull(req.c_str() + pos + 15, nullptr, 10));
+				}
+				if (req.size() - (headerEnd + 4) >= cl)
 					break;
 			}
 			const size_t headerEnd = req.find("\r\n\r\n");
 			const std::string body =
 				(headerEnd == std::string::npos) ? std::string() : req.substr(headerEnd + 4);
-			// 请求体按 Content-Length 读全（简化：codec body 单帧即完整）
-			std::string cl = "0";
-			if (auto pos = req.find("Content-Length:"); pos != std::string::npos) {
-				cl = req.substr(pos + 15, req.find("\r\n", pos) - pos - 15);
-			}
 			const std::string resp =
 				"HTTP/1.1 200 OK\r\n"
 				"Content-Type: application/json\r\n"
 				"Content-Length: " + std::to_string(body.size()) + "\r\n"
 				"Connection: close\r\n\r\n" + body;
-			std::string out = resp;
-			(void)cl;
 			std::size_t sent = 0;
-			while (sent < out.size()) {
-				const int w = c.sendBytes(out.data() + sent, static_cast<int>(out.size() - sent));
+			while (sent < resp.size()) {
+				const int w = c.sendBytes(resp.data() + sent, static_cast<int>(resp.size() - sent));
 				if (w <= 0)
 					break;
 				sent += static_cast<std::size_t>(w);
@@ -204,36 +228,45 @@ int main() {
 		return 0;
 	}
 
+	const std::string localhostEp = "https://localhost:" + std::to_string(server.port()) + "/v1";
+
 	// ── Test 1: 默认兜底上下文拒绝不受信证书 ──
-	// 宿主未初始化 SSLManager → 框架兜底 VERIFY_STRICT（系统 CA，不含自签
-	// 证书）→ 握手期证书校验失败 → 归一化 TlsFailed
+	// 宿主未初始化 SSLManager → connect 内框架兜底 VERIFY_STRICT（系统 CA，不含
+	// 自签证书）→ connect 仅 TCP 探测即成功（服务器可达），首次 send 触发握手
+	// → 证书校验失败 → Unreachable 家族（net:unreachable）
 	{
 		HttpTransport t;
-		auto ep = NetEndpoint::parse("https://localhost:" + std::to_string(server.port()) + "/v1");
+		auto ep = NetEndpoint::parse(localhostEp);
 		ep.connectTimeout = std::chrono::milliseconds(3000);
 		ep.requestTimeout = std::chrono::milliseconds(3000);
-		const auto err = t.connect(ep);
-		CHECK(!err.ok(), "untrusted self-signed cert must be rejected by default strict context");
-		CHECK(err.category == NetErrorCategory::Unreachable,
-			  "certificate rejection must normalize to the TLS family (Unreachable)");
+		const auto conn = t.connect(ep);
+		CHECK(conn.ok(), "connect is a TCP readiness probe and must succeed on a live server");
+		if (conn.ok()) {
+			const auto err = t.send(R"({"probe":true})");
+			CHECK(!err.ok(), "untrusted self-signed cert must be rejected by default strict context");
+			CHECK(err.category == NetErrorCategory::Unreachable,
+				  "certificate rejection must normalize to the TLS family (Unreachable)");
+		}
 	}
 
 	// ── Test 2: 宿主自定义信任锚（信任自签 CA）→ hostname 匹配 → 成功 ──
 	{
 		const auto dir = std::filesystem::temp_directory_path() / "dcnet_tls_test";
+		// caLocation 必须是文件路径：OpenSSL 目录模式要求 hash 命名链接，
+		// 普通文件名的证书在目录模式下静默不可见（信任锚无效）
 		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
-			Poco::Net::Context::CLIENT_USE, "", "", dir.string(),
+			Poco::Net::Context::CLIENT_USE, "", "", (dir / "cert.pem").string(),
 			Poco::Net::Context::VERIFY_STRICT, 9, false));
 		Poco::Net::SSLManager::instance().initializeClient(nullptr, nullptr, ctx);
 
 		HttpTransport t;
-		auto ep = NetEndpoint::parse("https://localhost:" + std::to_string(server.port()) + "/v1");
+		auto ep = NetEndpoint::parse(localhostEp);
 		ep.connectTimeout = std::chrono::milliseconds(3000);
 		ep.requestTimeout = std::chrono::milliseconds(3000);
-		const auto err = t.connect(ep);
-		CHECK(err.ok(), "trusted self-signed CA + matching hostname (localhost) must connect");
-		if (err.ok()) {
-			CHECK(t.send(R"({"probe":true})").ok(), "send over TLS");
+		const auto conn = t.connect(ep);
+		CHECK(conn.ok(), "trusted context: connect (TCP probe) must succeed");
+		if (conn.ok()) {
+			CHECK(t.send(R"({"probe":true})").ok(), "send over TLS (handshake with trusted self-signed CA)");
 			Payload body;
 			CHECK(t.recv(body).ok(), "recv over TLS");
 			CHECK(body.find(R"({"probe":true})") != std::string::npos, "TLS payload round-trip");
@@ -241,14 +274,22 @@ int main() {
 	}
 
 	// ── Test 3: hostname 校验被强制（信任证书但 host 与 SAN 不匹配）──
+	// 沿用 Test 2 注册的信任锚上下文（defaultClientContext）：证书受信，
+	// 但 host=127.0.0.1 与 SAN=DNS:localhost 不匹配 → send 时握手失败
 	{
 		HttpTransport t;
 		// 证书仅含 CN=localhost / SAN=DNS:localhost；host=127.0.0.1 → 校验失败
 		auto ep = NetEndpoint::parse("https://127.0.0.1:" + std::to_string(server.port()) + "/v1");
 		ep.connectTimeout = std::chrono::milliseconds(3000);
 		ep.requestTimeout = std::chrono::milliseconds(3000);
-		const auto err = t.connect(ep);
-		CHECK(!err.ok(), "hostname mismatch (127.0.0.1 vs SAN=localhost) must be rejected");
+		const auto conn = t.connect(ep);
+		CHECK(conn.ok(), "connect is a TCP readiness probe and must succeed regardless of TLS");
+		if (conn.ok()) {
+			const auto err = t.send(R"({"probe":true})");
+			CHECK(!err.ok(), "hostname mismatch (127.0.0.1 vs SAN=localhost) must be rejected");
+			CHECK(err.category == NetErrorCategory::Unreachable,
+				  "hostname mismatch must normalize to the TLS family (Unreachable)");
+		}
 	}
 
 	server.stop();

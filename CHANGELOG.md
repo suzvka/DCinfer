@@ -21,7 +21,7 @@ v0.7.1 发布审查（release-blocker issue）修复：完成回调双调用、s
   CR/LF/内嵌 NUL/其余控制字符在 `connect()`（配置期）拒绝，不发起网络 I/O——
   防请求序列化时报文行注入。
 - **P1 HTTPS 显式 TLS 校验**：`HTTPSClientSession` 改用显式客户端上下文——
-  宿主已初始化 `SSLManager` 时按宿主管辖，否则框架兕底 `VERIFY_STRICT`（证书
+  宿主已初始化 `SSLManager` 时按宿主管辖，否则框架兜底 `VERIFY_STRICT`（证书
   链 + 主机名校验 + 默认 CA，禁用 SSLv2/v3/TLS1.0/1.1）；HTTPS 不再依赖宿主
   全局配置（未初始化宿主上原本不可用）。宿主自定义信任锚：首个 connect 前
   `initializeClient(context)` 即可接管。Windows SChannel 分支未经 CI 验证，

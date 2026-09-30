@@ -193,8 +193,11 @@ void TaskBuffer::drainInputsTo(const TaskId& taskId, SlotWorkspace& workspace,
 										"type mismatch for port '" + port.name + "'");
 				}
 				// 元素宽度校验（P1）：逻辑类型相同但 typeSize 不一致（schema 声明
-				// 与实际内存布局不符）→ 后端按错误元素宽度解释数据，入口拒绝
-				if (t->typeSize() != port.typeSize) {
+				// 与实际内存布局不符）→ 后端按错误元素宽度解释数据，入口拒绝。
+				// 仅对数值类型生效：Data（字节流）端口的 port.typeSize 是
+				// sizeof(std::vector<char>) 容器外壳大小（NodePort::in<T> 推导），
+				// 与 Tensor 元素宽度（char → 1）非同一语义，不参与比对
+				if (port.type != Tensor::TensorType::Data && t->typeSize() != port.typeSize) {
 					throw NodeException(NodeException::ErrorType::TypeMismatch,
 										"TaskBuffer::drainInputsTo",
 										"typeSize mismatch for port '" + port.name + "' (schema "

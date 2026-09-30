@@ -295,15 +295,30 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build g++ pkg-config
 
-      # core-ir 预设：DCIr 开启，安装树同时覆盖 DCinfer 与 DCIr 两个包
+      # 安装树一：core-ir 预设——覆盖 DCinfer 与 DCIr 两个包
       - name: Configure (core-ir preset)
         run: cmake --preset core-ir
 
-      - name: Build
+      - name: Build (core-ir)
         run: cmake --build build/core-ir -j
 
-      - name: Install to prefix
+      - name: Install to prefix (DCinfer + DCIr)
         run: cmake --install build/core-ir --prefix "${{ github.workspace }}/install-prefix"
+
+      # 安装树二：DCNet + Builtin——覆盖 DCNet 与 DCEngine 两个包
+      #（core-ir 预设不开引擎/网络，冒烟三/四所需的包必须由此安装树提供）
+      - name: Configure (net + builtin)
+        run: >
+          cmake -B build/core-net -S . -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
+          -DDCINFER_BUILD_DCNET=ON
+          -DBUILD_ENGINE_BUILTIN=ON
+
+      - name: Build (net + builtin)
+        run: cmake --build build/core-net -j
+
+      - name: Install to prefix (DCNet + DCEngine)
+        run: cmake --install build/core-net --prefix "${{ github.workspace }}/install-prefix-net"
 
       # 冒烟一：core（DCinfer 单包 + 强约束版本请求）
       - name: Smoke test (core)
@@ -329,7 +344,7 @@ jobs:
         run: |
           cmake -B build-smoke-builtin -S examples/install_smoke \
             -DSMOKE_WITH_BUILTIN=ON \
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix"
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix-net"
           cmake --build build-smoke-builtin -j
           ./build-smoke-builtin/install_smoke | grep -q "install smoke OK"
 
@@ -338,7 +353,7 @@ jobs:
         run: |
           cmake -B build-smoke-net -S examples/install_smoke \
             -DSMOKE_WITH_NET=ON \
-            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix" \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix-net" \
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/cmake/vcpkg-toolchain.cmake"
           cmake --build build-smoke-net -j
           ./build-smoke-net/install_smoke | grep -q "install smoke OK"

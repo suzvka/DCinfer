@@ -59,7 +59,7 @@ bool isPrintableHeaderBytes(const std::string& v) {
 }
 
 /// 客户端 TLS 上下文（P1）：宿主已初始化 SSLManager（defaultClientContext
-/// 可用）时按宿主管辖；否则框架兕底初始化 VERIFY_STRICT（证书链 + 主机名
+/// 可用）时按宿主管辖；否则框架兜底初始化 VERIFY_STRICT（证书链 + 主机名
 /// 校验 + 默认 CA）——不再依赖宿主全局配置，HTTPS 开箱即安全可用。
 /// 宿主自定义信任锚：在首次 connect 前调用
 ///   Poco::Net::SSLManager::instance().initializeClient(context)
@@ -193,7 +193,7 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 	}
 
 	// 会话：HTTP 或 HTTPS（HTTPSClientSession 使用显式客户端 TLS 上下文——
-	// 宿主已初始化则用宿主的，否则兕底 VERIFY_STRICT，不依赖全局默认）
+	// 宿主已初始化则用宿主的，否则兜底 VERIFY_STRICT，不依赖全局默认）
 	try {
 		const std::string host = uri.getHost();
 		const Poco::UInt16 port = static_cast<Poco::UInt16>(uri.getPort());
