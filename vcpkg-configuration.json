@@ -1,8 +1,9 @@
 {
+  "$comment": "artifact registry 固定到具体 commit（P1-5）：refs/heads/main.zip 会随上游漂移，\n导致工具获取不可复现。此处固定 vcpkg-ce-catalog main@ae1a296（上游目录更新频率低，\n升版时显式改 SHA 并验证工具可用）。",
   "registries": [
     {
       "kind": "artifact",
-      "location": "https://github.com/microsoft/vcpkg-ce-catalog/archive/refs/heads/main.zip",
+      "location": "https://github.com/microsoft/vcpkg-ce-catalog/archive/ae1a296d0a5f1db298f4b1a9e2b949331cd17c51.zip",
       "name": "microsoft"
     }
   ],

@@ -1,0 +1,136 @@
+# Release workflow（P2-14）：v* tag 触发完整验证 + 发布物 + 供应链证明。
+#
+# 产出：
+#   - Linux/Windows 安装树包（tar.gz / zip）
+#   - SHA256SUMS 校验和文件
+#   - SPDX SBOM（syft，仅 Linux 路径生成）
+#   - build provenance attestation（actions/attest-build-provenance，SLSA v1）
+#
+# 依赖仓库设置：master/main 分支保护 + required checks（ci.yml 通过后 tag
+# 才可信）。本 workflow 需要写权限发布 release 与 id-token 生成 attestation。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            preset: gcc-release
+            pkg: tar.gz
+          - os: windows-latest
+            preset: msvc-release
+            pkg: zip
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - id: meta
+        name: Extract version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Ninja
+        if: runner.os == 'Windows'
+        uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723
+
+      - name: Setup MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+
+      - name: Configure (Release preset, includes DCIr)
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }} --config Release
+
+      - name: Test (full suite)
+        run: ctest --test-dir build/${{ matrix.preset }} -C Release --output-on-failure
+
+      - name: Install to prefix
+        run: cmake --install build/${{ matrix.preset }} --prefix "${{ github.workspace }}/install-prefix"
+
+      - name: Package install tree
+        shell: bash
+        run: |
+          set -e
+          NAME="dcinfer-${{ steps.meta.outputs.version }}-${RUNNER_OS,,}-x64"
+          mv install-prefix "$NAME"
+          if [ "${{ matrix.pkg }}" = "tar.gz" ]; then
+            tar -czf "$NAME.tar.gz" "$NAME"
+          else
+            7z a "$NAME.zip" "$NAME" >/dev/null
+          fi
+
+      # SBOM（仅 Linux 路径生成，SPDX JSON）：记录发布包中的依赖与版本
+      - name: Generate SBOM
+        if: runner.os == 'Linux'
+        uses: anchore/sbom-action@6b31fa7e2d592e47d95d2a5e0520a7352d47ead5
+        with:
+          format: spdx-json
+          artifact-name: sbom-scan.json
+          upload-artifact: false
+          output-file: sbom-scan.json
+
+      # Build provenance（SLSA v1 attestation）：绑定本 run 与产物
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@9d57eef8c06cd9d6b433effeeb7a6a77b3ff94ad
+        with:
+          subject-path: |
+            dcinfer-*.tar.gz
+            dcinfer-*.zip
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            dcinfer-*.tar.gz
+            dcinfer-*.zip
+            sbom-scan.json
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # 创建 release 与上传 assets
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum dcinfer-*.tar.gz dcinfer-*.zip > SHA256SUMS
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@a4f117a9dd5572319a486154ec1147aebabd285c
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/dcinfer-*.tar.gz
+            dist/dcinfer-*.zip
+            dist/SHA256SUMS
+            dist/sbom-scan.json

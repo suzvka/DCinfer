@@ -12,6 +12,13 @@
 # 提供，经主仓 toolchain wrapper 由 -DDCINFER_BUILD_IR=ON 注入）：
 #   cmake -B build -S . -DSMOKE_WITH_IR=ON -DCMAKE_PREFIX_PATH=<prefix> \
 #     -DCMAKE_TOOLCHAIN_FILE=<主仓>/cmake/vcpkg-toolchain.cmake -DDCINFER_BUILD_IR=ON
+#
+# Builtin 引擎安装链（零外部依赖，无需 vcpkg）：
+#   cmake -B build -S . -DSMOKE_WITH_BUILTIN=ON -DCMAKE_PREFIX_PATH=<prefix>
+#
+# DCNet 安装链（POCO 传递依赖由本目录 vcpkg.json 的 feature 'net' 提供）：
+#   cmake -B build -S . -DSMOKE_WITH_NET=ON -DCMAKE_PREFIX_PATH=<prefix> \
+#     -DCMAKE_TOOLCHAIN_FILE=<主仓>/cmake/vcpkg-toolchain.cmake
 
 cmake_minimum_required(VERSION 3.17)
 project(DCinferInstallSmoke LANGUAGES CXX)
@@ -38,4 +45,18 @@ if (SMOKE_WITH_IR)
     message(STATUS "DCIr_VERSION = ${DCIr_VERSION}")
     target_link_libraries(install_smoke PRIVATE DCIr::DCIr)
     target_compile_definitions(install_smoke PRIVATE SMOKE_WITH_IR=1)
+endif()
+
+if (SMOKE_WITH_BUILTIN)
+    find_package(DCEngine CONFIG REQUIRED)
+    message(STATUS "DCEngine_VERSION = ${DCEngine_VERSION}")
+    target_link_libraries(install_smoke PRIVATE DCEngine::Builtin)
+    target_compile_definitions(install_smoke PRIVATE SMOKE_WITH_BUILTIN=1)
+endif()
+
+if (SMOKE_WITH_NET)
+    find_package(DCNet CONFIG REQUIRED)
+    message(STATUS "DCNet_VERSION = ${DCNet_VERSION}")
+    target_link_libraries(install_smoke PRIVATE DCNet::DCNet)
+    target_compile_definitions(install_smoke PRIVATE SMOKE_WITH_NET=1)
 endif()

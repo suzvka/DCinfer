@@ -79,9 +79,16 @@ if("cuda" IN_LIST FEATURES)
         # ORT 1.25+ 源码构建强制 C++20（onnxruntime_language_standard_versions.cmake），
         # 且上游已内置 CUDA 13.3 cudafe++ regression workaround（ort_cuda133_patch_cccl_header）
         # 与 VS 2026 / CUDA 13.3 Windows 构建修复（#29042, #29266）。
-        "-DCMAKE_CUDA_FLAGS=-Xcudafe --diag_suppress=2803 -Xcompiler=/Zc:preprocessor -Xcompiler=/wd4996 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
-        "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} /Zc:preprocessor /wd4996 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
+        # 平台条件化（P1）：/Zc:preprocessor /wd4996 为 MSVC 专用，Linux GCC/Clang
+        # 直接失败——仅 Windows 追加；非 Windows 仅保留 NVCC 诊断抑制
+        "-DCMAKE_CUDA_FLAGS=-Xcudafe --diag_suppress=2803 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
     )
+    if(VCPKG_TARGET_IS_WINDOWS)
+        list(APPEND FEATURE_OPTIONS
+            "-DCMAKE_CUDA_FLAGS=-Xcudafe --diag_suppress=2803 -Xcompiler=/Zc:preprocessor -Xcompiler=/wd4996 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
+            "-DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS} /Zc:preprocessor /wd4996 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
+        )
+    endif()
 endif()
 
 if("tensorrt" IN_LIST FEATURES)
@@ -93,6 +100,17 @@ if("tensorrt" IN_LIST FEATURES)
         list(APPEND FEATURE_OPTIONS "-Donnxruntime_TENSORRT_HOME:PATH=${TENSORRT_HOME}")
     else()
         message(WARNING "Define TENSORRT_HOME for onnxruntime_TENSORRT_HOME")
+    endif()
+endif()
+
+# 目标 GPU（P1 可配置化）：经环境变量 DCINFER_CUDA_ARCHS / triplet 变量覆盖
+#（如 "89-real;86-real" 多架构或 "80-real;90-real"）；默认 89-real（RTX 4070）。
+# CUDA 13 已移除 sm_60 等旧架构，ORT 默认列表含 60 会配置失败。
+if(NOT DEFINED DCINFER_CUDA_ARCHS)
+    if(DEFINED ENV{DCINFER_CUDA_ARCHS})
+        set(DCINFER_CUDA_ARCHS "$ENV{DCINFER_CUDA_ARCHS}")
+    else()
+        set(DCINFER_CUDA_ARCHS "89-real")
     endif()
 endif()
 
@@ -131,8 +149,8 @@ vcpkg_cmake_configure(
         # 会耗尽内存（CUTLASS/attention 重模板 TU 单进程峰值数 GB），
         # 固定为 1；并行度由 VCPKG_MAX_CONCURRENCY=4（见 cmake/vcpkg-toolchain.cmake）统一控制
         -Donnxruntime_NVCC_THREADS=1
-        # 目标 GPU：RTX 4070 (sm_89)；CUDA 13 已移除 sm_60 等旧架构，ORT 默认列表含 60 会配置失败
-        "-DCMAKE_CUDA_ARCHITECTURES=89-real"
+        # 目标 GPU：默认 RTX 4070 (sm_89)，经 DCINFER_CUDA_ARCHS 覆盖（见上方说明）
+        "-DCMAKE_CUDA_ARCHITECTURES=${DCINFER_CUDA_ARCHS}"
         # some other customizations ...
         --compile-no-warning-as-error
     OPTIONS_DEBUG

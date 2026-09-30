@@ -1,5 +1,11 @@
 name: CI
 
+# 供应链加固（P2-6）：默认最小权限；需要写权限的 workflow（release.yml）
+# 自行声明。第三方 action 全部 pin 到不可变 commit SHA；checkout 关闭
+# 凭据持久化（避免 GITHUB_TOKEN 泄漏进 runner 文件系统）。
+permissions:
+  contents: read
+
 on:
   push:
     branches: [master, main]
@@ -18,9 +24,10 @@ jobs:
     name: Core only (no vcpkg)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -53,16 +60,17 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          submodules: false  # 验证零依赖路径：核心+Builtin 无需 vcpkg submodule
+          submodules: false # 验证零依赖路径：核心+Builtin 无需 vcpkg submodule
+          persist-credentials: false
 
       - name: Setup Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v5
+        uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723
 
       - name: Setup MSVC environment
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
 
       # ↓↓ 与 README「10 分钟上手」保持逐字一致（README 修改必须同步此处）↓↓
       # 不带 vcpkg toolchain：README 核心路径零外部依赖，CI 必须验证同一路径
@@ -101,9 +109,10 @@ jobs:
     name: DCNet + OpenAI mock
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -139,15 +148,16 @@ jobs:
     name: Windows MSVC Release
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Setup Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v5
+        uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723
 
       - name: Setup MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
 
       - name: Configure (MSVC Release)
         shell: pwsh
@@ -171,9 +181,10 @@ jobs:
     name: Linux GCC Release
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -199,9 +210,10 @@ jobs:
     name: Linux Clang Release
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -229,9 +241,10 @@ jobs:
     name: Linux GCC ThreadSanitizer
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          submodules: false  # 核心测试零 vcpkg 依赖（镜像 README quick start 路径）
+          submodules: false # 核心测试零 vcpkg 依赖（镜像 README quick start 路径）
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -272,9 +285,10 @@ jobs:
     name: Install smoke (find_package loopback)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
+          persist-credentials: false
 
       - name: Install build dependencies
         run: |
@@ -309,3 +323,56 @@ jobs:
             -DDCINFER_BUILD_IR=ON
           cmake --build build-smoke-ir -j
           ./build-smoke-ir/install_smoke | grep -q "install smoke OK"
+
+      # 冒烟三：Builtin 引擎安装链（零外部依赖，无需 vcpkg）——真实跑一次算子图
+      - name: Smoke test (with Builtin engine)
+        run: |
+          cmake -B build-smoke-builtin -S examples/install_smoke \
+            -DSMOKE_WITH_BUILTIN=ON \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix"
+          cmake --build build-smoke-builtin -j
+          ./build-smoke-builtin/install_smoke | grep -q "install smoke OK"
+
+      # 冒烟四：DCNet 安装链（传递依赖经 install_smoke manifest 的 feature 'net' 解析）
+      - name: Smoke test (with DCNet)
+        run: |
+          cmake -B build-smoke-net -S examples/install_smoke \
+            -DSMOKE_WITH_NET=ON \
+            -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install-prefix" \
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/cmake/vcpkg-toolchain.cmake"
+          cmake --build build-smoke-net -j
+          ./build-smoke-net/install_smoke | grep -q "install smoke OK"
+
+  # ──────────────────────────────────────────────
+  # ONNX Runtime CPU 构建（P1-7）：验证 ORT overlay portfile 主路径与
+  # DCINFER_ORT_EP 注入链路。注意：hosted runner 无 GPU，CUDA 构建不进
+  # CI——CUDA 组合（RTX 4070 / CUDA 13.3 / VS 2026）仅在文档声明的
+  # 本地环境人工验证（预设 msvc-ort-cuda）
+  # ──────────────────────────────────────────────
+  ort-cpu:
+    name: ONNX Runtime CPU build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++ pkg-config
+
+      - name: Configure (ORT CPU EP)
+        run: >
+          cmake -B build -S . -G Ninja
+          -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
+          -DBUILD_ENGINE_ONNXRUNTIME=ON
+          -DDCINFER_ORT_EP=CPU
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test (full suite)
+        run: ctest --test-dir build -C Release --output-on-failure

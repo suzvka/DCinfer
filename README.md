@@ -193,8 +193,12 @@ cmake --install build/core-only --prefix <安装前缀>
 | 包 | 消费方式 | 导出目标 | 传递依赖 |
 |---|---|---|---|
 | DCinfer | `find_package(DCinfer CONFIG REQUIRED)` | `DCinfer::DCinfer` | 标准库 |
-| DCIr | `find_package(DCIr CONFIG REQUIRED)` | `DCIr::DCIr` | DCinfer, zlib |
-| DCNet | `find_package(DCNet CONFIG REQUIRED)` | `DCNet::DCNet` | DCinfer, Poco |
+| DCIr | `find_package(DCIr CONFIG REQUIRED)` | `DCIr::DCIr` | DCinfer, nlohmann_json, minizip, zlib |
+| DCNet | `find_package(DCNet CONFIG REQUIRED)` | `DCNet::DCNet` | DCinfer, nlohmann_json, Poco |
+
+> 传递依赖名与各包 Config 的 `find_dependency` 调用一致；消费者需保证
+> `CMAKE_PREFIX_PATH` 能同时解析到这些依赖（vcpkg toolchain 是合法方式，
+> 参见 install_smoke 的 SMOKE_WITH_IR / SMOKE_WITH_NET 形态）。
 
 > **引擎适配器的安装支持范围**：v0.7 安装 SDK 仅导出 `DCEngine::Builtin`（零
 > 依赖引擎）。OnnxRuntime / OpenAI 适配器依赖 vcpkg 重型依赖，当前仅支持
