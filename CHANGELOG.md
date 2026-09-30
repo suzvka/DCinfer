@@ -5,6 +5,108 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-09-30
+
+v0.7.1 发布审查（release-blocker issue）修复：完成回调双调用、schema/typeSize
+入口校验缺失、DCNet 端点解析与部署边界加固、响应发送完整性、并发边界收窄、
+安装消费者覆盖与发布链路（CI 供应链 / release workflow）补齐。
+
+### Security
+
+- **P1 DCNet 端点解析严格化**：`NetEndpoint::parse` scheme 大小写不敏感识别
+  `http/https`，显式未知 scheme（如 `ftp://`）入口拒绝——不再静默降级为明文
+  HTTP；端口替换 `atoi` 为严格解析（仅十进制、全串消费、≤65535），非法/负数/
+  超范围一律拒绝。无 scheme 简写（`host[:port][/path]`）兼容不变。
+- **P1 DCNet 请求头注入防御**：`headers`/`authToken`/`contentType` 中的
+  CR/LF/内嵌 NUL/其余控制字符在 `connect()`（配置期）拒绝，不发起网络 I/O——
+  防请求序列化时报文行注入。
+- **P1 HTTPS 显式 TLS 校验**：`HTTPSClientSession` 改用显式客户端上下文——
+  宿主已初始化 `SSLManager` 时按宿主管辖，否则框架兕底 `VERIFY_STRICT`（证书
+  链 + 主机名校验 + 默认 CA，禁用 SSLv2/v3/TLS1.0/1.1）；HTTPS 不再依赖宿主
+  全局配置（未初始化宿主上原本不可用）。宿主自定义信任锚：首个 connect 前
+  `initializeClient(context)` 即可接管。Windows SChannel 分支未经 CI 验证，
+  需人工确认。`HttpTlsTest`（内嵌自签证书 + SecureServerSocket）覆盖：不受信
+  证书拒绝 / 信任锚接管正向交换 / hostname 不匹配拒绝。
+- **P1 服务端部署边界**：`DcNetListener::bind` 配置期全量校验——非回环
+  `listenHost`（非 127.0.0.1/::1/localhost）且 `authToken` 为空 → 拒绝（服务端
+  TLS 未实现前，无认证对外监听不允许）；空白 token（`Bearer ` 前缀剥后为空
+  或全空白）→ 拒绝（堵空凭据绕过）；负 `maxInFlight`/`maxConnections`、
+  `backlog ≤ 0`、`port` 越界、负 `requestTimeout` → 拒绝。
+
+### Fixed
+
+- **P1 完成回调至多一次**：正常路径回调自身抛异常时，外层 catch 会再次调用
+  同一回调——重复提交状态/通知/释放资源，第二次抛出还覆盖原始错误。改门闩
+  （`completed` 标志）统一正常与异常路径：回调恰好一次，原始异常原样重抛。
+  `ExecutionConcurrencyTest` H-2 增回调计数断言。
+- **P1 Node schema 入口校验缺失**：`NodeSchema::valid()` 已定义但从未强制。
+  现在 `Node` 构造与 `GraphStore::addNode` 均拒绝非法 schema（重复端口名/
+  typeSize=0 的非 Void 端口/默认值 type+typeSize 不一致）——缺陷前置暴露
+  （`NodeException(SchemaError)`）。
+- **P1 运行时 Tensor typeSize 校验缺失**：`TaskBuffer::drainInputsTo` 原只比
+  较逻辑类型，逻辑类型相同但元素宽度不同的张量（schema 声明与实际内存布局
+  不符）会流入后端。现追加 `typeSize` 比对 → `NodeException(TypeMismatch)`。
+  `NodeTest` 新增构造期正反例 + 执行期 typeSize mismatch 用例。
+- **P2 响应发送完整性**：`HttpListener::respond` 单次 `sendBytes` 不查返回值
+  即关闭连接——阻塞 socket 部分发送（发送缓冲满/超时窗口不足）时静默截断，
+  客户端实际字节数与 `Content-Length` 不符。改循环补发，失败/超时仍静默
+  关闭（对端归一化）。`MockServer` 同步修复。`HttpTransportTest` 新增 4 MiB
+  大响应逐字节完整性用例。
+- **P2 Content-Length 严格解析**：`strtoull` 不查全串/溢出/重复 header——
+  "100abc" 被静默解析为 100、负数回绕为巨大值（行为安全但语义错）、重复
+  header 首值静默生效。改 `std::from_chars` 全串校验（畸形 → 400）+ 重复
+  `content-length` 显式 400（多值混淆走私向量）。`ServerAdapterTest` 新增
+  raw socket 畸形 CL 用例（负数/部分数字/重复 → 400，合法仍 200）。
+
+### Changed
+
+- **OutputDeclaration.count=0 入口拒绝**：count=0 的声明立即视为满足，无
+  诊断价值——"无需该输出"的正确语义是不声明。`OutputZone::declare` 两个
+  重载均拒绝（校验先于写入，拒绝路径零副作用）。
+- **GraphStore 容器引用收窄**：`InferGraph::edges()` / `GraphBuilder::edges()`
+  改为按值返回——内部容器引用永不外泄（`edgesToJson` 曾把 range-for 元素
+  指针存入跨语句索引表，值语义下临时容器析构即悬垂，已同步修正）。`GraphStore`
+  内部引用版 `nodes()/edges()` 保留并注释"仅限持锁或封印后调用"。
+- **并发 shutdown 串行化**：`ThreadPool::_drainWorkers` 新增 `_drainMutex`、
+  `ResourceScheduler::shutdown` 新增 `_shutdownMutex`——并发重复 shutdown
+  对同一 worker 的 joinable+join 竞态（UB）消除；顺序重复调用幂等性不变。
+  `ThreadPoolTest` 新增并发 shutdown ×8 用例。
+- **EngineRegistry 实例缓存容量上限**：唯一 modelPath 槽位只增不减（长驻
+  服务场景内存无界增长）。达到上限（常量 64）后按 LRU（lastAccess 最旧）
+  驱逐非 loading 槽位；仍被节点持有的实例由共享句柄保活。`EngineRegistryTest`
+  新增容量驱逐回归（驱逐重建 / 最新条目保持命中）。
+- **GraphCompiler 图定义预算**：`compileString`/`compileFile(.dcg)` 入口
+  JSON 大小上限（32 MiB）+ `buildGraph` 节点数上限（4096）——不可信/异常
+  来源的图定义在解析前拒绝，防无界分配。
+- **破坏性（0.x）**：`NetEndpoint::parse`/`DcNetListener::bind`/`Node` 构造
+  新增拒绝路径（非法输入在入口显式拒绝）；`InferGraph::edges()`/
+  `GraphBuilder::edges()` 返回类型变更（值拷贝）。
+
+### Dependencies
+
+- vcpkg artifact registry 固定到具体 commit（`vcpkg-configuration.json`）——
+  `refs/heads/main.zip` 会随上游漂移，工具获取不可复现。
+- ORT overlay portfile 平台条件化：`/Zc:preprocessor` `/wd4996`（MSVC 专用）
+  仅在 Windows 追加，Linux GCC/Clang CUDA 路径不再直接失败；CUDA 架构经
+  `DCINFER_CUDA_ARCHS`（env/triplet 变量）可配置，默认 `89-real`（RTX 4070）。
+- vcpkg submodule 升级（OpenSSL ≥3.6.5 / Poco 1.15.x overlay）作为后续项：
+  需全量重建验证，本版未移动 submodule 固定提交。
+
+### CI / Release
+
+- ci.yml 供应链加固：顶层 `permissions: contents: read`；第三方 action 全部
+  pin 到完整 commit SHA；所有 checkout 关闭 `persist-credentials`；新增
+  `ort-cpu` job（hosted runner 无 GPU，CUDA 构建不进 CI，限文档声明组合的
+  本地验证）。
+- 新增 `release.yml`（`v*` tag 触发）：Linux/Windows 全量构建+测试 → 安装树
+  打包（tar.gz/zip）→ SHA256SUMS → SPDX SBOM（syft）→ SLSA v1 build
+  provenance attestation → 发布 GitHub Release。
+- 安装冒烟覆盖扩展：`examples/install_smoke` 新增 `SMOKE_WITH_BUILTIN`
+  （真实跑一次 Builtin 算子图）与 `SMOKE_WITH_NET`（回环监听 bind）两个
+  消费者形态；CI install-smoke 覆盖 DCinfer/DCIr/Builtin/DCNet 四类。
+- README 依赖表修正：DCIr 行补 nlohmann_json/minizip，DCNet 行补
+  nlohmann_json（与各包 Config 的 `find_dependency` 一致）。
+
 ## [0.7.1] - 2026-09-29
 
 v0.7.0 发布后收尾审查的调度器/引擎生命周期与 DCNet 传输层并发缺陷修复，

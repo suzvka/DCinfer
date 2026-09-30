@@ -33,7 +33,7 @@ include(GNUInstallDirs)
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
-    set(DCINFER_PKG_VERSION "0.7.1")
+    set(DCINFER_PKG_VERSION "0.7.2")
 endif()
 
 set_target_properties(DCEngine_Builtin PROPERTIES EXPORT_NAME Builtin)
