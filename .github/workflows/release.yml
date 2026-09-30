@@ -24,6 +24,7 @@ jobs:
     permissions:
       contents: read
       id-token: write # attest-build-provenance 经 OIDC 向 Sigstore 集群签名
+      attestations: write # 签名后经 attestations REST API 持久化到仓库
     strategy:
       fail-fast: false
       matrix:
