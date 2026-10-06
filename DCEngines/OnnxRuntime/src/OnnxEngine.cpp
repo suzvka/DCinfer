@@ -318,7 +318,16 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 		if (opts.sessionCustomizer)
 			opts.sessionCustomizer(&sessionOpts); // 追加额外 EP 或调整 SessionOptions
 
-		auto session = std::make_shared<Ort::Session>(sharedEnv(), toNativePath(modelPath).c_str(), sessionOpts);
+		std::shared_ptr<Ort::Session> session;
+		try {
+			session = std::make_shared<Ort::Session>(sharedEnv(), toNativePath(modelPath).c_str(), sessionOpts);
+		} catch (const Ort::Exception& e) {
+			// 适配器封装契约：宿主不包含 onnxruntime 头，引擎期异常统一转
+			// std::runtime_error 上抛（模型损坏/内核缺失/EP 不可用等）；
+			// 无内核模型的 Session 构造期即抛（内核分配在初始化阶段）
+			throw std::runtime_error(std::string("OnnxRuntime: failed to load model '")
+												 + modelPath + "': " + e.what());
+		}
 		return EngineInstance(std::move(session));
 	};
 
