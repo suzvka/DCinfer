@@ -104,6 +104,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$PWD/install-prefix" \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/vcpkg-toolchain.cmake" \
+            -DDCINFER_BUILD_IR=ON \
             -DSMOKE_WITH_IR=ON -DSMOKE_SDK=ON \
             -DSMOKE_EXPECT_VERSION="${{ steps.meta.outputs.version }}"
           cmake --build build/install-smoke --config Release
