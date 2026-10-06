@@ -115,8 +115,14 @@ TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseByt
 
 	size_t elementCount = 1;
 	for (auto d : shape) {
-		if (d == 0)
-			throw std::invalid_argument("TensorData: shape dimensions must be > 0");
+		if (d == 0) {
+			// 零维 = 0 元素张量：空文本/空集合的既有合法表示（如 OpenAI 空响应
+			// 文本、wire 空文本帧）——无分配无溢出风险；空载荷走 metadata-only
+			// lazy 语义，带载荷则 expectedBytes=0 与非空缓冲必然 mismatch 拒绝。
+			// （loadData 的稠密直通路径仍拒绝零维——见其入口不变量。）
+			elementCount = 0;
+			break;
+		}
 		if (elementCount > std::numeric_limits<size_t>::max() / d)
 			throw std::invalid_argument("TensorData: shape element count overflows");
 		elementCount *= d;

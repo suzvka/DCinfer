@@ -98,8 +98,10 @@ Tensor decodeTensor(const nlohmann::json& j) {
 		if (!dim.is_number_integer())
 			throw std::runtime_error("tensor codec: shape dimensions must be integers");
 		const auto d = dim.get<std::int64_t>();
-		if (d <= 0)
-			throw std::runtime_error("tensor codec: shape dimensions must be positive");
+		// 负数拒绝（无符号转换回绕）；零维允许——0 元素张量是空载荷的合法
+		// 线级表示（空文本直传），与 TensorData metadata-only 语义对齐。
+		if (d < 0)
+			throw std::runtime_error("tensor codec: shape dimensions must be non-negative");
 		const auto ud = static_cast<std::size_t>(d);
 		if (elements > std::numeric_limits<std::size_t>::max() / ud)
 			throw std::runtime_error("tensor codec: shape element count overflows");

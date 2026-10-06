@@ -350,6 +350,18 @@ static void runTensorDataExceptionTests() {
 							 1, TensorData::DataBlock(0));
 			},
 			"TensorData constructor shape product overflow rejected");
+		// 零维（0 元素张量）合法语义：空文本/空集合的既有表示（OpenAI 空响应、
+		// wire 空文本帧）——metadata-only 空载荷构造成功；带载荷则 mismatch。
+		{
+			TensorData td(std::vector<size_t>{0}, 1, TensorData::DataBlock(0));
+			if (td.typeSize() != 1 || !td.data().empty())
+				fail("zero-dim metadata-only TensorData must keep typeSize and empty payload");
+		}
+		expectInvalidArgument(
+			[&] {
+				TensorData td(std::vector<size_t>{0}, 1, TensorData::DataBlock(3));
+			},
+			"TensorData zero-dim with non-empty payload rejected");
 		// 合法路径行为不变：字节载荷原样进入 cache，不解释内容
 		TensorData td;
 		TensorData::DataBlock bytes(2 * sizeof(float));

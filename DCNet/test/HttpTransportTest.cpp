@@ -419,6 +419,46 @@ TEST(endToEndTextOverHttp) {
 		  "decoded text content");
 }
 
+// 空文本（0 元素张量）端到端往返：shape=[0] 空载荷是 wire 协议的合法形态
+// （空字符串响应），解码侧与 TensorData metadata-only 构造都必须接受。
+TEST(emptyTextOverHttp) {
+	MockHttpServer server;
+	server.start([&](const std::string& path, const std::string& body, int& status) {
+		if (path != "/v1/infer") {
+			status = 404;
+			return std::string(R"({"error":"not found"})");
+		}
+		const auto j = nlohmann::json::parse(body);
+		CHECK(j["dtype"] == "text", "server sees text dtype");
+		CHECK(j["shape"] == std::vector<int64_t>{0}, "server sees zero-length text shape");
+		CHECK(j["data"] == "", "server sees empty text payload");
+		status = 200;
+		nlohmann::json r;
+		r["dtype"] = "text";
+		r["shape"] = std::vector<int64_t>{0}; // 空响应文本
+		r["data"] = "";
+		return r.dump();
+	});
+
+	auto& reg = EngineRegistry::instance();
+	// 独立 engineType：注册表"保留首次"，与 endToEndTextOverHttp 的 DCNet.Text 区分
+	registerDcNetHttp(reg, makeTextJsonCodec(), {}, "DCNet.Text.Empty");
+
+	auto node = reg.createNode("DCNet.Text.Empty", "emptyTextNode",
+							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
+	NodeExecutor exec(*node);
+	CHECK(node != nullptr, "DCNet.Text.Empty text node should be created");
+
+	exec.setInput("t1", "text", makeTextTensor(""));
+	auto result = exec.tryExecute("t1");
+	CHECK(result.ok(), "empty text roundtrip should succeed");
+	CHECK(exec.hasOutput("t1", "result"), "result output should exist");
+	auto out = exec.takeOutputTensor("t1", "result");
+	CHECK(out.type() == Tensor::TensorType::Data && out.typeSize() == 1, "decoded tensor type/size");
+	auto bytes = out.bytes();
+	CHECK(bytes.empty(), "decoded empty text must stay empty");
+}
+
 TEST(headerInjectionRejectedAtConnect) {
 	// P1：headers/authToken/contentType 中的 CR/LF/控制字符在 connect（配置期）
 	// 拒绝，不发起任何网络 I/O——防请求序列化时报文行注入
@@ -485,6 +525,7 @@ int main() {
 	test_largeResponseIntegrity();
 	test_endToEndTensorOverHttp();
 	test_endToEndTextOverHttp();
+	test_emptyTextOverHttp();
 	std::printf("HttpTransportTest: %d checks, %d failures\n", g_checks.load(), g_failures.load());
 	return g_failures == 0 ? 0 : 1;
 }

@@ -15,7 +15,8 @@ ORT 1.28 导出 target 缺失的 include 路径消费侧补齐。
 
 - **P1 DCNet 张量帧解码防御加固**：`NetCodec` 的 `decodeTensor` 面向不可信
   远端帧的线级限制（不改动公开 Tensor API）——帧必须为 JSON 对象、
-  `dtype` 必须为字符串；`shape` 必须为数组且秩 ≤ 64，维度必须为正整数，
+  `dtype` 必须为字符串；`shape` 必须为数组且秩 ≤ 64，维度必须为非负整数
+  （0 元素 = 空载荷张量合法，与 TensorData metadata-only 语义对齐），
   元素计数乘法溢出检查；单张量字节上限 1 GiB（按 dtype typeSize 折算）。
   载荷完整性：`data` 必须为字符串（数值 dtype 经 base64 解码，Data 文本
   UTF-8 直传），字节数必须精确等于 元素数×typeSize——形状/dtype/数据
@@ -33,9 +34,11 @@ ORT 1.28 导出 target 缺失的 include 路径消费侧补齐。
 
 ### Changed
 
-- **TensorData 形状入口校验**：逐维 > 0（零维拒绝）、元素计数与
-  元素数×typeSize 字节数溢出拒绝（`std::invalid_argument`）；空 payload
-  保留 metadata-only 构造语义（校验先行，拒绝路径零副作用）；
+- **TensorData 形状入口校验**：元素计数与元素数×typeSize 字节数溢出拒绝
+  （`std::invalid_argument`）；零维保留既有语义——0 元素张量是空文本/空
+  集合的合法表示（OpenAI 空响应文本、wire 空文本帧），三参构造空载荷
+  metadata-only 语义不变（带载荷则 expectedBytes=0 必然 mismatch 拒绝），
+  `loadData` 稠密直通路径继续拒绝零维（入口不变量不变）；
   `TensorData(shape, DataBlock&&)` 的 typeSize 推导改用溢出检查的逐维
   乘积（原 `std::accumulate` 链乘无溢出防护）。
 - **install_smoke 消费者版本守护**：`SMOKE_EXPECT_VERSION` 显式期望版本
@@ -43,7 +46,8 @@ ORT 1.28 导出 target 缺失的 include 路径消费侧补齐。
   不再静默通过；`SMOKE_SDK` 形态与 Builtin/DCNet 互斥——SDK 冒烟不得
   误验引擎包。
 - **破坏性（0.x）**：`NetCodec` 张量帧解码与 `TensorData` 构造新增拒绝
-  路径——缺失/类型不符字段、零/负/超秩维度、超限载荷在入口显式拒绝。
+  路径——缺失/类型不符字段、负/超秩维度、超限载荷在入口显式拒绝
+  （零维空载荷张量保持合法）。
 
 ### Added
 
