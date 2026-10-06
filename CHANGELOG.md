@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-10-06
+
+SDK 发布链路定型与消费侧防御加固：release workflow 切换 `sdk-release` 预设
+并加装安装边界断言；DCNet 张量帧解码与 TensorData 形状入口补防御校验；
+ORT 1.28 导出 target 缺失的 include 路径消费侧补齐。
+
+### Security
+
+- **P1 DCNet 张量帧解码防御加固**：`NetCodec` 的 `decodeTensor` 面向不可信
+  远端帧的线级限制（不改动公开 Tensor API）——帧必须为 JSON 对象、
+  `dtype` 必须为字符串；`shape` 必须为数组且秩 ≤ 64，维度必须为正整数，
+  元素计数乘法溢出检查；单张量字节上限 1 GiB（按 dtype typeSize 折算）。
+  载荷完整性：`data` 必须为字符串（数值 dtype 经 base64 解码，Data 文本
+  UTF-8 直传），字节数必须精确等于 元素数×typeSize——形状/dtype/数据
+  三者不一致在解码期拒绝，防解码期无界分配与整型回绕。
+
+### Fixed
+
+- **ORT 1.28 导出 target 缺失 include 路径**：上游导出 target 不再携带
+  `INTERFACE_INCLUDE_DIRECTORIES`（头文件平铺安装至
+  `<prefix>/include/onnxruntime`）——1.23 的动态导入 target 自带该属性，
+  1.28 的静态导入 target（m64-linux 默认 static linkage）完全缺失，
+  `#include <onnxruntime_cxx_api.h>` 无法解析。消费侧按需补齐：
+  `get_target_property` 检测为空则 `find_path`（`NO_DEFAULT_PATH` +
+  `REQUIRED`）定位并 SYSTEM 注入——两种 linkage 下均可编译。
+
+### Changed
+
+- **TensorData 形状入口校验**：逐维 > 0（零维拒绝）、元素计数与
+  元素数×typeSize 字节数溢出拒绝（`std::invalid_argument`）；空 payload
+  保留 metadata-only 构造语义（校验先行，拒绝路径零副作用）；
+  `TensorData(shape, DataBlock&&)` 的 typeSize 推导改用溢出检查的逐维
+  乘积（原 `std::accumulate` 链乘无溢出防护）。
+- **install_smoke 消费者版本守护**：`SMOKE_EXPECT_VERSION` 显式期望版本
+  （EXACT 请求 + DCinfer/DCIr 安装版本双校验），过期安装前缀/错位 tag
+  不再静默通过；`SMOKE_SDK` 形态与 Builtin/DCNet 互斥——SDK 冒烟不得
+  误验引擎包。
+- **破坏性（0.x）**：`NetCodec` 张量帧解码与 `TensorData` 构造新增拒绝
+  路径——缺失/类型不符字段、零/负/超秩维度、超限载荷在入口显式拒绝。
+
+### Added
+
+- **`sdk-release` CMake 预设**：Core + DCIr 的 SDK 发布配置，显式排除
+  引擎/DCNet/测试/示例——发布产物边界由预设固定。
+
+### CI / Release
+
+- release.yml SDK 发布链路定型：双平台切换 `sdk-release` 预设；tag 版本
+  严格校验（`vMAJOR.MINOR.PATCH` 格式 + 与 `project()` 版本一致性比对）；
+  SDK 安装边界断言——核心/IR 头文件与 Config 齐备，安装树含
+  engine/onnx 制品即失败；sdk-release 关测试（全矩阵由 ci.yml 覆盖），
+  改为 CTest 注册核验；SBOM 明确扫描最终 SDK 安装树；消费者冒烟
+  （`SMOKE_SDK` + `SMOKE_WITH_IR` + 期望版本注入）。
+- README 发布消费说明同步：SDK 包仅含 `DCinfer::DCinfer` 与可选
+  `DCIr::DCIr`，不夹带具体引擎适配器（Builtin 需
+  `-DBUILD_ENGINE_BUILTIN=ON` 单独构建）；测试运行说明补充（先构建再
+  `ctest --output-on-failure`，`ctest -N` 核对注册）。
+
 ## [0.7.2] - 2026-09-30
 
 v0.7.1 发布审查（release-blocker issue）修复：完成回调双调用、schema/typeSize
