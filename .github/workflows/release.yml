@@ -93,8 +93,11 @@ jobs:
           test -f install-prefix/include/Ir/GraphCompiler.h
           test -f install-prefix/lib/cmake/DCinfer/DCinferConfig.cmake
           test -f install-prefix/lib/cmake/DCIr/DCIrConfig.cmake
-          if find install-prefix -iname '*engine*' -o -iname '*onnx*' | grep -q .; then
-            echo 'SDK install tree contains an engine artifact' >&2
+          # 边界断言针对引擎适配器实现（DCEngine 包目标 / onnx·openai 适配器产物）。
+          # 核心公开头 EngineRegistry.h / ExecutionEngine.h 名字含 Engine 属合法 SDK 内容，
+          # 不能用 '*engine*' 宽匹配（曾在 v0.7.3 首跑误报）。
+          if find install-prefix -iname 'DCEngine*' -o -iname '*onnx*' -o -iname '*openai*' | grep -q .; then
+            echo 'SDK install tree contains an engine adapter artifact' >&2
             exit 1
           fi
           cmake -S examples/install_smoke -B build/install-smoke \
