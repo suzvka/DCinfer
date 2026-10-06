@@ -200,18 +200,19 @@ cmake --install build/core-only --prefix <安装前缀>
 > `CMAKE_PREFIX_PATH` 能同时解析到这些依赖（vcpkg toolchain 是合法方式，
 > 参见 install_smoke 的 SMOKE_WITH_IR / SMOKE_WITH_NET 形态）。
 
-> **引擎适配器的安装支持范围**：v0.7 安装 SDK 仅导出 `DCEngine::Builtin`（零
-> 依赖引擎）。OnnxRuntime / OpenAI 适配器依赖 vcpkg 重型依赖，当前仅支持
-> 源码树消费（`add_subdirectory`，仓库内构建），不在安装导出范围内——
-> 安装后 `find_package(DCEngine)` 只能取到 `DCEngine::Builtin` 目标。
+> **SDK 发布边界**：正式 SDK 发布包仅包含 `DCinfer::DCinfer` 与可选的
+> `DCIr::DCIr`，不夹带 Builtin、ONNX Runtime、OpenAI 或 DCNet 等具体适配器。
+> 这些适配器属于独立集成/第三方实现，需在源码树中显式启用并由宿主管理其依赖。
+> 若需要安装 Builtin 参考引擎，请使用 `-DBUILD_ENGINE_BUILTIN=ON` 单独构建，
+> 不要将该构建树误认为正式 SDK 发布包。
 
 宿主工程 CMakeLists 示例：
 
 ```cmake
 find_package(DCinfer 0.7 CONFIG REQUIRED)   # 版本请求需与当前 minor 一致（见下）
-find_package(DCEngine CONFIG REQUIRED)   # 需要 Builtin 引擎时
+find_package(DCIr CONFIG REQUIRED)          # SDK 包启用 DCIr 时
 
-target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)
+target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCIr::DCIr)
 ```
 
 > 各包导出文件采用 `SameMinorVersion` 兼容策略：`find_package` 请求的 major.minor
@@ -223,7 +224,11 @@ target_link_libraries(my_app PRIVATE DCinfer::DCinfer DCEngine::Builtin)
 ### 运行测试
 
 ```bash
-ctest --test-dir build -C Release
+# 先完整构建，再运行与当前配置对应的测试
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+# 可选：核对 CTest 是否注册了预期测试
+ctest --test-dir build -N -C Release
 ```
 
 ## 已知限制

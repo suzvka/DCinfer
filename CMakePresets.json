@@ -156,6 +156,21 @@
       }
     },
     {
+      "name": "sdk-release",
+      "displayName": "Core + DCIr SDK Release (no engines)",
+      "description": "发布 SDK：DCinfer 核心 + DCIr；明确排除第三方引擎、DCNet、测试与示例",
+      "binaryDir": "${sourceDir}/build/sdk-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
+        "DCINFER_BUILD_IR": "ON",
+        "DCINFER_BUILD_ENGINES": "OFF",
+        "DCINFER_BUILD_DCNET": "OFF",
+        "DCINFER_BUILD_TESTS": "OFF",
+        "DCINFER_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
       "name": "core-ir",
       "displayName": "Core + DCIr (JSON/.dcg compiler)",
       "description": "构建 DCinfer 核心库 + DCIr 图编译器；不构建引擎适配器 / DCNet / 测试 / 示例（依赖经 vcpkg feature 'ir' 安装）",

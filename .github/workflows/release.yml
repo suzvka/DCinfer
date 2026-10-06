@@ -3,7 +3,7 @@
 # 产出：
 #   - Linux/Windows 安装树包（tar.gz / zip）
 #   - SHA256SUMS 校验和文件
-#   - SPDX SBOM（syft，仅 Linux 路径生成）
+#   - SPDX SBOM（syft，扫描最终 Core+DCIr 安装树；Linux 路径生成）
 #   - build provenance attestation（actions/attest-build-provenance，SLSA v1）
 #
 # 依赖仓库设置：master/main 分支保护 + required checks（ci.yml 通过后 tag
@@ -30,10 +30,10 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            preset: gcc-release
+            preset: sdk-release
             pkg: tar.gz
           - os: windows-latest
-            preset: msvc-release
+            preset: sdk-release
             pkg: zip
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -44,9 +44,23 @@ jobs:
           persist-credentials: false
 
       - id: meta
-        name: Extract version
+        name: Extract and validate tag version
         shell: bash
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          project_version="$(sed -n 's/^project(DCinfer VERSION \([^)]*\)).*/\1/p' CMakeLists.txt)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag must be vMAJOR.MINOR.PATCH" >&2; exit 1; }
+          [[ "$version" == "$project_version" ]] || { echo "Tag $version != CMake project version $project_version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "project_version=$project_version" >> "$GITHUB_OUTPUT"
+
+      - name: Assert SDK release boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q '"DCINFER_BUILD_ENGINES": "OFF"' CMakePresets.json
+          grep -q '"DCINFER_BUILD_DCNET": "OFF"' CMakePresets.json
 
       - name: Setup Ninja
         if: runner.os == 'Windows'
@@ -62,11 +76,44 @@ jobs:
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config Release
 
-      - name: Test (full suite)
-        run: ctest --test-dir build/${{ matrix.preset }} -C Release --output-on-failure
+      # sdk-release intentionally disables tests; the full matrix is covered by ci.yml.
+      - name: Verify SDK CTest registration
+        run: ctest --test-dir build/${{ matrix.preset }} -C Release --show-only
 
       - name: Install to prefix
         run: cmake --install build/${{ matrix.preset }} --prefix "${{ github.workspace }}/install-prefix"
+
+      - name: Consumer smoke and install-boundary assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f install-prefix/include/InferGraph.h
+          test -f install-prefix/include/Ir/GraphCompiler.h
+          test -f install-prefix/lib/cmake/DCinfer/DCinferConfig.cmake
+          test -f install-prefix/lib/cmake/DCIr/DCIrConfig.cmake
+          if find install-prefix -iname '*engine*' -o -iname '*onnx*' | grep -q .; then
+            echo 'SDK install tree contains an engine artifact' >&2
+            exit 1
+          fi
+          cmake -S examples/install_smoke -B build/install-smoke \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$PWD/install-prefix" \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/vcpkg-toolchain.cmake" \
+            -DSMOKE_WITH_IR=ON -DSMOKE_SDK=ON \
+            -DSMOKE_EXPECT_VERSION="${{ steps.meta.outputs.version }}"
+          cmake --build build/install-smoke --config Release
+          if [ "${RUNNER_OS}" = "Windows" ]; then build/install-smoke/Release/install_smoke.exe; else build/install-smoke/install_smoke; fi
+
+      # SBOM：明确扫描最终 SDK 安装树（必须在打包移动目录前执行）
+      - name: Generate SDK install-tree SBOM
+        if: runner.os == 'Linux'
+        uses: anchore/sbom-action@6b31fa7e2d592e47d95d2a5e0520a7352d47ead5
+        with:
+          path: install-prefix
+          format: spdx-json
+          artifact-name: sbom-scan.json
+          upload-artifact: false
+          output-file: sbom-scan.json
 
       - name: Package install tree
         shell: bash
@@ -79,16 +126,6 @@ jobs:
           else
             7z a "$NAME.zip" "$NAME" >/dev/null
           fi
-
-      # SBOM（仅 Linux 路径生成，SPDX JSON）：记录发布包中的依赖与版本
-      - name: Generate SBOM
-        if: runner.os == 'Linux'
-        uses: anchore/sbom-action@6b31fa7e2d592e47d95d2a5e0520a7352d47ead5
-        with:
-          format: spdx-json
-          artifact-name: sbom-scan.json
-          upload-artifact: false
-          output-file: sbom-scan.json
 
       # Build provenance（SLSA v1 attestation）：绑定本 run 与产物
       - name: Attest build provenance

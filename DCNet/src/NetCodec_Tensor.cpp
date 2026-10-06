@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -22,6 +23,11 @@
 namespace DC::Net {
 
 namespace {
+
+// Defensive limits for untrusted remote tensor frames.  These are wire-level
+// limits and deliberately do not alter the public Tensor API.
+constexpr std::size_t kMaxTensorRank = 64;
+constexpr std::size_t kMaxTensorBytes = std::size_t{1} << 30; // 1 GiB
 
 // dtype 字符串 ↔ Tensor 类型映射（数值 base64；Data 文本 UTF-8 直传）
 std::string dtypeToString(Tensor::TensorType type, size_t typeSize) {
@@ -74,24 +80,52 @@ nlohmann::json encodeTensor(const Tensor& t) {
 
 /// JSON → Tensor（支持 "text" 与全部数值 dtype）
 Tensor decodeTensor(const nlohmann::json& j) {
+	if (!j.is_object())
+		throw std::runtime_error("tensor codec: frame must be an object");
 	Tensor::TensorType type = Tensor::TensorType::Void;
 	size_t typeSize = 0;
-	const std::string dtype = j.value("dtype", "unknown");
+	if (!j.contains("dtype") || !j["dtype"].is_string())
+		throw std::runtime_error("tensor codec: dtype must be a string");
+	const std::string dtype = j["dtype"].get<std::string>();
 	if (!dtypeFromString(dtype, type, typeSize))
 		throw std::runtime_error("tensor codec: unknown dtype '" + dtype + "'");
-	Tensor::Shape shape = j.value("shape", Tensor::Shape{});
-	if (type == Tensor::TensorType::Data) {
-		const std::string text = j.value("data", "");
-		Tensor::DataBlock block(text.size());
-		if (!text.empty())
-			std::memcpy(block.data(), text.data(), text.size());
-		return Tensor(type, typeSize, std::move(shape), std::move(block));
+	if (!j.contains("shape") || !j["shape"].is_array() || j["shape"].size() > kMaxTensorRank)
+		throw std::runtime_error("tensor codec: invalid or oversized shape rank");
+	Tensor::Shape shape;
+	shape.reserve(j["shape"].size());
+	std::size_t elements = 1;
+	for (const auto& dim : j["shape"]) {
+		if (!dim.is_number_integer())
+			throw std::runtime_error("tensor codec: shape dimensions must be integers");
+		const auto d = dim.get<std::int64_t>();
+		if (d <= 0)
+			throw std::runtime_error("tensor codec: shape dimensions must be positive");
+		const auto ud = static_cast<std::size_t>(d);
+		if (elements > std::numeric_limits<std::size_t>::max() / ud)
+			throw std::runtime_error("tensor codec: shape element count overflows");
+		elements *= ud;
+		shape.push_back(d);
 	}
-	const std::string b64 = j.value("data", "");
-	const std::string bytes = detail::base64Decode(b64);
-	Tensor::DataBlock block(bytes.size());
-	if (!bytes.empty())
-		std::memcpy(block.data(), bytes.data(), bytes.size());
+	if (elements > kMaxTensorBytes / typeSize)
+		throw std::runtime_error("tensor codec: tensor exceeds maximum size");
+	if (!j.contains("data"))
+		throw std::runtime_error("tensor codec: missing data");
+	std::string payload;
+	if (type == Tensor::TensorType::Data) {
+		if (!j["data"].is_string())
+			throw std::runtime_error("tensor codec: text data must be a string");
+		payload = j["data"].get<std::string>();
+	} else {
+		if (!j["data"].is_string())
+			throw std::runtime_error("tensor codec: numeric data must be base64 string");
+		payload = detail::base64Decode(j["data"].get<std::string>());
+	}
+	const std::size_t expected = elements * typeSize;
+	if (payload.size() != expected)
+		throw std::runtime_error("tensor codec: data byte size does not match shape and dtype");
+	Tensor::DataBlock block(payload.size());
+	if (!payload.empty())
+		std::memcpy(block.data(), payload.data(), payload.size());
 	return Tensor(type, typeSize, std::move(shape), std::move(block));
 }
 

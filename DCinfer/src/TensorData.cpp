@@ -14,6 +14,18 @@ size_t checkedShapeProduct(size_t product) {
 		throw std::invalid_argument("TensorData: shape product must be > 0 for typeSize inference");
 	return product;
 }
+
+size_t checkedShapeProduct(const TensorData::Shape& shape) {
+	size_t product = 1;
+	for (const auto d : shape) {
+		if (d == 0)
+			throw std::invalid_argument("TensorData: shape dimensions must be > 0");
+		if (product > std::numeric_limits<size_t>::max() / d)
+			throw std::invalid_argument("TensorData: shape element count overflows");
+		product *= d;
+	}
+	return checkedShapeProduct(product);
+}
 } // namespace
 
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
@@ -97,18 +109,25 @@ TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseByt
 	  _typeSize(0) {
 	_isScalar = shape.empty();
 
-	if (denseBytes.empty()) {
-		setTypeSize(typeSize);
-		return;
-	}
-
 	if (typeSize == 0) {
 		throw std::invalid_argument("TensorData: typeSize must be > 0");
 	}
 
 	size_t elementCount = 1;
 	for (auto d : shape) {
-		elementCount *= static_cast<size_t>(d);
+		if (d == 0)
+			throw std::invalid_argument("TensorData: shape dimensions must be > 0");
+		if (elementCount > std::numeric_limits<size_t>::max() / d)
+			throw std::invalid_argument("TensorData: shape element count overflows");
+		elementCount *= d;
+	}
+	if (elementCount > std::numeric_limits<size_t>::max() / typeSize)
+		throw std::invalid_argument("TensorData: required byte size overflows");
+	// An empty block means metadata-only construction; preserve the public
+	// Tensor API's lazy/no-payload semantics after validating the shape.
+	if (denseBytes.empty()) {
+		setTypeSize(typeSize);
+		return;
 	}
 	const size_t expectedBytes = elementCount * typeSize;
 	if (denseBytes.size() != expectedBytes) {
@@ -121,8 +140,7 @@ TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseByt
 TensorData::TensorData(const Shape& shape, DataBlock&& data)
 	: TensorData(shape,
 				 (!shape.empty())
-					 ? (data.size() / checkedShapeProduct(std::accumulate(shape.begin(), shape.end(), static_cast<size_t>(1),
-													  [](size_t a, auto b) { return a * static_cast<size_t>(b); })))
+					 ? (data.size() / checkedShapeProduct(shape))
 					 : data.size(),
 				 std::move(data)) {}
 

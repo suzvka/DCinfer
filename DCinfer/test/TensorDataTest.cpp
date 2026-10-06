@@ -337,6 +337,19 @@ static void runTensorDataExceptionTests() {
 				td.loadData(std::vector<size_t>{2}, 0, TensorData::DataBlock(0));
 			},
 			"loadData zero typeSize rejected");
+		expectInvalidArgument(
+			[&] {
+				TensorData td;
+				td.loadData(std::vector<size_t>{std::numeric_limits<size_t>::max(), 2}, 1,
+							TensorData::DataBlock(0));
+			},
+			"loadData shape product overflow rejected");
+		expectInvalidArgument(
+			[&] {
+				TensorData td(std::vector<size_t>{std::numeric_limits<size_t>::max(), 2},
+							 1, TensorData::DataBlock(0));
+			},
+			"TensorData constructor shape product overflow rejected");
 		// 合法路径行为不变：字节载荷原样进入 cache，不解释内容
 		TensorData td;
 		TensorData::DataBlock bytes(2 * sizeof(float));

@@ -25,13 +25,23 @@
 cmake_minimum_required(VERSION 3.17)
 project(DCinferInstallSmoke LANGUAGES CXX)
 
+# Release smoke is intentionally a Core + DCIr consumer.  Keep the expected
+# version explicit so a stale prefix or mismatched tag cannot pass silently.
+set(SMOKE_EXPECT_VERSION "0.7.2" CACHE STRING "Expected DCinfer/ DCIr package version")
+if (NOT SMOKE_EXPECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "SMOKE_EXPECT_VERSION must be a semantic version")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 版本请求必须与当前 minor 对齐：本包导出文件用 SameMinorVersion 兼容策略，
 # 请求的 major.minor 与已安装版本不同则 find_package 直接失败。
 # → 每次 minor 升级需同步更新下面的版本号。
-find_package(DCinfer 0.7 CONFIG REQUIRED)
+find_package(DCinfer ${SMOKE_EXPECT_VERSION} EXACT CONFIG REQUIRED)
+if (NOT DCinfer_VERSION STREQUAL SMOKE_EXPECT_VERSION)
+    message(FATAL_ERROR "DCinfer version mismatch: expected ${SMOKE_EXPECT_VERSION}, got ${DCinfer_VERSION}")
+endif()
 message(STATUS "DCinfer_VERSION = ${DCinfer_VERSION}")
 
 add_executable(install_smoke main.cpp)
@@ -43,10 +53,18 @@ if (MSVC)
 endif()
 
 if (SMOKE_WITH_IR)
-    find_package(DCIr CONFIG REQUIRED)
+    find_package(DCIr ${SMOKE_EXPECT_VERSION} EXACT CONFIG REQUIRED)
+    if (NOT DCIr_VERSION STREQUAL SMOKE_EXPECT_VERSION)
+        message(FATAL_ERROR "DCIr version mismatch: expected ${SMOKE_EXPECT_VERSION}, got ${DCIr_VERSION}")
+    endif()
     message(STATUS "DCIr_VERSION = ${DCIr_VERSION}")
     target_link_libraries(install_smoke PRIVATE DCIr::DCIr)
     target_compile_definitions(install_smoke PRIVATE SMOKE_WITH_IR=1)
+endif()
+
+# The SDK smoke must never accidentally validate an engine package.
+if (SMOKE_SDK AND (SMOKE_WITH_BUILTIN OR SMOKE_WITH_NET))
+    message(FATAL_ERROR "SMOKE_SDK excludes third-party engines and DCNet")
 endif()
 
 if (SMOKE_WITH_BUILTIN)
