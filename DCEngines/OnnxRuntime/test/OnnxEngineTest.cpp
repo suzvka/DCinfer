@@ -228,7 +228,7 @@ int main() {
 		// 使用 TestHarness：task 完成回调在输出清理前触发，能安全取到结果
 		DC::TestHarness harness;
 		harness.addNode(std::move(node));
-		harness.bindOutput("onnx_add", "Z");
+		harness.bindOutput("Z", "onnx_add", "Z");
 
 		const float xData[4] = {1.0f, 2.0f, 3.0f, 4.0f};
 		const float yData[4] = {10.0f, 20.0f, 30.0f, 40.0f};
@@ -329,7 +329,7 @@ int main() {
 			// FP16 真实推理：X + Y = Z（fp16 位模式，数据黑盒传递）
 			DC::TestHarness harness;
 			harness.addNode(std::move(node));
-			harness.bindOutput("onnx_fp16", "Z");
+			harness.bindOutput("Z", "onnx_fp16", "Z");
 			const float xData[4] = {1.0f, 2.0f, 3.0f, 4.0f};
 			const float yData[4] = {10.0f, 20.0f, 30.0f, 40.0f};
 			auto makeFp16 = [](const float (&vals)[4]) {
@@ -394,7 +394,7 @@ int main() {
 
 			DC::TestHarness harness;
 			harness.addNode(std::move(node));
-			harness.bindOutput("onnx_dyn", "Z");
+			harness.bindOutput("Z", "onnx_dyn", "Z");
 			const float xData[4] = {5.0f, 6.0f, 7.0f, 8.0f};
 			const float yData[4] = {0.5f, 1.5f, 2.5f, 3.5f};
 			harness.feedInput("task_dyn", "onnx_dyn", "X", makeFloatTensor(xData));
