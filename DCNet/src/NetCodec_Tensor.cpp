@@ -103,6 +103,12 @@ Tensor decodeTensor(const nlohmann::json& j) {
 		if (d < 0)
 			throw std::runtime_error("tensor codec: shape dimensions must be non-negative");
 		const auto ud = static_cast<std::size_t>(d);
+		if (ud == 0) {
+			// 零维置零后乘法恒 0 无溢出，同时避开下方对 ud 的除法（整数除零）
+			elements = 0;
+			shape.push_back(d);
+			continue;
+		}
 		if (elements > std::numeric_limits<std::size_t>::max() / ud)
 			throw std::runtime_error("tensor codec: shape element count overflows");
 		elements *= ud;

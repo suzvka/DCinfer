@@ -419,8 +419,10 @@ TEST(endToEndTextOverHttp) {
 		  "decoded text content");
 }
 
-// 空文本（0 元素张量）端到端往返：shape=[0] 空载荷是 wire 协议的合法形态
-// （空字符串响应），解码侧与 TensorData metadata-only 构造都必须接受。
+// 空文本响应端到端：服务器返回 shape=[0] 空载荷帧（远端空字符串响应的
+// wire 形态），解码侧与 TensorData metadata-only 构造都必须接受。
+// 输入端仍用非空文本——输入端口要求稠密缓存/稀疏视图（既有 valid 语义），
+// metadata-only 空载荷仅在输出/响应端合法。
 TEST(emptyTextOverHttp) {
 	MockHttpServer server;
 	server.start([&](const std::string& path, const std::string& body, int& status) {
@@ -430,8 +432,7 @@ TEST(emptyTextOverHttp) {
 		}
 		const auto j = nlohmann::json::parse(body);
 		CHECK(j["dtype"] == "text", "server sees text dtype");
-		CHECK(j["shape"] == std::vector<int64_t>{0}, "server sees zero-length text shape");
-		CHECK(j["data"] == "", "server sees empty text payload");
+		CHECK(j["data"] == "ping", "server sees request text");
 		status = 200;
 		nlohmann::json r;
 		r["dtype"] = "text";
@@ -449,7 +450,7 @@ TEST(emptyTextOverHttp) {
 	NodeExecutor exec(*node);
 	CHECK(node != nullptr, "DCNet.Text.Empty text node should be created");
 
-	exec.setInput("t1", "text", makeTextTensor(""));
+	exec.setInput("t1", "text", makeTextTensor("ping"));
 	auto result = exec.tryExecute("t1");
 	CHECK(result.ok(), "empty text roundtrip should succeed");
 	CHECK(exec.hasOutput("t1", "result"), "result output should exist");
