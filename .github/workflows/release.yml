@@ -49,8 +49,10 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          project_version="$(sed -n 's/^project(DCinfer VERSION \([^)]*\)).*/\1/p' CMakeLists.txt)"
+          # 捕获组限定为版本号字符：[^)]* 会连 LANGUAGES CXX 一起吞入
+          project_version="$(sed -n 's/^project(DCinfer VERSION \([0-9][0-9.]*\)[^)]*)/\1/p' CMakeLists.txt)"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag must be vMAJOR.MINOR.PATCH" >&2; exit 1; }
+          [[ "$project_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Unrecognized CMake project version: '$project_version'" >&2; exit 1; }
           [[ "$version" == "$project_version" ]] || { echo "Tag $version != CMake project version $project_version" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "project_version=$project_version" >> "$GITHUB_OUTPUT"
