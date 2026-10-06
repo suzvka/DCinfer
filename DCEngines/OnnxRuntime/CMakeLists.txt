@@ -49,9 +49,13 @@ target_include_directories(DCEngine_OnnxRuntime
 get_target_property(_ort_include_dirs onnxruntime::onnxruntime
                     INTERFACE_INCLUDE_DIRECTORIES)
 if(NOT _ort_include_dirs OR _ort_include_dirs STREQUAL "_ort_include_dirs-NOTFOUND")
+	# onnxruntime_DIR 指向 <installed>/<triplet>/share/onnxruntime，头文件在
+	# <installed>/<triplet>/include/onnxruntime/（vcpkg 标准布局）——即
+	# onnxruntime_DIR 的上两级。多候选兼容安装根层级差异。
 	find_path(onnxruntime_INCLUDE_DIR
 		NAMES onnxruntime_cxx_api.h
-		HINTS "${onnxruntime_DIR}/../../../include/onnxruntime"
+		HINTS "${onnxruntime_DIR}/../../include/onnxruntime"
+				"${onnxruntime_DIR}/../../../include/onnxruntime"
 		NO_DEFAULT_PATH
 		REQUIRED)
 	target_include_directories(DCEngine_OnnxRuntime SYSTEM
