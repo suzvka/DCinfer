@@ -137,7 +137,7 @@ TEST(bearerTokenInjected) {
 
 	auto& reg = EngineRegistry::instance();
 	// 注册保留首次：鉴权变体用独立 engineType，避免与 chatRoundtrip 的 "OpenAI" 冲突
-	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m", .engineType = "OpenAI.Auth", .authToken = "sk-test-123"});
+	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m", .engineType = "OpenAI.Auth", .authToken = "sk-test-123", .allowInsecureCredentials = true});
 
 	auto node = reg.createNode("OpenAI.Auth", "authNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));
@@ -258,7 +258,54 @@ TEST(transportRetryOnServerError) {
 		  "recovered response content");
 }
 
+TEST(paramsPolicy) {
+	MockHttpServer server;
+	std::atomic<int> calls{0};
+	server.start([&](const std::string& path, const std::string& body, int& status) {
+		if (path.empty()) {
+			status = 400;
+			return std::string("{}"); // TCP readiness probe is not a sent request.
+		}
+		++calls;
+		const auto j = nlohmann::json::parse(body);
+		CHECK(j["model"] == "policy-model" && j["stream"] == false, "host protocol fields retained");
+		CHECK(j["messages"][0]["content"] == "hi", "host prompt retained");
+		status = 200;
+		return std::string(R"({"choices":[{"message":{"content":"ok"}}]})");
+	});
+	auto& reg = EngineRegistry::instance();
+	DC::OpenAI::registerOpenAiEngine(reg, {.model = "policy-model", .engineType = "OpenAI.Policy"});
+	auto node = reg.createNode("OpenAI.Policy", "policyNode", "http://127.0.0.1:" + std::to_string(server.port()) + "/v1");
+	NodeExecutor exec(*node);
+	const char* invalid[] = {
+		R"({"model":"secret"})", R"({"messages":[]})", R"({"stream":true})", R"({"tools":[]})",
+		R"({"unknown":0})", R"({"temperature":true})", R"({"temperature":null})",
+		R"({"temperature":-0.1})", R"({"temperature":2.1})", R"({"top_p":1.1})",
+		R"({"presence_penalty":-2.1})", R"({"frequency_penalty":2.1})",
+		R"({"max_tokens":0})", R"({"max_tokens":1.5})", R"({"max_tokens":true})",
+		R"({"max_tokens":18446744073709551615})", "{not-json"
+	};
+	int sequence = 0;
+	for (const auto* params : invalid) {
+		const auto task = "bad" + std::to_string(++sequence);
+		exec.setInput(task, "prompt", makeTextTensor("hi"));
+		exec.setInput(task, "params", makeTextTensor(params));
+		const auto result = exec.tryExecute(task);
+		CHECK(result.status == Node::Status::InvalidInput, "invalid parameter rejected locally");
+		CHECK(calls == 0, "invalid parameter sends no request");
+	}
+	for (const auto* params : {R"({"temperature":0,"top_p":0,"max_tokens":1,"presence_penalty":-2,"frequency_penalty":-2})",
+		R"({"temperature":2,"top_p":1,"max_tokens":2147483647,"presence_penalty":2,"frequency_penalty":2})"}) {
+		const auto task = "good" + std::to_string(++sequence);
+		exec.setInput(task, "prompt", makeTextTensor("hi"));
+		exec.setInput(task, "params", makeTextTensor(params));
+		CHECK(exec.tryExecute(task).ok(), "sampling boundaries accepted");
+	}
+	CHECK(calls == 2, "only valid requests reach server");
+}
+
 int main() {
+	test_paramsPolicy();
 	test_chatRoundtrip();
 	test_remoteServerErrorNormalized();
 	test_bearerTokenInjected();

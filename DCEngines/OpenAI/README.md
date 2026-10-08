@@ -56,6 +56,16 @@ auto node = EngineRegistry::instance().createNode(
 
 请求路径：`{basePath}/chat/completions`（OpenAI 兼容协议面）。
 
+### 参数与凭据安全边界
+
+`params` 仅接受以下数值字段：`temperature` [0,2]、`top_p` [0,1]、
+`presence_penalty` / `frequency_penalty` [-2,2]，以及整数 `max_tokens` [1,2147483647]。
+布尔值、null、错误类型、越界值、未知键（包括 `seed`/`stop` 等尚未支持的参数）均在发请求前报 `InvalidInput`。
+`model`、`messages`、`stream`、`tools` 不能由请求参数覆盖。宿主注册模型和 prompt/system 始终有效。
+
+携带 token 或敏感附加头时必须使用 HTTPS。仅本地开发测试可显式设置
+`allowInsecureCredentials = true`；该开关不提供链路安全，生产环境保持默认 false。
+
 ## 构建
 
 ```bash

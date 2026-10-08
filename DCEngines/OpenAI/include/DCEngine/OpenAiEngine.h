@@ -30,6 +30,9 @@ struct OpenAiOptions {
 	/// 附加请求头（"Name: value"；覆盖同名默认头）。
 	std::vector<std::string> headers;
 
+	/// Development-only: permit credentials over HTTP. Keep false for production; use HTTPS.
+	bool allowInsecureCredentials = false;
+
 	// ── 超时与重试（0/负值 = 沿用 DCNet 默认：连接 5s / 请求 30s / 不重试）──
 	std::chrono::milliseconds connectTimeout{0};
 	std::chrono::milliseconds requestTimeout{0};
@@ -50,7 +53,8 @@ struct OpenAiOptions {
 /// - createNode(engineType, name, modelPath)：modelPath 即远端端点（URL），
 ///   连接失败在配置期抛 NodeException（携带 NetError 归一化消息）
 /// - 端口（本地形状规则）：in prompt（Data，必填）/ system（Data，可选）/
-///   params（Data，可选，请求级采样参数 JSON，逐请求覆盖；非法 JSON 报 InvalidInput）
+///   params（Data，可选）：仅 temperature [0,2]、top_p [0,1]、max_tokens 整数 [1,2147483647]、
+///   presence_penalty/frequency_penalty [-2,2]；未知字段、协议字段、错误类型/范围报 InvalidInput。
 ///   → out response（Data；响应缺 choices[0].message.content 报 ExecutionFailed，
 ///   附 dcnet 领域诊断 code=RemoteMalformed）
 /// - 请求路径：{basePath}/chat/completions（OpenAI 兼容协议面）

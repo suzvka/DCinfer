@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <cmath>
 
 namespace DC::OpenAI {
 
@@ -90,13 +91,31 @@ public:
 				nlohmann::json overrides;
 				try {
 					overrides = nlohmann::json::parse(text);
-				} catch (const std::exception& e) {
-					throw DC::Net::DcCodecInputError(std::string("params is not valid JSON: ") + e.what());
+				} catch (const std::exception&) {
+					throw DC::Net::DcCodecInputError("params is not valid JSON");
 				}
 				if (!overrides.is_object())
 					throw DC::Net::DcCodecInputError("params must be a JSON object");
-				for (auto it = overrides.begin(); it != overrides.end(); ++it)
-					j[it.key()] = it.value();
+				for (auto it = overrides.begin(); it != overrides.end(); ++it) {
+					const auto& key = it.key();
+					const auto& value = it.value();
+					if (key == "temperature" || key == "top_p" || key == "presence_penalty" || key == "frequency_penalty") {
+						if (!value.is_number())
+							throw DC::Net::DcCodecInputError("sampling parameter must be numeric");
+						const double number = value.get<double>();
+						const double lower = (key == "presence_penalty" || key == "frequency_penalty") ? -2.0 : 0.0;
+						const double upper = key == "top_p" ? 1.0 : 2.0;
+						if (!std::isfinite(number) || number < lower || number > upper)
+							throw DC::Net::DcCodecInputError("sampling parameter outside supported range");
+					} else if (key == "max_tokens") {
+						// Compare without narrowing: huge unsigned values must not wrap to signed.
+						if (!value.is_number_integer() || value <= 0 || value > 2147483647)
+							throw DC::Net::DcCodecInputError("max_tokens must be an integer in [1,2147483647]");
+					} else {
+						throw DC::Net::DcCodecInputError("unsupported params field");
+					}
+					j[key] = value;
+				}
 			}
 		}
 		return j.dump();
@@ -153,6 +172,7 @@ void registerOpenAiEngine(EngineRegistry& reg, const OpenAiOptions& opts) {
 		desc.authToken = (lowerPrefix == "bearer ") ? token : "Bearer " + token;
 	}
 	desc.headers = opts.headers;
+	desc.allowInsecureCredentials = opts.allowInsecureCredentials;
 	desc.connectTimeout = opts.connectTimeout;
 	desc.requestTimeout = opts.requestTimeout;
 	desc.maxRetries = opts.maxRetries;

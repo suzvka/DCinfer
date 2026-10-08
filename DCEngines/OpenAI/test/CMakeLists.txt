@@ -18,4 +18,5 @@ foreach(test_src IN LISTS TEST_SOURCES)
     target_link_libraries(${test_name} PRIVATE DCEngine::OpenAI)
     # MockHttpServer（POCO）依赖经 DCNet::DCNet → DCEngine::OpenAI 传递
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
 endforeach()
