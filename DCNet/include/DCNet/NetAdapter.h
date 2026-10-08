@@ -37,6 +37,7 @@ struct DcNetAdapterDesc {
 	// ── 端点级覆盖项（modelPath 解析后覆盖同名字段）──
 	// 鉴权 / 附加头 / 超时 / 重试无法从 URL 表达，注册级统一注入。
 	// 敏感信息约束：authToken 不写入日志与错误信息。
+	bool allowInsecureCredentials = false; ///< Development-only plaintext credential opt-in.
 	std::string authToken;                      ///< 非空时覆盖 Authorization 头（"Bearer xxx" 或裸 key）
 	std::vector<std::string> headers;           ///< 非空时覆盖附加头列表（"Name: value"）
 	std::chrono::milliseconds connectTimeout{0}; ///< count>0 时覆盖（默认 5s）

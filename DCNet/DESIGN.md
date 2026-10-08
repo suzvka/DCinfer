@@ -7,6 +7,30 @@
 >
 > 本文档为权威约定，实现与文档不一致处以实现为准并回改文档。
 >
+> **Preflight security boundary (NET-1..NET-10):** The listener has no inbound TLS or
+> chunked support and binds only resolved loopback addresses, even with authentication.
+> Remote deployments require a trusted same-host TLS/mTLS reverse proxy and a backend
+> port inaccessible to untrusted local users. Transfer-Encoding, duplicate headers and
+> Expect are rejected. Clients require HTTPS for credentials (including sensitive custom
+> headers and URI userinfo); `allowInsecureCredentials` in NetEndpoint/DcNetAdapterDesc is
+> an explicit development-only exception, never encryption. Do not put credentials in
+> URLs: registry/cache keys retain modelPath. Use authToken instead.
+>
+> Header parsing is bounded to 64 KiB. Method/auth/route/in-flight admission precedes
+> body reads; maxRequestBody defaults to 8 MiB, maxBufferedBodyBytes to 32 MiB per listener.
+> Body reservations release on all exits. A single absolute read deadline covers headers
+> and body (a bounded socket-buffer prefix may arrive alongside headers).
+> Every concurrent external stop waits for complete drain. Handler stop throws before
+> lifecycle locks; destroying the listener/service from its handler is forbidden.
+> Hung application handlers still require application cancellation. recv must run on the
+> send owner thread; its lease releases with RAII and short fixed-length responses fail.
+>
+> Internal 500 responses expose only a generic error and correlation ID. The optional
+> diagnosticSink receives that ID and a safe event label, not exception/request text;
+> hosts control access and retention. Diagnostics are bounded and controls sanitized.
+> Native Windows TLS validation requires native certificate/trust-store fixtures;
+> OpenSSL coverage alone does not establish SChannel verification behavior.
+>
 > **发布状态**：实验性组件，不承诺 API 稳定性；
 > **禁止用于网络暴露部署**（HTTP 服务端生命周期与重试状态机的加固项
 > 尚未落地）。

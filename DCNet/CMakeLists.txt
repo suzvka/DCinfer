@@ -6,6 +6,8 @@
 #
 # 构建：cmake -B build -S . -DDCINFER_BUILD_DCNET=ON（默认 OFF，与 vcpkg feature 'net' 对应）
 
+include(GNUInstallDirs)
+
 add_library(DCNet STATIC)
 add_library(DCNet::DCNet ALIAS DCNet)
 
@@ -46,7 +48,7 @@ target_include_directories(DCNet
         # BUILD_INTERFACE：源码内消费（DCinfer 扁平头路径经 DCinfer::DCinfer 传递）
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         # INSTALL_INTERFACE：安装树（include/DCNet/ 结构保留，消费方 include "DCNet/NetAdapter.h"）
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 file(GLOB_RECURSE DCNET_SRC CONFIGURE_DEPENDS
@@ -58,13 +60,11 @@ target_sources(DCNet PRIVATE ${DCNET_SRC})
 # 依赖链：DCNetConfig → find_dependency(DCinfer) + json + Poco，与
 # vcpkg feature 'net' 分层一致。MockServer.h 为 header-only 测试基建
 # （经 DCNet::DCNet 传递包含），随包安装以保持该用法可用。
-include(GNUInstallDirs)
-
-# 包版本：与 DCinfer 模块同一约定（仅顶层构建时 PROJECT_VERSION 权威，否则回落字面版本）
+# GNUInstallDirs is included before target interface paths above.
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
-    set(DCINFER_PKG_VERSION "0.7.3")
+    set(DCINFER_PKG_VERSION "0.7.4")
 endif()
 
 install(TARGETS DCNet EXPORT DCNetTargets

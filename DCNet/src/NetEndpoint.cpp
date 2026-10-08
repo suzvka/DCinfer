@@ -51,7 +51,7 @@ NetEndpoint NetEndpoint::parse(const std::string& text) {
 	// 3. 剥离 userinfo（http://user:pass@host —— v1 忽略）
 	auto at = authority.rfind('@');
 	if (at != std::string::npos)
-		authority = authority.substr(at + 1);
+		throw NodeException(NodeException::ErrorType::InternalError, "NetEndpoint::parse", "URI userinfo is not supported; configure authToken instead");
 
 	// 4. host[:port]（v1 不处理 IPv6 字面量）。端口严格解析（P1）：仅十进制
 	//    数字、全串消费、≤65535——atoi 时代非法/负数/超范围值会被静默接受
@@ -89,6 +89,7 @@ NetEndpoint NetEndpoint::parse(const std::string& text) {
 }
 
 std::string NetEndpoint::endpoint() const {
+	if (!url.empty()) return url;
 	std::string s = useTls ? "https://" : "http://";
 	s += host;
 	if (port > 0)

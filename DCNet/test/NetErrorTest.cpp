@@ -243,6 +243,12 @@ TEST(wireRoundTripParity) {
 }
 
 int main() {
+	const auto hostile = DC::Net::normalizeRemoteBody(
+		"{\"error\":{\"code\":\"bad\\r\\ncode\",\"message\":\"" + std::string(10000, 'x') + "\\r\\nend\"}}", NetErrorCategory::RemoteServer);
+	CHECK(hostile.remoteDetail.size() <= 515, "remote diagnostics bounded before publication");
+	CHECK(hostile.code.find('\r') == std::string::npos && hostile.code.find('\n') == std::string::npos, "remote code controls scrubbed");
+	CHECK(hostile.localMessage.find('\r') == std::string::npos && hostile.localMessage.find('\n') == std::string::npos, "local diagnostic controls scrubbed");
+	CHECK(hostile.diagnostic.domain == "dcnet", "sanitization retains diagnostic channel");
 	test_transportTimeout();
 	test_transportUnreachable();
 	test_httpStatus4xx();

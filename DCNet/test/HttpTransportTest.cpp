@@ -513,20 +513,125 @@ TEST(largeResponseIntegrity) {
 		  "large response content must match byte-for-byte");
 }
 
-int main() {
-	test_successRoundtrip();
-	test_status404Normalized();
-	test_status500Normalized();
-	test_status302Normalized();
-	test_responseBodyLimitEnforced();
-	test_errorBodyTruncated();
-	test_connectionRefusedNormalized();
-	test_closeRacingSlowRecv();
-	test_headerInjectionRejectedAtConnect();
-	test_largeResponseIntegrity();
-	test_endToEndTensorOverHttp();
-	test_endToEndTextOverHttp();
-	test_emptyTextOverHttp();
+TEST(shortFixedBodyReleasesLease) {
+	Poco::Net::ServerSocket listener;
+	listener.bind(Poco::Net::SocketAddress("127.0.0.1", 0));
+	listener.listen();
+	const int port = listener.address().port();
+	std::thread server([&] {
+		try {
+			for (int i = 0; i < 3; ++i) {
+				if (!listener.poll(Poco::Timespan(5, 0), Poco::Net::Socket::SELECT_READ)) break;
+				auto c = listener.acceptConnection();
+				c.setReceiveTimeout(Poco::Timespan(2, 0));
+				std::string request;
+				char buffer[1024];
+				int n;
+				while (request.find("\r\n\r\n") == std::string::npos && (n = c.receiveBytes(buffer, sizeof(buffer))) > 0)
+					request.append(buffer, n);
+				if (request.empty()) continue; // TCP readiness probe
+				const std::string response = i == 1
+					? "HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nAAAA"
+					: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+				c.sendBytes(response.data(), static_cast<int>(response.size()));
+				c.close();
+			}
+		} catch (...) {}
+	});
+	HttpTransport t;
+	CHECK(t.connect(epFor(port)).ok(), "short-body server connected");
+	CHECK(t.send("").ok(), "short-body headers accepted");
+	Payload out;
+	CHECK(!t.recv(out).ok(), "fixed-length truncated body must fail");
+	NetError next;
+	std::thread another([&] { next = t.send(""); if (next.ok()) { Payload body; next = t.recv(body); } });
+	another.join();
+	CHECK(next.ok(), "failed read releases lease for another thread");
+	server.join();
+}
+
+TEST(credentialSchemeAndLeaseOwnership) {
+	#define TRACE_STEP(label) do { std::puts("CREDENTIAL " label); std::fflush(stdout); } while (0)
+	TRACE_STEP("start");
+	MockHttpServer server;
+	server.start([](const std::string&, const std::string&, int& status) { status = 200; return std::string("ok"); });
+	HttpTransport t;
+	auto ep = epFor(server.port());
+	ep.authToken = "Bearer PRIVATE";
+	ep.useTls = true;
+	ep.url = "http://127.0.0.1:" + std::to_string(server.port());
+	CHECK(!t.connect(ep).ok(), "final http URI overrides useTls and refuses credentials");
+	ep.authToken.clear();
+	ep.headers = {"X-Api-Key: PRIVATE"};
+	CHECK(!t.connect(ep).ok(), "sensitive custom header refuses plaintext");
+	ep.headers.clear();
+	ep.url = "http://PRIVATE@127.0.0.1:" + std::to_string(server.port());
+	const auto rejected = t.connect(ep);
+	CHECK(!rejected.ok() && rejected.localMessage.find("PRIVATE") == std::string::npos, "userinfo rejected without URI leak");
+	ep.url = "http://127.0.0.1:" + std::to_string(server.port());
+	ep.authToken = "Bearer PRIVATE";
+	ep.allowInsecureCredentials = true;
+	TRACE_STEP("connecting optin");
+	CHECK(t.connect(ep).ok(), "explicit development opt-in permits plaintext credentials");
+	TRACE_STEP("sending");
+	CHECK(t.send("x").ok(), "send owns response lease");
+	TRACE_STEP("wrong recv");
+	NetError other;
+	std::thread wrong([&] { Payload out; other = t.recv(out); });
+	wrong.join();
+	TRACE_STEP("wrong recv joined");
+	CHECK(!other.ok(), "another thread cannot steal response lease");
+	Payload out;
+	TRACE_STEP("owner recv");
+	CHECK(t.recv(out).ok() && out == "ok", "owner still consumes response");
+	TRACE_STEP("invalid reconnect");
+	ep.headers = {"Authorization: PRIVATE\r\nInjected: yes"};
+	const auto bad = t.connect(ep);
+	CHECK(bad.localMessage.find("PRIVATE") == std::string::npos && bad.localMessage.find('\n') == std::string::npos, "header diagnostic excludes values and controls");
+}
+
+TEST(requestTargetAndFramingRejectedBeforeProbe) {
+	Poco::Net::ServerSocket listener;
+	listener.bind(Poco::Net::SocketAddress("127.0.0.1", 0)); listener.listen();
+	HttpTransport t;
+	auto ep = epFor(listener.address().port());
+	for (const auto& path : std::vector<std::string>{"/PRIVATE\r\nInjected: yes", "/has space", std::string("/nul\0PRIVATE", 12)}) {
+		ep.requestPath = path;
+		const auto err = t.connect(ep);
+		CHECK(!err.ok() && err.localMessage.find("PRIVATE") == std::string::npos && err.localMessage.find('\n') == std::string::npos, "raw target controls rejected without diagnostic leaks");
+	}
+	ep.requestPath.clear();
+	for (const auto& path : std::vector<std::string>{"/PRIVATE%0d%0aInjected", "/has%20space", "/nul%00PRIVATE"}) {
+		ep.url = "http://127.0.0.1:" + std::to_string(ep.port) + path;
+		CHECK(!t.connect(ep).ok(), "decoded URI path controls rejected");
+	}
+	ep.url.clear(); ep.headers = {"tRaNsFeR-EnCoDiNg: chunked"};
+	CHECK(!t.connect(ep).ok(), "caller cannot configure transfer framing");
+	CHECK(!listener.poll(Poco::Timespan(0, 100000), Poco::Net::Socket::SELECT_READ), "invalid targets and framing never initiate a TCP probe");
+}
+
+int main(int argc, char** argv) {
+	test_requestTargetAndFramingRejectedBeforeProbe();
+	if (argc > 1 && std::string(argv[1]) == "--credential") { test_credentialSchemeAndLeaseOwnership(); return g_failures.load() ? 1 : 0; }
+	std::puts("RUN shortFixedBodyReleasesLease"); std::fflush(stdout);
+	test_shortFixedBodyReleasesLease();
+	std::puts("RUN credentialSchemeAndLeaseOwnership"); std::fflush(stdout);
+	test_credentialSchemeAndLeaseOwnership();
+	std::puts("RUN existing transport regressions"); std::fflush(stdout);
+	#define RUN_CASE(name) do { std::puts("RUN " #name); std::fflush(stdout); test_##name(); } while (0)
+	RUN_CASE(successRoundtrip);
+	RUN_CASE(status404Normalized);
+	RUN_CASE(status500Normalized);
+	RUN_CASE(status302Normalized);
+	RUN_CASE(responseBodyLimitEnforced);
+	RUN_CASE(errorBodyTruncated);
+	RUN_CASE(connectionRefusedNormalized);
+	RUN_CASE(closeRacingSlowRecv);
+	RUN_CASE(headerInjectionRejectedAtConnect);
+	RUN_CASE(largeResponseIntegrity);
+	RUN_CASE(endToEndTensorOverHttp);
+	RUN_CASE(endToEndTextOverHttp);
+	RUN_CASE(emptyTextOverHttp);
 	std::printf("HttpTransportTest: %d checks, %d failures\n", g_checks.load(), g_failures.load());
 	return g_failures == 0 ? 0 : 1;
 }

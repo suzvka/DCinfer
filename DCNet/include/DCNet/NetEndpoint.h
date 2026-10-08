@@ -34,6 +34,7 @@ struct NetEndpoint {
 	size_t maxResponseBody = 512u * 1024u * 1024u;
 
 	// ── 鉴权与附加头 ──
+	bool allowInsecureCredentials = false; ///< Explicit development-only plaintext credential opt-in.
 	std::string authToken;             ///< "Bearer xxx" 或裸 key，按协议注入请求头
 	std::vector<std::string> headers;  ///< "Name: value"
 

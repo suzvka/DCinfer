@@ -132,6 +132,7 @@ static void ensureDoublerEngine() {
 static NetEndpoint epFor(int port, std::string requestPath = "/infer") {
 	NetEndpoint ep;
 	ep.host = "127.0.0.1";
+	ep.allowInsecureCredentials = true;
 	ep.port = port;
 	ep.basePath = "/v1";
 	ep.requestPath = std::move(requestPath);
@@ -610,7 +611,7 @@ TEST(bindConfigValidation) {
 		} catch (const NodeException&) {
 			threw = true;
 		}
-		CHECK(!threw, "non-loopback + valid authToken must bind");
+		CHECK(threw, "non-loopback plaintext must be refused even with valid authToken");
 	}
 }
 

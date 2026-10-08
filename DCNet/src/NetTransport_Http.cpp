@@ -13,8 +13,17 @@
 #include <Poco/StreamCopier.h>
 #include <Poco/Timespan.h>
 #include <Poco/URI.h>
+#if defined(_WIN32)
+#include <Poco/Net/SecureStreamSocket.h>
+#include <Poco/UnicodeConverter.h>
+#include <wininet.h>
+#pragma comment(lib, "crypt32.lib")
+#endif
 
 #include <chrono>
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
 #include <condition_variable>
 #include <istream>
 #include <memory>
@@ -42,12 +51,103 @@ NetTransportError classifyPocoException(const Poco::Exception& e) {
 	return NetTransportError::Other;
 }
 
+#if defined(_WIN32)
+// NetSSLWin X509Certificate::verify resolves DNS SANs when the endpoint is
+// an IP literal, accepting localhost certificates for 127.0.0.1. Validate the
+// native SSL policy instead, before HTTPSClientSession serializes any headers.
+class VerifiedHttpsClientSession final : public Poco::Net::HTTPSClientSession {
+public:
+	VerifiedHttpsClientSession(const std::string& host, Poco::UInt16 port,
+		Poco::Net::Context::Ptr context)
+		: Poco::Net::HTTPSClientSession(host, port, context), _context(context) {
+		if (context->verificationMode() == Poco::Net::Context::VERIFY_NONE ||
+			!context->extendedCertificateVerificationEnabled())
+			throw Poco::Net::SSLException("HTTPS requires certificate verification");
+	}
+protected:
+	void connect(const Poco::Net::SocketAddress& address) override {
+		Poco::Net::HTTPSClientSession::connect(address);
+		Poco::Net::SecureStreamSocket secure(socket());
+		secure.completeHandshake(); // chain is checked against the POCO Context
+		const auto cert = secure.peerCertificate();
+		CERT_CHAIN_PARA parameters{};
+		parameters.cbSize = sizeof(parameters);
+		PCCERT_CHAIN_CONTEXT chain = nullptr;
+		if (!CertGetCertificateChain(nullptr, cert.system(), nullptr,
+			_context->certificateStore(), &parameters, 0, nullptr, &chain))
+			throw Poco::Net::SSLException("HTTPS certificate chain unavailable");
+		const std::unique_ptr<const CERT_CHAIN_CONTEXT, decltype(&CertFreeCertificateChain)>
+			chainOwner(chain, &CertFreeCertificateChain);
+		// Do not allow host certificate-error handlers to bypass trust. Require
+		// every completed chain to terminate at an issuer in this Context store.
+		bool trusted = chain->cChain > 0;
+		for (DWORD i = 0; i < chain->cChain && trusted; ++i) {
+			const auto* simple = chain->rgpChain[i];
+			if (!simple->cElement) { trusted = false; break; }
+			const auto root = simple->rgpElement[simple->cElement - 1]->pCertContext;
+			const auto issuer = CertFindCertificateInStore(_context->certificateStore(),
+				root->dwCertEncodingType, 0, CERT_FIND_ISSUER_OF, root, nullptr);
+			trusted = issuer != nullptr;
+			if (issuer) CertFreeCertificateContext(issuer);
+		}
+		if (!trusted)
+			throw Poco::Net::SSLException("HTTPS certificate authority not trusted");
+		std::wstring host;
+		Poco::UnicodeConverter::convert(getHost(), host);
+		SSL_EXTRA_CERT_CHAIN_POLICY_PARA ssl{};
+		ssl.cbSize = sizeof(ssl);
+		ssl.dwAuthType = AUTHTYPE_SERVER;
+		// Root trust was already checked by the handshake against Context's
+		// private memory store; do not require installing its CA in Windows ROOT.
+		ssl.fdwChecks = SECURITY_FLAG_IGNORE_UNKNOWN_CA;
+		ssl.pwszServerName = const_cast<wchar_t*>(host.c_str());
+		CERT_CHAIN_POLICY_PARA policy{};
+		policy.cbSize = sizeof(policy);
+		policy.pvExtraPolicyPara = &ssl;
+		CERT_CHAIN_POLICY_STATUS status{};
+		status.cbSize = sizeof(status);
+		const BOOL ok = CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain, &policy, &status);
+		if (!ok || status.dwError)
+			throw Poco::Net::SSLException(status.dwError == CERT_E_CN_NO_MATCH
+				? "HTTPS certificate hostname mismatch" : "HTTPS certificate policy rejected");
+	}
+private:
+	Poco::Net::Context::Ptr _context;
+};
+#endif
+
 Poco::Timespan toTimespan(const std::chrono::milliseconds& ms) {
 	return Poco::Timespan(0, std::chrono::duration_cast<std::chrono::microseconds>(ms).count());
 }
 
 /// header 值安全检查（P1）：拒绝 CR/LF、内嵌 NUL 与其余控制字符——
 /// 这些字节会经请求序列化注入伪造报文行（header 注入/请求走私）。
+std::string requestTarget(std::string base, const std::string& suffix) {
+	if (!suffix.empty()) {
+		if (suffix.front() == '/') {
+			if (!base.empty() && base.back() == '/') base.pop_back();
+			base += suffix;
+		} else {
+			if (base.empty() || base.back() != '/') base += '/';
+			base += suffix;
+		}
+	}
+	return base.empty() ? "/" : base;
+}
+
+bool validRequestTarget(const std::string& target) {
+	if (target.empty() || target.front() != '/' || target.rfind("//", 0) == 0) return false;
+	for (unsigned char c : target) if (c <= 0x20 || c == 0x7f || c == '#') return false;
+	return true;
+}
+
+bool isHeaderName(const std::string& name) {
+	if (name.empty()) return false;
+	for (unsigned char c : name)
+		if (!std::isalnum(c) && std::string("!#$%&'*+-.^_`|~").find(static_cast<char>(c)) == std::string::npos) return false;
+	return true;
+}
+
 bool isPrintableHeaderBytes(const std::string& v) {
 	for (unsigned char c : v) {
 		if (c == '\t')
@@ -69,9 +169,11 @@ Poco::Net::Context::Ptr ensureClientTlsContext() {
 		return Poco::Net::SSLManager::instance().defaultClientContext();
 	} catch (const Poco::Exception&) {
 #if defined(_WIN32)
-		// SChannel 后端（NetSSL_Win）：Context(usage, certPath, verMode, options,
-		// storeName)，信任链来自系统证书库。注：本分支未经 CI 验证（DCNet CI
-		// 仅 Ubuntu/OpenSSL），发布前需在 Windows 上人工验证。
+		// NetSSLWin can itself supply a rejecting VERIFY_RELAXED default when
+		// no application configuration exists; client RELAXED still checks CA
+		// trust. If POCO cannot supply one, use system-root VERIFY_STRICT.
+		// VerifiedHttpsClientSession independently enforces trust and native
+		// hostname policy for either mode before any HTTP bytes are written.
 		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
 			Poco::Net::Context::CLIENT_USE, "", Poco::Net::Context::VERIFY_STRICT));
 		Poco::Net::SSLManager::instance().initializeClient(nullptr, nullptr, ctx);
@@ -107,19 +209,20 @@ void HttpTransport::acquireClaim() {
 	std::unique_lock lk(_ioMutex);
 	const auto self = std::this_thread::get_id();
 	// 同线程遗留占用（上次交换未由 recv 收尾）直接回收：不自锁
-	_ioCv.wait(lk, [this, self] { return !_claimed || _claimOwner == self; });
+	_ioCv.wait(lk, [this, self] { return !_closing && (!_claimed || _claimOwner == self); });
+	_callActive = true;
 	_claimed = true;
 	_claimOwner = self;
 }
 
-void HttpTransport::releaseClaimIfOwned() {
-	{
-		std::lock_guard lk(_ioMutex);
-		if (!_claimed || _claimOwner != std::this_thread::get_id())
-			return; // 非本线程占用：不动他人租约
+void HttpTransport::finishCall(bool releaseClaim) {
+	std::lock_guard lk(_ioMutex);
+	if (releaseClaim && _claimed && _claimOwner == std::this_thread::get_id()) {
 		_claimed = false;
-		_claimOwner = std::thread::id{};
+		_claimOwner = {};
 	}
+	_callActive = false;
+	// Notify while locked; no member access remains after inactive state is observable.
 	_ioCv.notify_all();
 }
 
@@ -142,12 +245,18 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 		const std::string name = (colon == std::string::npos) ? h : h.substr(0, colon);
 		const std::string value =
 			(colon == std::string::npos) ? std::string() : h.substr(colon + 1);
-		if (name.empty() || !isPrintableHeaderBytes(name) || !isPrintableHeaderBytes(value)
-			|| name.find(' ') != std::string::npos || name.find(':') != std::string::npos) {
+		std::string lowerName = name;
+		std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (lowerName == "transfer-encoding") {
+			_failed = true;
+			_connectError = normalizeTransportError(NetTransportError::Other, "transport-owned framing header is not configurable");
+			return _connectError;
+		}
+		if (colon == std::string::npos || !isHeaderName(name) || !isPrintableHeaderBytes(value)) {
 			_failed = true;
 			_connectError = normalizeTransportError(
 				NetTransportError::Other,
-				"invalid header in endpoint config (name/value must be printable, no CR/LF): '" + h + "'");
+				"invalid header in endpoint config (header " + std::to_string(&h - ep.headers.data() + 1) + ")");
 			return _connectError;
 		}
 	}
@@ -173,11 +282,27 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 	} catch (const Poco::Exception& e) {
 		_failed = true;
 		_connectError = normalizeTransportError(NetTransportError::Other,
-												"bad endpoint '" + ep.endpoint() + "': " + e.displayText());
+												"invalid endpoint URI");
 		return _connectError;
 	}
 	_useTls = (uri.getScheme() == "https");
+	bool credentials = !ep.authToken.empty() || !uri.getUserInfo().empty();
+	for (const auto& header : ep.headers) {
+		auto name = header.substr(0, header.find(':'));
+		std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		credentials = credentials || name == "authorization" || name == "proxy-authorization" || name == "cookie" || name == "x-api-key" || name == "api-key" || name == "apikey" || name == "x-auth-token";
+	}
+	if ((uri.getScheme() != "http" && !_useTls) || (!_useTls && credentials && !ep.allowInsecureCredentials)) {
+		_failed = true;
+		_connectError = normalizeTransportError(NetTransportError::Other, "unsupported scheme or plaintext credentials require explicit allowInsecureCredentials");
+		return _connectError;
+	}
 	_basePath = uri.getPath();
+	if (!validRequestTarget(requestTarget(_basePath, ep.requestPath))) {
+		_failed = true;
+		_connectError = normalizeTransportError(NetTransportError::Other, "invalid HTTP request target");
+		return _connectError;
+	}
 
 	// TCP 就绪探测（契约 §3.1：connect 即就绪探测，拒连/DNS 失败在 createEngine 配置期报告）
 	try {
@@ -188,7 +313,7 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 	} catch (const Poco::Exception& e) {
 		_failed = true;
 		_connectError = normalizeTransportError(classifyPocoException(e),
-												"probe " + ep.endpoint() + " failed: " + e.displayText());
+												"endpoint TCP probe failed");
 		return _connectError;
 	}
 
@@ -198,20 +323,27 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 		const std::string host = uri.getHost();
 		const Poco::UInt16 port = static_cast<Poco::UInt16>(uri.getPort());
 		std::shared_ptr<Poco::Net::HTTPClientSession> session;
-		if (_useTls)
+		if (_useTls) {
+#if defined(_WIN32)
+			session = std::make_shared<VerifiedHttpsClientSession>(host, port, ensureClientTlsContext());
+#else
 			session = std::make_shared<Poco::Net::HTTPSClientSession>(host, port,
 																  ensureClientTlsContext());
-		else
+#endif
+		} else
 			session = std::make_shared<Poco::Net::HTTPClientSession>(host, port);
 		session->setKeepAlive(true);
 		session->setConnectTimeout(toTimespan(ep.connectTimeout));
 		session->setSendTimeout(toTimespan(ep.requestTimeout));
 		session->setReceiveTimeout(toTimespan(ep.requestTimeout));
-		_session = std::move(session);
+		{
+			std::lock_guard lk(_ioMutex);
+			_session = std::move(session);
+		}
 	} catch (const Poco::Exception& e) {
 		_failed = true;
 		_connectError = normalizeTransportError(classifyPocoException(e),
-												"session " + ep.endpoint() + " failed: " + e.displayText());
+												"HTTP session initialization failed");
 		return _connectError;
 	}
 
@@ -237,22 +369,7 @@ NetError HttpTransport::send(const Payload& payload) {
 								  : _connectError;
 
 	try {
-		// 完整路径 = basePath + requestPath（requestPath 自带前导 '/' 时避免双斜杠）
-		std::string path = _basePath;
-		if (!_ep.requestPath.empty()) {
-			const std::string& rp = _ep.requestPath;
-			if (rp[0] == '/') {
-				if (!path.empty() && path.back() == '/')
-					path.pop_back();
-				path += rp;
-			} else {
-				if (path.empty() || path.back() != '/')
-					path += '/';
-				path += rp;
-			}
-		}
-		if (path.empty())
-			path = "/";
+		const std::string path = requestTarget(_basePath, _ep.requestPath);
 
 		// 请求头：Content-Type / Authorization（Bearer 由调用方填全）/ 附加头
 		Poco::Net::HTTPRequest req(Poco::Net::HTTPRequest::HTTP_POST, path,
@@ -284,11 +401,14 @@ NetError HttpTransport::send(const Payload& payload) {
 		{
 			std::lock_guard lk(_ioMutex);
 			_response = &rs;
+			_responseLength = res.hasContentLength() ? res.getContentLength64() : -1;
 		}
 		const int status = res.getStatus();
 		if (status < 200 || status >= 300) {
 			// 错误体仅作诊断：允许截断到 maxResponseBody，不再读取
-			const Payload body = readBody(rs, _ep.maxResponseBody, nullptr);
+			bool diagnosticTruncated = false;
+			const Payload body = readBody(rs, _ep.maxResponseBody == 0 ? 4096 : std::min<std::size_t>(_ep.maxResponseBody, 4096), &diagnosticTruncated);
+			if (diagnosticTruncated || (_responseLength >= 0 && static_cast<unsigned long long>(_responseLength) != body.size())) abortResponse();
 			{
 				std::lock_guard lk(_ioMutex);
 				_response = nullptr;
@@ -301,65 +421,52 @@ NetError HttpTransport::send(const Payload& payload) {
 	} catch (const Poco::Exception& e) {
 		abortResponse();
 		_failed = true;
-		return normalizeTransportError(classifyPocoException(e), e.displayText());
+		return normalizeTransportError(classifyPocoException(e), "HTTP exchange failed");
 	} catch (const std::exception& e) {
 		abortResponse();
 		_failed = true;
-		return normalizeTransportError(NetTransportError::Other, e.what());
+		return normalizeTransportError(NetTransportError::Other, "HTTP exchange failed");
 	}
 }
 
 NetError HttpTransport::recv(Payload& out) {
-	const auto self = std::this_thread::get_id();
+	out.clear();
 	std::shared_ptr<Poco::Net::HTTPClientSession> session;
 	std::istream* rs = nullptr;
+	long long expected = -1;
 	{
 		std::lock_guard lk(_ioMutex);
-		if (_response) {
-			// claim 内快照交换状态（与 close/析构的强制回收同锁互斥）：
-			// 本地副本保活 session——close 超时强收仅 abort 中断读并释放
-			// close 侧引用，本函数继续使用的 session 对象由副本持有至
-			// 读取结束，不悬垂
-			session = _session;
-			rs = _response;
-		} else if (_claimed && _claimOwner == self) {
-			_claimed = false; // 无挂起响应：回收本线程遗留占用
-			_claimOwner = std::thread::id{};
+		if (_closing || !_claimed || _claimOwner != std::this_thread::get_id())
+			return normalizeTransportError(NetTransportError::Other, "recv requires send ownership on the same thread");
+		session = _session;
+		rs = _response;
+		expected = _responseLength;
+		_callActive = true;
+	}
+	const ClaimScope scope{this};
+	if (!rs || !session) return normalizeTransportError(NetTransportError::Other, "no pending response");
+	try {
+		bool truncated = false;
+		out = readBody(*rs, _ep.maxResponseBody, &truncated);
+		bool preempted;
+		{
+			std::lock_guard lk(_ioMutex);
+			_response = nullptr;
+			preempted = (_session != session);
 		}
-	}
-	if (!rs) {
-		_ioCv.notify_all();
-		return normalizeTransportError(NetTransportError::Other, "no pending response");
-	}
-	bool truncated = false;
-	out = readBody(*rs, _ep.maxResponseBody, &truncated);
-	bool preempted = false;
-	{
-		std::lock_guard lk(_ioMutex);
-		_response = nullptr;
-		// 交换期间会话被 close/析构强收（其侧引用已置空/替换）：本次读取被
-		// abort 中断，返回错误而非静默短读（部分 body 不是有效交换结果）
-		preempted = (_session != session);
-	}
-	if (session && (truncated || preempted)) {
-		try {
-			session->abort(); // 丢弃未读完的挂起响应（残留报文不污染下次交换）
-		} catch (...) {
+		if (truncated || preempted || (expected >= 0 && static_cast<unsigned long long>(expected) != out.size())) {
+			abortResponse();
+			out.clear();
+			return normalizeTransportError(NetTransportError::Reset, "incomplete or oversized response body");
 		}
+		return {};
+	} catch (const Poco::Exception& e) {
+		abortResponse(); out.clear();
+		return normalizeTransportError(classifyPocoException(e), "response read failed");
+	} catch (...) {
+		abortResponse(); out.clear();
+		return normalizeTransportError(NetTransportError::Other, "response read failed");
 	}
-	if (truncated) {
-		// 成功体超限：按错误归一化，session 由副本存活至本函数结束
-		releaseClaimIfOwned(); // 交换异常结束：释放占用并唤醒等待者
-		return normalizeTransportError(NetTransportError::Other,
-									   "response body exceeds maxResponseBody ("
-										   + std::to_string(_ep.maxResponseBody) + " bytes)");
-	}
-	if (preempted) {
-		releaseClaimIfOwned(); // 交换异常结束：释放占用并唤醒等待者
-		return normalizeTransportError(NetTransportError::Reset, "transport closed while reading response");
-	}
-	releaseClaimIfOwned(); // 交换结束：释放占用并唤醒等待者
-	return {};
 }
 
 bool HttpTransport::alive() const {
@@ -369,22 +476,27 @@ bool HttpTransport::alive() const {
 
 void HttpTransport::close() {
 	std::unique_lock lk(_ioMutex);
-	// 等他人交换收尾至多 5s（超时即占用泄漏——强制回收，close 不得挂死）
+	_ioCv.wait(lk, [this] { return !_closing; });
+	_closing = true;
 	const auto self = std::this_thread::get_id();
-	const bool freeOrMine = !_claimed || _claimOwner == self;
-	const bool acquired = freeOrMine || _ioCv.wait_for(lk, std::chrono::seconds(5),
-													   [this, self] { return !_claimed || _claimOwner == self; });
-	if (!acquired) {
-		_claimed = false;
-		_claimOwner = std::thread::id{};
+	const bool ready = _ioCv.wait_for(lk, std::chrono::seconds(5),
+		[this, self] { return !_claimed || (_claimOwner == self && !_callActive); });
+	if (!ready) {
+		// Abort the old session, but do not publish a free lease while old I/O still runs.
+		lk.unlock();
+		dropSession();
+		lk.lock();
+		_ioCv.wait(lk, [this] { return !_callActive; });
 	}
+	_claimed = false;
+	_claimOwner = {};
 	lk.unlock();
-	dropSession(); // 自持锁：abort 中断仍在进行的读（读方副本保活 session）
-	{
-		std::lock_guard lk2(_ioMutex);
-		_failed = false;
-		_connectError = {};
-	}
+	dropSession();
+	lk.lock();
+	_failed = false;
+	_connectError = {};
+	_closing = false;
+	lk.unlock();
 	_ioCv.notify_all();
 }
 
@@ -406,8 +518,8 @@ Payload HttpTransport::readBody(std::istream& rs, size_t limit, bool* truncated)
 			}
 			out.append(buffer, got);
 		}
-		if (!rs)
-			break; // eof/fail：读取结束
+		if (rs.bad() || (rs.fail() && !rs.eof())) throw std::runtime_error("response stream failure");
+		if (rs.eof()) break;
 	}
 	return out;
 }

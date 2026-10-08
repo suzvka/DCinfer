@@ -93,8 +93,9 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 	const auto epConnectTimeout = desc.connectTimeout;
 	const auto epRequestTimeout = desc.requestTimeout;
 	const int epMaxRetries = desc.maxRetries;
+	const bool allowInsecureCredentials = desc.allowInsecureCredentials;
 	ed.createEngine = [engineType, transportFactory, codec, epAuthToken, epHeaders,
-					   epConnectTimeout, epRequestTimeout, epMaxRetries](const std::string& modelPath) -> EngineInstance {
+					   epConnectTimeout, epRequestTimeout, epMaxRetries, allowInsecureCredentials](const std::string& modelPath) -> EngineInstance {
 		if (!transportFactory)
 			throw NodeException(NodeException::ErrorType::InternalError, "DCNet",
 								"engine '" + engineType + "' has no transportFactory");
@@ -103,6 +104,7 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 			throw NodeException(NodeException::ErrorType::InternalError, "DCNet",
 								"engine '" + engineType + "' transportFactory returned null");
 		NetEndpoint ep = NetEndpoint::parse(modelPath);
+		ep.allowInsecureCredentials = allowInsecureCredentials;
 		if (codec)
 			ep.requestPath = codec->requestPath(); // 协议子路径（如 /infer）注入端点
 		if (!epAuthToken.empty())
@@ -118,7 +120,7 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 		NetError err = transport->connect(ep);
 		if (!err.ok())
 			throw NodeException(NodeException::ErrorType::ExecutionFailed, "DCNet",
-								"connect " + ep.endpoint() + " failed: " + err.localMessage);
+								"connect failed: " + err.localMessage);
 		return EngineInstance(std::move(transport));
 	};
 

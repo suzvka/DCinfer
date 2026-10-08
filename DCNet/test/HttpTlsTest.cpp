@@ -19,9 +19,8 @@
 //     单线程服务器被 probe 杀死后，后续用例误报
 //   - caLocation 必须传文件路径：OpenSSL 目录模式要求 hash 命名，普通文件名
 //     找不到 → 信任锚静默无效
-// 注：Windows SChannel（NetSSL_Win）后端的证书加载 API 不同，本测试首版
-// 仅覆盖 OpenSSL 后端（CI 的 DCNet job 在 Ubuntu 运行）；Windows 侧人工验证。
-#if !defined(_WIN32)
+// Windows uses native SChannel with a short-lived self-signed CA/server certificate.
+// Trust is scoped to Context::addTrustedCert (memory only), never the system ROOT store.
 
 #include "DCNet/NetEndpoint.h"
 #include "DCNet/NetError.h"
@@ -40,6 +39,19 @@
 #include <fstream>
 #include <string>
 #include <thread>
+
+#include <Poco/Net/X509Certificate.h>
+#include <Poco/UUIDGenerator.h>
+#include <atomic>
+#include <memory>
+#include <stdexcept>
+#include <vector>
+#if defined(_WIN32)
+#include <Poco/Delegate.h>
+#include <Poco/Net/VerificationErrorArgs.h>
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "advapi32.lib")
+#endif
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -114,11 +126,176 @@ void writePemFile(const std::filesystem::path& path, const char* pem) {
 	ofs << pem;
 }
 
+#if defined(_WIN32)
+// Observe POCO's verification event without changing its decision. Transport
+// errors intentionally redact diagnostics, so public error text is not evidence
+// that a rejection came from certificates rather than a reset or refused TCP.
+class VerificationObserver {
+public:
+	VerificationObserver() {
+		Poco::Net::SSLManager::instance().ClientVerificationError +=
+			Poco::delegate(this, &VerificationObserver::onError);
+	}
+	~VerificationObserver() {
+		Poco::Net::SSLManager::instance().ClientVerificationError -=
+			Poco::delegate(this, &VerificationObserver::onError);
+	}
+	bool untrusted = false;
+	bool hostname = false;
+private:
+	void onError(const void*, Poco::Net::VerificationErrorArgs& args) {
+		untrusted = untrusted || args.errorMessage() == "Certificate Authority not trusted";
+		hostname = hostname || args.errorMessage() == "The certificate host names do not match the server host name";
+		// Deliberately do not setIgnoreError: this is an observer, never a bypass.
+	}
+};
+
+// POCO's PFX loader persists private keys (it does not use PKCS12_NO_PERSIST_KEY).
+// Record the imported container and delete only that fixture-owned key after the
+// server/context have released it. Certificates and trust stores stay in memory.
+class NativeTlsFixture {
+public:
+	NativeTlsFixture() {
+		const auto id = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
+		_dir = std::filesystem::temp_directory_path() / ("dcnet_tls_" + id);
+		_keyName = L"dcnet_tls_" + std::wstring(id.begin(), id.end());
+	}
+	~NativeTlsFixture() {
+		if (_cert) CertFreeCertificateContext(_cert);
+		if (_key) CryptDestroyKey(_key);
+		if (_provider) CryptReleaseContext(_provider, 0);
+		if (!_importedName.empty() && _importedName != _keyName)
+			deleteKey(_importedName, _importedProvider, _importedType);
+		if (_createdKey) deleteKey(_keyName, MS_ENH_RSA_AES_PROV_W, PROV_RSA_AES);
+		std::error_code ec;
+		// Unique directory created by this fixture; never remove a shared temp path.
+		if (_createdDir) std::filesystem::remove_all(_dir, ec);
+		CHECK(!ec, "remove native TLS fixture directory");
+	}
+	void create() {
+		_createdDir = std::filesystem::create_directory(_dir);
+		require(_createdDir, "create unique fixture directory");
+		require(CryptAcquireContextW(&_provider, _keyName.c_str(), MS_ENH_RSA_AES_PROV_W,
+			PROV_RSA_AES, CRYPT_NEWKEYSET), "create fixture key container");
+		_createdKey = true;
+		require(CryptGenKey(_provider, AT_KEYEXCHANGE, (2048 << 16) | CRYPT_EXPORTABLE, &_key),
+			"generate RSA key");
+		DWORD size = 0;
+		require(CertStrToNameW(X509_ASN_ENCODING, L"CN=localhost", CERT_X500_NAME_STR,
+			nullptr, nullptr, &size, nullptr), "size subject");
+		std::vector<BYTE> subject(size);
+		require(CertStrToNameW(X509_ASN_ENCODING, L"CN=localhost", CERT_X500_NAME_STR,
+			nullptr, subject.data(), &size, nullptr), "encode subject");
+		CERT_NAME_BLOB name{size, subject.data()};
+		CERT_ALT_NAME_ENTRY dns{};
+		dns.dwAltNameChoice = CERT_ALT_NAME_DNS_NAME;
+		dns.pwszDNSName = const_cast<wchar_t*>(L"localhost");
+		CERT_ALT_NAME_INFO san{1, &dns};
+		CERT_BASIC_CONSTRAINTS2_INFO ca{};
+		ca.fCA = TRUE;
+		auto sanBytes = encode(X509_ALTERNATE_NAME, &san);
+		auto caBytes = encode(X509_BASIC_CONSTRAINTS2, &ca);
+		CERT_EXTENSION extensions[] = {
+			{const_cast<char*>(szOID_SUBJECT_ALT_NAME2), FALSE,
+				{static_cast<DWORD>(sanBytes.size()), sanBytes.data()}},
+			{const_cast<char*>(szOID_BASIC_CONSTRAINTS2), TRUE,
+				{static_cast<DWORD>(caBytes.size()), caBytes.data()}}
+		};
+		CERT_EXTENSIONS ext{2, extensions};
+		CRYPT_KEY_PROV_INFO keyInfo{};
+		keyInfo.pwszContainerName = const_cast<wchar_t*>(_keyName.c_str());
+		keyInfo.pwszProvName = const_cast<wchar_t*>(MS_ENH_RSA_AES_PROV_W);
+		keyInfo.dwProvType = PROV_RSA_AES;
+		keyInfo.dwKeySpec = AT_KEYEXCHANGE;
+		CRYPT_ALGORITHM_IDENTIFIER algorithm{};
+		algorithm.pszObjId = const_cast<char*>(szOID_RSA_SHA256RSA);
+		FILETIME now;
+		GetSystemTimeAsFileTime(&now);
+		ULARGE_INTEGER ticks{};
+		ticks.LowPart = now.dwLowDateTime; ticks.HighPart = now.dwHighDateTime;
+		const auto center = ticks.QuadPart;
+		SYSTEMTIME from{}, until{};
+		ticks.QuadPart = center - 24ULL * 60 * 60 * 10000000;
+		FILETIME ft{ticks.LowPart, ticks.HighPart};
+		require(FileTimeToSystemTime(&ft, &from), "certificate start time");
+		ticks.QuadPart = center + 7ULL * 24 * 60 * 60 * 10000000;
+		ft = {ticks.LowPart, ticks.HighPart};
+		require(FileTimeToSystemTime(&ft, &until), "certificate end time");
+		_cert = CertCreateSelfSignCertificate(_provider, &name, 0, &keyInfo,
+			&algorithm, &from, &until, &ext);
+		require(_cert != nullptr, "create localhost self-signed CA");
+		HCERTSTORE store = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, 0, nullptr);
+		require(store != nullptr, "create export memory store");
+		try {
+			require(CertAddCertificateContextToStore(store, _cert, CERT_STORE_ADD_ALWAYS, nullptr),
+				"add export certificate");
+			CRYPT_DATA_BLOB blob{};
+			require(PFXExportCertStoreEx(store, &blob, L"", nullptr, EXPORT_PRIVATE_KEYS | REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY), "size PFX");
+			std::vector<BYTE> pfx(blob.cbData);
+			blob.pbData = pfx.data();
+			require(PFXExportCertStoreEx(store, &blob, L"", nullptr, EXPORT_PRIVATE_KEYS | REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY), "export PFX");
+			std::ofstream file(pfxPath(), std::ios::binary);
+			file.write(reinterpret_cast<const char*>(pfx.data()), blob.cbData);
+			require(file.good(), "write PFX fixture");
+		} catch (...) { CertCloseStore(store, 0); throw; }
+		CertCloseStore(store, 0);
+	}
+	std::filesystem::path pfxPath() const { return _dir / "server.pfx"; }
+	Poco::Net::X509Certificate certificate() const { return Poco::Net::X509Certificate(_cert, true); }
+	void recordImportedKey(PCCERT_CONTEXT cert) {
+		DWORD size = 0;
+		require(CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, nullptr, &size), "size imported key info");
+		std::vector<BYTE> bytes(size);
+		require(CertGetCertificateContextProperty(cert, CERT_KEY_PROV_INFO_PROP_ID, bytes.data(), &size), "read imported key info");
+		const auto* info = reinterpret_cast<const CRYPT_KEY_PROV_INFO*>(bytes.data());
+		_importedName = info->pwszContainerName;
+		_importedProvider = info->pwszProvName;
+		_importedType = info->dwProvType;
+		require(!(info->dwFlags & CRYPT_MACHINE_KEYSET) && _importedType != 0,
+			"fixture import must use user-scoped CryptoAPI key");
+	}
+private:
+	static void require(bool ok, const char* what) {
+		if (!ok) throw std::runtime_error(std::string(what) + " (Win32=" + std::to_string(GetLastError()) + ")");
+	}
+	static std::vector<BYTE> encode(LPCSTR type, const void* value) {
+		DWORD size = 0;
+		require(CryptEncodeObjectEx(X509_ASN_ENCODING, type, value, 0, nullptr, nullptr, &size), "size extension");
+		std::vector<BYTE> bytes(size);
+		require(CryptEncodeObjectEx(X509_ASN_ENCODING, type, value, 0, nullptr, bytes.data(), &size), "encode extension");
+		return bytes;
+	}
+	static void deleteKey(const std::wstring& name, const std::wstring& provider, DWORD type) {
+		HCRYPTPROV unused = 0;
+		CHECK(CryptAcquireContextW(&unused, name.c_str(), provider.c_str(), type, CRYPT_DELETEKEYSET),
+			"delete fixture-owned private key container");
+	}
+	std::filesystem::path _dir;
+	std::wstring _keyName, _importedName, _importedProvider;
+	DWORD _importedType = 0;
+	HCRYPTPROV _provider = 0;
+	HCRYPTKEY _key = 0;
+	PCCERT_CONTEXT _cert = nullptr;
+	bool _createdKey = false;
+	bool _createdDir = false;
+};
+#endif
+
 /// 单连接 HTTPS mock 服务：SecureServerSocket + 简单回显（POST body → JSON）。
 class MockHttpsServer {
 public:
 	bool start() {
 		try {
+#if defined(_WIN32)
+			_fixture.create();
+			Poco::Net::Context::Ptr sctx(new Poco::Net::Context(
+				Poco::Net::Context::TLS_SERVER_USE, _fixture.pfxPath().string(),
+				Poco::Net::Context::VERIFY_NONE,
+				Poco::Net::Context::OPT_LOAD_CERT_FROM_FILE | Poco::Net::Context::OPT_USE_STRONG_CRYPTO));
+			const auto cert = sctx->certificate();
+			_fixture.recordImportedKey(cert.system());
+			sctx->requireMinimumProtocol(Poco::Net::Context::PROTO_TLSV1_2);
+#else
 			const auto dir = std::filesystem::temp_directory_path() / "dcnet_tls_test";
 			std::filesystem::create_directories(dir);
 			writePemFile(dir / "cert.pem", kCertPem);
@@ -126,37 +303,43 @@ public:
 			Poco::Net::Context::Ptr sctx(new Poco::Net::Context(
 				Poco::Net::Context::SERVER_USE, (dir / "key.pem").string(),
 				(dir / "cert.pem").string(), "", Poco::Net::Context::VERIFY_NONE));
-			// 双栈监听：host="localhost" 可能解析为 ::1 或 127.0.0.1，仅绑 IPv4 时
-			// ::1 拒连会被测试误判为“拒证书成功”（假阳性）；Linux 默认 dual-stack
-			_socket = std::make_unique<Poco::Net::SecureServerSocket>(
-				Poco::Net::SocketAddress("[::]:0"), 16, sctx);
+#endif
+			// Explicit dual-stack binding is required on Windows as well: localhost
+			// may resolve to either family. Keep all fixture traffic on loopback.
+			_socket = std::make_unique<Poco::Net::SecureServerSocket>(sctx);
+			_socket->bind6(Poco::Net::SocketAddress("[::]:0"), true, false);
+			_socket->listen(16);
 			_port = static_cast<int>(_socket->address().port());
 			_stop = false;
 			_thread = std::thread([this] { run(); });
 			return _port > 0;
-		} catch (...) {
+		} catch (const std::exception& e) {
+			std::printf("HTTPS fixture setup failed: %s\n", e.what());
 			return false;
 		}
 	}
 
+	~MockHttpsServer() { stop(); }
+#if defined(_WIN32)
+	Poco::Net::X509Certificate certificate() const { return _fixture.certificate(); }
+#endif
+
 	void stop() {
 		_stop = true;
-		if (_thread.joinable()) {
-			try {
-				_socket->close();
-			} catch (...) {
-			}
-			_thread.join();
-		}
+		if (_thread.joinable()) _thread.join();
+		_socket.reset();
 	}
 
 	int port() const { return _port; }
+	std::size_t receivedBytes() const { return _receivedBytes.load(); }
 
 private:
 	void run() {
 		while (!_stop) {
 			Poco::Net::StreamSocket c;
 			try {
+				if (!_socket->poll(Poco::Timespan(100000), Poco::Net::Socket::SELECT_READ))
+					continue;
 				c = _socket->acceptConnection();
 			} catch (...) {
 				// 主动关闭（stop）→ 退出；客户端侧握手失败/裸 TCP probe（
@@ -170,7 +353,7 @@ private:
 		}
 	}
 
-	static void serve(Poco::Net::StreamSocket& c) {
+	void serve(Poco::Net::StreamSocket& c) {
 		try {
 			c.setReceiveTimeout(Poco::Timespan(5, 0));
 			c.setSendTimeout(Poco::Timespan(5, 0));
@@ -178,6 +361,7 @@ private:
 			char buf[4096];
 			int n;
 			while ((n = c.receiveBytes(buf, sizeof(buf))) > 0) {
+				_receivedBytes += static_cast<std::size_t>(n);
 				req.append(buf, static_cast<size_t>(n));
 				const size_t headerEnd = req.find("\r\n\r\n");
 				if (headerEnd == std::string::npos)
@@ -213,27 +397,34 @@ private:
 		}
 	}
 
+#if defined(_WIN32)
+	NativeTlsFixture _fixture; // destroyed after the server socket/context
+#endif
 	int _port = -1;
 	std::atomic<bool> _stop{false};
+	std::atomic<std::size_t> _receivedBytes{0};
 	std::thread _thread;
 	std::unique_ptr<Poco::Net::SecureServerSocket> _socket;
 };
 
 } // namespace
 
-int main() {
+int runTests() {
+#if defined(_WIN32)
+	VerificationObserver verification;
+#endif
 	MockHttpsServer server;
 	if (!server.start()) {
-		std::printf("SKIP: HTTPS mock server failed to start\n");
-		return 0;
+		std::printf("FAIL: HTTPS mock server failed to start\n");
+		return 1;
 	}
 
 	const std::string localhostEp = "https://localhost:" + std::to_string(server.port()) + "/v1";
 
 	// ── Test 1: 默认兜底上下文拒绝不受信证书 ──
-	// 宿主未初始化 SSLManager → connect 内框架兜底 VERIFY_STRICT（系统 CA，不含
-	// 自签证书）→ connect 仅 TCP 探测即成功（服务器可达），首次 send 触发握手
-	// → 证书校验失败 → Unreachable 家族（net:unreachable）
+	// Windows POCO can itself supply a rejecting VERIFY_RELAXED default;
+	// this test intentionally asserts security behavior, not the mode enum.
+	// 自签证书不在系统 CA：connect 仅 TCP 探测成功，send 触发握手拒绝。
 	{
 		HttpTransport t;
 		auto ep = NetEndpoint::parse(localhostEp);
@@ -246,17 +437,34 @@ int main() {
 			CHECK(!err.ok(), "untrusted self-signed cert must be rejected by default strict context");
 			CHECK(err.category == NetErrorCategory::Unreachable,
 				  "certificate rejection must normalize to the TLS family (Unreachable)");
+#if defined(_WIN32)
+			CHECK(verification.untrusted,
+				  "untrusted rejection must emit certificate chain validation evidence");
+#endif
 		}
 	}
 
 	// ── Test 2: 宿主自定义信任锚（信任自签 CA）→ hostname 匹配 → 成功 ──
 	{
+#if defined(_WIN32)
+		// No system ROOT access, no verification bypass, no online revocation
+		// requirement for this deliberately offline, short-lived fixture.
+		// NetSSLWin VERIFY_RELAXED still validates both chain and hostname; it
+		// selects POCO's manual validation path, which consults addTrustedCert.
+		// VERIFY_STRICT lets SChannel reject unknown roots before POCO can use
+		// its process-local store (SecureSocketImpl::initCommon).
+		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
+			Poco::Net::Context::TLS_CLIENT_USE, "", Poco::Net::Context::VERIFY_RELAXED,
+			Poco::Net::Context::OPT_USE_STRONG_CRYPTO));
+		ctx->addTrustedCert(server.certificate());
+#else
 		const auto dir = std::filesystem::temp_directory_path() / "dcnet_tls_test";
 		// caLocation 必须是文件路径：OpenSSL 目录模式要求 hash 命名链接，
 		// 普通文件名的证书在目录模式下静默不可见（信任锚无效）
 		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
 			Poco::Net::Context::CLIENT_USE, "", "", (dir / "cert.pem").string(),
 			Poco::Net::Context::VERIFY_STRICT, 9, false));
+#endif
 		Poco::Net::SSLManager::instance().initializeClient(nullptr, nullptr, ctx);
 
 		HttpTransport t;
@@ -276,6 +484,7 @@ int main() {
 	// ── Test 3: hostname 校验被强制（信任证书但 host 与 SAN 不匹配）──
 	// 沿用 Test 2 注册的信任锚上下文（defaultClientContext）：证书受信，
 	// 但 host=127.0.0.1 与 SAN=DNS:localhost 不匹配 → send 时握手失败
+	const auto bytesBeforeMismatch = server.receivedBytes();
 	{
 		HttpTransport t;
 		// 证书仅含 CN=localhost / SAN=DNS:localhost；host=127.0.0.1 → 校验失败
@@ -289,22 +498,29 @@ int main() {
 			CHECK(!err.ok(), "hostname mismatch (127.0.0.1 vs SAN=localhost) must be rejected");
 			CHECK(err.category == NetErrorCategory::Unreachable,
 				  "hostname mismatch must normalize to the TLS family (Unreachable)");
+
 		}
 	}
 
 	server.stop();
-	std::printf("HttpTlsTest: %d checks, %d failures\n", g_checks, g_failures);
+	CHECK(server.receivedBytes() == bytesBeforeMismatch,
+		  "hostname rejection must occur before sending HTTP headers or body");
 	return g_failures == 0 ? 0 : 1;
 }
 
-#else // _WIN32
-
-#include <cstdio>
 int main() {
-	// Windows SChannel（NetSSL_Win）后端的证书加载 API 不同，首版跳过
-	//（见修复计划风险 2）；CI 的 DCNet job 在 Ubuntu/OpenSSL 运行本测试
-	std::printf("SKIP: TLS test targets the OpenSSL backend only\n");
-	return 0;
-}
-
+	int result = 1;
+	try {
+		result = runTests();
+	} catch (const std::exception& e) {
+		std::printf("FAIL: TLS fixture/test exception: %s\n", e.what());
+		++g_failures;
+	}
+#if defined(_WIN32)
+	Poco::Net::SSLManager::instance().initializeClient(nullptr, nullptr, nullptr);
 #endif
+	// runTests has returned: all fixture keys, certificates and temp files have
+	// been cleaned up, so cleanup failures participate in the process result.
+	std::printf("HttpTlsTest: %d checks, %d failures\n", g_checks, g_failures);
+	return result == 0 && g_failures == 0 ? 0 : 1;
+}

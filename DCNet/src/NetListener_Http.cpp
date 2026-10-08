@@ -15,6 +15,7 @@
 
 #include "NodeException.h"
 #include "NetWire.h"
+#include "NetListenerLifecycle.h"
 
 #include <Poco/Exception.h>
 #include <Poco/Net/ServerSocket.h>
@@ -22,11 +23,13 @@
 #include <Poco/Net/StreamSocket.h>
 #include <Poco/Timespan.h>
 
+#include <cstdio>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <limits>
 #include <cstdlib>
 #include <charconv>
 #include <exception>
@@ -57,6 +60,7 @@ struct RawRequest {
 	std::string method;
 	std::string path;
 	std::string body;
+	std::size_t bodyLength = 0;
 	std::unordered_map<std::string, std::string> headers; // 键小写化
 };
 
@@ -96,9 +100,17 @@ bool isLoopbackHost(const std::string& host) {
 	return lower == "127.0.0.1" || lower == "::1" || lower == "[::1]" || lower == "localhost";
 }
 
+thread_local const void* servingListener = nullptr;
+
 class HttpListener final : public DcNetListener {
 public:
-	~HttpListener() override { stop(); }
+	~HttpListener() override {
+		if (servingListener == this) {
+			std::fputs("DCNet fatal: listener destruction from its handler is forbidden\n", stderr);
+			std::terminate();
+		}
+		stop();
+	}
 
 	void bind(const NetServerEndpoint& endpoint) override {
 		std::lock_guard lk(_mutex);
@@ -128,13 +140,14 @@ public:
 				reject("authToken is blank after 'Bearer ' prefix stripping; configure a real token"
 					   " or leave it empty to disable auth on loopback");
 		}
-		if (!isLoopbackHost(endpoint.listenHost) && endpoint.authToken.empty())
-			reject("non-loopback listen host '" + endpoint.listenHost
-				   + "' requires authToken; server-side TLS is not implemented yet, so"
-					 " an unauthenticated non-loopback listener is refused");
+		if (endpoint.maxRequestBody == 0 || endpoint.maxBufferedBodyBytes == 0)
+			reject("body budgets must be positive");
+		const Poco::Net::SocketAddress resolved(endpoint.listenHost, static_cast<Poco::UInt16>(endpoint.port));
+		if (!resolved.host().isLoopback())
+			reject("plaintext listener requires a resolved loopback address; use a trusted TLS reverse proxy");
 
 		try {
-			_socket.bind(Poco::Net::SocketAddress(endpoint.listenHost, static_cast<Poco::UInt16>(endpoint.port)),
+			_socket.bind(resolved,
 						 false);
 			_socket.listen(endpoint.backlog);
 		} catch (const Poco::Exception& e) {
@@ -147,34 +160,24 @@ public:
 	}
 
 	void start(RequestHandler handler) override {
-		{
-			std::lock_guard lk(_mutex);
-			if (!_bound)
-				throw NodeException(NodeException::ErrorType::InternalError, "DcNetListener::start",
-									"bind() must be called before start()");
-			if (_started.load())
-				throw NodeException(NodeException::ErrorType::InternalError, "DcNetListener::start",
-									"listener already started");
-			_handler = std::move(handler);
-			_stopped.store(false);
-			_started.store(true);
-		}
-		_acceptThread = std::thread([this] { acceptLoop(); });
+		std::lock_guard lifecycle(_lifecycleMutex);
+		std::lock_guard lk(_mutex);
+		if (!_bound || _started.load())
+			throw NodeException(NodeException::ErrorType::InternalError, "DcNetListener::start", "listener not bound or already started");
+		_handler = std::move(handler);
+		detail::launchListenerAccept(_started, _stopped, _handler, _acceptThread,
+			[this] { return std::thread([this] { acceptLoop(); }); });
 	}
 
 	void stop() override {
-		{
-			std::lock_guard lk(_mutex);
-			if (!_started.load() || _stopped.load())
-				return;
-			_stopped.store(true);
-		}
-		try {
-			_socket.close(); // 中断 accept（轮询循环在 50ms 内感知 _stopped）
-		} catch (...) {
-		}
-		if (_acceptThread.joinable())
-			_acceptThread.join();
+		// Check thread identity before any lifecycle lock: external stop may be draining us.
+		if (servingListener == this)
+			throw NodeException(NodeException::ErrorType::InternalError, "DcNetListener::stop", "stop from listener handler is forbidden");
+		std::lock_guard lifecycle(_lifecycleMutex);
+		if (!_started.load()) return;
+		_stopped.store(true);
+		try { _socket.close(); } catch (...) {}
+		if (_acceptThread.joinable()) _acceptThread.join();
 		drainConnections();
 	}
 
@@ -217,7 +220,7 @@ private:
 		std::vector<std::shared_ptr<Poco::Net::StreamSocket>> snapshot;
 		{
 			std::lock_guard lk(_connMutex);
-			snapshot = _conns; // 快照后锁外关闭：不在持锁期间做 syscall
+			for (auto& conn : _conns) if (conn) forceClose(*conn);
 		}
 		for (auto& conn : snapshot)
 			if (conn)
@@ -253,8 +256,7 @@ private:
 				forceClose(*holder); // 连接级过载：不排队、不起线程
 				return nullptr;
 			}
-			_activeThreads.fetch_add(1, std::memory_order_acq_rel); // 起线程前先记账
-			_conns.push_back(holder);
+			detail::registerListenerConnection(_conns, _activeThreads, holder);
 		}
 		return holder;
 	}
@@ -315,12 +317,14 @@ private:
 		// 回收 accept 期登记的存活账；连接收尾从在册集摘除（两者均先于成员访问建立）
 		const ThreadReleaseGuard threadsGuard{_activeThreads};
 		const ConnScope connScope{this, conn};
+		struct IdentityGuard { const void* previous = servingListener; IdentityGuard(const void* p) { servingListener = p; } ~IdentityGuard() { servingListener = previous; } } identity{this};
 		try {
 			conn->setReceiveTimeout(toTimespan(_endpoint.requestTimeout));
 			conn->setSendTimeout(toTimespan(_endpoint.requestTimeout));
 
 			RawRequest req;
-			const int readStatus = readRequest(*conn, req, _endpoint.requestTimeout);
+			const auto deadline = std::chrono::steady_clock::now() + (_endpoint.requestTimeout.count() > 0 ? _endpoint.requestTimeout : kDefaultRequestTimeout);
+			const int readStatus = readRequest(*conn, req, deadline);
 			if (readStatus != 0) {
 				respond(*conn,
 						WireResponse{readStatus, detail::wireErrorBody(readStatus == 413 ? "payload_too_large" : "bad_request",
@@ -328,18 +332,6 @@ private:
 																						 : "malformed HTTP request")});
 				return;
 			}
-
-			// 过载闸门（DESIGN.md §3.6）：请求已完整读入后计数（探测连接不入计），超出在途
-			// 上限立即 wire 429——不排队、不静默丢弃
-			if (_inFlight.fetch_add(1, std::memory_order_acq_rel) + 1 >
-				static_cast<std::size_t>(_endpoint.maxInFlight)) {
-				_inFlight.fetch_sub(1, std::memory_order_acq_rel);
-				respond(*conn, WireResponse{429, detail::wireErrorBody(
-													"overloaded", "server overloaded: in-flight limit reached")});
-				return;
-			}
-			InFlightGuard guard{_inFlight};
-
 			if (req.method != "POST") {
 				respond(*conn, WireResponse{405, detail::wireErrorBody("method_not_allowed", "only POST is supported")});
 				return;
@@ -353,15 +345,45 @@ private:
 				respond(*conn, WireResponse{404, detail::wireErrorBody("not_found", "no such endpoint")});
 				return;
 			}
+			if (_inFlight.fetch_add(1, std::memory_order_acq_rel) + 1 >
+				static_cast<std::size_t>(_endpoint.maxInFlight)) {
+				_inFlight.fetch_sub(1, std::memory_order_acq_rel);
+				respond(*conn, WireResponse{429, detail::wireErrorBody(
+													"overloaded", "server overloaded: in-flight limit reached")});
+				return;
+			}
+			InFlightGuard guard{_inFlight};
+
+			if (req.bodyLength > _endpoint.maxRequestBody) {
+				respond(*conn, WireResponse{413, detail::wireErrorBody("payload_too_large", "request body too large")});
+				return;
+			}
+			bool reserved = false;
+			{
+				std::lock_guard budgetLock(_bodyMutex);
+				if (req.bodyLength <= _endpoint.maxBufferedBodyBytes - _bufferedBodyBytes) {
+					_bufferedBodyBytes += req.bodyLength;
+					reserved = true;
+				}
+			}
+			if (!reserved) {
+				respond(*conn, WireResponse{429, detail::wireErrorBody("overloaded", "body budget exhausted")});
+				return;
+			}
+			struct BodyLease { HttpListener* self; std::size_t bytes; ~BodyLease() { std::lock_guard lk(self->_bodyMutex); self->_bufferedBodyBytes -= bytes; } } bodyLease{this, req.bodyLength};
+			if (!readBody(*conn, req, deadline)) {
+				respond(*conn, WireResponse{400, detail::wireErrorBody("bad_request", "malformed HTTP request")});
+				return;
+			}
 
 			WireResponse resp;
 			try {
 				resp = _handler(req.path, req.body);
 			} catch (const std::exception& e) {
 				// handler 异常不得逃逸出服务线程（不得崩溃），兜底 5xx
-				resp = WireResponse{500, detail::wireErrorBody("server_error", std::string("handler exception: ") + e.what())};
+				resp = WireResponse{500, internalError()};
 			} catch (...) {
-				resp = WireResponse{500, detail::wireErrorBody("server_error", "unknown handler exception")};
+				resp = WireResponse{500, internalError()};
 			}
 			respond(*conn, resp);
 		} catch (...) {
@@ -372,10 +394,8 @@ private:
 	// 读取并解析请求；成功返回 0，否则返回应答的 HTTP 错误状态码（400/413）。
 	// budget 为单请求读总预算：每次 receiveBytes 前把连接 receive 超时收紧到剩余
 	// 时间，慢速滴灌连接到点自行释放线程（与 maxConnections 构成两道防线）。
-	static int readRequest(Poco::Net::StreamSocket& conn, RawRequest& req, std::chrono::milliseconds budget) {
-		const std::chrono::milliseconds total =
-			budget.count() > 0 ? budget : kDefaultRequestTimeout;
-		const auto deadline = std::chrono::steady_clock::now() + total;
+	static int readRequest(Poco::Net::StreamSocket& conn, RawRequest& req,
+		const std::chrono::steady_clock::time_point& deadline) {
 		std::string raw;
 		char buf[4096];
 		int n;
@@ -387,6 +407,8 @@ private:
 			if (n <= 0)
 				return 400;
 			raw.append(buf, static_cast<std::size_t>(n));
+			if (raw.size() > kMaxHeaderBytes)
+				return 400;
 			if (raw.find("\r\n\r\n") != std::string::npos)
 				break;
 		}
@@ -399,7 +421,7 @@ private:
 		const std::string line = raw.substr(0, eol);
 		const std::size_t sp1 = line.find(' ');
 		const std::size_t sp2 = sp1 == std::string::npos ? std::string::npos : line.find(' ', sp1 + 1);
-		if (sp1 == std::string::npos || sp2 == std::string::npos)
+		if (sp1 == std::string::npos || sp2 == std::string::npos || line.substr(sp2 + 1) != "HTTP/1.1")
 			return 400;
 		req.method = line.substr(0, sp1);
 		req.path = line.substr(sp1 + 1, sp2 - sp1 - 1);
@@ -413,6 +435,13 @@ private:
 			const std::size_t colon = raw.find(':', pos);
 			if (colon != std::string::npos && colon < lineEnd) {
 				std::string key = raw.substr(pos, colon - pos);
+				if (key.empty()) return 400;
+				for (unsigned char c : key)
+					if (!std::isalnum(c) && std::string("!#$%&'*+-.^_`|~").find(static_cast<char>(c)) == std::string::npos) return 400;
+				for (std::size_t i = colon + 1; i < lineEnd; ++i) {
+					const auto c = static_cast<unsigned char>(raw[i]);
+					if ((c < 0x20 && c != '\t') || c == 0x7f) return 400;
+				}
 				for (auto& c : key)
 					c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 				std::string value = raw.substr(colon + 1, lineEnd - colon - 1);
@@ -421,15 +450,16 @@ private:
 				auto [it, inserted] = req.headers.emplace(std::move(key), std::move(value));
 				// 重复 Content-Length 拒绝（P2-10）：多值混淆是请求走私的
 				// 经典向量，显式 400 而非首值静默生效
-				if (!inserted && it->first == "content-length")
+				if (!inserted)
 					return 400;
-			}
+			} else return 400;
 			pos = lineEnd + 2;
 		}
 
 		// ④ 请求体：Content-Length（v1 不支持 chunked）。严格解析（P2-10）：
 		// 全串十进制、无符号、无溢出——strtoull 时代 "100abc" 被静默解析为
 		// 100、负数回绕为巨大值（行为安全但语义错），现在一律 400
+		if (req.headers.count("transfer-encoding") || req.headers.count("expect")) return 400;
 		std::size_t bodyLen = 0;
 		if (auto it = req.headers.find("content-length"); it != req.headers.end()) {
 			const std::string& v = it->second;
@@ -437,29 +467,28 @@ private:
 				return 400;
 			unsigned long long parsed = 0;
 			const auto [ptr, ec] = std::from_chars(v.data(), v.data() + v.size(), parsed, 10);
-			if (ec != std::errc() || ptr != v.data() + v.size())
+			if (ec != std::errc() || ptr != v.data() + v.size() || parsed > std::numeric_limits<std::size_t>::max())
 				return 400; // 溢出 / 全串未消费
 			bodyLen = static_cast<std::size_t>(parsed);
 		}
-		if (bodyLen > kMaxBodyBytes)
-			return 413;
+		req.bodyLength = bodyLen;
 		req.body = raw.substr(headerEnd + 4);
-		if (req.body.size() > bodyLen)
-			req.body.resize(bodyLen);
-		while (req.body.size() < bodyLen) {
-			if (!armRemainingBudget(conn, deadline))
-				return 400; // 读预算耗尽（慢速滴灌请求体）
-			n = conn.receiveBytes(buf, sizeof(buf));
-			if (n <= 0)
-				return 400;
-			req.body.append(buf, static_cast<std::size_t>(n));
-			if (req.body.size() > bodyLen)
-				req.body.resize(bodyLen);
-		}
+		if (req.body.size() > bodyLen) return 400;
 		return 0;
 	}
 
-	/// 把连接 receive 超时收紧到剩余读预算；预算耗尽返回 false。
+	static bool readBody(Poco::Net::StreamSocket& conn, RawRequest& req,
+		const std::chrono::steady_clock::time_point& deadline) {
+		char buf[4096];
+		while (req.body.size() < req.bodyLength) {
+			if (!armRemainingBudget(conn, deadline)) return false;
+			const int n = conn.receiveBytes(buf, static_cast<int>(std::min(sizeof(buf), req.bodyLength - req.body.size())));
+			if (n <= 0) return false;
+			req.body.append(buf, static_cast<std::size_t>(n));
+		}
+		return true;
+	}
+
 	static bool armRemainingBudget(Poco::Net::StreamSocket& conn,
 								   const std::chrono::steady_clock::time_point& deadline) {
 		const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -509,6 +538,15 @@ private:
 		}
 	}
 
+	std::string internalError() {
+		const auto id = "dcnet-" + std::to_string(_errorSeq.fetch_add(1));
+		if (_endpoint.diagnosticSink) { try { _endpoint.diagnosticSink(id + " internal server error stage=handler_exception"); } catch (...) {} }
+		return detail::wireErrorBody("server_error", "internal server error; correlation=" + id);
+	}
+	std::atomic<unsigned long long> _errorSeq{0};
+	std::mutex _lifecycleMutex;
+	std::mutex _bodyMutex;
+	std::size_t _bufferedBodyBytes = 0;
 	NetServerEndpoint _endpoint;
 	Poco::Net::ServerSocket _socket;
 	RequestHandler _handler;

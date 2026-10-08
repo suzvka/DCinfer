@@ -2,6 +2,7 @@
 
 #include "NetTransport.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <iosfwd>
 #include <memory>
@@ -63,7 +64,7 @@ private:
 	/// 领取交换权（阻塞直到无人在交换）；同一线程已有遗留占用先回收再领。
 	void acquireClaim();
 	/// 释放交换权（仅当本线程持有时），并唤醒等待者。
-	void releaseClaimIfOwned();
+	void finishCall(bool releaseClaim);
 
 	/// 交换权 RAII 收尾：作用域结束默认释放；send 成功路径 dismiss() 把占用
 	/// 延续给 recv（跨调用租约）。
@@ -71,8 +72,7 @@ private:
 		HttpTransport* self;
 		bool release = true;
 		~ClaimScope() {
-			if (release)
-				self->releaseClaimIfOwned();
+			self->finishCall(release);
 		}
 		void dismiss() { release = false; }
 	};
@@ -80,6 +80,8 @@ private:
 	NetEndpoint _ep;
 	mutable std::mutex _ioMutex;                    ///< 保护下列可变状态 + 交换权登记
 	std::condition_variable _ioCv;                  ///< 交换权释放时唤醒等待者
+	bool _closing = false;
+	bool _callActive = false;
 	bool _claimed = false;                          ///< 一次交换进行中（connect/send→recv/close）
 	std::thread::id _claimOwner{};                  ///< 交换权持有线程（同线程重入回收依据）
 	/// 会话（shared_ptr：交换中途被 close/析构强收时，交换方持有的本地
@@ -88,9 +90,10 @@ private:
 	/// 挂起的响应流（send → recv 之间有效；指向 session 内部流，仅在
 	/// 交换权持有期间访问——跨线程收尾方（close/析构）经 _ioMutex 置空）
 	std::istream* _response = nullptr;
+	long long _responseLength = -1;
 	std::string _basePath;                          ///< 端点 basePath（不含 requestPath）
 	bool _useTls = false;
-	bool _failed = false;
+	std::atomic<bool> _failed{false};
 	NetError _connectError; ///< connect 失败的归一化错误（send 未连接时复现）
 };
 

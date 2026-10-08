@@ -38,6 +38,8 @@ struct DcNetListener {
 	/// 后强制关闭在册连接（把阻塞在读/写上的线程立即放倒）→ 等其全部退出。
 	/// 因此本函数返回即蕴含：无任何工作线程再持有监听器状态（不存在"线程存活而
 	/// 对象已析构"的窗口），紧随其后的析构安全。重复调用安全。
+	/// All concurrent callers wait for complete drain. Handler calls to stop throw before
+	/// lifecycle locks. Destroying the listener/service from its handler is forbidden.
 	virtual void stop() = 0;
 
 	/// @brief 服务端健康镜像（对端 alive() 的镜像语义）。

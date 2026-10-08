@@ -11,6 +11,7 @@
 #include "NodeException.h"
 #include "NetWire.h"
 
+#include <cstdio>
 #include <atomic>
 #include <cstdint>
 #include <exception>
@@ -59,6 +60,14 @@ public:
 		: _reg(reg), _engineType(std::move(desc.engineType)), _localModelRef(std::move(desc.localModelRef)),
 		  _codec(std::move(desc.codec)), _endpoint(desc.endpoint) {}
 
+	~ServerService() override {
+		try { stop(); }
+		catch (...) {
+			std::fputs("DCNet fatal: service destruction from its handler is forbidden\n", stderr);
+			std::terminate();
+		}
+	}
+
 	void launch() {
 		_listener = makeHttpListener();
 		_listener->bind(_endpoint); // 配置期出口（ADR-7）：失败抛 NodeException
@@ -91,7 +100,7 @@ private:
 				inputs = _codec->decodeRequest(body);
 			} catch (const std::exception& e) {
 				return {415, detail::wireErrorBody("malformed_frame",
-												   std::string("request payload not parseable: ") + e.what())};
+												   "request payload not parseable")};
 			}
 
 			// ② 每请求一个节点实例（ADR-7：实例级隔离）；引擎实例由
@@ -101,10 +110,10 @@ private:
 			try {
 				node = _reg.createNode(_engineType, taskId, _localModelRef);
 			} catch (const std::exception& e) {
-				return {500, detail::wireErrorBody("server_error", std::string("createNode failed: ") + e.what())};
+				return {500, internalError("create_node_failed")};
 			}
 			if (!node)
-				return {500, detail::wireErrorBody("server_error", "engine '" + _engineType + "' unavailable")};
+				return {500, internalError("engine_unavailable")};
 
 			// ③ 输入边界 schema 校验（DESIGN.md §6.1：schema 违例 → InvalidInput）
 			std::string reason;
@@ -137,10 +146,10 @@ private:
 					case NodeException::ErrorType::TypeMismatch:
 						return {400, detail::wireErrorBody("invalid_input", e.what())};
 					default:
-						return {500, detail::wireErrorBody("server_error", e.what())};
+						return {500, internalError("execute_failed")};
 					}
 				} catch (const std::exception& e) {
-					return {500, detail::wireErrorBody("server_error", std::string("execute failed: ") + e.what())};
+					return {500, internalError("execute_failed")};
 				}
 				if (result.ok())
 					outputs = exec.collectOutputTensors(taskId);
@@ -148,6 +157,7 @@ private:
 			}
 
 			// ④ 本地执行失败 → wire 逆向映射（DESIGN.md §6.1；语义一致性）
+			if (!result.ok() && wireHttpStatusFor(result.status) >= 500) return {500, internalError("execute_failed")};
 			if (!result.ok())
 				return {wireHttpStatusFor(result.status),
 						detail::wireErrorBody(wireCodeFor(result.status), result.message)};
@@ -156,15 +166,21 @@ private:
 			try {
 				return {200, _codec->encodeResponse(outputs)};
 			} catch (const std::exception& e) {
-				return {500, detail::wireErrorBody("server_error", std::string("encode response failed: ") + e.what())};
+				return {500, internalError("encode_response_failed")};
 			}
 		} catch (const std::exception& e) {
-			return {500, detail::wireErrorBody("server_error", e.what())};
+			return {500, internalError("execute_failed")};
 		} catch (...) {
-			return {500, detail::wireErrorBody("server_error", "unknown server error")};
+			return {500, internalError("execute_failed")};
 		}
 	}
 
+	std::string internalError(const char* stage) {
+		const auto id = "dcnet-service-" + std::to_string(_errorSeq.fetch_add(1));
+		if (_endpoint.diagnosticSink) { try { _endpoint.diagnosticSink(id + " internal server error stage=" + stage); } catch (...) {} }
+		return detail::wireErrorBody("server_error", "internal server error; correlation=" + id);
+	}
+	std::atomic<unsigned long long> _errorSeq{0};
 	EngineRegistry& _reg;
 	std::string _engineType;
 	std::string _localModelRef;

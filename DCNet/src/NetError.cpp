@@ -49,6 +49,16 @@ const std::unordered_map<std::string, NetErrorCategory>& knownRemoteCodes() {
 } // namespace
 
 NetError finalize(NetError e) {
+	auto bounded = [](const std::string& text) {
+		std::string safe;
+		for (unsigned char c : text) {
+			if (safe.size() >= 512) { safe += "..."; break; }
+			safe += (c < 0x20 || c == 0x7f) ? '?' : static_cast<char>(c);
+		}
+		return safe;
+	};
+	e.code = bounded(e.code);
+	e.remoteDetail = bounded(e.remoteDetail);
 	switch (e.category) {
 	case NetErrorCategory::None:
 		e.localStatus = Node::Status::Ok;
