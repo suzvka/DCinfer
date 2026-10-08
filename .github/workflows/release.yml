@@ -6,8 +6,8 @@
 #   - SPDX SBOM（syft，扫描最终 Core+DCIr 安装树；Linux 路径生成）
 #   - build provenance attestation（actions/attest-build-provenance，SLSA v1）
 #
-# 依赖仓库设置：master/main 分支保护 + required checks（ci.yml 通过后 tag
-# 才可信）。本 workflow 需要写权限发布 release 与 id-token 生成 attestation。
+# Fail-closed exact-SHA CI gate below is independent of branch/tag protection.
+# Archive metadata is normalized; binary reproducibility still requires clean-build comparison.
 name: Release
 
 on:
@@ -18,8 +18,45 @@ permissions:
   contents: read
 
 jobs:
+  ci-gate:
+    name: Exact tag SHA CI gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Resolve tag and require successful CI for that commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_sha="$(git rev-parse 'HEAD^{commit}')"
+          test "$tag_sha" = "$GITHUB_SHA"
+          # Fail-closed：整条 ci.yml（含全部 job）必须在该 SHA 的 master/main
+          # push 上成功——查询 workflow 本身而非调用方指定的 check 名，新增
+          # job 自动纳入门禁；API 不可达/无 run/未完成/失败/取消一律拒绝。
+          result="$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$tag_sha&event=push&per_page=100" \
+            --jq '[.workflow_runs[]
+                   | select(.head_branch == "master" or .head_branch == "main")]
+                  | if length == 0 then "none"
+                    else (max_by([.run_number, (.run_attempt // 1)])
+                          | "\(.status)/\(.conclusion) \(.html_url)")
+                    end')"
+          echo "CI gate: $result"
+          case "$result" in
+            completed/success*) echo "Verified CI for exact tag SHA $tag_sha" ;;
+            *) echo "::error::No successful main/master push CI run for exact tag SHA $tag_sha (got: $result)"; exit 1 ;;
+          esac
+
   build:
     name: Build & verify (${{ matrix.os }})
+    needs: ci-gate
+    timeout-minutes: 90
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -32,9 +69,11 @@ jobs:
           - os: ubuntu-24.04
             preset: sdk-release
             pkg: tar.gz
-          - os: windows-latest
+            triplet: x64-linux
+          - os: windows-2022
             preset: sdk-release
             pkg: zip
+            triplet: x64-windows
     outputs:
       version: ${{ steps.meta.outputs.version }}
     steps:
@@ -71,16 +110,34 @@ jobs:
       - name: Setup MSVC environment
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+          toolset: '14.44'
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-13 pkg-config
+
+      - name: Pin CMake toolchain
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12.4'
+      - run: python -m pip install cmake==3.31.6
+
+      - name: Set source epoch and toolchain options
+        shell: bash
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Linux ]; then echo "CXX=g++-13" >> "$GITHUB_ENV"; fi
 
       - name: Configure (Release preset, includes DCIr)
-        run: cmake --preset ${{ matrix.preset }}
+        run: cmake --preset ${{ matrix.preset }} -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
 
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --config Release
 
-      # sdk-release intentionally disables tests; the full matrix is covered by ci.yml.
-      - name: Verify SDK CTest registration
-        run: ctest --test-dir build/${{ matrix.preset }} -C Release --show-only
+      - name: Execute SDK release tests (not enumeration)
+        run: ctest --test-dir build/${{ matrix.preset }} -C Release --output-on-failure --timeout 120 --no-tests=error
 
       - name: Install to prefix
         run: cmake --install build/${{ matrix.preset }} --prefix "${{ github.workspace }}/install-prefix"
@@ -100,7 +157,7 @@ jobs:
             echo 'SDK install tree contains an engine adapter artifact' >&2
             exit 1
           fi
-          cmake -S examples/install_smoke -B build/install-smoke \
+          cmake -S examples/install_smoke -B build/install-smoke -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$PWD/install-prefix" \
             -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/vcpkg-toolchain.cmake" \
@@ -108,7 +165,7 @@ jobs:
             -DSMOKE_WITH_IR=ON -DSMOKE_SDK=ON \
             -DSMOKE_EXPECT_VERSION="${{ steps.meta.outputs.version }}"
           cmake --build build/install-smoke --config Release
-          if [ "${RUNNER_OS}" = "Windows" ]; then build/install-smoke/Release/install_smoke.exe; else build/install-smoke/install_smoke; fi
+          if [ "${RUNNER_OS}" = "Windows" ]; then build/install-smoke/install_smoke.exe; else build/install-smoke/install_smoke; fi
 
       # SBOM：明确扫描最终 SDK 安装树（必须在打包移动目录前执行）
       - name: Generate SDK install-tree SBOM
@@ -121,16 +178,65 @@ jobs:
           upload-artifact: false
           output-file: sbom-scan.json
 
-      - name: Package install tree
+      - name: Compare second clean SDK build (record every difference)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          # Distinct empty build/install directories; dependency downloads/cache
+          # are shared, so this is not an independent dependency rebuild.
+          test ! -e build/sdk-release-second
+          test ! -e install-prefix-second
+          cmake --preset sdk-release -B build/sdk-release-second -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
+          cmake --build build/sdk-release-second --config Release
+          ctest --test-dir build/sdk-release-second -C Release --output-on-failure --timeout 120 --no-tests=error
+          cmake --install build/sdk-release-second --prefix "$PWD/install-prefix-second"
+          # 记录两份安装树的逐文件 SHA256 清单差异（证据随产物归档）。差异
+          # 不阻断发布——静态库的编译期嵌入差异（时间戳/路径等）为已知现象；
+          # 本步骤如实记录每一处差异，不宣称二进制可重现。
+          obs="reproducibility-${RUNNER_OS,,}"
+          ( cd install-prefix && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$obs.sha256.a"
+          ( cd install-prefix-second && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$obs.sha256.b"
+          if diff -u "$obs.sha256.a" "$obs.sha256.b" > "$obs.diff"; then
+            echo "Second clean build matches at file level."
+          else
+            echo "Documented differences recorded in $obs.diff"
+          fi
+
+      - name: Record toolchain and package with normalized metadata
+        shell: bash
+        run: |
+          set -euo pipefail
           NAME="dcinfer-${{ steps.meta.outputs.version }}-${RUNNER_OS,,}-x64"
           mv install-prefix "$NAME"
-          if [ "${{ matrix.pkg }}" = "tar.gz" ]; then
-            tar -czf "$NAME.tar.gz" "$NAME"
+          # 工具链与输入记录（随包分发）
+          {
+            echo "name: $NAME"
+            echo "source_date_epoch: $SOURCE_DATE_EPOCH"
+            echo "triplet: ${{ matrix.triplet }}"
+            echo "runner: $RUNNER_OS"
+            cmake --version | head -n 1
+            if [ "$RUNNER_OS" = "Linux" ]; then g++-13 --version | head -n 1; fi
+          } > "$NAME/build-metadata.txt"
+          # 规范化归档：条目排序 + 固定 mtime/owner（tar）或统一 mtime（zip），
+          # gzip 不写时间戳。Same install tree packed twice must match — this
+          # validates packaging, NOT two clean compiled SDKs (compiler/PDB/path
+          # drift remains external).
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            pack() { tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner -cf - "$NAME" | gzip -n -9 > "$1"; }
+            pack "$NAME.tar.gz"
+            pack "verify.tar.gz"
+            cmp "$NAME.tar.gz" "verify.tar.gz"
+            rm -f verify.tar.gz
           else
-            7z a "$NAME.zip" "$NAME" >/dev/null
+            SEVENZ="/c/Program Files/7-Zip/7z.exe"
+            test -x "$SEVENZ" || SEVENZ="C:/Program Files/7-Zip/7z.exe"
+            test -x "$SEVENZ" || SEVENZ="$(command -v 7z || true)"
+            test -x "$SEVENZ" || { echo "7-Zip not found" >&2; exit 1; }
+            find "$NAME" -exec touch -d "@$SOURCE_DATE_EPOCH" {} +
+            "$SEVENZ" a -tzip -mx=9 -mtc=off -mta=off "$NAME.zip" "$NAME"
+            "$SEVENZ" a -tzip -mx=9 -mtc=off -mta=off "verify.zip" "$NAME"
+            cmp "$NAME.zip" "verify.zip"
+            rm -f verify.zip
           fi
 
       # Build provenance（SLSA v1 attestation）：绑定本 run 与产物
@@ -150,10 +256,11 @@ jobs:
             dcinfer-*.tar.gz
             dcinfer-*.zip
             sbom-scan.json
+            reproducibility-*
 
   release:
     name: Publish release
-    needs: build
+    needs: [ci-gate, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write # 创建 release 与上传 assets
@@ -181,3 +288,4 @@ jobs:
             dist/dcinfer-*.zip
             dist/SHA256SUMS
             dist/sbom-scan.json
+            dist/reproducibility-*

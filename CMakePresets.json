@@ -158,7 +158,7 @@
     {
       "name": "sdk-release",
       "displayName": "Core + DCIr SDK Release (no engines)",
-      "description": "发布 SDK：DCinfer 核心 + DCIr；明确排除第三方引擎、DCNet、测试与示例",
+      "description": "Core + DCIr Release SDK; build and run tests, exclude engines/DCNet/examples from package",
       "binaryDir": "${sourceDir}/build/sdk-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -166,8 +166,13 @@
         "DCINFER_BUILD_IR": "ON",
         "DCINFER_BUILD_ENGINES": "OFF",
         "DCINFER_BUILD_DCNET": "OFF",
-        "DCINFER_BUILD_TESTS": "OFF",
+        "DCINFER_BUILD_TESTS": "ON",
         "DCINFER_BUILD_EXAMPLES": "OFF"
+      },
+      "generator": "Ninja",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
       }
     },
     {

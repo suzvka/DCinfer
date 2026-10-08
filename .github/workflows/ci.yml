@@ -58,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest]
+        os: [ubuntu-24.04, windows-2022]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -99,15 +99,20 @@ jobs:
           }
 
       - name: Core tests
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 120 --no-tests=error
 
   # ──────────────────────────────────────────────
   # DCNet + OpenAI mock（网络框架与远端适配器，MockHttpServer 真实 HTTP）
   # 时间敏感测试以 --repeat until-fail 加严（Flaky 守护）
   # ──────────────────────────────────────────────
   dcnet-openai:
-    name: DCNet + OpenAI mock
-    runs-on: ubuntu-24.04
+    name: DCNet + OpenAI mock (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -115,13 +120,25 @@ jobs:
           persist-credentials: false
 
       - name: Install build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build g++ pkg-config
 
+      - name: Setup Ninja (Windows)
+        if: runner.os == 'Windows'
+        uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723
+
+      - name: Setup MSVC (Windows x64)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+        with:
+          arch: x64
+
       - name: Configure
         run: >
           cmake -B build -S . -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
           -DDCINFER_BUILD_DCNET=ON
           -DBUILD_ENGINE_BUILTIN=ON
@@ -131,22 +148,23 @@ jobs:
         run: cmake --build build -j
 
       - name: Assert OpenAiEngineTest registered (F11 guard)
+        shell: bash
         run: |
           ctest --test-dir build -N -R "OpenAiEngineTest" | grep -q "OpenAiEngineTest" \
             || { echo "::error::OpenAiEngineTest is not registered (DCINFER_BUILD_TESTS wiring)"; exit 1; }
 
       - name: Test (full suite)
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 120 --no-tests=error
 
       - name: Time-sensitive tests x3 (until-fail)
-        run: ctest --test-dir build -C Release -R "InferGraphTest|GraphOperatorTest" --repeat until-fail:3 --output-on-failure
+        run: ctest --test-dir build -C Release -R "InferGraphTest|GraphOperatorTest" --repeat until-fail:3 --output-on-failure --timeout 120 --no-tests=error
 
   # ──────────────────────────────────────────────
   # Windows / MSVC (Release)
   # ──────────────────────────────────────────────
   msvc-release:
     name: Windows MSVC Release
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -172,7 +190,7 @@ jobs:
       - name: Test
         shell: pwsh
         run: |
-          ctest --test-dir build/msvc-release -C Release --output-on-failure
+          ctest --test-dir build/msvc-release -C Release --output-on-failure --timeout 120 --no-tests=error
 
   # ──────────────────────────────────────────────
   # Linux / GCC (Release)
@@ -201,7 +219,7 @@ jobs:
 
       - name: Test
         run: |
-          ctest --test-dir build/gcc-release -C Release --output-on-failure
+          ctest --test-dir build/gcc-release -C Release --output-on-failure --timeout 120 --no-tests=error
 
   # ──────────────────────────────────────────────
   # Linux / Clang (Release) — bonus cross-compiler check
@@ -230,7 +248,7 @@ jobs:
 
       - name: Test
         run: |
-          ctest --test-dir build/clang-release -C Release --output-on-failure
+          ctest --test-dir build/clang-release -C Release --output-on-failure --timeout 120 --no-tests=error
 
   # ──────────────────────────────────────────────
   # Linux / GCC + ThreadSanitizer — 并发正确性（冻结边界 / 任务生命周期）
@@ -266,14 +284,14 @@ jobs:
         run: >
           ctest --test-dir build-tsan
           -R "FreezeBoundaryTest|GraphOperatorTest|GraphInterfaceTest|InferGraphTest|LoweringTest|TaskLifecycleRegressionTest|ExecutionConcurrencyTest|ThreadPoolTest|ValueSharingTest|FailureClosureTest|ResourceSchedulerTest"
-          --output-on-failure
+          --output-on-failure --timeout 120 --no-tests=error
 
       - name: Freeze-boundary repeated (until-fail x3)
         run: >
           ctest --test-dir build-tsan
           -R "FreezeBoundaryTest"
           --repeat until-fail:3
-          --output-on-failure
+          --output-on-failure --timeout 120 --no-tests=error
 
   # ──────────────────────────────────────────────
   # 安装闭环冒烟（README「引入」路径）：构建 → cmake --install → 独立工程
@@ -297,7 +315,7 @@ jobs:
 
       # 安装树一：core-ir 预设——覆盖 DCinfer 与 DCIr 两个包
       - name: Configure (core-ir preset)
-        run: cmake --preset core-ir
+        run: cmake --preset core-ir -DCMAKE_INSTALL_INCLUDEDIR=inc
 
       - name: Build (core-ir)
         run: cmake --build build/core-ir -j
@@ -310,6 +328,7 @@ jobs:
       - name: Configure (net + builtin)
         run: >
           cmake -B build/core-net -S . -G Ninja
+          -DCMAKE_INSTALL_INCLUDEDIR=inc
           -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
           -DDCINFER_BUILD_DCNET=ON
           -DBUILD_ENGINE_BUILTIN=ON
@@ -393,4 +412,100 @@ jobs:
         run: cmake --build build -j
 
       - name: Test (full suite)
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 120 --no-tests=error
+
+  windows-ort-cpu:
+    name: Windows ORT CPU Release
+    runs-on: windows-2022
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+        with:
+          arch: x64
+      - run: cmake --preset msvc-ort-cpu
+      - run: cmake --build build/msvc-ort-cpu --config Release
+      - name: Required ORT integration test
+        run: ctest --test-dir build/msvc-ort-cpu -C Release -R OnnxEngineTest --output-on-failure --timeout 120 --no-tests=error
+      - run: ctest --test-dir build/msvc-ort-cpu -C Release --output-on-failure --timeout 120 --no-tests=error
+
+  debug-sanitizers:
+    name: Linux Debug ASan + UBSan (core and net)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++ pkg-config
+      - run: >
+          cmake -S . -B build/sanitizers -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
+          -DDCINFER_BUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON -DBUILD_ENGINE_BUILTIN=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+      - run: cmake --build build/sanitizers -j 2
+      - run: ctest --test-dir build/sanitizers --output-on-failure --timeout 120 --no-tests=error
+
+  atomic-32:
+    name: GCC 32-bit atomic probe and core tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-11-multilib
+      - run: >
+          cmake -S . -B build/atomic32 -G Ninja
+          -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_CXX_FLAGS=-m32
+          -DCMAKE_EXE_LINKER_FLAGS=-m32 -DCMAKE_BUILD_TYPE=Debug
+          -DDCINFER_BUILD_ENGINES=OFF -DDCINFER_BUILD_EXAMPLES=OFF
+      - run: cmake --build build/atomic32 -j 2
+      - run: ctest --test-dir build/atomic32 --output-on-failure --timeout 120 --no-tests=error
+
+  minimum-toolchain:
+    name: Minimum toolchain (${{ matrix.cxx }}, CMake 3.17.5)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++-11, clang++-14]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-11 clang-14
+      - run: python3 -m pip install --user cmake==3.17.5
+      # Preset schema v3 needs newer CMake; exercise the advertised minimum via -S/-B.
+      - run: >
+          $HOME/.local/bin/cmake -S . -B build/minimum -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DDCINFER_BUILD_ENGINES=OFF -DDCINFER_BUILD_EXAMPLES=OFF
+      - run: $HOME/.local/bin/cmake --build build/minimum -j 2
+      - run: (cd build/minimum && $HOME/.local/bin/ctest --output-on-failure --timeout 120 --no-tests=error)
+      - name: C++17 parent context remains unchanged
+        run: |
+          mkdir -p build/parent
+          cat > build/parent/CMakeLists.txt <<'CMAKE'
+          cmake_minimum_required(VERSION 3.17)
+          project(Parent LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_REQUIRED_LIBRARIES dcinfer_parent_probe_library_must_not_link)
+          set(CMAKE_REQUIRED_FLAGS "-DPARENT_SENTINEL=1")
+          add_subdirectory(../.. dcinfer)
+          if(NOT CMAKE_CXX_STANDARD EQUAL 17 OR NOT CMAKE_REQUIRED_LIBRARIES STREQUAL "dcinfer_parent_probe_library_must_not_link" OR NOT CMAKE_REQUIRED_FLAGS STREQUAL "-DPARENT_SENTINEL=1")
+            message(FATAL_ERROR "DCinfer changed parent probe context")
+          endif()
+          CMAKE
+          $HOME/.local/bin/cmake -S build/parent -B build/parent-out -G Ninja -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DDCINFER_BUILD_ENGINES=OFF
+          $HOME/.local/bin/cmake --build build/parent-out -j 2
