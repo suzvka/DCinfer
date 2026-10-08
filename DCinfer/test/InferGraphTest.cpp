@@ -1041,6 +1041,105 @@ void testBoundInputOutputApi() {
 }
 
 // ════════════════════════════════════════════
+// 输出取数端口不变量：绑定/声明端口必须是终端端口（无出边）
+// 回归：绑定端口带出边时输出区搬运截走数据 → 下游饿死（任务永久挂起 /
+// 静默跳过下游）；连接器端口不可绑定（无稳定公共坐标）
+// ════════════════════════════════════════════
+
+void testOutputRetrievalPortsMustBeTerminal() {
+	TEST("output ports must be terminal: bound/declared ports with out-edges are rejected") {
+		// 1) 绑定端口带出边：冻结期（compile）拒绝
+		{
+			InferGraph g;
+			g.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+			g.addNode(std::make_unique<Node>("Builtin", "dst", identitySchema(), identityRunFn()));
+			g.connect("src", "y", "dst", "x");
+			g.bindOutput("mid", "src", "y"); // src.y 有出边 → 非法
+			g.bindOutput("final", "dst", "y");
+
+			bool threw = false;
+			try {
+				g.freeze(); // 校验在冻结期（compile；首次 feed/submit 亦触发）
+			} catch (const GraphException& e) {
+				threw = (e.getErrorType() == GraphException::ErrorType::NonTerminalPort);
+			}
+			CHECK(threw, "bound port with out-edges must be rejected at freeze time");
+		}
+
+		// 2) 绑定自动导线的输出口（携带出边的连接器端口）：冻结期同样拒绝
+		{
+			InferGraph g;
+			g.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+			g.addNode(std::make_unique<Node>("Builtin", "dst", identitySchema(), identityRunFn()));
+			auto& wire = g.connect("src", "y", "dst", "x"); // 自动导线 __wire_0（out_0 → dst.x）
+
+			g.bindOutput("mid", wire.name(), "out_0");
+			bool threw = false;
+			try {
+				g.freeze(); // 校验在冻结期（compile）
+			} catch (const GraphException& e) {
+				threw = (e.getErrorType() == GraphException::ErrorType::NonTerminalPort);
+			}
+			CHECK(threw, "binding a wire output port (with out-edges) must be rejected at freeze");
+		}
+
+		// 4) 正向姿势：显式分支承接中间输出（中间结果可见 + 继续参与下游）
+		{
+			InferGraph g;
+			g.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+			g.addNode(std::make_unique<Node>("Builtin", "mid_out", identitySchema(), identityRunFn()));
+			g.addNode(std::make_unique<Node>("Builtin", "dst", identitySchema(), identityRunFn()));
+			g.connect("src", "y", "mid_out", "x"); // 分支 1：直通节点承接绑定
+			g.connect("src", "y", "dst", "x");     // 分支 2：继续运算（同源口自动扩容扇出）
+			g.bindOutput("mid", "mid_out", "y");   // 绑定挂分支叶子（终端）
+			g.bindOutput("final", "dst", "y");
+
+			g.feedInput("t1", "src", "x", makeFloatTensor(42.0f));
+			g.submitBound("t1");
+			CHECK(g.waitForResult("t1").status == TaskStatus::Succeeded, "explicit branch form must succeed");
+			auto mid = g.takeOutputTensor("t1", "mid_out", "y");
+			auto fin = g.takeOutputTensor("t1", "dst", "y");
+			CHECK(std::abs(mid.item<float>() - 42.0f) < 1e-6f, "branch leaf carries the mid value");
+			CHECK(std::abs(fin.item<float>() - 42.0f) < 1e-6f, "downstream branch keeps computing");
+		}
+
+		// 5) 不误伤：未声明的中间端口（有出边）不参与校验，终端声明照常工作
+		{
+			InferGraph g;
+			g.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+			g.addNode(std::make_unique<Node>("Builtin", "dst", identitySchema(), identityRunFn()));
+			g.connect("src", "y", "dst", "x"); // src.y 有出边但未被声明/绑定 → 合法
+
+			g.feedInput("t1", "src", "x", makeFloatTensor(7.0f));
+			g.submit("t1", "dst", "y");
+			CHECK(g.waitForResult("t1").status == TaskStatus::Succeeded, "terminal-only declaration must work");
+			auto r = g.takeOutputTensor("t1", "dst", "y");
+			CHECK(std::abs(r.item<float>() - 7.0f) < 1e-6f, "value flows through to the terminal port");
+		}
+
+		// 6) 声明自由度保留：显式声明带出边端口（不绑定）仍被允许——声明是
+		//    完成条件（循环计数/部分求值依赖此语义），不引终端约束
+		{
+			InferGraph g;
+			g.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
+			g.addNode(std::make_unique<Node>("Builtin", "dst", identitySchema(), identityRunFn()));
+			g.connect("src", "y", "dst", "x");
+
+			g.feedInput("t1", "src", "x", makeFloatTensor(3.0f));
+			bool accepted = true;
+			try {
+				g.submit("t1", "src", "y"); // 有出边但未绑定 → 合法（完成条件语义）
+			} catch (const GraphException&) {
+				accepted = false;
+			}
+			CHECK(accepted, "declaration on an edge-carrying port stays allowed when not bound");
+			CHECK(g.waitForResult("t1").status == TaskStatus::Succeeded, "declared port satisfied on first production");
+		}
+	}
+	END_TEST();
+}
+
+// ════════════════════════════════════════════
 // 图级签名：bindInput/bindOutput + 内部寻址注入/取用（含跨节点同名端口）
 // ════════════════════════════════════════════
 
@@ -1273,6 +1372,7 @@ int main() {
 		// 图 API 便捷绑定
 		testBoundInputOutputApi();
 		testAliasBindingApi();
+		testOutputRetrievalPortsMustBeTerminal();
 		testTakeOutputDestructive();
 
 		// wait/waitForResult 超时语义

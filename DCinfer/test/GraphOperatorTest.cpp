@@ -240,9 +240,13 @@ static void testLoopTTLBounded() {
 		};
 
 		sub->addNode(std::make_unique<Node>("Builtin", "loop", incSchema, incRunFn));
-		sub->connect("loop", "y", "loop", "x"); // 自反馈环
+		sub->addNode(std::make_unique<Node>("Builtin", "out", identitySchema(), identityRunFn())); // 分支叶承接绑定
+		// 显式分支（输出取数端口不变量：绑定不得挂在环边上）：
+		// 分支 1 loop.y → out（直通叶，终端，绑定挂此）；分支 2 loop.y → loop.x（自反馈环）
+		sub->connect("loop", "y", "out", "x");
+		sub->connect("loop", "y", "loop", "x"); // 同源口二次 connect 自动扩容扇出
 		sub->bindInput("x", "loop", "x");
-		sub->bindOutput("y", "loop", "y");
+		sub->bindOutput("y", "out", "y");
 
 		GraphOperator::Options opts;
 		opts.maxHops = 3; // 很小的跳数限制：子图内很快终止

@@ -25,6 +25,7 @@ public:
 		PropagateFailed,     ///< 数据传播链中写下游输入失败
 		UnreachableDeclaration, ///< submit 时声明目标在拓扑上不可达（构图/断链错误）
 		DuplicateEdge,       ///< 端口已有连接：输出口既有连接不可扩容 / 输入口已有入边（禁止二次 connect）
+		NonTerminalPort,     ///< 输出取数端口非法：绑定端口必须是终端端口（无出边），否则数据流被截断
 		Other                ///< 其他未分类的错误
 	};
 
@@ -89,6 +90,9 @@ private:
 			break;
 		case ErrorType::DuplicateEdge:
 			errorStr = "Edge Already Connected";
+			break;
+		case ErrorType::NonTerminalPort:
+			errorStr = "Non-Terminal Output Port";
 			break;
 		case ErrorType::Other:
 			errorStr = "Other";

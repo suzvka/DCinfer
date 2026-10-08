@@ -48,6 +48,10 @@ public:
 	/// @param  scheduler 资源调度器共享句柄；nullptr = 进程级默认实例
 	///         （ResourceScheduler::instance()——多图默认共享进程预算）
 	explicit InferGraph(std::shared_ptr<ResourceScheduler> scheduler = nullptr);
+	/// Retain external ownership while APIs/nodes/callbacks execute. Never destroy
+	/// this graph from its own RunFn or completion callback (including cancel on
+	/// nonworkers): the engine diagnoses and terminates in all builds instead of
+	/// self-waiting or returning into freed state. Destroy from an external owner.
 	~InferGraph() = default;
 
 	InferGraph(const InferGraph&) = delete;
@@ -110,9 +114,17 @@ public:
 	/// 绑定构成图级签名的一部分：submitBound 以此为输出声明来源，
 	/// 结果仍按内部寻址取用（takeOutput / takeOutputTensor）；
 	/// alias 不参与运行时寻址，按公开别名操作见 interface()。
+	///
+	/// 端口约束：绑定端口必须是终端端口（无出边）——取数（OutputZone 搬运）
+	/// 与出边传播共享同一消费槽，非终端绑定会截断下游数据流（下游饿死 /
+	/// 任务挂起）。中间结果既要对外可见又要继续参与下游时，显式插入分支：
+	/// 把该端口 connect 到直通节点（如恒等算子），绑定挂分支叶子；同源口
+	/// 再次 connect 自动扩容为扇出，无需手写 Broadcast(N)。
 	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
 	/// @throws GraphException(InvalidBinding) 若别名为空
 	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
+	/// @throws GraphException(NonTerminalPort) 若绑定端口有出边（首次提交/
+	///         冻结期拒绝，不引为隐式拷贝：需要中间输出时显式建分支）
 	/// @throws GraphException(Frozen) 若图已冻结
 	void bindOutput(const std::string& alias, const std::string& nodeName,
 					const std::string& portName) {
@@ -152,6 +164,10 @@ public:
 	/// @note   声明清理/写入与轮次登记由引擎在单事务内原子完成（并发同 ID 提交恰一方
 	///         成功）。复用已收尾的 taskId 合法：上一轮的声明/结果/诊断随之清理。
 	///         输出在 task 终止后仍保留，供 waitForResult → takeOutput 取用。
+	///         声明是任务的完成条件：全部声明满足即终止，未被声明覆盖的分支
+	///         不保证执行完毕（需其完成时一并声明对应端口）。声明不被终端
+	///         约束（循环计数/部分求值依赖此自由度：声明有出边端口合法，但
+	///         数据可得性随传播时序——想稳定取中间值请走绑定+显式分支）。
 	///         执行超时由节点实现方自行负责（失败经 NodeResult + Diagnostic 自报）。
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				uint32_t maxHops = kDefaultMaxHops) {

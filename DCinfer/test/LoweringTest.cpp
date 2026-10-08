@@ -224,26 +224,26 @@ static void test_cycleTtlStillBounded() {
 	CHECK(aRuns.load() >= 3, "TTL budget stretches after lowering (a runs >= 3 times)");
 }
 
-// ── 5. 绑定防护：wire 承担图级输入/输出契约时不擦除 ──
+// ── 5. 绑定防护：wire 承担图级输入契约时不擦除；输出侧契约绑定受终端不变量约束 ──
 
 static void test_bindingProtectionKeepsWire() {
 	{
-		// wire 的 out_0 被绑定为图级输出 → 保留
+		// 回归（输出取数端口不变量）：绑定自动导线的输出口（携带出边）被拒绝——
+		// 旧行为：绑定消费截走数据、下游静默跳过（c 永不执行）；现收束为显式错误。
+		// 中间结果需要对外可见时，显式插入直通分支承接绑定（见 InferGraphTest）。
 		InferGraph graph;
 		graph.addNode(makeId("a"));
 		graph.addNode(makeId("c"));
 		auto& w = graph.connect("a", "y", "c", "x");
 		graph.bindOutput("out_0", w.name(), "out_0");
 
-		auto snap = graph.freeze();
-		CHECK(snap->loweringStats().erasedConnectors == 0, "wire bound as output is kept");
-		CHECK(snap->runtimeNodeCount() == 3, "runtime keeps the contract-bearing wire");
-
-		graph.feedInput("t1", "a", "x", floatTensor(2.0f));
-		graph.submit("t1", w.name(), "out_0");
-		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "declaration on wire should be satisfied");
-		auto r = graph.takeOutputTensor("t1", w.name(), "out_0");
-		CHECK(std::abs(r.item<float>() - 2.0f) < 1e-6f, "wire artifact value correct");
+		bool rejected = false;
+		try {
+			graph.freeze();
+		} catch (const GraphException& e) {
+			rejected = (e.getErrorType() == GraphException::ErrorType::NonTerminalPort);
+		}
+		CHECK(rejected, "binding a wire output port (with out-edges) must be rejected at freeze");
 	}
 	{
 		// wire 的 in 被绑定为图级输入 → 保留（feedInput 直喂 wire）

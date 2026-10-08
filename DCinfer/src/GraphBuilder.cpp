@@ -2,6 +2,7 @@
 #include "GraphLowering.h"
 
 #include <mutex>
+#include <set>
 #include <utility>
 
 namespace DC {
@@ -57,6 +58,11 @@ std::shared_ptr<const CompiledGraph> GraphBuilder::compile() {
 	if (_snapshot)
 		return _snapshot; // 幂等：重复 compile 返回同一快照
 
+	// ⓪ 校验先于封印：输出取数端口不变量失败可修正后重试 compile
+	//   （封印不可回退——若先封印，用户错误将把图锁死为不可修复状态；
+	//   提交期守卫「先于任何状态登记、失败可重试」的同款哲学）。
+	_validateOutputBindings();
+
 	// ① 封印先行：拓扑（GraphStore::seal）与全部节点配置面
 	//   （Node::_sealForExecution）先封闭，再进入只读阶段——在飞构图
 	//    操作的写经各自锁先于封印完成，此后源图不存在任何写者，
@@ -88,6 +94,36 @@ void GraphBuilder::_ensureMutableLocked() const {
 	if (_snapshot) {
 		throw GraphException(GraphException::ErrorType::Frozen, "GraphBuilder",
 							 "graph is compiled; topology is immutable after freeze");
+	}
+}
+
+void GraphBuilder::_validateOutputBindings() const {
+	// 输出取数端口不变量：绑定端口必须是终端端口（无出边）。
+	// 传播期「输出区搬运」与「出边搬运」共享同一消费槽——非终端绑定会把
+	// 数据从下游数据流中截走：下游饿死（下游声明无法满足 → 任务挂起，
+	// 或侥幸跳过下游）。声明侧（submit）保持完成条件语义不变（循环/部分
+	// 求值依赖它），本校验只约束绑定。
+	//
+	// 实现：一次扫源图建「有出边端口」索引，逐绑定 O(1) 查。
+	// 构建期视图（持 _mutex，构建面独占）：调用时机先于封印。
+	std::set<std::pair<std::string, std::string>> portsWithOutEdges;
+	for (const auto& e : _store->edges())
+		portsWithOutEdges.emplace(e.srcNode, e.srcPort);
+
+	for (const auto& b : _outputBindings) {
+		const Node* n = _store->node(b.nodeName);
+		if (!n)
+			continue; // 绑定的坐标存在性由 interface()/提交期校验（既有延迟语义不在此收紧）
+		if (portsWithOutEdges.contains({b.nodeName, b.portName})) {
+			throw GraphException(GraphException::ErrorType::NonTerminalPort, "GraphBuilder::compile",
+								 "output binding '" + b.alias + "' on port '" + b.nodeName + ":" + b.portName
+									 + "' has outgoing edges; a bound (retrievable) output port must be terminal. "
+									   "For a mid-pipeline value that must stay retrievable AND keep flowing "
+									   "downstream, insert an explicit branch: connect the port through a "
+									   "pass-through node and bind the branch leaf (repeat connect on the same "
+									   "source port auto-expands the fan-out), or bind a downstream terminal "
+									   "port instead");
+		}
 	}
 }
 

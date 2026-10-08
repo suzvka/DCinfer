@@ -60,10 +60,15 @@ public:
 	void bindInput(const std::string& nodeName, const std::string& portName,
 				   const std::string& alias);
 
-	/// @brief  标记输出：该节点的该端口产出进入输出区（与边目的地互斥）
+	/// @brief  标记输出：该节点的该端口产出进入输出区
 	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一；不参与运行时寻址）
 	/// @throws GraphException(InvalidBinding) 别名为空
 	/// @throws GraphException(DuplicateBinding) 别名重复
+	/// @throws GraphException(NonTerminalPort) 绑定端口有出边（compile 期拒绝）——
+	///         取数（OutputZone 搬运）与出边传播共享同一消费槽，非终端绑定
+	///         会截断下游数据流（下游饿死/任务挂起）。中间结果既要对外可见
+	///         又要继续参与下游时显式插入分支：经直通节点承接绑定，绑定挂
+	///         分支叶子（同源口再次 connect 自动扩容扇出）
 	/// @note   重复绑定同一 node:port 为无操作
 	void bindOutput(const std::string& nodeName, const std::string& portName,
 					const std::string& alias);
@@ -139,6 +144,13 @@ private:
 	/// @brief  构建守卫：冻结后调用构建 API 抛 GraphException(Frozen)
 	///         （调用方须持有 _mutex）
 	void _ensureMutableLocked() const;
+
+	/// @brief  输出取数端口不变量校验（compile 期、封印前调用：失败可修正重试）：
+	///         绑定端口必须是终端端口（无出边）——取数与边搬运共享同一
+	///         消费槽，非终端绑定会截断下游数据流（声明侧保持完成条件
+	///         语义不变，不受此约束）
+	/// @throws GraphException(NonTerminalPort)
+	void _validateOutputBindings() const;
 
 	/// @brief  别名校验（别名是绑定的必填公共名）：拒绝空别名与重复别名
 	template <typename Bindings>

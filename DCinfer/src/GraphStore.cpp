@@ -96,11 +96,12 @@ void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPo
 // ════════════════════════════════════════════
 // connect：自动插入广播连接器（1→1，零拷贝 move 直通）
 // ════════════════════════════════════════════
-// 同一输出端口禁止二次 connect（CORE-01）：每次 connect 创建独立 1:1 wire，
-// 二次连接会产生两条同源直连边（lowering 将 1 出边 wire 融合为直连边），
-// 而传播期按边逐个消费式取数——首条边取走后 hasOutput=false，第二条边
-// 静默跳过，下游永远收不到数据且任务永久挂起。1:N 分发必须显式创建
-// Connector.Broadcast(N)（见 README「灵活的图拓扑」）。
+// 同源口二次 connect（CORE-01 演进）：传播期按边逐个消费式取数——同一
+// 输出端口的出边只能有一条实际搬运数据。首次 connect 创建 1:1 wire；
+// 二次 connect 对既有导线原地扩容（多分一份，等效自动 Broadcast(N)），
+// 其他拓扑（connectRaw 构造等）构图期 fail-fast。旧语义（每次创建独立
+// 1:1 wire → 两条同源直连边 → 首边取走后第二条静默跳过，下游饿死/
+// 任务永久挂起）不再存在。详见下方实现与 InferGraph::connect 文档。
 
 Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort,
 					   const std::string& dstNode, const std::string& dstPort) {
