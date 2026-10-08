@@ -1,3 +1,5 @@
+include(GNUInstallDirs)
+
 add_library(DCinfer STATIC)
 add_library(DCinfer::DCinfer ALIAS DCinfer)
 
@@ -21,39 +23,43 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # MSVC / Clang 的对应实现在标准库内，无需额外链接。
     #
     # 先不带 atomic 测试，失败再尝试链接 libatomic。
-    include(CheckCXXSourceCompiles)
-    check_cxx_source_compiles(
-        "#include <semaphore>
-         #include <atomic>
-         int main() {
-             std::counting_semaphore<> s(1);
-             s.acquire();
-             s.release();
-             std::atomic<std::int64_t> a{0};
-             a.fetch_add(1, std::memory_order_relaxed);
-             return 0;
-         }"
-        DCINFER_ATOMIC_BUILTIN_OK
-    )
-    if(NOT DCINFER_ATOMIC_BUILTIN_OK)
-        set(CMAKE_REQUIRED_LIBRARIES "-latomic")
-        check_cxx_source_compiles(
-            "#include <semaphore>
-             #include <atomic>
-             int main() {
-                 std::counting_semaphore<> s(1);
-                 s.acquire();
-                 s.release();
-                 std::atomic<std::int64_t> a{0};
-                 a.fetch_add(1, std::memory_order_relaxed);
-                 return 0;
-             }"
-            DCINFER_NEEDS_LIBATOMIC
-        )
+    # Function scope restores *all* CMAKE_REQUIRED_* and language settings,
+    # including whether the parent defined them, when the probe returns.
+    function(_dcinfer_check_atomic)
+        include(CheckCXXSourceCompiles)
+        include(CMakePushCheckState)
+        cmake_push_check_state(RESET)
+        # Probe DCinfer's own link requirements, not arbitrary parent test inputs.
+        # Re-evaluate when reconfigured; a cached answer may reflect another context.
+        unset(DCINFER_ATOMIC_BUILTIN_OK CACHE)
+        unset(DCINFER_NEEDS_LIBATOMIC CACHE)
         set(CMAKE_REQUIRED_LIBRARIES "")
-        if(DCINFER_NEEDS_LIBATOMIC)
-            target_link_libraries(DCinfer PUBLIC atomic)
+        set(CMAKE_CXX_STANDARD 20)
+        set(CMAKE_CXX_STANDARD_REQUIRED ON)
+        set(CMAKE_CXX_EXTENSIONS OFF)
+        set(_source "#include <semaphore>
+                     #include <atomic>
+                     #include <cstdint>
+                     int main() {
+                         std::counting_semaphore<> s(1);
+                         s.acquire(); s.release();
+                         std::atomic<std::int64_t> a{0};
+                         a.fetch_add(1, std::memory_order_relaxed);
+                         return 0;
+                     }")
+        check_cxx_source_compiles("${_source}" DCINFER_ATOMIC_BUILTIN_OK)
+        if(NOT DCINFER_ATOMIC_BUILTIN_OK)
+            list(APPEND CMAKE_REQUIRED_LIBRARIES atomic)
+            check_cxx_source_compiles("${_source}" DCINFER_NEEDS_LIBATOMIC)
+            if(NOT DCINFER_NEEDS_LIBATOMIC)
+                message(FATAL_ERROR "C++20 semaphore/atomic probe failed both with and without libatomic")
+            endif()
         endif()
+        cmake_pop_check_state()
+    endfunction()
+    _dcinfer_check_atomic()
+    if(NOT DCINFER_ATOMIC_BUILTIN_OK AND DCINFER_NEEDS_LIBATOMIC)
+        target_link_libraries(DCinfer PUBLIC atomic)
     endif()
 endif()
 
@@ -68,7 +74,7 @@ target_include_directories(DCinfer
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Graph>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Compose>
         # INSTALL_INTERFACE：安装树（各子目录公开头扁平合并到 include/，见下方 install 规则）
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 file(GLOB_RECURSE DCINFER_SRC_FILES CONFIGURE_DEPENDS
@@ -81,15 +87,13 @@ target_sources(DCinfer PRIVATE ${DCINFER_SRC_FILES})
 # ── 安装与 find_package 支持 ──
 # 消费方式二选一：add_subdirectory()（BUILD_INTERFACE 源码路径）或安装后
 # find_package(DCinfer CONFIG REQUIRED)（INSTALL_INTERFACE 相对路径）。
-include(GNUInstallDirs)
-
-# 包版本：仅顶层构建（自身 project() 即 DCinfer）时 PROJECT_VERSION 才权威；
+# GNUInstallDirs is included before target interface paths above.
 # 宿主直接 add_subdirectory 本目录时它指向宿主版本，必须回落到字面版本，
 # 否则写出的 *ConfigVersion.cmake 会带宿主版本号（需与顶层 project() 同步维护）。
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
-    set(DCINFER_PKG_VERSION "0.7.3")
+    set(DCINFER_PKG_VERSION "0.7.4")
 endif()
 
 install(TARGETS DCinfer EXPORT DCinferTargets

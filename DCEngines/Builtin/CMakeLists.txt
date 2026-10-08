@@ -3,6 +3,8 @@
 # 仅依赖 DCinfer 核心库，无需任何外部推理框架。
 # 提供 Add / Mul / Identity 等基础算子，用于教学、测试和快速验证图拓扑。
 
+include(GNUInstallDirs)
+
 add_library(DCEngine_Builtin STATIC)
 add_library(DCEngine::Builtin ALIAS DCEngine_Builtin)
 
@@ -15,7 +17,7 @@ target_include_directories(DCEngine_Builtin
         # BUILD_INTERFACE：源码内消费（DCinfer 扁平头路径经 DCinfer::DCinfer 传递）
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         # INSTALL_INTERFACE：安装树（include/DCEngine/ 结构保留，消费方 include "DCEngine/BuiltinOps.h"）
-        $<INSTALL_INTERFACE:include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 file(GLOB_RECURSE DCENGINE_BUILTIN_SRC CONFIGURE_DEPENDS
@@ -27,13 +29,13 @@ target_sources(DCEngine_Builtin PRIVATE ${DCENGINE_BUILTIN_SRC})
 # 包名 DCEngine：目标导出为 DCEngine::Builtin，与源码内 alias 一致
 # （target 名 DCEngine_Builtin 需经 EXPORT_NAME 改名）。OnnxRuntime / OpenAI
 # 适配器依赖 vcpkg 重型依赖，暂不纳入安装导出，仍以 add_subdirectory 消费。
-include(GNUInstallDirs)
+# GNUInstallDirs is included before target interface paths above.
 
 # 包版本：与 DCinfer 模块同一约定（仅顶层构建时 PROJECT_VERSION 权威，否则回落字面版本）
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
-    set(DCINFER_PKG_VERSION "0.7.3")
+    set(DCINFER_PKG_VERSION "0.7.4")
 endif()
 
 set_target_properties(DCEngine_Builtin PROPERTIES EXPORT_NAME Builtin)
