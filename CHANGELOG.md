@@ -5,6 +5,112 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-10-09
+
+发布前安全审查批次（23 项）与输出取数不变量修复。要点：DCNet 请求面与
+生命周期加固（未认证内存 DoS、明文凭据边界、并发 stop / 租约 / 错误脱敏），
+核心线程池生命周期硬契约，DCIr 归档读取与临时目录安全，OpenAI `params`
+白名单，发布链路定型（exact-SHA CI 门禁、归档规范化、双构建差异记录）与
+CI 覆盖补齐；绑定端口收束为终端端口不变量。
+
+### Security
+
+- **P0 NET-1 鉴权前读取完整请求体（未认证内存 DoS）**：有界头部解析后先做
+  认证/方法/路径/配额检查，再预留正文预算——默认单体上限 8 MiB、聚合
+  32 MiB；未认证请求在读取正文前即被拒绝（提前 401/413/429），预算恢复
+  与共享头/正文 deadline 均有回归；正常认证请求行为不变。
+- **P0 NET-2 明文凭据边界**：明文监听仅允许解析后回环；出站按最终 URI
+  拒绝在明文 HTTP 上发送敏感凭据（开发例外为显式开关、默认关闭）；
+  Windows 原生信任/主机名策略在发送任何 HTTP 字节前验证。
+- **NET-8 错误与日志入口脱敏**：非法 header 只输出序号/安全名称（密钥
+  子串与原始 CR/LF 不再进入错误串）；控制符清洗与长度上限统一。
+- **NET-9 内部错误外泄**：内部 500 仅返回稳定错误码与关联 ID（文件路径/
+  配置/请求片段不外泄）；受控 sink 只接收阶段标签，不接收任意异常/请求
+  原文；远端诊断保留 dcnet 通道但限长并清洗控制符。
+- **AI-1 OpenAI `params` 采样白名单**：仅 `temperature`/`top_p`/
+  `max_tokens`/`presence_penalty`/`frequency_penalty` 等采样参数经逐项
+  类型与范围检查后生效；`model`/`messages`/`stream` 等协议字段与未知
+  字段一律拒绝（非法表驱动配置零实际请求有回归）。
+- **IR-2 `.dcg` 临时目录安全创建**：POSIX 原子 0700 + `openat` no-follow；
+  Windows 当前用户私有 DACL、祖先句柄防目录替换、reparse 点拒绝、独占
+  创建——消除权限非原子的 TOCTOU 窗口。
+
+### Fixed
+
+- **CORE-1 池线程内关闭/析构线程池**：worker 身份检测（TLS 自标识）——
+  池线程内 `shutdown()`/`resetInstance()`/最后所有者析构改为明确诊断的
+  fail-fast，替代原先的 `resource deadlock`/挂死/进程 abort；不 detach
+  规避（防 UAF）；外部并发 shutdown 与幂等补救有回归。
+- **CORE-2 节点/回调内析构引擎**：无分配 TLS 活动引擎栈自检（覆盖节点、
+  同步 cancel、回调），命中即明确诊断；8 个隔离 death case 覆盖禁止重入
+  析构契约与有界结束。
+- **NET-3 并发 `stop()`**：完整 stop 流程串行化并排水（第二调用等待首次
+  完成，不再提前返回引发 UAF）；handler 内同步 stop 在锁前拒绝。
+- **NET-4 `_activeThreads` 记账事务性**：先登记容器再增加活跃计数
+  （RAII 回滚）；分配失败注入验证计数与容器一致——`stop()` 不再永等。
+- **NET-5 `recv()` 租约 RAII**：全出口回收租约、异常 abort 会话；截断读
+  后其他线程请求仍能在有界时间内完成。
+- **NET-6 `start()` 发布时序**：accept 线程建立后才发布 started；创建
+  失败回滚状态与 handler，可成功重试。
+- **NET-7 `readBody` 短读**：区分 stream failure 与 EOF，并校验固定
+  Content-Length——截断正文必须失败而非进入 codec。
+- **IR-1 `.json` 无界读取**：流式读取至 32 MiB+1 哨兵即拒绝（峰值内存
+  有界）；精确边界与正常图回归。
+- **ORT-1 Windows ORT 预设测试路径**：Release/单配置直接注册
+  `TARGET_FILE`（仅多配置 Debug 保留 DLL wrapper）——官方 Windows ORT
+  预设 CTest 不再必败。
+- **BUILD-1 安装接口路径**：目标 `INSTALL_INTERFACE` 统一 GNUInstallDirs
+  （`${CMAKE_INSTALL_INCLUDEDIR}`）——自定义包含目录（如 `inc`）的安装
+  树可被消费；四个包的非默认安装与搬迁后消费均验证通过。
+- **BUILD-2 libatomic 探测上下文**：探测显式 C++20 并隔离/恢复父工程
+  check context（重新计算自身缓存）；C++17 宿主 `add_subdirectory` 前后
+  上下文保持不变（CI 用 probe-only 库哨兵断言）。
+- **输出取数端口不变量（High）绑定端口带出边会截断下游数据流**：
+  `bindOutput` 的端口在图中存在出边时，传播期「OutputZone 搬运」与
+  「出边搬运」共享同一消费槽——取数截走数据后下游永久饿死：任务或
+  挂起（下游声明永不满足、无 Error 级诊断、不自行终止，直至宿主
+  cancel 释放），或静默跳过下游（Succeeded 但下游从未执行、无任何
+  诊断）。现收束为：**绑定端口必须是终端端口（无出边）**——冻结期
+  （compile，失败可修正重试）校验，违规抛新增的
+  `GraphException(NonTerminalPort)`。中间结果既要对外可见又要继续参与
+  下游时显式插入分支：把该端口 connect 到直通节点、绑定挂分支叶子
+  （同源口再次 connect 自动扩容扇出）。取数语义不变——「输出 = 把
+  张量 move 到目的地」，无隐式拷贝/共享；提交期显式声明保持既有
+  完成条件语义（循环计数/部分求值依赖其自由度，不受本约束）。
+
+### Changed
+
+- **破坏性（0.x）**：以下入口由静默降级/延迟暴露收束为显式拒绝——非回环
+  明文监听、明文 HTTP 承载 Bearer 凭据（默认关闭，可显式开关）、
+  `params` 越界键、绑定带出边（非终端）端口。
+- **NET-10 部署边界成文**：README/DESIGN 明确服务端 TLS 与 chunked 未
+  实现，远端明文部署须经 TLS 代理回环上游；Windows 网络/原生 TLS 分支
+  纳入 CI 矩阵。
+- **CORE-3 背压示例**：README 给出宿主 semaphore admission 示例（许可
+  持续到真实排水）；无界队列与「submit 成功即会执行」契约不变。
+
+### CI / Release
+
+- **REL-1 发布门禁与真实测试**：发布流程执行完整 CTest 套件
+  （`--no-tests=error`，非枚举）；exact-SHA CI 门禁——tag 必须指向
+  master/main push 上整条 ci.yml 全矩阵成功的提交；API 不可达、无 run、
+  运行中、失败、取消一律 fail-closed 拒绝。consumer smoke 注入期望版本
+  强校验安装树。
+- **REL-2 归档规范化与可追溯性**：`SOURCE_DATE_EPOCH`；归档条目排序 +
+  固定 mtime/owner（tar）/统一 mtime（zip），gzip 不写时间戳；同安装树
+  两次打包字节级比对；双干净构建的安装树逐文件 SHA256 清单差异如实
+  记录随产物归档（未宣称二进制可重现）；runner 与工具链显式 pin
+  （windows-2022、CMake 3.31.6、MSVC 14.44、g++-13）。
+- **CI-1 防悬挂**：全部测试注册 TIMEOUT 120，CI 全局 `--timeout`/
+  `--no-tests=error`，关键筛选带名称断言——挂起的 fixture 在 120s 被判
+  失败而非耗尽作业。
+- **CI-2 覆盖补齐**：新增 Debug、ASan+UBSan（core+DCNet+OpenAI）、最低
+  工具链（GCC 11 / Clang 14 / CMake 3.17.5）、GCC 32-bit atomic probe、
+  Windows DCNet/OpenAI/TLS/ORT 作业；README quickstart 在 Windows/Linux
+  逐字执行校验。
+- **install_smoke 版本守护**：期望版本升为 0.7.4，过期安装前缀/错位 tag
+  不再静默通过。
+
 ## [0.7.3] - 2026-10-06
 
 SDK 发布链路定型与消费侧防御加固：release workflow 切换 `sdk-release` 预设
