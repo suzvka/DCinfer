@@ -3,6 +3,8 @@
 
 # Do not set cmake_minimum_required or project() here; handled by top-level.
 
+include(GNUInstallDirs)
+
 add_library(DCIr STATIC)
 add_library(DCIr::DCIr ALIAS DCIr)
 
@@ -26,12 +28,16 @@ target_link_libraries(DCIr PUBLIC
 	unofficial::minizip::minizip
 )
 
+if (WIN32)
+	target_link_libraries(DCIr PRIVATE advapi32)
+endif()
+
 target_include_directories(DCIr
 	PUBLIC
 		# BUILD_INTERFACE：源码内消费（含 DCinfer 扁平头路径，经 DCinfer::DCinfer 传递）
 		$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 		# INSTALL_INTERFACE：安装树（include/Ir/ 结构保留，消费方 include "Ir/GraphCompiler.h"）
-		$<INSTALL_INTERFACE:include>
+		$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 file(GLOB_RECURSE DCIr_SRC_FILES CONFIGURE_DEPENDS
@@ -44,13 +50,11 @@ target_sources(DCIr PRIVATE ${DCIr_SRC_FILES})
 # ── 安装与 find_package 支持 ──
 # 依赖链：DCIrConfig → find_dependency(DCinfer) + json/zlib/minizip，与
 # vcpkg feature 'ir' 分层一致；core-only 用户不安装本包、不拉这些依赖。
-include(GNUInstallDirs)
-
-# 包版本：与 DCinfer 模块同一约定（仅顶层构建时 PROJECT_VERSION 权威，否则回落字面版本）
+# GNUInstallDirs is included before target interface paths above.
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
 	set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
-	set(DCINFER_PKG_VERSION "0.7.3")
+	set(DCINFER_PKG_VERSION "0.7.4")
 endif()
 
 install(TARGETS DCIr EXPORT DCIrTargets

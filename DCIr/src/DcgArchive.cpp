@@ -2,9 +2,10 @@
 
 #include "GraphException.h"
 #include "PathGuard.h"
+#include "SecureExtraction.h"
 
-#include <minizip/unzip.h>
-#include <minizip/zip.h>
+#include <unzip.h>
+#include <zip.h>
 
 #include <chrono>
 #include <cstdint>
@@ -48,29 +49,6 @@ void ensureEntryWithinBudget(const unz_file_info64& info, const std::string& ent
 		&& info.uncompressed_size / kMaxCompressionRatio > info.compressed_size) {
 		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
 			"entry rejected: suspicious compression ratio: " + entry);
-	}
-}
-
-/// 符号链接防御：baseDir 到 target 之间已存在的路径组件不得是符号链接
-/// （防归档借解包目录中既有 symlink 将写入重定向到目录之外）
-void ensureNoSymlinkAncestor(const std::filesystem::path& baseDir, const std::filesystem::path& target,
-							 const std::string& entry) {
-	const auto rel = target.lexically_normal().lexically_relative(baseDir.lexically_normal());
-	if (rel.empty())
-		return;
-	std::filesystem::path cur = baseDir;
-	for (const auto& comp : rel) {
-		if (comp == "..") {
-			throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
-				"extraction target escapes base directory: " + entry);
-		}
-		cur /= comp;
-		std::error_code ec;
-		const auto st = std::filesystem::symlink_status(cur, ec);
-		if (!ec && std::filesystem::is_symlink(st)) {
-			throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
-				"symlink in extraction path is not allowed: " + cur.string());
-		}
 	}
 }
 
@@ -130,6 +108,8 @@ void closeCurrentEntryWithCrcCheck(unzFile handle, CurrentEntryGuard& guard, con
 // 工厂方法
 // ════════════════════════════════════════════
 
+DcgArchive::DcgArchive() = default;
+
 std::unique_ptr<DcgArchive> DcgArchive::openRead(const std::filesystem::path& path) {
 	auto archive = std::unique_ptr<DcgArchive>(new DcgArchive());
 	archive->_archivePath = path;
@@ -152,39 +132,8 @@ std::unique_ptr<DcgArchive> DcgArchive::openRead(const std::filesystem::path& pa
 				+ std::to_string(kMaxArchiveEntries) + ")");
 	}
 
-	// 创建唯一且私有的临时目录（随机后缀 + 独占创建；冲突则换名重试）
-	auto tmpBase = std::filesystem::temp_directory_path();
-	auto now = std::chrono::system_clock::now().time_since_epoch().count();
-	std::random_device rd;
-	std::uniform_int_distribution<uint64_t> dist;
-	std::filesystem::path tmpDir;
-	bool created = false;
-	for (int attempt = 0; attempt < 16; ++attempt) {
-		tmpDir = tmpBase / ("dcg_" + path.stem().string() + "_" + std::to_string(now) + "_"
-							+ std::to_string(dist(rd)));
-		std::error_code ec;
-		const bool made = std::filesystem::create_directory(tmpDir, ec);
-		if (made && !ec) {
-			created = true;
-			break;
-		}
-		if (ec) {
-			throw GraphException(GraphException::ErrorType::Other,
-				"DcgArchive::openRead",
-				"cannot create temp dir: " + tmpDir.string() + ": " + ec.message());
-		}
-		// made=false 且无错误：同名目录已存在（极小概率冲突）→ 换随机名重试
-	}
-	if (!created) {
-		throw GraphException(GraphException::ErrorType::Other,
-			"DcgArchive::openRead",
-			"cannot create unique temp dir under: " + tmpBase.string());
-	}
-	// 尽力收紧目录权限（POSIX 0700；Windows 无权限位模型，忽略失败）
-	std::error_code pec;
-	std::filesystem::permissions(tmpDir, std::filesystem::perms::owner_all,
-		std::filesystem::perm_options::replace, pec);
-	archive->_tempDir = tmpDir;
+	archive->_extraction = std::make_unique<detail::SecureExtraction>();
+	archive->_tempDir = archive->_extraction->path;
 
 	return archive;
 }
@@ -219,6 +168,7 @@ DcgArchive::~DcgArchive() {
 		::unzClose(_readHandle);
 	}
 
+	_extraction.reset(); // release pinned handles before removing the private directory
 	// 清理临时目录
 	if (!_tempDir.empty()) {
 		std::error_code ec;
@@ -332,10 +282,12 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 	}
 	_extractTotalBytes += info.uncompressed_size;
 
-	// 确定输出路径（校验后归一化）并防御既有符号链接组件
-	const auto tmpPath = (_tempDir / archivePath).lexically_normal();
-	ensureNoSymlinkAncestor(_tempDir, tmpPath, archivePath);
-	std::filesystem::create_directories(tmpPath.parent_path());
+	std::string normalized;
+	detail::isSafeArchiveEntryName(archivePath, &normalized);
+	const auto relative = std::filesystem::path(normalized).lexically_normal();
+	const auto tmpPath = _tempDir / relative;
+	detail::SecureExtraction::Output output;
+	_extraction->createOutput(relative, output);
 
 	// 打开条目
 	ret = ::unzOpenCurrentFile(_readHandle);
@@ -346,30 +298,9 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 	}
 	CurrentEntryGuard guard{_readHandle};
 
-	// 流式读取写盘（分块）：完整性/CRC 校验失败或写盘失败时清理部分文件后重抛
-	try {
-		{
-			std::ofstream ofs(tmpPath, std::ios::binary | std::ios::trunc);
-			if (!ofs.is_open()) {
-				throw GraphException(GraphException::ErrorType::Other,
-					"DcgArchive::extractOne",
-					"cannot create temp file: " + tmpPath.string());
-			}
-			streamCurrentEntry(_readHandle, info.uncompressed_size, archivePath,
-				[&ofs](const char* p, std::size_t n) {
-					ofs.write(p, static_cast<std::streamsize>(n));
-					if (!ofs) {
-						throw GraphException(GraphException::ErrorType::Other,
-							"DcgArchive::extractOne", "write error to extraction target");
-					}
-				});
-		} // ofs 关闭（异常清理前先释放文件句柄）
-		closeCurrentEntryWithCrcCheck(_readHandle, guard, archivePath);
-	} catch (...) {
-		std::error_code ec;
-		std::filesystem::remove(tmpPath, ec);
-		throw;
-	}
+	streamCurrentEntry(_readHandle, info.uncompressed_size, archivePath,
+		[&output](const char* p, std::size_t n) { output.write(p, n); });
+	closeCurrentEntryWithCrcCheck(_readHandle, guard, archivePath);
 
 	return tmpPath;
 }

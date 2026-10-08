@@ -6,6 +6,7 @@
 #include "Ir/DcgArchive.h"
 #include "PathGuard.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -599,9 +600,25 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 							"GraphCompiler::compileFile",
 							"cannot open file: " + std::string(path));
 	}
-	std::ostringstream oss;
-	oss << ifs.rdbuf();
-	std::string content = oss.str();
+	// Read at most 32 MiB + one sentinel byte, including growing/non-seekable
+	// inputs. Never trust a pre-read file_size check as the allocation boundary.
+	std::string content;
+	content.reserve(kMaxGraphJsonBytes + 1);
+	char chunk[64 * 1024];
+	while (content.size() <= kMaxGraphJsonBytes) {
+		const auto request = std::min<std::size_t>(sizeof(chunk), kMaxGraphJsonBytes + 1 - content.size());
+		ifs.read(chunk, static_cast<std::streamsize>(request));
+		content.append(chunk, static_cast<std::size_t>(ifs.gcount()));
+		if (content.size() > kMaxGraphJsonBytes) {
+			throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::compileFile",
+				"graph definition exceeds size limit (33554432 bytes)");
+		}
+		if (ifs.bad() || (ifs.fail() && !ifs.eof())) {
+			throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::compileFile",
+				"failed to read graph definition");
+		}
+		if (ifs.eof()) break;
+	}
 
 	// baseDir = 文件所在目录
 	std::filesystem::path baseDir = p.parent_path();

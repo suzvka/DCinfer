@@ -13,6 +13,8 @@ typedef void* zipFile;
 
 namespace DC::Ir {
 
+namespace detail { class SecureExtraction; }
+
 /// @brief 轻量 ZIP 容器读写器（基于 minizip）
 ///
 /// .dcg 格式 = ZIP 容器，内含 graph.json + models/* 模型文件。
@@ -79,7 +81,8 @@ public:
 	void finalize();
 
 private:
-	DcgArchive() = default;
+	DcgArchive();
+	std::unique_ptr<detail::SecureExtraction> _extraction;
 
 	// ── minizip 句柄 ──
 	unzFile _readHandle = nullptr;   // unzFile

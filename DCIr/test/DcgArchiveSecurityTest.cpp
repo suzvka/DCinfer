@@ -11,6 +11,8 @@
 //   - 截断归档明确报错；高压缩比（zip bomb 形态）条目按预算拒绝
 //   - IR-04/05：解包条目数聚合预算、归档全局条目数上限、graph.json 专用体积预算
 //   - 正常归档读取不被安全校验误伤（graph.json 往返 + 模型解压内容比对）
+#include <algorithm>
+#include <vector>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -19,11 +21,21 @@
 #include <stdexcept>
 #include <string>
 
-#include <minizip/zip.h>
+#include <zip.h>
 
 #include "Ir/DcgArchive.h"
 #include "GraphException.h"
 #include "PathGuard.h"
+#include "Ir/GraphCompiler.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <aclapi.h>
+#else
+#include <sys/stat.h>
+#endif
 
 using namespace DC;
 using namespace DC::Ir;
@@ -99,34 +111,34 @@ static void testSafePathValidator() {
 		const auto base = std::filesystem::temp_directory_path() / "dcg_guard_base";
 		std::string reason;
 
-		CHECK(!detail::isSafeArchiveRelPath("", base, &reason), "empty path must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("../escaped.bin", base, &reason), "'..' must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/../../x.bin", base, &reason), "nested '..' must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("..\\win.bin", base, &reason), "backslash '..' must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("/abs.bin", base, &reason), "unix-absolute path must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("//server/share/x.bin", base, &reason), "UNC-style path must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("C:/abs.bin", base, &reason), "drive path must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("c:relative.bin", base, &reason), "drive-relative path must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath(std::string("models/x") + '\0' + "y.bin", base, &reason),
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("", base, &reason), "empty path must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("../escaped.bin", base, &reason), "'..' must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/../../x.bin", base, &reason), "nested '..' must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("..\\win.bin", base, &reason), "backslash '..' must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("/abs.bin", base, &reason), "unix-absolute path must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("//server/share/x.bin", base, &reason), "UNC-style path must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("C:/abs.bin", base, &reason), "drive path must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("c:relative.bin", base, &reason), "drive-relative path must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath(std::string("models/x") + '\0' + "y.bin", base, &reason),
 			  "embedded NUL must be rejected");
 
-		CHECK(detail::isSafeArchiveRelPath("graph.json", base, &reason), "top-level relative must be accepted");
-		CHECK(detail::isSafeArchiveRelPath("models/resnet.onnx", base, &reason), "nested relative must be accepted");
-		CHECK(detail::isSafeArchiveRelPath("models/./x.bin", base, &reason), "dot component must be accepted");
+		CHECK(DC::Ir::detail::isSafeArchiveRelPath("graph.json", base, &reason), "top-level relative must be accepted");
+		CHECK(DC::Ir::detail::isSafeArchiveRelPath("models/resnet.onnx", base, &reason), "nested relative must be accepted");
+		CHECK(DC::Ir::detail::isSafeArchiveRelPath("models/./x.bin", base, &reason), "dot component must be accepted");
 
 		// IR-03：Windows 罪名字形（保留设备名 / ADS 冒号 / 尾点尾空格）
-		CHECK(!detail::isSafeArchiveRelPath("models/CON", base, &reason), "CON device name must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/con.txt", base, &reason),
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/CON", base, &reason), "CON device name must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/con.txt", base, &reason),
 			  "case-insensitive device name with extension must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/AUX.onnx", base, &reason), "AUX device name must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/COM1", base, &reason), "COM1 device name must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/LPT9.bin", base, &reason), "LPT9 device name must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/data.txt:ads", base, &reason), "ADS colon must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/trailing.", base, &reason), "trailing dot must be rejected");
-		CHECK(!detail::isSafeArchiveRelPath("models/trailing ", base, &reason), "trailing space must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/AUX.onnx", base, &reason), "AUX device name must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/COM1", base, &reason), "COM1 device name must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/LPT9.bin", base, &reason), "LPT9 device name must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/data.txt:ads", base, &reason), "ADS colon must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/trailing.", base, &reason), "trailing dot must be rejected");
+		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/trailing ", base, &reason), "trailing space must be rejected");
 		// 合法名不被误伤
-		CHECK(detail::isSafeArchiveRelPath("models/console.onnx", base, &reason), "'console' must be accepted");
-		CHECK(detail::isSafeArchiveRelPath("models/com10.onnx", base, &reason), "'com10' must be accepted");
+		CHECK(DC::Ir::detail::isSafeArchiveRelPath("models/console.onnx", base, &reason), "'console' must be accepted");
+		CHECK(DC::Ir::detail::isSafeArchiveRelPath("models/com10.onnx", base, &reason), "'com10' must be accepted");
 	}
 	END_TEST();
 }
@@ -220,11 +232,21 @@ static void testSymlinkAncestorRejected() {
 			auto w = DcgArchive::openWrite(dcgPath);
 			w->writeGraphJson("{}");
 			w->addModelFile("models/link.bin", workDir / "payload.bin");
+			w->addModelFile("leaf.bin", workDir / "payload.bin");
 			w->finalize();
 		}
 
 		auto r = DcgArchive::openRead(dcgPath);
 		std::error_code ec;
+		const auto outsideFile = workDir / "outside-sentinel.bin";
+		writePayload(outsideFile, "unchanged sentinel");
+		std::filesystem::create_symlink(outsideFile, r->tempDir() / "leaf.bin", ec);
+		if (!ec) {
+			// Leaf creation is exclusive: refusing an existing link cannot truncate its target.
+			bool leafRejected = false;
+			try { r->extractOne("leaf.bin"); } catch (const GraphException&) { leafRejected = true; }
+			CHECK(leafRejected && readFile(outsideFile) == "unchanged sentinel", "leaf symlink target remains unchanged");
+		}
 		std::filesystem::create_directory_symlink(outside, r->tempDir() / "models", ec);
 		if (ec) {
 			std::cout << "SKIP (symlink privilege unavailable: " << ec.message() << ") ";
@@ -470,8 +492,76 @@ static void testMultiChunkModelRoundTrip() {
 
 // ════════════════════════════════════════════
 
+static void testPrivateDirectoryAndExclusiveTarget() {
+	TEST("IR-2: private directory and exclusive extraction target") {
+		const auto work = makeWorkDir("private");
+		writeRawEntry(work / "private.dcg", "model.bin", "payload");
+		auto archive = DcgArchive::openRead(work / "private.dcg");
+#ifdef _WIN32
+		PSECURITY_DESCRIPTOR sd = nullptr;
+		PACL acl = nullptr;
+		CHECK(GetNamedSecurityInfoW(const_cast<LPWSTR>(archive->tempDir().c_str()), SE_FILE_OBJECT,
+			DACL_SECURITY_INFORMATION, nullptr, nullptr, &acl, nullptr, &sd) == ERROR_SUCCESS, "read directory DACL");
+		SECURITY_DESCRIPTOR_CONTROL control{}; DWORD revision = 0;
+		const bool protectedAcl = GetSecurityDescriptorControl(sd, &control, &revision) && (control & SE_DACL_PROTECTED);
+		CHECK(protectedAcl && acl && acl->AceCount == 1, "protected single-user DACL required");
+		HANDLE token = nullptr; CHECK(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "open token");
+		DWORD bytes = 0; GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+		std::vector<unsigned char> user(bytes);
+		const bool gotUser = GetTokenInformation(token, TokenUser, user.data(), bytes, &bytes) != FALSE;
+		CloseHandle(token);
+		void* ace = nullptr;
+		CHECK(gotUser && GetAce(acl, 0, &ace), "read current user and directory ACE");
+		auto* allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
+		const bool currentUserOnly = allowed->Header.AceType == ACCESS_ALLOWED_ACE_TYPE
+			&& EqualSid(&allowed->SidStart, reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid);
+		LocalFree(sd);
+		CHECK(currentUserOnly, "only current user may access extraction directory");
+#else
+		struct stat st{};
+		CHECK(::stat(archive->tempDir().c_str(), &st) == 0 && (st.st_mode & 0777) == 0700,
+			"private directory must be POSIX 0700");
+#endif
+		const auto target = archive->extractOne("model.bin");
+		CHECK(readFile(target) == "payload", "first extraction works");
+		writePayload(target, "existing sentinel");
+		bool rejected = false;
+		try { archive->extractOne("model.bin"); } catch (const GraphException&) { rejected = true; }
+		CHECK(rejected && readFile(target) == "existing sentinel", "existing target never opened or truncated");
+		archive.reset();
+		std::filesystem::remove_all(work);
+	} END_TEST();
+}
+
+static void testBoundedJsonFile() {
+	TEST("IR-1: exact JSON boundary accepted; limit+1 rejected before DOM") {
+		const auto work = makeWorkDir("jsonlimit");
+		const auto file = work / "graph.json";
+		const std::size_t limit = 32u * 1024 * 1024;
+		const std::string prefix = "{\"nodes\":[]}";
+		{
+			std::ofstream out(file, std::ios::binary);
+			out << prefix;
+			const std::string block(64 * 1024, ' ');
+			for (std::size_t remaining = limit - prefix.size(); remaining;) {
+				const auto n = std::min(remaining, block.size()); out.write(block.data(), n); remaining -= n;
+			}
+		}
+		InferGraph exact;
+		GraphCompiler::compileFile(exact, file.string());
+		{ std::ofstream out(file, std::ios::binary | std::ios::app); out.put('!'); }
+		bool rejected = false;
+		try { InferGraph over; GraphCompiler::compileFile(over, file.string()); }
+		catch (const GraphException& e) { rejected = std::string(e.what()).find("exceeds size limit") != std::string::npos; }
+		CHECK(rejected, "limit+1 must report size budget, not JSON parse failure");
+		std::filesystem::remove_all(work);
+	} END_TEST();
+}
+
 int main() {
 	try {
+		testPrivateDirectoryAndExclusiveTarget();
+		testBoundedJsonFile();
 		testSafePathValidator();
 		testAddModelFileRejectsUnsafeEntryName();
 		testExtractOneRejectsTraversal();
