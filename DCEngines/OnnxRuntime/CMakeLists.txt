@@ -56,8 +56,10 @@ if(NOT _ort_include_dirs OR _ort_include_dirs STREQUAL "_ort_include_dirs-NOTFOU
 		NAMES onnxruntime_cxx_api.h
 		HINTS "${onnxruntime_DIR}/../../include/onnxruntime"
 				"${onnxruntime_DIR}/../../../include/onnxruntime"
-		NO_DEFAULT_PATH
-		REQUIRED)
+		NO_DEFAULT_PATH)
+	if(NOT onnxruntime_INCLUDE_DIR)
+		message(FATAL_ERROR "ONNX Runtime C++ headers not found in the configured package")
+	endif()
 	target_include_directories(DCEngine_OnnxRuntime SYSTEM
 		PUBLIC "${onnxruntime_INCLUDE_DIR}")
 endif()
