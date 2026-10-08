@@ -314,6 +314,46 @@ parent.addNode(op.makeNode("Block"));           // 生成普通 Node 嵌入父�
 - 节点 type 为 `"Builtin"`：DCIr 序列化往返仅保留结构（Schema 骨架），
   与注册算子同等待遇。
 
+## DCNet 安全部署边界（NET-1..NET-10）
+
+- 内置 HTTP 监听器**不提供服务端 TLS/mTLS，也不支持 chunked 请求体**；仅接受
+  Content-Length 定长请求，每个请求应答后关闭连接。Transfer-Encoding、重复头与
+  Expect 请求会被拒绝，不应依赖自动转换或 `100-continue`。
+- 监听地址必须解析为**回环地址**；即使配置 Bearer token，也不能直接绑定
+  `0.0.0.0` 或其他非回环地址。远程访问必须通过同机可信 TLS/mTLS 反向代理，
+  同时限制本地用户访问后端端口，并在代理上配置认证、请求大小和连接速率限制。
+- 出站凭据默认要求最终 URI 使用 **HTTPS**；包括 authToken、Authorization、
+  Cookie、API-key 等敏感附加头以及 URI userinfo。不要在 URL 中放凭据，使用
+  authToken。仅本地开发可显式设置 `NetEndpoint::allowInsecureCredentials` 或
+  `DcNetAdapterDesc::allowInsecureCredentials`（OpenAI 对应公开选项同名）；该开关
+  **不会加密流量**，禁止用于不可信网络。
+- 服务端默认单体预算 `maxRequestBody = 8 MiB`、聚合正文预算
+  `maxBufferedBodyBytes = 32 MiB`，认证/路由/配额闸门在读取正文前执行；头与正文
+  共用一次读截止时间。按业务规模调小预算，不以认证代替资源限制。
+- `stop()` 的所有外部并发调用均等待完整排水。handler 内不得 stop 或销毁最后
+  一份服务所有权；业务 handler 自身必须有取消/超时策略。内部错误对外仅给出
+  通用错误与关联 ID；受控 `diagnosticSink` 只接收关联 ID 与安全阶段标签。
+
+详细契约参见 [DCNet 设计文档](DCNet/DESIGN.md)。
+
+## 宿主服务背压（CORE-3）
+
+核心 `ThreadPool::submit` 队列按设计不设上限，不能把无限网络输入直接变成待执行任务。
+宿主应在分配请求载荷、创建任务或 `feedInput` 前做有界、非阻塞准入；额度用尽立即回复 429/503，
+并限制单请求字节数、任务超时与每租户并发。示意如下：
+
+```cpp
+std::counting_semaphore<64> admission{64};
+// 在服务端接入线程调用，不在调度器 worker 上阻塞等待额度。
+if (!admission.try_acquire()) { reject_overload(429); return; }
+// 保持 RAII permit 与宿主任务所有权，直到所有节点工作实际排水结束才 release。
+// submit/输入分配失败也必须回收 permit；不可仅在 completion/cancel 回调里提前释放。
+```
+
+完成或取消通知只表示逻辑终止，不保证慢节点已退出。宿主可使用有界数目的图/运行槽位，
+由外部控制线程负责停用、排水和回收，再归还准入额度；不要在节点或回调内销毁本图或关闭本调度器。
+监控准入占用、拒绝计数、排队延迟和任务载荷总量，负载超过预算时主动降载。
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
