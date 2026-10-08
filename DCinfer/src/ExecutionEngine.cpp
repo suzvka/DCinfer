@@ -11,9 +11,30 @@
 #include "Node/internal/ExecutionPipeline.h"
 
 #include <chrono>
+#include <cstdio>
+#include <exception>
 #include <stdexcept>
 
 namespace DC {
+
+namespace {
+	// Intrusive TLS stack: no allocation; nested calls to different engines retain
+	// every active identity rather than hiding the outer engine behind the inner.
+	struct EngineScope {
+		const ExecutionEngine* engine;
+		EngineScope* previous;
+		static thread_local EngineScope* top;
+		explicit EngineScope(const ExecutionEngine* e) noexcept : engine(e), previous(top) { top = this; }
+		~EngineScope() { top = previous; }
+		static bool contains(const ExecutionEngine* e) noexcept {
+			for (auto* p = top; p; p = p->previous)
+				if (p->engine == e) return true;
+			return false;
+		}
+	};
+	thread_local EngineScope* EngineScope::top = nullptr;
+}
+
 
 // ════════════════════════════════════════════
 // TaskGate 析构
@@ -67,6 +88,10 @@ ExecutionEngine::ExecutionEngine(std::shared_ptr<ResourceScheduler> scheduler)
 }
 
 ExecutionEngine::~ExecutionEngine() {
+	if (EngineScope::contains(this)) {
+		std::fputs("ExecutionEngine: prohibited reentrant destruction from own node/API/callback; retain external ownership\n", stderr);
+		std::terminate();
+	}
 	// 自排水（共享调度器下不能靠“关闭自己的池”来 join 在飞任务）：
 	//
 	// ① 停止新派发：派发登记（_shuttingDown 检查 + _pendingRuns +1）在
@@ -148,6 +173,7 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 	try {
 		dispatched = _scheduler->submit(node->affinity(),
 									 [this, node, nodeName, round, remainingHops, ticket] {
+		EngineScope active{this}; // before RunDone: outlives its destructor
 		// 在飞计数收尾（RAII）：任何退出路径均经本析构递减；归零且本轮
 		// 未终止时由最后完成的 lambda 触发耗尽检测。排水计数由票据独立
 		// 回收（function 析构晚于 lambda 体，故全部引擎回访——
@@ -279,6 +305,7 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 							 const std::shared_ptr<GraphRuntimeState>& state,
 							 std::vector<OutputDeclaration> declarations) {
+	EngineScope active{this};
 	// 快照经发布协议读取（acquire）：进入本函数前 facade 已 _ensureFrozen，
 	// 本地句柄同时把快照存活期钉在本次调用内（state 亦持有）
 	auto snap = state->snapshot();
@@ -371,6 +398,7 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 }
 
 bool ExecutionEngine::tryWriteTaskState(const TaskId& taskId, const std::function<void()>& writeOp) {
+	EngineScope active{this};
 	auto round = _findRound(taskId);
 	if (!round) {
 		// 无轮次（从未提交 / 已释放）：不存在并发收尾，直接写入
@@ -560,6 +588,7 @@ void ExecutionEngine::_finalizeDetached(const std::shared_ptr<TaskGate>& round) 
 }
 
 void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskStatus terminalStatus) {
+	EngineScope active{this};
 	auto& state = round->state;
 	const TaskId& taskId = round->taskId;
 	auto& output = state->output;
@@ -810,6 +839,7 @@ bool ExecutionEngine::isFinalizing(const TaskId& taskId) const {
 }
 
 bool ExecutionEngine::cancel(const TaskId& taskId) {
+	EngineScope active{this};
 	auto round = _findRound(taskId);
 	if (!round)
 		return false; // 未知或已释放（幂等）

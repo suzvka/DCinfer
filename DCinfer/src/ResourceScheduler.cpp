@@ -1,6 +1,8 @@
 #include "ResourceScheduler.h"
 
 #include <array>
+#include <cstdio>
+#include <exception>
 #include <optional>
 #include <stdexcept>
 
@@ -43,6 +45,8 @@ void ResourceScheduler::resetInstance() {
 	std::shared_ptr<ResourceScheduler> old;
 	{
 		std::lock_guard lk(g_instanceMutex);
+		if (g_instance && g_instance->isWorkerThread())
+			throw std::logic_error("ResourceScheduler::resetInstance: prohibited on own worker");
 		old = std::move(g_instance);
 		g_pendingConfig.reset();
 	}
@@ -60,7 +64,22 @@ ResourceScheduler::ResourceScheduler(const SchedulerConfig& config)
 		throw std::invalid_argument("ResourceScheduler: config workers must be > 0");
 }
 
+bool ResourceScheduler::isWorkerThread() const noexcept {
+	const auto* current = ThreadPool::currentWorkerPool();
+	if (!current)
+		return false;
+	std::lock_guard lk(_initMutex);
+	for (const auto& pool : _pools)
+		if (pool.get() == current)
+			return true;
+	return false;
+}
+
 ResourceScheduler::~ResourceScheduler() {
+	if (isWorkerThread()) {
+		std::fputs("ResourceScheduler: prohibited destruction on own worker; retain external ownership\n", stderr);
+		std::terminate();
+	}
 	shutdown();
 }
 
@@ -97,6 +116,8 @@ bool ResourceScheduler::submit(ResourceClass cls, std::function<void()> task) {
 }
 
 void ResourceScheduler::shutdown() {
+	if (isWorkerThread())
+		throw std::logic_error("ResourceScheduler::shutdown: prohibited on own worker");
 	// 关停锁（P2-13）：并发 shutdown 时两个线程可能同时对同一池发起
 	// join（ThreadPool 侧已由 _drainMutex 兜底串行化，本锁消除调度器级
 	// 快照+逐池关停的交叠，双保险）；顺序重复调用幂等性不变。

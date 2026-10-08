@@ -1,11 +1,20 @@
 #include "ThreadPool.h"
 
+#include <cstdio>
+#include <exception>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <system_error>
 
 namespace DC {
+
+namespace {
+	thread_local const ThreadPool* g_workerPool = nullptr;
+}
+
+const ThreadPool* ThreadPool::currentWorkerPool() noexcept { return g_workerPool; }
+bool ThreadPool::isWorkerThread() const noexcept { return g_workerPool == this; }
 
 // ── ThreadPool ──
 
@@ -37,6 +46,10 @@ ThreadPool::ThreadPool(const PoolConfig& config)
 }
 
 ThreadPool::~ThreadPool() {
+	if (isWorkerThread()) {
+		std::fputs("ThreadPool: prohibited destruction on own worker; retain external ownership\n", stderr);
+		std::terminate();
+	}
 	shutdown();
 }
 
@@ -64,6 +77,8 @@ void ThreadPool::shutdown() {
 }
 
 void ThreadPool::_drainWorkers() {
+	if (isWorkerThread())
+		throw std::logic_error("ThreadPool::shutdown: prohibited on own worker");
 	// 排水锁（P2-13）：并发 shutdown 时两个线程同时 joinable+join 同一
 	// worker 是竞态（UB）——串行化后第二个调用者看到已清空的 _workers，
 	// 顺序幂等性保持（joinable 检查 + clear）
@@ -86,6 +101,11 @@ void ThreadPool::_drainWorkers() {
 }
 
 void ThreadPool::_workerLoop() {
+	struct WorkerScope {
+		const ThreadPool* previous;
+		explicit WorkerScope(const ThreadPool* pool) : previous(g_workerPool) { g_workerPool = pool; }
+		~WorkerScope() { g_workerPool = previous; }
+	} identity{this};
 	while (true) {
 		std::function<void()> task;
 		{

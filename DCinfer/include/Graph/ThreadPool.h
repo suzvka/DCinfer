@@ -32,6 +32,8 @@ public:
 	/// @brief  构造线程池
 	/// @param  config  线程数配置
 	explicit ThreadPool(const PoolConfig& config = {});
+	/// Destruction requires an external owner on a nonworker thread. Violations
+	/// print a diagnostic and terminate (also in Release); workers are never detached.
 	~ThreadPool();
 
 	ThreadPool(const ThreadPool&) = delete;
@@ -41,11 +43,18 @@ public:
 	/// @return true = 任务已入队；false = 池已关闭或入队失败（内存压力）——
 	///         任务未被接受，调用方应按失败语义处理（不得假设任务会执行）
 	/// @note   队列无界（无背压）：提交速率长期超过执行速率时内存占用随之
-	///         增长，宿主应以提交节流或扩大线程数控制队列规模
+	///         增长；宿主须在分配载荷/提交前做有界准入，超载立即拒绝，
+	///         RAII 准入票据持有至实际执行/载荷释放；增加线程数不等于内存界限。
+	///         worker 不得阻塞等待由排队任务释放的准入票据。
 	bool submit(std::function<void()> task);
 
 	/// @brief  优雅关闭（丢弃队列中未执行的任务）
+	/// @throws std::logic_error on this pool's worker, before any state change/lock.
 	void shutdown();
+
+	/// Identity includes task execution AND destruction of its captured payload.
+	bool isWorkerThread() const noexcept;
+	static const ThreadPool* currentWorkerPool() noexcept;
 
 	size_t totalThreads() const {
 		return _totalThreads;

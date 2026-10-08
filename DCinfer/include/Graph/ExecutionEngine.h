@@ -52,8 +52,11 @@ public:
 	/// @brief  析构：自排水——停止新派发、标记全部轮次终止、等待在飞与
 	///         已排队任务 lambda 全部退出（引擎回访归零），再移出并释放
 	///         轮次表。共享调度器不受影响（仅引擎自身退出）。
-	/// @note   定义于 .cpp；析构不得从调度器 worker 线程上调用（任务
-	///         lambda 内析构图会自我等待）。
+	/// @note   Host must retain external ownership until node/API/callback calls return.
+	///         Destruction of this engine or its InferGraph from its own RunFn,
+	///         completion callback (including synchronous cancel on nonworkers), or
+	///         writeOp is prohibited: diagnostic + std::terminate in all builds.
+	///         Never detach workers or skip draining to evade this contract.
 	~ExecutionEngine();
 
 	ExecutionEngine(const ExecutionEngine&) = delete;
@@ -145,7 +148,9 @@ public:
 	///         置位执行，等待将自我阻塞；亦不得 submit()/feedInput()/
 	///         releaseTask()/detachTask()——收尾窗口内复用/输入注入/释放
 	///         均被拒绝（DuplicateTask/无操作，H-3）。回调应只读取/捕获数据，
-	///         新一轮提交请在 waitForResult 返回后进行。
+	///         新一轮提交请在 waitForResult 返回后进行。禁止在回调内销毁
+	///         本引擎/InferGraph（包括非 worker 上 cancel 同步触发的回调）；
+	///         违反外部所有权契约时打印诊断并 terminate，Release 同样有效。
 	void setTaskCompleteCallback(TaskCompleteCallback cb) {
 		std::lock_guard lk(_cbMutex);
 		_taskCompleteCb = std::move(cb);

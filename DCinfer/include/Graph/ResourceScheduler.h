@@ -57,8 +57,18 @@ struct SchedulerConfig {
 /// 池在调度器析构前保持存在——shutdown() 只关停（拒绝新提交、join 在飞），
 /// 不销毁对象（并发提交方持有的池指针始终有效，与关停的竞态由池内锁串行）。
 /// 内部池队列为无界 FIFO（无内置背压/丢弃）：提交速率长期超过执行速率时
-/// 队列与任务载荷随之增长，长驻/服务部署由宿主以提交节流或扩大线程数
+/// 队列与任务载荷随之增长，长驻/服务部署由宿主以有界准入
 /// 控制队列规模（与 ThreadPool.h 契约一致）。
+/// Host backpressure: acquire a bounded admission permit BEFORE allocating payloads
+/// or feeding/submitting a graph; reject overload promptly (e.g. HTTP 429/503).
+/// Keep a RAII permit with accepted work until execution/payload ownership drains;
+/// cancellation/terminal notification alone does not mean a running node has exited.
+/// Do not block scheduler workers acquiring permits needed by queued work. Increasing
+/// worker count is NOT a memory bound. Budget graph fanout and queued payload bytes.
+///
+/// Ownership contract: shutdown/resetInstance must run outside this scheduler's
+/// workers; violations throw std::logic_error before stop state changes. The last
+/// owner must be released externally; worker destruction diagnoses and terminates.
 ///
 /// ── 阻塞语义（预算规划约束） ──
 /// worker 被阻塞任务（网络 I/O、等待型节点）占住是池化执行的固有语义：
@@ -70,7 +80,10 @@ public:
 	/// @param config 进程资源预算（各类 worker 必须 > 0）
 	/// @throws std::invalid_argument config 无效
 	explicit ResourceScheduler(const SchedulerConfig& config = {});
+	/// Must be destroyed by an external nonworker owner; violation diagnoses and terminates.
 	~ResourceScheduler();
+	/// True on any of this scheduler's resource-class workers (including payload destruction).
+	bool isWorkerThread() const noexcept;
 
 	ResourceScheduler(const ResourceScheduler&) = delete;
 	ResourceScheduler& operator=(const ResourceScheduler&) = delete;
@@ -87,6 +100,8 @@ public:
 	/// @note   建议先析构使用方（图/引擎），再关停调度器——反序亦安全
 	///         （在飞任务由本函数 join 兜底执行完毕，排队任务弃置即回收，
 	///         关停返回后无任何任务 lambda 可再回访使用方）。
+	/// @throws std::logic_error from any own resource-class worker, before locking
+	///         the shutdown mutex or changing stop state (including payload teardown).
 	void shutdown();
 
 	/// @brief 是否已关停（shutdown() 调用后为 true）
@@ -119,6 +134,8 @@ public:
 	/// @brief 关停并清除进程级默认实例（测试隔离 / 服务器确定性回收）。
 	///        此后 instance() 按新预配置重新惰性创建；仍持有旧实例引用的
 	///        使用方不受影响（旧实例已关停，拒绝新提交）。
+	/// @throws std::logic_error from an own worker of the current default instance;
+	///         singleton and pending configuration remain unchanged.
 	static void resetInstance();
 
 private:
@@ -131,7 +148,7 @@ private:
 
 	SchedulerConfig _config;
 	std::atomic<bool> _stopped{false};
-	std::mutex _initMutex;                 ///< 保护惰性创建与关停遍历
+	mutable std::mutex _initMutex;                 ///< 保护惰性创建与关停遍历
 	std::mutex _shutdownMutex;             ///< 串行化并发 shutdown（P2-13）：快照+逐池 join 不再交叠
 	std::unique_ptr<ThreadPool> _pools[3]; ///< 每资源类一个执行器（下标 = ResourceClass 值）
 };

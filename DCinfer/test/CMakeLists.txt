@@ -22,4 +22,5 @@ foreach(test_src IN LISTS TEST_SOURCES)
     # Use generator expression to pass the full path to the built executable to CTest.
     # This avoids issues where the build tool tries to execute the test by target name.
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
 endforeach()
