@@ -135,11 +135,14 @@ jobs:
         with:
           arch: x64
 
+      # Windows runner 默认 pwsh：`-DKEY=值.含点` 会被参数重写切分
+      # （vcpkg-toolchain.cmake → vcpkg-toolchain + .cmake，配置期直接失败）。
+      # 含点值必须整体加引号（bash 下等效；无点值如 =ON/=Release 不受影响）。
       - name: Configure
         run: >
           cmake -B build -S . -G Ninja
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
+          "-DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake"
           -DDCINFER_BUILD_DCNET=ON
           -DBUILD_ENGINE_BUILTIN=ON
           -DBUILD_ENGINE_OPENAI=ON
@@ -485,7 +488,9 @@ jobs:
         with:
           persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-11 clang-14
-      - run: python3 -m pip install --user cmake==3.17.5
+      # PyPI 上 cmake 3.17.x 最高为 3.17.3（3.17.5 不存在，pip 解析直接失败）——
+      # 保持“最小 3.17 线”验证意图
+      - run: python3 -m pip install --user cmake==3.17.3
       # Preset schema v3 needs newer CMake; exercise the advertised minimum via -S/-B.
       - run: >
           $HOME/.local/bin/cmake -S . -B build/minimum -G Ninja
