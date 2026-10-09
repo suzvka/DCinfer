@@ -201,6 +201,11 @@ jobs:
           else
             echo "Documented differences recorded in $obs.diff"
           fi
+          # GitHub Release API 拒绝 0 字节资产（size must be >= 1）：两份安装树
+          # 完全一致时 diff 为空，写入说明行保证资产可上传（语义：无差异）。
+          if [ ! -s "$obs.diff" ]; then
+            echo "no differences: both clean builds produced identical install trees" > "$obs.diff"
+          fi
 
       - name: Record toolchain and package with normalized metadata
         shell: bash
