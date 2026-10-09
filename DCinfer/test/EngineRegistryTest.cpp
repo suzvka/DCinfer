@@ -777,7 +777,9 @@ static void runTests() {
 			desc.converter = {mockToNative, mockToDC};
 			desc.createEngine = [](const std::string& path) -> EngineInstance {
 				++g_lruCreateCount;
-				return EngineInstance(std::make_shared<MockSession>(path));
+				// 聚合显式构造：直接传 (path) 依赖 C++20 P0960 括号聚合初始化，
+				// clang-14（最低工具链）不支持；对齐本文件其余 mock 构造风格。
+				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
 			};
 			if (!reg.registerEngine(desc))
 				throw std::runtime_error("register LruMock engine failed");

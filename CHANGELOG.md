@@ -74,6 +74,10 @@ CI 覆盖补齐；绑定端口收束为终端端口不变量。
   （CMake 3.17 的 FindThreads 会继承宿主 `CMAKE_REQUIRED_*` 哨兵值导致
   pthread.h 误判 not found）；C++17 宿主 add_subdirectory 前后上下文保持
   不变（CI 用 probe-only 库哨兵断言）。
+- **BUILD-3 clang-14 测试编译**：`make_shared<MockSession>(path)` 依赖
+  C++20 P0960 括号聚合初始化（clang 16 前未实现），最低工具链 clang-14
+  构建测试报 `construct_at` 无匹配；改为显式聚合构造
+  （`MockSession{path}`，与同文件其余 mock 一致）。
 - **输出取数端口不变量（High）绑定端口带出边会截断下游数据流**：
   `bindOutput` 的端口在图中存在出边时，传播期「OutputZone 搬运」与
   「出边搬运」共享同一消费槽——取数截走数据后下游永久饿死：任务或
