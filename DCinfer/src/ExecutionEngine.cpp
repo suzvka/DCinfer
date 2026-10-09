@@ -89,7 +89,11 @@ ExecutionEngine::ExecutionEngine(std::shared_ptr<ResourceScheduler> scheduler)
 
 ExecutionEngine::~ExecutionEngine() {
 	if (EngineScope::contains(this)) {
+		// fail-fast 诊断必须可靠送达：宿主可将 stderr 重定向到文件（freopen），
+		// glibc 下重定向后的流可能为全缓冲，随后 _Exit 不经 flush 会丢掉诊断
+		// 文本——显式 flush 兜底（unbuffered 时为空操作）。
 		std::fputs("ExecutionEngine: prohibited reentrant destruction from own node/API/callback; retain external ownership\n", stderr);
+		std::fflush(stderr);
 		std::terminate();
 	}
 	// 自排水（共享调度器下不能靠“关闭自己的池”来 join 在飞任务）：

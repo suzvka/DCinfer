@@ -47,7 +47,11 @@ ThreadPool::ThreadPool(const PoolConfig& config)
 
 ThreadPool::~ThreadPool() {
 	if (isWorkerThread()) {
+		// fail-fast 诊断必须可靠送达：宿主可将 stderr 重定向到文件（freopen），
+		// glibc 下重定向后的流可能为全缓冲，随后 _Exit 不经 flush 会丢掉诊断
+		// 文本——显式 flush 兜底（unbuffered 时为空操作）。
 		std::fputs("ThreadPool: prohibited destruction on own worker; retain external ownership\n", stderr);
+		std::fflush(stderr);
 		std::terminate();
 	}
 	shutdown();
