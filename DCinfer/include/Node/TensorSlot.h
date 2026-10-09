@@ -55,8 +55,37 @@ public:
 	// ── 生命周期 ──
 	TensorSlot(const TensorSlot&) = delete;
 	TensorSlot& operator=(const TensorSlot&) = delete;
-	TensorSlot(TensorSlot&&) noexcept = default;
-	TensorSlot& operator=(TensorSlot&&) noexcept = default;
+
+	/// @brief 析构：释放类型擦除的运行时数据（RAII）。未被 take/clear 的
+	///        残留值随槽位销毁释放——否则容器销毁或移动后源对象会泄漏
+	///        （LeakSanitizer 在常规执行路径可复现）。
+	~TensorSlot() { releaseBlob(); }
+
+	/// @brief 移动构造：接管 other 的数据并清空源（防空析构双重释放）。
+	///        清空源只 reset 不走 deleter：std::function 的 moved-from 状态
+	///        由实现定义，依赖其"被置空"来判断释放会对已转移指针二次释放。
+	TensorSlot(TensorSlot&& other) noexcept
+		: _rule(std::move(other._rule)),
+		  _defaultData(std::move(other._defaultData)),
+		  _defaultProvider(std::move(other._defaultProvider)),
+		  _blob(std::move(other._blob)),
+		  _config(std::move(other._config)) {
+		other._blob.reset();
+	}
+
+	/// @brief 移动赋值：先释放自身数据，再接管并清空源。
+	TensorSlot& operator=(TensorSlot&& other) noexcept {
+		if (this != &other) {
+			releaseBlob();
+			_rule = std::move(other._rule);
+			_defaultData = std::move(other._defaultData);
+			_defaultProvider = std::move(other._defaultProvider);
+			_blob = std::move(other._blob);
+			other._blob.reset(); // 所有权已转移：仅清空源，不调用 deleter
+			_config = std::move(other._config);
+		}
+		return *this;
+	}
 
 	/// @brief 构造 TensorSlot。
 	/// @param name   槽位名称（对应端口名）。
@@ -148,6 +177,14 @@ private:
 	DefaultProvider _defaultProvider; // 懒求值默认值工厂
 	std::optional<TypedBlob> _blob; // 运行时数据
 	Config _config;
+
+	/// @brief 释放类型擦除数据（幂等：ptr 置空后二次调用无操作）。
+	void releaseBlob() {
+		if (_blob.has_value() && _blob->deleter && _blob->ptr) {
+			_blob->deleter(_blob->ptr);
+			_blob->ptr = nullptr;
+		}
+	}
 
 	[[noreturn]] void abort(ErrorType errorType = ErrorType::Other, const std::string& message = "") const;
 };
