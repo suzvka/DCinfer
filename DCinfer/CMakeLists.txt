@@ -12,7 +12,14 @@ endif()
 
 # Linux: <thread>, <mutex>, <semaphore>, <condition_variable> 均需链接 pthread
 # Windows: Threads::Threads 是空操作，不影响
+#
+# 探测与 libatomic 同域隔离（RESET + 恢复）：宿主 add_subdirectory 前可能设置
+# CMAKE_REQUIRED_LIBRARIES/FLAGS（如探针哨兵值）——CMake 3.17 的 FindThreads
+# 会把它们带入 pthread.h 探测的链接行，链接不存在的库导致误判 not found。
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
 find_package(Threads REQUIRED)
+cmake_pop_check_state()
 target_link_libraries(DCinfer PUBLIC Threads::Threads)
 
 # ── GCC 特化处理 ──

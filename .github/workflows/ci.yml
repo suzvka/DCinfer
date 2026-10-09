@@ -476,7 +476,7 @@ jobs:
       - run: ctest --test-dir build/atomic32 --output-on-failure --timeout 120 --no-tests=error
 
   minimum-toolchain:
-    name: Minimum toolchain (${{ matrix.cxx }}, CMake 3.17.5)
+    name: Minimum toolchain (${{ matrix.cxx }}, CMake 3.17.3)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:

@@ -69,9 +69,11 @@ CI 覆盖补齐；绑定端口收束为终端端口不变量。
 - **BUILD-1 安装接口路径**：目标 `INSTALL_INTERFACE` 统一 GNUInstallDirs
   （`${CMAKE_INSTALL_INCLUDEDIR}`）——自定义包含目录（如 `inc`）的安装
   树可被消费；四个包的非默认安装与搬迁后消费均验证通过。
-- **BUILD-2 libatomic 探测上下文**：探测显式 C++20 并隔离/恢复父工程
-  check context（重新计算自身缓存）；C++17 宿主 `add_subdirectory` 前后
-  上下文保持不变（CI 用 probe-only 库哨兵断言）。
+- **BUILD-2 探测上下文隔离**：libatomic 探测显式 C++20 并隔离/恢复父工程
+  check context（重新计算自身缓存）；`find_package(Threads)` 同域隔离
+  （CMake 3.17 的 FindThreads 会继承宿主 `CMAKE_REQUIRED_*` 哨兵值导致
+  pthread.h 误判 not found）；C++17 宿主 add_subdirectory 前后上下文保持
+  不变（CI 用 probe-only 库哨兵断言）。
 - **输出取数端口不变量（High）绑定端口带出边会截断下游数据流**：
   `bindOutput` 的端口在图中存在出边时，传播期「OutputZone 搬运」与
   「出边搬运」共享同一消费槽——取数截走数据后下游永久饿死：任务或
