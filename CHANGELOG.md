@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-10-09
+
+引擎节点编译语义修正（破坏性）：GraphCompiler 不再于编译期急切创建引擎
+实例——引擎节点改为延迟物化（不加载模型、不缓存实例），`modelPath` 收束
+为引擎自定义不透明信息（原样透传：不拼接、不校验、不做文件系统解释），
+`.dcg` 编译不再解压模型文件。编译机不再需要持有模型文件；模型加载由宿主
+经 `getOrCreateEngine` + `Node::bindEngine` 显式完成，编译机/执行机分离
+部署成为一等公民。
+
+### Changed
+
+- **破坏性（0.x）引擎节点延迟物化**：引擎节点反序列化不再调用
+  `getOrCreateEngine`——编译期零加载、零实例缓存，先前「模型缺失/不可达
+  → 编译中断」的路径不再存在（加载失败语义回归 `createEngine` 钩子，在
+  宿主调用 `getOrCreateEngine` 时暴露）。节点经新增公开接口
+  `EngineRegistry::createLazyNode` 物化：schema 取 JSON 声明（不做实例
+  推导、不被覆盖），工厂提供引擎 RunFn；未注册工厂回退骨架
+  （RunFn=nullptr）并输出警告，JSON 声明 schema 为空亦报告警告。宿主须
+  在冻结前经 `getOrCreateEngine(engineType, modelPath)` +
+  `Node::bindEngine` 注入实例（典型：执行机侧解析 modelPath 后加载）；
+  实例缓存键为该字符串本身。
+- **破坏性（0.x）`modelPath` 语义收束为透传**：不再做基目录拼接、路径
+  校验或任何文件系统解释——相对路径、URL、模型标识符均原样保留
+  （与 `engineConfig` 的「一字段一语义」哲学对齐）；依赖编译期路径解析、
+  拼接或越界拒绝的行为不再存在。
+- **`GraphCompiler::compileString` 删除 `baseDir` 参数**（透传后不再需要
+  基目录锚点）；`compileFile(.dcg)` 只读取 `graph.json`，不再收集/校验/
+  解压 modelPath 引用文件——资源就绪由宿主经 `DcgArchive::extractOne`
+  自行处理（归档读取防御与 `addModelFile` 写入侧保护不变）。
+
 ## [0.7.4] - 2026-10-09
 
 发布前安全审查批次（23 项）与输出取数不变量修复。要点：DCNet 请求面与
