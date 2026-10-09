@@ -1,4 +1,5 @@
 // GraphCompiler 单元测试
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -6,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <streambuf>
 #include <string>
 
@@ -61,22 +63,35 @@ static Node::Port voidPort(std::string name, size_t typeSize, Tensor::Shape shap
 	return p;
 }
 
+/// @brief 测试引擎 createEngine 调用计数（验证"编译期零加载"）
+static std::atomic<int> g_engineLoadCalls{0};
+
 /// @brief 注册可配置测试引擎（EngineRegistry 为全局单例，类型名必须唯一）
-/// @param createSuccess     createEngine 是否成功（false → 返回空实例，模拟模型缺失）
-/// @param withPortHooks     是否注册 getInputPorts/getOutputPorts（模拟实例推导 Schema）
+/// @param createSuccess     createEngine 是否成功（false → 返回空实例）
+/// @param withPortHooks     是否注册实例端口推导钩子（保留：验证延迟物化不触发推导）
 /// @param checkFileExists   createEngine 前检查模型文件是否存在
+/// @param throwOnCreate     createEngine 抛异常（模拟真实 ORT 加载失败行为，
+///                          见 OnnxEngine.cpp：模型不可加载时抛 std::runtime_error）
 static void registerTestEngine(const std::string& type, bool createSuccess,
-							   bool withPortHooks, bool checkFileExists) {
+							   bool withPortHooks, bool checkFileExists,
+							   bool throwOnCreate = false) {
 	auto& reg = EngineRegistry::instance();
 	EngineDescriptor desc;
 	desc.engineType = type;
 	desc.factory = [type](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		auto node = std::make_unique<Node>(type, p.nodeName, p.schema, nullptr, ResourceClass::Compute);
+		// factory 提供真 RunFn：物化节点应可执行（未绑定实例时由引擎 RunFn 自行判错）
+		auto node = std::make_unique<Node>(type, p.nodeName, p.schema,
+										   [](Node::RunContext& ctx) { return ctx.success(); },
+										   ResourceClass::Compute);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
 		return node;
 	};
-	desc.createEngine = [createSuccess, checkFileExists](const std::string& modelPath) -> EngineInstance {
+	desc.createEngine = [createSuccess, checkFileExists, throwOnCreate](
+							const std::string& modelPath) -> EngineInstance {
+		++g_engineLoadCalls;
+		if (throwOnCreate)
+			throw std::runtime_error("simulated engine load failure for '" + modelPath + "'");
 		if (modelPath.empty()) return EngineInstance();
 		if (checkFileExists && !std::filesystem::exists(modelPath)) return EngineInstance();
 		if (!createSuccess) return EngineInstance();
@@ -322,10 +337,10 @@ void testRoundTrip() {
 		CHECK(graph2.edgeCount() == 2, "roundtrip: should have 2 edges");
 		CHECK(graph2.outputBindings().size() == 1, "roundtrip: should have 1 output binding");
 
-		// modelPath 保留
+		// modelPath 原样透传
 		auto* n1 = graph2.node("test1");
 		CHECK(n1 != nullptr, "roundtrip: test1 not null");
-		CHECK(n1->modelPath().find("test.onnx") != std::string::npos, "roundtrip: modelPath should contain test.onnx");
+		CHECK(n1->modelPath() == "models/test.onnx", "roundtrip: modelPath must be preserved verbatim");
 
 		// 清理
 		std::remove(tmpFile.c_str());
@@ -410,7 +425,7 @@ void testSerializeToJsonString() {
 }
 
 void testModelPathHandling() {
-	TEST("modelPath - absolute path preserved, relative path not mangled") {
+	TEST("modelPath - passed through verbatim (no path interpretation)") {
 		const char* json = R"({
   "version": "1.0",
   "nodes": [
@@ -427,8 +442,8 @@ void testModelPathHandling() {
 		InferGraph graph; GraphCompiler::compileString(graph, json);
 		auto* n = graph.node("m1");
 		CHECK(n != nullptr, "m1 should exist");
-		CHECK(!n->modelPath().empty(), "modelPath should not be empty");
-		// 相对路径会被 baseDir（默认当前目录）拼接
+		CHECK(n->modelPath() == "models/test.onnx",
+			"modelPath must be preserved verbatim (no baseDir concatenation)");
 	}
 	END_TEST();
 }
@@ -568,10 +583,11 @@ void testDcgRoundTrip() {
 		CHECK(graph2.edgeCount() >= 1, "dcg roundtrip: should have edges");
 		CHECK(graph2.outputBindings().size() == 1, "dcg roundtrip: should have 1 output binding");
 
-		// modelPath 应该保留相对路径格式
+		// modelPath 原样透传（归档内相对路径，不拼接临时目录）
 		auto* node1 = graph2.node("dcg_n1");
 		CHECK(node1 != nullptr, "dcg roundtrip: dcg_n1 not null");
-		CHECK(!node1->modelPath().empty(), "dcg roundtrip: modelPath should not be empty");
+		CHECK(node1->modelPath() == "models/test_dcg_model.bin",
+			"dcg roundtrip: modelPath must stay archive-relative verbatim");
 
 		// 清理
 		std::remove(dcgFile.c_str());
@@ -684,8 +700,52 @@ void testVoidPortRoundTrip() {
 	END_TEST();
 }
 
+void testEngineNodeMaterialization() {
+	TEST("engine node — declared schema + RunFn materialized without loading model") {
+		g_engineLoadCalls = 0;
+		registerTestEngine("MaterializeEngine", true, true, false);
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "eng1", "type": "MaterializeEngine", "affinity": "Compute", "tag": "t1",
+      "modelPath": "models/m.onnx",
+      "inputs": [
+        {"name":"declaredIn","tensorType":"Int","typeSize":4,"shape":[],"required":true}
+      ],
+      "outputs": [
+        {"name":"declaredOut","tensorType":"Int","typeSize":4,"shape":[],"required":true}
+      ]
+    }
+  ],
+  "edges": [],
+  "outputBindings": []
+})";
+		CerrCapture cap;
+		InferGraph graph; GraphCompiler::compileString(graph, json);
+		auto* n = graph.node("eng1");
+		CHECK(n != nullptr, "engine node should be materialized");
+		// 声明 schema 保留：不触发实例推导（引擎端口钩子产出 in/out，声明为 declaredIn/Out）
+		CHECK(n->schema().inputs.size() == 1 && n->schema().inputs[0].name == "declaredIn",
+			"JSON declared schema must be preserved (no instance derivation)");
+		CHECK(n->schema().outputs.size() == 1 && n->schema().outputs[0].name == "declaredOut",
+			"JSON declared output schema must be preserved");
+		// 工厂提供的引擎 RunFn 已注入：可执行物化节点（非骨架）
+		CHECK(static_cast<bool>(n->runFn()), "factory-provided RunFn must be present");
+		// modelPath 原样透传
+		CHECK(n->modelPath() == "models/m.onnx", "modelPath must be passed through verbatim");
+		CHECK(n->tag() == "t1", "tag preserved");
+		CHECK(cap.str().find("empty declared schema") == std::string::npos,
+			"no empty-schema warning for non-empty declaration");
+		// 编译期零加载：createEngine 从未被调用
+		CHECK(g_engineLoadCalls == 0, "createEngine must not be invoked at compile time");
+	}
+	END_TEST();
+}
+
 void testEngineNodeNoModelPath() {
-	TEST("engine node without modelPath — skeleton fallback with warning") {
+	TEST("engine node without modelPath — materialized as declarative node, no warning") {
+		g_engineLoadCalls = 0;
 		registerTestEngine("NoModelPathEngine", true, true, false);
 		const char* json = R"({
   "version": "1.0",
@@ -705,68 +765,36 @@ void testEngineNodeNoModelPath() {
 })";
 		CerrCapture cap;
 		InferGraph graph; GraphCompiler::compileString(graph, json);
-
-		// 无 modelPath → 不调用 createNode（避免空路径加载），回退骨架节点
 		auto* n = graph.node("eng1");
-		CHECK(n != nullptr, "skeleton node should be created");
-		CHECK(n->type() == "NoModelPathEngine", "type should be preserved");
-		CHECK(n->schema().inputs.size() == 1, "JSON schema preserved on skeleton");
+		CHECK(n != nullptr, "node should be materialized (no skeleton fallback)");
+		CHECK(n->type() == "NoModelPathEngine", "type preserved");
+		CHECK(n->schema().inputs.size() == 1, "declared schema preserved");
 		CHECK(n->tag() == "t1", "tag preserved");
 		CHECK(n->modelPath().empty(), "no modelPath set");
-		CHECK(cap.str().find("has no modelPath") != std::string::npos,
-			"warning should mention missing modelPath");
+		CHECK(static_cast<bool>(n->runFn()), "RunFn present (executable materialization)");
+		CHECK(cap.str().find("warning") == std::string::npos, "no warnings for a valid declaration");
+		CHECK(g_engineLoadCalls == 0, "createEngine must not be invoked at compile time");
 	}
 	END_TEST();
 }
 
-void testEngineNodeLoadFailure() {
-	TEST("engine node load failure — explicit diagnostics, node skipped") {
-		// createEngine 检查模型文件存在（模拟 ORT Session 加载缺失文件失败）
-		registerTestEngine("MissingModelEngine", true, true, true);
+void testCompileNeverInvokesCreateEngine() {
+	TEST("compile never invokes createEngine — URL modelPath (issue scenario)") {
+		// 旧语义：编译期调用 createNode(modelPath) 触发加载，真实 ORT 引擎对
+		// 不可加载路径抛异常 → 整个编译中断；新语义：加载完全推迟到宿主绑定/执行期。
+		g_engineLoadCalls = 0;
+		registerTestEngine("ThrowOnLoadEngine", true, true, false, /*throwOnCreate=*/true);
 		const char* json = R"({
   "version": "1.0",
   "nodes": [
     {
-      "name": "m1", "type": "MissingModelEngine", "affinity": "Compute",
-      "modelPath": "models/does_not_exist.onnx",
-      "inputs": [], "outputs": []
-    }
-  ],
-  "edges": [],
-  "outputBindings": []
-})";
-		CerrCapture cap;
-		InferGraph graph; GraphCompiler::compileString(graph, json);
-
-		// 节点被跳过（不中断编译），但必须有可感知的诊断
-		CHECK(graph.node("m1") == nullptr, "node should be skipped on load failure");
-		std::string diag = cap.str();
-		CHECK(diag.find("failed to create engine node") != std::string::npos,
-			"diagnostics should be present");
-		CHECK(diag.find("m1") != std::string::npos, "diagnostics should contain node name");
-		CHECK(diag.find("MissingModelEngine") != std::string::npos,
-			"diagnostics should contain engine type");
-		CHECK(diag.find("does_not_exist.onnx") != std::string::npos,
-			"diagnostics should contain modelPath");
-	}
-	END_TEST();
-}
-
-void testEngineSchemaDerivedAndEmpty() {
-	TEST("engine schema — instance-derived overrides JSON; empty schema warns") {
-		// 1) 注册端口推导钩子 → Schema 从实例推导，JSON schema 被覆盖
-		registerTestEngine("SchemaDerivedEngine", true, true, false);
-		const char* json = R"({
-  "version": "1.0",
-  "nodes": [
-    {
-      "name": "e1", "type": "SchemaDerivedEngine",
-      "modelPath": "models/m.onnx",
+      "name": "m", "type": "ThrowOnLoadEngine", "affinity": "Compute",
+      "modelPath": "https://obj.example.com/mnist-12.onnx",
       "inputs": [
-        {"name":"jsonIn","tensorType":"Int","typeSize":4,"shape":[],"required":true}
+        {"name":"x","tensorType":"Float","typeSize":4,"shape":[],"required":true}
       ],
       "outputs": [
-        {"name":"jsonOut","tensorType":"Int","typeSize":4,"shape":[],"required":true}
+        {"name":"y","tensorType":"Float","typeSize":4,"shape":[],"required":true}
       ]
     }
   ],
@@ -774,25 +802,32 @@ void testEngineSchemaDerivedAndEmpty() {
   "outputBindings": []
 })";
 		CerrCapture cap;
-		InferGraph graph; GraphCompiler::compileString(graph, json);
-		auto* n = graph.node("e1");
-		CHECK(n != nullptr, "e1 should exist");
-		CHECK(n->schema().inputs.size() == 1 && n->schema().inputs[0].name == "in",
-			"schema derived from engine instance overrides JSON schema");
-		CHECK(n->schema().outputs.size() == 1 && n->schema().outputs[0].name == "out",
-			"output derived from engine instance");
-		CHECK(n->modelPath().find("models/m.onnx") != std::string::npos,
-			"modelPath preserved on engine node");
-		CHECK(cap.str().find("empty schema") == std::string::npos,
-			"no empty-schema warning when port hooks are registered");
+		InferGraph graph;
+		bool threw = false;
+		try {
+			GraphCompiler::compileString(graph, json);
+		} catch (const std::exception&) {
+			threw = true;
+		}
+		CHECK(!threw, "compile must not trigger engine load (old semantics rethrew here)");
+		auto* n = graph.node("m");
+		CHECK(n != nullptr, "URL-modelPath engine node must be materialized");
+		CHECK(n->modelPath() == "https://obj.example.com/mnist-12.onnx",
+			"URL must be passed through verbatim (no baseDir concatenation)");
+		CHECK(g_engineLoadCalls == 0, "createEngine must never be invoked at compile time");
+		(void)cap;
+	}
+	END_TEST();
+}
 
-		// 2) 不注册端口推导钩子 → 框架传空 schema → 编译期警告
-		registerTestEngine("NoPortHookEngine", true, false, false);
-		const char* json2 = R"({
+void testEngineDeclaredSchemaEmptyWarns() {
+	TEST("engine node — empty declared schema warns") {
+		registerTestEngine("NoPortDeclEngine", true, false, false);
+		const char* json = R"({
   "version": "1.0",
   "nodes": [
     {
-      "name": "e2", "type": "NoPortHookEngine",
+      "name": "e2", "type": "NoPortDeclEngine", "affinity": "Compute",
       "modelPath": "models/m2.onnx",
       "inputs": [], "outputs": []
     }
@@ -800,63 +835,45 @@ void testEngineSchemaDerivedAndEmpty() {
   "edges": [],
   "outputBindings": []
 })";
-		CerrCapture cap2;
-		InferGraph graph2; GraphCompiler::compileString(graph2, json2);
+		CerrCapture cap;
+		InferGraph graph2; GraphCompiler::compileString(graph2, json);
 		auto* n2 = graph2.node("e2");
 		CHECK(n2 != nullptr, "e2 should exist");
 		CHECK(n2->schema().inputs.empty() && n2->schema().outputs.empty(),
-			"empty schema when engine has no port hooks");
-		CHECK(cap2.str().find("empty schema") != std::string::npos,
-			"warning should mention empty schema");
+			"empty declared schema stays empty (no derivation)");
+		CHECK(cap.str().find("empty declared schema") != std::string::npos,
+			"warning should mention empty declared schema");
 	}
 	END_TEST();
 }
 
-void testDcgRecompileAfterReleaseAllEngines() {
-	TEST("dcg lifecycle — recompile after releaseAllEngines reloads from archive") {
-		// 场景：解压模型到临时目录 → createNode 加载（实例缓存持有）→ 临时文件删除
-		registerTestEngine("DcgLifecycleEngine", true, true, true); // 检查文件存在
-		std::string modelFile = "test_dcg_lifecycle_model.bin";
+void testDcgCompileDefersModelResolution() {
+	TEST("dcg compile — no extraction, no engine load; modelPath stays archive-relative") {
+		g_engineLoadCalls = 0;
+		registerTestEngine("DcgDeferEngine", true, true, false);
+		std::string modelFile = "test_dcg_defer_model.bin";
 		{
 			std::ofstream ofs(modelFile, std::ios::binary);
-			ofs.write("lifecycle-model", 15);
+			ofs.write("defer-model", 11);
 		}
 		TestHarness harness;
-		auto n1 = std::make_unique<Node>("DcgLifecycleEngine", "lc1", identitySchema(), identityRunFn());
+		auto n1 = std::make_unique<Node>("DcgDeferEngine", "dc_n1", identitySchema(), identityRunFn());
 		n1->setModelPath(modelFile);
 		harness.addNode(std::move(n1));
-		harness.bindOutput("y", "lc1", "y");
-		std::string dcgFile = "test_dcg_lifecycle.dcg";
+		harness.bindOutput("y", "dc_n1", "y");
+		std::string dcgFile = "test_dcg_defer.dcg";
 		GraphCompiler::serialize(harness.graph(), dcgFile);
-		std::remove(modelFile.c_str()); // dcg 自带模型，源文件可删
+		std::remove(modelFile.c_str()); // 模型随归档分发，源文件删除不影响编译
 
-		// 1) 首次编译：解压临时模型 → 引擎实例创建成功
-		InferGraph graph1;
-		CerrCapture cap1;
-		GraphCompiler::compileFile(graph1, dcgFile);
-		CHECK(graph1.node("lc1") != nullptr, "first compile: engine node created");
-		CHECK(cap1.str().find("failed to create engine node") == std::string::npos,
-			"first compile: no failure diagnostics");
+		InferGraph graph;
+		GraphCompiler::compileFile(graph, dcgFile);
+		auto* n = graph.node("dc_n1");
+		CHECK(n != nullptr, "engine node must be materialized from .dcg");
+		CHECK(static_cast<bool>(n->runFn()), "materialized node carries engine RunFn");
+		CHECK(n->modelPath() == "models/test_dcg_defer_model.bin",
+			"modelPath must stay archive-relative (no temp-dir rewriting)");
+		CHECK(g_engineLoadCalls == 0, "no engine load at compile time");
 
-		// 2) 清空实例缓存（临时文件已删除；节点持有的是非拥有实例指针）
-		EngineRegistry::instance().releaseAllEngines();
-
-		// 3) 再次编译同一 .dcg：compileFile 会重新解压到新的临时目录，
-		//    缓存键（engineType + 新临时绝对路径）不同 → 重新加载成功。
-		//    注意：旧缓存条目（指向已删除临时文件）不会导致加载失败，
-		//    但旧条目成为孤儿，直到下次 releaseAllEngines() 才释放。
-		InferGraph graph2;
-		CerrCapture cap2;
-		GraphCompiler::compileFile(graph2, dcgFile);
-		CHECK(graph2.node("lc1") != nullptr,
-			"recompile succeeds: model re-extracted to fresh temp dir");
-		CHECK(graph2.node("lc1")->modelPath().find("models") != std::string::npos,
-			"modelPath points into temp dir");
-		CHECK(cap2.str().find("failed to create engine node") == std::string::npos,
-			"recompile: no failure diagnostics");
-
-		// 清理：引擎缓存中仍有 graph2 的实例（键指向已删除临时文件），统一释放
-		EngineRegistry::instance().releaseAllEngines();
 		std::remove(dcgFile.c_str());
 	}
 	END_TEST();
@@ -893,7 +910,8 @@ void testSharedModelDcgRoundTrip() {
 		auto* b = graph2.node("shared_b");
 		CHECK(a != nullptr && b != nullptr, "both shared-model nodes must exist");
 		CHECK(!a->modelPath().empty() && !b->modelPath().empty(), "both modelPaths must resolve");
-		CHECK(a->modelPath() == b->modelPath(), "shared nodes must resolve to the same extracted file");
+		CHECK(a->modelPath() == "models/test_shared_model.bin" && b->modelPath() == a->modelPath(),
+			"shared nodes must keep the same archive-relative path verbatim");
 
 		std::remove(dcgFile.c_str());
 		std::remove(modelFile.c_str());
@@ -929,8 +947,11 @@ void testDcgObjectShapedNodesRejected() {
 	END_TEST();
 }
 
-void testDcgUnsafeModelPathRejected() {
-	TEST("IR-02: .dcg modelPath with '..' or absolute path is rejected") {
+void testDcgModelPathPassThrough() {
+	TEST("IR-02': .dcg modelPath passed through verbatim at compile (landing防御 at extractOne)") {
+		// 新语义：编译期不落盘→不做路径校验，modelPath 为不透明字符串原样保留。
+		// 实际落盘防御（越界/ADS/符号链接/预算）由 DcgArchive::extractOne 承担
+		// （DcgArchiveSecurityTest 覆盖），宿主在绑定期/执行期消费时仍受保护。
 		auto makeDcg = [](const std::string& dcgFile, const std::string& mp) {
 			auto w = DC::Ir::DcgArchive::openWrite(dcgFile);
 			std::string json = R"({"version":"1.0","nodes":[{"name":"n1","type":"Builtin","affinity":"Compute","modelPath":")"
@@ -939,21 +960,19 @@ void testDcgUnsafeModelPathRejected() {
 			w->finalize();
 		};
 
+		// 引号/反斜杠不落入 JSON 语法：用正斜杠形式覆盖原有用例
 		const std::string cases[] = {"../evil.onnx", "/tmp/evil.onnx", "C:/tmp/evil.onnx"};
 		constexpr size_t kCaseCount = 3;
-		int rejected = 0;
 		for (size_t i = 0; i < kCaseCount; ++i) {
 			std::string dcgFile = "test_unsafe_path_" + std::to_string(i) + ".dcg";
 			makeDcg(dcgFile, cases[i]);
-			try {
-				InferGraph graph;
-				GraphCompiler::compileFile(graph, dcgFile);
-			} catch (const GraphException&) {
-				++rejected;
-			}
+			InferGraph graph;
+			GraphCompiler::compileFile(graph, dcgFile);
+			auto* n = graph.node("n1");
+			CHECK(n != nullptr && n->modelPath() == cases[i],
+				"modelPath must pass through verbatim (no compile-time rejection)");
 			std::remove(dcgFile.c_str());
 		}
-		CHECK(rejected == 3, "all unsafe modelPath declarations must be rejected");
 	}
 	END_TEST();
 }
@@ -1032,17 +1051,18 @@ int main() {
 		testUnregisteredType();
 		testDcgRoundTrip();
 		testDcgSerializeNoModels();
-		// 引擎注册接口统一后的语义适配
+		// 引擎注册接口统一后的语义适配（延迟物化：编译期零加载）
 		testDynamicShapeRoundTrip();
 		testVoidPortRoundTrip();
+		testEngineNodeMaterialization();
 		testEngineNodeNoModelPath();
-		testEngineNodeLoadFailure();
-		testEngineSchemaDerivedAndEmpty();
-		testDcgRecompileAfterReleaseAllEngines();
+		testCompileNeverInvokesCreateEngine();
+		testEngineDeclaredSchemaEmptyWarns();
+		testDcgCompileDefersModelResolution();
 		// v0.5.2 修复项回归（IR-01/02/07/08）
 		testSharedModelDcgRoundTrip();
 		testDcgObjectShapedNodesRejected();
-		testDcgUnsafeModelPathRejected();
+		testDcgModelPathPassThrough();
 		testInvalidEdgeFailFast();
 		testTypeSizeNegativeRejected();
 

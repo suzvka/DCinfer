@@ -287,10 +287,10 @@ static void registerMockModelEngine(EngineRegistry& reg, const std::string& type
 		return {{"out", Tensor::TensorType::Float, sizeof(float), {}, true}};
 	};
 
-	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+	desc.factory = [type](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		if (!p.schema.inputs.empty())
 			++mockFactorySchemaSeen;
-		auto node = std::make_unique<Node>("MockModel", p.nodeName, p.schema, mockModelRunImpl,
+		auto node = std::make_unique<Node>(type, p.nodeName, p.schema, mockModelRunImpl,
 										   ResourceClass::Operator);
 		if (p.engineInstance)
 			node->bindEngine(p.engineInstance, p.engineInstance->descriptor());
@@ -470,6 +470,36 @@ static void runTests() {
 			throw std::runtime_error("different modelPath should create new instance");
 	}
 	std::cout << "Test 10 passed: createNode(modelPath) single-load + schema passing + cache" << std::endl;
+
+	// ── Test 10b: createLazyNode：声明 schema 物化，不创建实例（编译期零加载）──
+	{
+		mockEngineCreateCount = 0;
+		mockFactorySchemaSeen = 0;
+		registerMockModelEngine(reg, "LazyMockModel");
+
+		// 声明 schema 与实例端口（in/out）不同：验证不做实例推导、原样透传
+		Node::Schema declared;
+		declared.inputs = {Node::Port::in<float>("declaredIn")};
+		declared.outputs = {Node::Port::out<float>("declaredOut")};
+		auto node = reg.createLazyNode("LazyMockModel", "ln1", declared);
+		if (!node)
+			throw std::runtime_error("createLazyNode returned null");
+		if (node->type() != "LazyMockModel")
+			throw std::runtime_error("node type must be the registered engine type");
+		if (node->schema().inputs.size() != 1 || node->schema().inputs[0].name != "declaredIn")
+			throw std::runtime_error("declared input schema must be passed to factory verbatim");
+		if (node->schema().outputs.size() != 1 || node->schema().outputs[0].name != "declaredOut")
+			throw std::runtime_error("declared output schema must be passed to factory verbatim");
+		if (mockEngineCreateCount != 0)
+			throw std::runtime_error("createLazyNode must not create engine instances");
+		if (mockFactorySchemaSeen != 1)
+			throw std::runtime_error("factory must be invoked once with the declared schema");
+
+		// 未知引擎 → nullptr
+		if (reg.createLazyNode("UnknownLazyEngine", "ln2", {}))
+			throw std::runtime_error("createLazyNode for unknown engine should return null");
+	}
+	std::cout << "Test 10b passed: createLazyNode declared-schema materialization, zero load" << std::endl;
 
 	// ── Test 11: 并发 getOrCreateEngine：同 key 只创建一个实例，全部拿到同一句柄 ──
 	{

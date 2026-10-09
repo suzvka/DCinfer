@@ -16,23 +16,27 @@ namespace DC::Ir {
 /// - .json  纯 JSON 图描述文件
 /// - .dcg   zip 打包的推理图（graph.json + model files）
 ///
-/// modelPath 处理：
-/// - 序列化时，绝对路径转为 zip 内相对路径（models/ 前缀）
-/// - 反序列化时，相对路径拼接解压目录为绝对路径
-/// - .dcg 反序列化（不可信归档）为受限模式：modelPath 必须是解压目录内的
-///   安全相对路径（拒绝 ../、绝对路径、盘符、保留设备名等，见 PathGuard）；
-///   .json 反序列化（本地可信输入）保持宽松拼接语义
+/// modelPath 处理（引擎自定义不透明信息）：
+/// - 反序列化时 modelPath 原样保留：GraphCompiler 不拼接、不校验、不做
+///   任何文件系统解释——相对路径、URL、模型标识符均为合法取值，透传给
+///   引擎适配层消费（与 engineConfig 的"一字段一语义"哲学一致）。
+/// - 序列化（.dcg）时 modelPath 被替换为归档内相对路径（models/ 前缀）
+///   以便模型文件随归档分发；.json 序列化原样写出。
 ///
 /// 引擎节点（type 已注册 EngineRegistry）反序列化语义：
-/// - createNode(engineType, name, modelPath) 一次加载并缓存引擎实例，
-///   节点 Schema 从实例推导（引擎的 getInputPorts/getOutputPorts）——
-///   JSON 中携带的 inputs/outputs 被引擎推导结果覆盖，不参与节点构造。
-///   引擎未注册端口推导钩子时节点 Schema 为空，编译期输出警告。
-/// - JSON 无 modelPath 字段的引擎节点：不以 "" 为缓存 key 创建引擎实例
-///   （空路径加载模型会抛异常中断编译），回退为骨架节点并输出警告，
-///   保留 JSON schema。
-/// - createNode 失败（模型缺失 / 引擎未注册 createEngine）时节点被跳过，
-///   输出含节点名、引擎类型、modelPath 的错误诊断，图不完整可感知。
+/// - 编译期只物化节点、不创建引擎实例（不调用 createEngine、不加载模型）：
+///   节点经 EngineRegistry::createLazyNode 构造，schema 取 JSON 声明的
+///   inputs/outputs（不做实例推导、不被覆盖），工厂提供引擎 RunFn。
+///   引擎实例由宿主在冻结前经 getOrCreateEngine + Node::bindEngine 注入
+///   （典型：执行机侧解析 modelPath 后加载）；实例缓存键为该字符串本身。
+/// - JSON 声明的 schema 为空（无端口）时输出警告：接线与执行均以节点
+///   schema 为准，空声明意味着该节点不可接线。
+/// - 引擎未注册工厂时回退骨架节点（RunFn=nullptr）并输出警告，
+///   保留 JSON 声明 schema，保证图结构完整可序列化。
+///
+/// .dcg 归档模型：compileFile(.dcg) 只读取 graph.json，不解压模型文件；
+/// 资源就绪由宿主自行处理——DcgArchive::extractOne 提供归档内安全解压
+/// （路径越界/符号链接/解包预算防御），供宿主在绑定期/执行期使用。
 ///
 /// 动态维度 shape 编码：
 /// - Node::Port::shape 类型为 Tensor::Shape = std::vector<int64_t>
@@ -49,15 +53,12 @@ namespace DC::Ir {
 ///   转换为 size_t::max 且形状乘积溢出，属声明层与数据层的语义边界
 ///   （核心库保持现状，不改造数据层表达）。
 ///
-/// .dcg 与引擎实例缓存的生命周期：
-/// - compileFile(.dcg) 解压模型到临时目录 → createNode 加载（实例缓存键 =
-///   engineType + 临时绝对路径）→ 临时文件立即删除。
-/// - 实例驻留内存不受删除影响；但缓存键指向的文件路径永久失效。重复编译
-///   同一 .dcg 解压到新临时目录（键不同）→ 新增实例缓存条目，旧条目成为
-///   永不命中的孤儿，直到 releaseAllEngines() 释放。
-/// - 约束：dcg 重复编译后，旧实例缓存条目不可再命中；运行中的图保持实例
-///   缓存（勿在中途 releaseAllEngines，节点持有非拥有实例指针），释放后
-///   重新编译即可（会重新解压加载）。惰性加载引擎不受保护（临时文件已删）。
+/// 引擎实例生命周期：
+/// - 编译期不创建实例；宿主经 getOrCreateEngine 显式加载（createEngine
+///   钩子负责 modelPath 的解释与失败语义），节点经 Node::bindEngine 持有
+///   共享句柄，实例存活期覆盖节点存活期。
+/// - releaseEngine / releaseAllEngines 仅移除缓存条目：仍被节点持有的
+///   实例安全存活，实际销毁发生在最后一个共享句柄释放时。
 class GraphCompiler {
 public:
 	// ── 反序列化 ──
@@ -71,10 +72,8 @@ public:
 	/// @brief 从 JSON 字符串构建推理图
 	/// @param graph 输出参数，反序列化结果写入此对象
 	/// @param json JSON 图描述字符串
-	/// @param baseDir 模型文件基础目录（modelPath 为相对路径时拼接，默认为当前目录）
 	/// @throws GraphException 若 JSON 解析失败或图结构不合法
-	static void compileString(InferGraph& graph, std::string_view json,
-							 std::filesystem::path baseDir = std::filesystem::current_path());
+	static void compileString(InferGraph& graph, std::string_view json);
 
 	// ── 序列化 ──
 
@@ -87,15 +86,10 @@ private:
 	// ── 反序列化辅助 ──
 
 	/// @brief 反序列化内部入口（compileString 与 compileFile(.dcg) 共用）
-	/// @param restrictModelPaths .dcg 受限模式（IR-02）：modelPath 必须通过
-	///        PathGuard 校验（解压目录内的安全相对路径），拒绝越界声明
-	static void compileInternal(InferGraph& graph, const nlohmann::json& root,
-								const std::filesystem::path& baseDir, bool restrictModelPaths);
+	static void compileInternal(InferGraph& graph, const nlohmann::json& root);
 
 	/// @brief 从解析好的 JSON 填充 InferGraph
-	/// @param restrictModelPaths .dcg 受限模式：modelPath 必须通过 PathGuard 校验
-	static void buildGraph(InferGraph& graph, const nlohmann::json& root, const std::filesystem::path& baseDir,
-						   bool restrictModelPaths);
+	static void buildGraph(InferGraph& graph, const nlohmann::json& root);
 
 	/// @brief 处理边的重连：按 mode 分组，重建连接器
 	static void rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJson);

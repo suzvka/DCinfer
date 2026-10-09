@@ -106,10 +106,14 @@ private:
 ///
 /// - engineConfig：createNode(engineType, name, engineConfig) 透传的**用户配置**指针；
 ///   仅承载用户自定义配置（一字段一语义），引擎实例不经此字段传递。
-/// - engineInstance：引擎实例共享句柄（modelPath 路径下非空）；
+/// - engineInstance：引擎实例共享句柄（modelPath 路径下非空；
+///   createNode(engineConfig) / createLazyNode 路径下为空）；
 ///   工厂经 Node::bindEngine 绑定后，节点持有句柄，引擎存活期覆盖节点存活期。
-/// - schema：框架从 EngineInstance 推导（需引擎注册 getInputPorts/getOutputPorts）；
-///   可为空，工厂可自行推导或使用内置 Schema 兜底。
+/// - schema：factory 收到的端口 Schema，来源依创建路径：
+///   createNode(engineType, name, modelPath) 为框架从 EngineInstance 推导
+///   （需引擎注册 getInputPorts/getOutputPorts）；createLazyNode 为调用方
+///   声明值（不做实例推导）；createNode(engineType, name, engineConfig) 为空。
+///   工厂可自行推导或使用内置 Schema 兜底。
 /// - modelPath：createNode(engineType, name, modelPath) 路径下非空。
 struct NodeFactoryParams {
 	std::string nodeName;

@@ -132,6 +132,28 @@ std::unique_ptr<Node> EngineRegistry::createNode(const std::string& engineType, 
 	return node;
 }
 
+std::unique_ptr<Node> EngineRegistry::createLazyNode(const std::string& engineType, const std::string& nodeName,
+													 Node::Schema schema) const {
+	// 锁内拷贝工厂，锁外调用（factory 是用户回调，可能重入注册表）
+	NodeFactory factory;
+	{
+		std::lock_guard lk(_mutex);
+		auto it = _engines.find(engineType);
+		if (it == _engines.end() || !it->second.factory) {
+			return nullptr;
+		}
+		factory = it->second.factory;
+	}
+
+	// 不调用 getOrCreateEngine：无实例、无缓存条目、无模型加载。
+	// schema 以调用方声明值直接交给工厂（不做实例推导）；engineInstance 为空，
+	// 工厂按其契约以 p.schema 构造节点且不绑定实例（见 NodeFactoryParams）。
+	NodeFactoryParams params;
+	params.nodeName = nodeName;
+	params.schema = std::move(schema);
+	return factory(params);
+}
+
 // ── 引擎实例管理 ──
 
 std::string EngineRegistry::_makeEngineKey(const std::string& engineType, const std::string& modelPath) {

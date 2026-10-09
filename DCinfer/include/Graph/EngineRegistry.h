@@ -159,6 +159,14 @@ public:
 	std::unique_ptr<Node> createNode(const std::string& engineType, const std::string& nodeName,
 									 const std::string& modelPath);
 
+	// ── 接口 4：物化延迟加载节点（编译期只建节点，不创建引擎实例）──
+	// 调用工厂构造节点：schema 取调用方声明值（不做实例推导），不调用 createEngine、
+	// 不产生实例缓存条目；引擎实例由调用方在需要时经 getOrCreateEngine 加载后
+	// 经 Node::bindEngine 绑定（典型：远程/编排场景，编译进程不含模型资源）。
+	// @return nullptr 若引擎未注册或未注册工厂
+	std::unique_ptr<Node> createLazyNode(const std::string& engineType, const std::string& nodeName,
+										 Node::Schema schema) const;
+
 	// ── 引擎实例管理 ──
 
 	/// 获取或创建引擎实例（以 engineType + modelPath 复合键缓存）
