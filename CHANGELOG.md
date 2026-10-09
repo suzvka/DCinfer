@@ -44,6 +44,13 @@ CI 覆盖补齐；绑定端口收束为终端端口不变量。
 - **CORE-2 节点/回调内析构引擎**：无分配 TLS 活动引擎栈自检（覆盖节点、
   同步 cancel、回调），命中即明确诊断；8 个隔离 death case 覆盖禁止重入
   析构契约与有界结束。
+- **CORE-4 TensorSlot 类型擦除数据泄漏**：析构不释放 `store()` 存储的
+  运行时数据、移动不置空源——未经 `take()`/`clear()` 的输入值随槽位
+  销毁泄漏（LeakSanitizer 在常规执行路径复现）；析构改为 RAII 释放，
+  移动显式转移所有权（源仅清空、不二次释放）。
+- **CORE-5 fail-fast 诊断在重定向下丢失**：禁止析构路径的诊断文本在
+  glibc `freopen` 重定向后（全流缓冲）随 `_Exit` 未 flush 丢失，death
+  case 只观测到退出码、无法核验诊断内容；三处防护显式 flush 兜底。
 - **NET-3 并发 `stop()`**：完整 stop 流程串行化并排水（第二调用等待首次
   完成，不再提前返回引发 UAF）；handler 内同步 stop 在锁前拒绝。
 - **NET-4 `_activeThreads` 记账事务性**：先登记容器再增加活跃计数
@@ -105,7 +112,7 @@ CI 覆盖补齐；绑定端口收束为终端端口不变量。
   `--no-tests=error`，关键筛选带名称断言——挂起的 fixture 在 120s 被判
   失败而非耗尽作业。
 - **CI-2 覆盖补齐**：新增 Debug、ASan+UBSan（core+DCNet+OpenAI）、最低
-  工具链（GCC 11 / Clang 14 / CMake 3.17.5）、GCC 32-bit atomic probe、
+  工具链（GCC 11 / Clang 14 / CMake 3.17.3）、GCC 32-bit atomic probe、
   Windows DCNet/OpenAI/TLS/ORT 作业；README quickstart 在 Windows/Linux
   逐字执行校验。
 - **install_smoke 版本守护**：期望版本升为 0.7.4，过期安装前缀/错位 tag
