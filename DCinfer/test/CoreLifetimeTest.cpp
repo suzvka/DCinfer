@@ -277,14 +277,23 @@ static bool deathCase(const char* executable, const char* mode) {
 #else
     const auto pid = fork();
     if (pid == 0) { execl(executable, executable, "--child", mode, log.string().c_str(), nullptr); std::_Exit(4); }
-    if (pid < 0) return false;
+    if (pid < 0) { reportFailure(0, "fork failed"); return false; }
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     int status = 0;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (waitpid(pid, &status, WNOHANG) == pid) return WIFEXITED(status) && WEXITSTATUS(status) == 86 && diagnosed();
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            const bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 86 && diagnosed();
+            if (!ok) {
+                const unsigned long code = WIFEXITED(status) ? static_cast<unsigned long>(WEXITSTATUS(status)) : 0;
+                reportFailure(code, "unexpected exit/diagnostic");
+            }
+            return ok;
+        }
         std::this_thread::sleep_for(5ms);
     }
-    kill(pid, SIGKILL); waitpid(pid, &status, 0); return false;
+    kill(pid, SIGKILL); waitpid(pid, &status, 0);
+    reportFailure(0, "child wait timed out");
+    return false;
 #endif
 }
 int main(int argc, char** argv) {
