@@ -408,8 +408,9 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 		} else if (reg.hasEngine(type)) {
 			// 引擎节点：编译期只物化、不加载（见 GraphCompiler.h 头注释）。
 			// createLazyNode 以 JSON 声明 schema（不做实例推导）调用工厂构造节点；
-			// modelPath 原样透传，模型加载由引擎 createEngine 钩子在宿主
-			// 绑定期/执行期处理（getOrCreateEngine + Node::bindEngine）。
+			// modelPath 原样透传，模型加载由引擎 loadModel 钩子在宿主
+			// 绑定期/执行期处理（getOrCreateEngine 先确保引擎核心、再加载模型
+			// + Node::bindEngine）。
 			auto node = reg.createLazyNode(type, name, schema);
 			if (!node) {
 				// 引擎已注册但未注册工厂：回退骨架（与未注册类型一致），
@@ -595,8 +596,8 @@ void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
 
 			// 共享模型（IR-01）：同一磁盘文件被多个节点引用时复用已分配的
 			// archive 名——只入包一份、所有引用节点写回同一相对路径。
-			// （此前重复条目会二次改名并覆盖 modelFiles 记录，导致首节点
-			// graph.json 引用悬空、.dcg 必然编译失败）
+			// （重复条目二次改名会覆盖 modelFiles 记录 → 首节点 graph.json
+			// 引用悬空、.dcg 编译必然失败）
 			if (auto it = modelFiles.find(origPath); it != modelFiles.end()) {
 				j["modelPath"] = it->second;
 				continue;

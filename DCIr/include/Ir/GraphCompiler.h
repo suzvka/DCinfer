@@ -24,7 +24,8 @@ namespace DC::Ir {
 ///   以便模型文件随归档分发；.json 序列化原样写出。
 ///
 /// 引擎节点（type 已注册 EngineRegistry）反序列化语义：
-/// - 编译期只物化节点、不创建引擎实例（不调用 createEngine、不加载模型）：
+/// - 编译期只物化节点、不创建引擎实例（不调用 createEngineCore / loadModel：
+///   不初始化引擎、不加载模型）：
 ///   节点经 EngineRegistry::createLazyNode 构造，schema 取 JSON 声明的
 ///   inputs/outputs（不做实例推导、不被覆盖），工厂提供引擎 RunFn。
 ///   引擎实例由宿主在冻结前经 getOrCreateEngine + Node::bindEngine 注入
@@ -54,9 +55,10 @@ namespace DC::Ir {
 ///   （核心库保持现状，不改造数据层表达）。
 ///
 /// 引擎实例生命周期：
-/// - 编译期不创建实例；宿主经 getOrCreateEngine 显式加载（createEngine
-///   钩子负责 modelPath 的解释与失败语义），节点经 Node::bindEngine 持有
-///   共享句柄，实例存活期覆盖节点存活期。
+/// - 编译期不创建实例；宿主经 getOrCreateEngine 显式加载（内部先确保引擎
+///   核心就绪——createEngineCore 每 engineType 一次；loadModel 钩子负责
+///   modelPath 的解释与失败语义），节点经 Node::bindEngine 持有
+///   共享句柄，实例存活期覆盖节点存活期（实例共享持有核心，核心存活期覆盖实例）。
 /// - releaseEngine / releaseAllEngines 仅移除缓存条目：仍被节点持有的
 ///   实例安全存活，实际销毁发生在最后一个共享句柄释放时。
 class GraphCompiler {

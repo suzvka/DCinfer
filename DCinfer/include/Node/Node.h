@@ -173,7 +173,8 @@ public:
 	Node& operator=(Node&&) = delete;
 
 	// ── 引擎绑定（引擎支持节点构造后绑定）──
-	/// 节点持有引擎实例共享句柄：节点存活 ⇒ 引擎实例存活，
+	/// 节点持有引擎实例共享句柄：节点存活 ⇒ 引擎实例存活
+	/// （实例经共享句柄持有引擎核心，核心存活期覆盖实例）；
 	/// releaseEngine/releaseAllEngines 移除缓存条目不影响已绑定节点。
 	/// @throws NodeException(Frozen) 若节点所在图已冻结
 	void bindEngine(std::shared_ptr<EngineInstance> engineInstance, const EngineDescriptor* engineDesc = nullptr);

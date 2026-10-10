@@ -42,7 +42,7 @@ static Tensor mockToDC(const void* native) {
 }
 
 // ── Mock 模型引擎：验证 createNode(modelPath) 单路径 ──
-// createEngine 计数验证"一次加载 + 缓存"，端口推导与 schema 传递验证"框架驱动"
+// loadModel 计数验证"一次加载 + 缓存"，端口推导与 schema 传递验证"框架驱动"
 
 struct MockSession {
 	std::string modelPath;
@@ -77,11 +77,11 @@ static void registerLifecycleEngine(EngineRegistry& reg, const std::string& type
 	desc.engineType = type;
 	desc.converter = {mockToNative, mockToDC};
 
-	desc.createEngine = [](const std::string& path) -> EngineInstance {
+	desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 		++g_lifecycleCreateCount;
 		return EngineInstance(std::make_shared<LifecycleSession>(LifecycleSession{path}));
 	};
-	desc.releaseEngine = [](void*) { ++g_lifecycleReleaseCount; };
+	desc.releaseModel = [](void*) { ++g_lifecycleReleaseCount; };
 	desc.getInputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
 		if (!inst.get())
 			return {};
@@ -105,7 +105,7 @@ static void registerLifecycleEngine(EngineRegistry& reg, const std::string& type
 
 // ── single-flight 专项引擎：交错阻塞与失败传播验证 ──
 
-static std::atomic<int> g_blockEntered{0};   // 进入 createEngine 的次数
+static std::atomic<int> g_blockEntered{0};   // 进入 loadModel 的次数
 static std::atomic<bool> g_blockRelease{false}; // 慢路径放行开关
 static std::atomic<int> g_blockCreated{0};   // 完成创建的次数
 
@@ -114,7 +114,7 @@ static Node::Result noopRunImpl(Node::RunContext& ctx) {
 	return ctx.success();
 }
 
-/// createEngine 慢路径（models/slow.onnx）阻塞至 g_blockRelease 放行；
+/// loadModel 慢路径（models/slow.onnx）阻塞至 g_blockRelease 放行；
 /// 快路径（其他 path）立即完成——用于验证慢 key 不阻塞其他 key。
 static void registerFlightEngine(EngineRegistry& reg, const std::string& type) {
 	if (reg.hasEngine(type))
@@ -122,7 +122,7 @@ static void registerFlightEngine(EngineRegistry& reg, const std::string& type) {
 	EngineDescriptor desc;
 	desc.engineType = type;
 	desc.converter = {mockToNative, mockToDC};
-	desc.createEngine = [](const std::string& path) -> EngineInstance {
+	desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 		++g_blockEntered;
 		if (path == "models/slow.onnx") {
 			while (!g_blockRelease.load())
@@ -152,14 +152,14 @@ static void registerFlightEngine(EngineRegistry& reg, const std::string& type) {
 static std::atomic<bool> g_failNext{true};
 static std::atomic<int> g_failCalls{0};
 
-/// createEngine 按 g_failNext 抛出异常或成功——验证失败传播与重试。
+/// loadModel 按 g_failNext 抛出异常或成功——验证失败传播与重试。
 static void registerFailingEngine(EngineRegistry& reg, const std::string& type) {
 	if (reg.hasEngine(type))
 		return;
 	EngineDescriptor desc;
 	desc.engineType = type;
 	desc.converter = {mockToNative, mockToDC};
-	desc.createEngine = [](const std::string& path) -> EngineInstance {
+	desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 		++g_failCalls;
 		if (g_failNext.load())
 			throw std::runtime_error("simulated engine load failure: " + path);
@@ -219,7 +219,7 @@ static void registerPhaseEngine(EngineRegistry& reg, const std::string& type) {
 	EngineDescriptor desc;
 	desc.engineType = type;
 	desc.converter = {mockToNative, mockToDC};
-	desc.createEngine = [](const std::string& path) -> EngineInstance {
+	desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 		return EngineInstance(std::make_shared<PhaseSession>(PhaseSession{path}));
 	};
 	desc.getInputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
@@ -270,7 +270,7 @@ static void registerMockModelEngine(EngineRegistry& reg, const std::string& type
 	desc.engineType = type;
 	desc.converter = {mockToNative, mockToDC};
 
-	desc.createEngine = [](const std::string& path) -> EngineInstance {
+	desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 		++mockEngineCreateCount;
 		return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
 	};
@@ -623,7 +623,7 @@ static void runTests() {
 		for (int i = 0; i < 5000 && g_blockEntered.load() < 1; ++i)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		if (g_blockEntered.load() < 1)
-			throw std::runtime_error("slow createEngine should have been entered");
+			throw std::runtime_error("slow loadModel should have been entered");
 
 		// 线程 B：快 key 创建——不等待 A 放行即完成
 		auto fastHandle = reg.getOrCreateEngine("Flight", "models/fast.onnx");
@@ -647,7 +647,7 @@ static void runTests() {
 		g_failCalls = 0;
 		registerFailingEngine(reg, "Failing");
 
-		// 首个调用者：createEngine 异常透传
+		// 首个调用者：loadModel 异常透传
 		bool threw = false;
 		try {
 			reg.getOrCreateEngine("Failing", "models/fail.onnx");
@@ -655,9 +655,9 @@ static void runTests() {
 			threw = true;
 		}
 		if (!threw)
-			throw std::runtime_error("createEngine exception should propagate to leader");
+			throw std::runtime_error("loadModel exception should propagate to leader");
 		if (g_failCalls != 1)
-			throw std::runtime_error("leader should invoke createEngine exactly once");
+			throw std::runtime_error("leader should invoke loadModel exactly once");
 
 		// 失败清除槽位：后续调用重试创建（失败可恢复）
 		g_failNext = false;
@@ -805,7 +805,7 @@ static void runTests() {
 			EngineDescriptor desc;
 			desc.engineType = "LruMock";
 			desc.converter = {mockToNative, mockToDC};
-			desc.createEngine = [](const std::string& path) -> EngineInstance {
+			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 				++g_lruCreateCount;
 				// 聚合显式构造：直接传 (path) 依赖 C++20 P0960 括号聚合初始化，
 				// clang-14（最低工具链）不支持；对齐本文件其余 mock 构造风格。
@@ -829,7 +829,7 @@ static void runTests() {
 		if (!evicted)
 			throw std::runtime_error("evicted instance must be recreated on demand");
 		if (g_lruCreateCount.load() != createsBefore + 1)
-			throw std::runtime_error("recreating evicted instance must hit createEngine again");
+			throw std::runtime_error("recreating evicted instance must hit loadModel again");
 		// 最近条目仍在缓存：同一句柄且不重建
 		auto latest = reg.getOrCreateEngine("LruMock", "lru-model-69");
 		if (latest != recent.back())
@@ -838,6 +838,272 @@ static void runTests() {
 			throw std::runtime_error("cached instance must not trigger re-creation");
 	}
 	std::cout << "Test 20 passed: instance cache LRU eviction at capacity limit" << std::endl;
+
+	// ── Test 21: 引擎核心跨模型共享：同 engineType 多 modelPath → 核心恰好一次 ──
+	{
+		static std::atomic<int> g_coreOnceInit{0};
+		static std::atomic<int> g_coreOnceLoad{0};
+		if (!reg.hasEngine("CoreOnce")) {
+			EngineDescriptor desc;
+			desc.engineType = "CoreOnce";
+			desc.converter = {mockToNative, mockToDC};
+			desc.createEngineCore = []() -> EngineCore {
+				++g_coreOnceInit;
+				return EngineCore(std::make_shared<int>(7));
+			};
+			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
+				++g_coreOnceLoad;
+				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
+			};
+			if (!reg.registerEngine(desc))
+				throw std::runtime_error("register CoreOnce engine failed");
+		}
+
+		auto h1 = reg.getOrCreateEngine("CoreOnce", "models/core-1.onnx");
+		auto h2 = reg.getOrCreateEngine("CoreOnce", "models/core-2.onnx");
+		if (!h1 || !h2)
+			throw std::runtime_error("instances should be created");
+		if (g_coreOnceInit.load() != 1)
+			throw std::runtime_error("engine core should be initialized exactly once across models");
+		if (g_coreOnceLoad.load() != 2)
+			throw std::runtime_error("each modelPath should load exactly once");
+		if (!h1->core() || !h1->core()->get())
+			throw std::runtime_error("engine core should be bound and non-empty");
+		if (h1->core().get() != h2->core().get())
+			throw std::runtime_error("both instances should share the same engine core");
+
+		// 显式预热接口：缓存命中，不重复初始化
+		auto core = reg.getOrCreateEngineCore("CoreOnce");
+		if (!core || core.get() != h1->core().get())
+			throw std::runtime_error("getOrCreateEngineCore should hit the cached core");
+		if (g_coreOnceInit.load() != 1)
+			throw std::runtime_error("getOrCreateEngineCore must not re-initialize");
+	}
+	std::cout << "Test 21 passed: engine core initialized once, shared across models" << std::endl;
+
+	// ── Test 22: 核心失败语义：抛异常/空返回不缓存，可重试；loadModel 不被调用 ──
+	{
+		static std::atomic<int> g_coreFailInit{0};
+		static std::atomic<int> g_coreFailLoad{0};
+		static std::atomic<int> g_coreFailMode{0}; // 0 成功；1 抛异常；2 返回空核心
+		if (!reg.hasEngine("CoreFail")) {
+			EngineDescriptor desc;
+			desc.engineType = "CoreFail";
+			desc.converter = {mockToNative, mockToDC};
+			desc.createEngineCore = []() -> EngineCore {
+				++g_coreFailInit;
+				if (g_coreFailMode.load() == 1)
+					throw std::runtime_error("simulated core init failure");
+				if (g_coreFailMode.load() == 2)
+					return EngineCore(); // 空核心 = 失败
+				return EngineCore(std::make_shared<int>(9));
+			};
+			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
+				++g_coreFailLoad;
+				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
+			};
+			if (!reg.registerEngine(desc))
+				throw std::runtime_error("register CoreFail engine failed");
+		}
+
+		// 1) 核心抛异常 → 上抛，且 loadModel 从未被调用
+		g_coreFailMode = 1;
+		bool threw = false;
+		try {
+			reg.getOrCreateEngine("CoreFail", "models/core-fail.onnx");
+		} catch (const std::runtime_error&) {
+			threw = true;
+		}
+		if (!threw)
+			throw std::runtime_error("core init exception should propagate");
+		if (g_coreFailLoad.load() != 0)
+			throw std::runtime_error("loadModel must not run when core init fails");
+
+		// 2) 空核心 → nullptr（不抛）
+		g_coreFailMode = 2;
+		auto emptyResult = reg.getOrCreateEngine("CoreFail", "models/core-fail.onnx");
+		if (emptyResult)
+			throw std::runtime_error("empty core must surface as failure (nullptr)");
+		if (g_coreFailLoad.load() != 0)
+			throw std::runtime_error("loadModel must not run for empty core");
+
+		// 3) 失败不缓存：修复后可重试成功
+		g_coreFailMode = 0;
+		auto recovered = reg.getOrCreateEngine("CoreFail", "models/core-fail.onnx");
+		if (!recovered)
+			throw std::runtime_error("core init should succeed after failure");
+		if (g_coreFailInit.load() != 3)
+			throw std::runtime_error("each failed attempt should retry core init");
+		if (g_coreFailLoad.load() != 1)
+			throw std::runtime_error("model should load exactly once after core success");
+	}
+	std::cout << "Test 22 passed: core failure semantics (throw/empty, no cache, retry)" << std::endl;
+
+	// ── Test 23: 分层释放：releaseAllEngines 清两级缓存；实例保活核心；钩子各恰好一次 ──
+	{
+		static std::atomic<int> g_lifeInit{0};
+		static std::atomic<int> g_lifeLoad{0};
+		static std::atomic<int> g_lifeModelRelease{0};
+		static std::atomic<int> g_lifeCoreRelease{0};
+		if (!reg.hasEngine("CoreLifecycle")) {
+			EngineDescriptor desc;
+			desc.engineType = "CoreLifecycle";
+			desc.converter = {mockToNative, mockToDC};
+			desc.createEngineCore = []() -> EngineCore {
+				++g_lifeInit;
+				return EngineCore(std::make_shared<int>(11));
+			};
+			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
+				++g_lifeLoad;
+				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
+			};
+			desc.releaseModel = [](void*) { ++g_lifeModelRelease; };
+			desc.releaseEngineCore = [](void*) { ++g_lifeCoreRelease; };
+			if (!reg.registerEngine(desc))
+				throw std::runtime_error("register CoreLifecycle engine failed");
+		}
+
+		auto h = reg.getOrCreateEngine("CoreLifecycle", "models/core-life.onnx");
+		if (!h || g_lifeLoad.load() != 1)
+			throw std::runtime_error("instance should be loaded once");
+		auto core = h->core();
+		if (!core)
+			throw std::runtime_error("instance should carry its core");
+
+		// 清两级缓存：实例/核心均由外部句柄保活，释放钩子不触发
+		reg.releaseAllEngines();
+		if (g_lifeModelRelease.load() != 0 || g_lifeCoreRelease.load() != 0)
+			throw std::runtime_error("cache clear must not destroy handle-held objects");
+
+		// 仅释放实例句柄：模型钩子恰好一次；核心仍被本地句柄持有 → 核心钩子不触发
+		h.reset();
+		if (g_lifeModelRelease.load() != 1)
+			throw std::runtime_error("releaseModel should fire exactly once");
+		if (g_lifeCoreRelease.load() != 0)
+			throw std::runtime_error("core should stay alive while held by local handle");
+
+		// 释放核心句柄：核心钩子恰好一次
+		core.reset();
+		if (g_lifeCoreRelease.load() != 1)
+			throw std::runtime_error("releaseEngineCore should fire exactly once");
+
+		// 重新获取：缓存已清 → 核心重建（计数 +1）
+		auto h2 = reg.getOrCreateEngine("CoreLifecycle", "models/core-life2.onnx");
+		if (!h2 || g_lifeInit.load() != 2)
+			throw std::runtime_error("core should be re-initialized after full release");
+	}
+	std::cout << "Test 23 passed: two-level release, core outlives instance, hooks fire once" << std::endl;
+
+	// ── Test 24: 核心层 single-flight：同 engineType 不同 modelPath 并发 → 核心恰好一次 ──
+	{
+		static std::atomic<int> g_coreConcInit{0};
+		static std::atomic<int> g_coreConcLoad{0};
+		static std::atomic<bool> g_coreConcRelease{false};
+		static std::atomic<int> g_coreConcEntered{0};
+		if (!reg.hasEngine("CoreConcurrent")) {
+			EngineDescriptor desc;
+			desc.engineType = "CoreConcurrent";
+			desc.converter = {mockToNative, mockToDC};
+			desc.createEngineCore = []() -> EngineCore {
+				++g_coreConcEntered;
+				// 阻塞至放行：确保全部并发调用者在核心创建期间进入等待
+				while (!g_coreConcRelease.load())
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				++g_coreConcInit;
+				return EngineCore(std::make_shared<int>(13));
+			};
+			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
+				++g_coreConcLoad;
+				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
+			};
+			if (!reg.registerEngine(desc))
+				throw std::runtime_error("register CoreConcurrent engine failed");
+		}
+
+		constexpr int kThreads = 8;
+		std::atomic<int> got{0};
+		std::vector<EngineHandle> handles(kThreads);
+		std::vector<std::thread> threads;
+		for (int i = 0; i < kThreads; ++i) {
+			threads.emplace_back([&, i] {
+				auto inst = reg.getOrCreateEngine("CoreConcurrent",
+															"models/cc-" + std::to_string(i) + ".onnx");
+				if (inst && inst->get()) {
+					handles[i] = inst;
+					++got;
+				}
+			});
+		}
+		// 等核心回调被进入（此刻领导者已锁外执行，其余线程进入 core 等待）
+		for (int i = 0; i < 5000 && g_coreConcEntered.load() < 1; ++i)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 让其余线程抵达 core single-flight
+		g_coreConcRelease = true;
+		for (auto& t : threads)
+			t.join();
+
+		if (got != kThreads)
+			throw std::runtime_error("all threads should obtain instances");
+		if (g_coreConcEntered.load() != 1 || g_coreConcInit.load() != 1)
+			throw std::runtime_error("core should initialize exactly once under concurrency");
+		if (g_coreConcLoad.load() != kThreads)
+			throw std::runtime_error("each distinct modelPath should load exactly once");
+		for (int i = 1; i < kThreads; ++i) {
+			if (handles[i]->core().get() != handles[0]->core().get())
+				throw std::runtime_error("all instances should share one core");
+		}
+	}
+	std::cout << "Test 24 passed: core single-flight under concurrent multi-model access" << std::endl;
+
+	// ── Test 25: releaseEngineCore：旧实例保活旧核心；重建后新实例获得新核心 ──
+	{
+		static std::atomic<int> g_reCoreInit{0};
+		static std::atomic<int> g_reCoreRelease{0};
+		if (!reg.hasEngine("CoreRelease")) {
+			EngineDescriptor desc;
+			desc.engineType = "CoreRelease";
+			desc.converter = {mockToNative, mockToDC};
+			desc.createEngineCore = []() -> EngineCore {
+				++g_reCoreInit;
+				return EngineCore(std::make_shared<int>(17));
+			};
+			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
+				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
+			};
+			desc.releaseEngineCore = [](void*) { ++g_reCoreRelease; };
+			if (!reg.registerEngine(desc))
+				throw std::runtime_error("register CoreRelease engine failed");
+		}
+
+		auto h1 = reg.getOrCreateEngine("CoreRelease", "models/cr-1.onnx");
+		if (!h1 || g_reCoreInit.load() != 1)
+			throw std::runtime_error("initial core + model should load");
+		auto oldCore = h1->core();
+		if (!oldCore)
+			throw std::runtime_error("h1 should carry the initial core");
+
+		// 移除核心缓存条目：h1 仍持有旧核心 → 不销毁
+		reg.releaseEngineCore("CoreRelease");
+		if (g_reCoreRelease.load() != 0)
+			throw std::runtime_error("releaseEngineCore must not destroy instance-held core");
+
+		// 新模型路径：核心缓存已空 → 重新初始化（旧核心不受影响）
+		auto h2 = reg.getOrCreateEngine("CoreRelease", "models/cr-2.onnx");
+		if (!h2 || g_reCoreInit.load() != 2)
+			throw std::runtime_error("core should be re-initialized after releaseEngineCore");
+		if (h2->core().get() == oldCore.get())
+			throw std::runtime_error("new instance should carry the new core");
+		if (g_reCoreRelease.load() != 0)
+			throw std::runtime_error("old core must stay alive while h1 holds it");
+
+		// 释放旧实例（本地句柄 + 实例缓存条目）与旧核心句柄：旧核心钩子恰好一次
+		h1.reset();
+		reg.releaseEngine("CoreRelease", "models/cr-1.onnx"); // 移除实例缓存引用（含实例持有的核心引用）
+		oldCore.reset();
+		if (g_reCoreRelease.load() != 1)
+			throw std::runtime_error("old core release hook should fire once");
+	}
+	std::cout << "Test 25 passed: releaseEngineCore rebuilds core, old core kept alive by holders" << std::endl;
 
 	std::cout << "\nAll EngineRegistry tests passed!" << std::endl;
 }
