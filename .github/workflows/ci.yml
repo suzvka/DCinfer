@@ -384,58 +384,9 @@ jobs:
           ./build-smoke-net/install_smoke | grep -q "install smoke OK"
 
   # ──────────────────────────────────────────────
-  # ONNX Runtime CPU 构建（P1-7）：验证 ORT overlay portfile 主路径与
-  # DCINFER_ORT_EP 注入链路。注意：hosted runner 无 GPU，CUDA 构建不进
-  # CI——CUDA 组合（RTX 4070 / CUDA 13.3 / VS 2026）仅在文档声明的
-  # 本地环境人工验证（预设 msvc-ort-cuda）
+  # ONNX Runtime 适配器编译不进 CI（仅本地验证：预设 msvc-ort-cpu /
+  # msvc-ort-cuda）；CI 只验证核心逻辑与零/低依赖路径
   # ──────────────────────────────────────────────
-  ort-cpu:
-    name: ONNX Runtime CPU build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 240
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          submodules: recursive
-          persist-credentials: false
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build g++ pkg-config
-
-      - name: Configure (ORT CPU EP)
-        run: >
-          cmake -B build -S . -G Ninja
-          -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
-          -DBUILD_ENGINE_ONNXRUNTIME=ON
-          -DDCINFER_ORT_EP=CPU
-
-      - name: Build
-        run: cmake --build build -j
-
-      - name: Test (full suite)
-        run: ctest --test-dir build -C Release --output-on-failure --timeout 120 --no-tests=error
-
-  windows-ort-cpu:
-    name: Windows ORT CPU Release
-    runs-on: windows-2022
-    timeout-minutes: 240
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          submodules: recursive
-          persist-credentials: false
-      - uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723
-      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
-        with:
-          arch: x64
-      - run: cmake --preset msvc-ort-cpu
-      - run: cmake --build build/msvc-ort-cpu --config Release
-      - name: Required ORT integration test
-        run: ctest --test-dir build/msvc-ort-cpu -C Release -R OnnxEngineTest --output-on-failure --timeout 120 --no-tests=error
-      - run: ctest --test-dir build/msvc-ort-cpu -C Release --output-on-failure --timeout 120 --no-tests=error
-
   debug-sanitizers:
     name: Linux Debug ASan + UBSan (core and net)
     runs-on: ubuntu-24.04
