@@ -27,8 +27,11 @@ struct OnnxOptions {
 /// @endcode
 ///
 /// 引擎特性：
-/// - createNode(engineType, name, modelPath) 自动从模型创建并缓存引擎实例，
-///   并从实例推导输入/输出端口 Schema（模型仅加载一次）
+/// - 两级生命周期：引擎核心（共享 Ort::Env）每 engineType 初始化一次；
+///   模型（Ort::Session）按 modelPath 加载一次并缓存（Session 绑定共享 Env，
+///   生命周期由实例共享持有核心句柄保证）
+/// - createNode(engineType, name, modelPath) 自动确保核心就绪并加载模型，
+///   并从实例推导输入/输出端口 Schema
 /// - 张量转换经 TensorConverter 契约：DC::Tensor ↔ Ort::Value
 /// - FP16（FLOAT16）挂 Float 类型族（typeSize=2，数据黑盒传递不解释数值）；
 ///   BFLOAT16/STRING 等仍显式降级为 Void 并告警

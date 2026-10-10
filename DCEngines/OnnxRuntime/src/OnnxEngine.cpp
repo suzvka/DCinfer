@@ -23,15 +23,6 @@ static std::basic_string<ORTCHAR_T> toNativePath(const std::string& path) {
 }
 
 // ════════════════════════════════════════════
-// ONNX Runtime 环境单例
-// ════════════════════════════════════════════
-
-static Ort::Env& sharedEnv() {
-	static Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "DCinfer");
-	return env;
-}
-
-// ════════════════════════════════════════════
 // ONNX 数据类型 → DC::Tensor::TensorType 映射
 // ════════════════════════════════════════════
 
@@ -293,10 +284,19 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 	// ── TensorConverter：DC::Tensor ↔ Ort::Value ──
 	desc.converter = {onnxToNative, onnxToDC};
 
-	// ── createEngine: 从模型路径创建引擎实例（含模型加载与资源分配）──
-	// 实例被 Registry 以 modelPath 为 key 缓存（建图仅加载一次）；
-	// 所属描述符由框架在缓存时注入，无需依赖全局单例
-	desc.createEngine = [opts](const std::string& modelPath) -> EngineInstance {
+	// ── createEngineCore：引擎级初始化（缓存键 = engineType，每类型恰好一次）──
+	// 共享 Ort::Env：日志级别与名称固定；全部 Session 经 loadModel 绑定此 Env。
+	desc.createEngineCore = []() -> EngineCore {
+		return EngineCore(std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "DCinfer"));
+	};
+
+	// ── loadModel：从模型路径加载 Session（缓存键 = engineType:modelPath，每组合恰好一次）──
+	// 实例由 Registry 缓存复用（同一模型只加载一次）；
+	// Env 来自引擎核心（Session 必须绑定 Env 且不超出其生命周期——
+	// 实例共享持有核心句柄，由框架保证）
+	desc.loadModel = [opts](const EngineCore& core, const std::string& modelPath) -> EngineInstance {
+		auto& env = *static_cast<Ort::Env*>(const_cast<void*>(core.get()));
+
 		Ort::SessionOptions sessionOpts;
 		sessionOpts.SetIntraOpNumThreads(opts.intraOpThreads); // 与 DCinfer 图级并行模型一致
 
@@ -320,7 +320,7 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 
 		std::shared_ptr<Ort::Session> session;
 		try {
-			session = std::make_shared<Ort::Session>(sharedEnv(), toNativePath(modelPath).c_str(), sessionOpts);
+			session = std::make_shared<Ort::Session>(env, toNativePath(modelPath).c_str(), sessionOpts);
 		} catch (const Ort::Exception& e) {
 			// 适配器封装契约：宿主不包含 onnxruntime 头，引擎期异常统一转
 			// std::runtime_error 上抛（模型损坏/内核缺失/EP 不可用等）；
