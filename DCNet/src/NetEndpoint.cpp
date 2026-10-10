@@ -9,8 +9,8 @@ namespace DC::Net {
 
 namespace {
 
-/// 大小写不敏感识别 scheme（1 = http、2 = https、-1 = 未知）：
-/// 未知 scheme 由调用方拒绝——静默降级为明文 HTTP 会把凭据发往非预期端点。
+/// 大小写不敏感识别 scheme，返回 1 为 http、2 为 https、-1 为未知：
+/// 未知 scheme 由调用方拒绝，静默降级为明文 HTTP 会把凭据发往非预期端点。
 int classifyScheme(const std::string& scheme) {
 	std::string lower;
 	lower.reserve(scheme.size());
@@ -29,7 +29,7 @@ NetEndpoint NetEndpoint::parse(const std::string& text) {
 	NetEndpoint ep;
 	std::string s = text;
 
-	// 提取 scheme 与 TLS 标记；未知 scheme（如 ftp://）在入口拒绝
+	// 提取 scheme 与 TLS 标记；未知 scheme 如 ftp:// 在入口拒绝
 	auto schemePos = s.find("://");
 	if (schemePos != std::string::npos) {
 		const int known = classifyScheme(s.substr(0, schemePos));
@@ -50,8 +50,8 @@ NetEndpoint NetEndpoint::parse(const std::string& text) {
 	if (at != std::string::npos)
 		throw NodeException(NodeException::ErrorType::InternalError, "NetEndpoint::parse", "URI userinfo is not supported; configure authToken instead");
 
-	// host[:port]（v1 不支持 IPv6 字面量）；端口严格解析：仅十进制数字、
-	// 全串消费、≤65535
+	// host[:port]，v1 不支持 IPv6 字面量；端口严格解析：仅十进制数字、
+	// 全串消费、不超过 65535
 	auto colon = authority.rfind(':');
 	if (colon != std::string::npos) {
 		ep.host = authority.substr(0, colon);

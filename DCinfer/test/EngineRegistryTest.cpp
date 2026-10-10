@@ -749,14 +749,14 @@ static void runTests() {
 			desc.converter = {mockToNative, mockToDC};
 			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 				++g_lruCreateCount;
-				// clang-14（最低工具链）不支持 P0960 括号聚合初始化，显式构造
+				// clang-14 即最低工具链不支持 P0960 括号聚合初始化，显式构造
 				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
 			};
 			if (!reg.registerEngine(desc))
 				throw std::runtime_error("register LruMock engine failed");
 		}
 
-		// 创建 70 个实例（> 上限 64）：最旧条目被 LRU 逐出，句柄持有的实例保活
+		// 创建 70 个实例，超上限 64：最旧条目被 LRU 逐出，句柄持有的实例保活
 		std::vector<EngineHandle> recent;
 		for (int i = 0; i < 70; ++i)
 			recent.push_back(reg.getOrCreateEngine("LruMock", "lru-model-" + std::to_string(i)));

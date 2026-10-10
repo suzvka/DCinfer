@@ -12,11 +12,11 @@
 
 namespace DC {
 
-/// @brief 图构建器：构建期的唯一可写面（addNode/connect/bindInput/bindOutput）。
+/// @brief 图构建器：构建期的唯一可写面。
 ///
-/// compile() 产出不可变 CompiledGraph 快照并移交拓扑所有权；冻结后所有构建 API
-/// 抛 GraphException(Frozen)。全部公开方法以内部互斥锁串行化（构图与冻结互斥，
-/// 无 TOCTOU 窗口）。拓扑演进 = 重建 GraphBuilder 并重新 compile。
+/// compile 产出不可变 CompiledGraph 快照并移交拓扑所有权；冻结后所有构建 API 抛
+/// GraphException(Frozen)。公开方法以内部互斥锁串行化，构图与冻结互斥，无 TOCTOU 窗口。
+/// 拓扑演进须重建 GraphBuilder 并重新 compile。
 class GraphBuilder {
 public:
 	using Edge = GraphStore::Edge;
@@ -27,38 +27,36 @@ public:
 	GraphBuilder(const GraphBuilder&) = delete;
 	GraphBuilder& operator=(const GraphBuilder&) = delete;
 
-	// ── 图构建（冻结前可用）──
-
-	/// @brief 添加节点（转移所有权）；空名或重名抛 DuplicateNode。
+	/// @brief 添加节点并转移所有权；空名或重名抛 DuplicateNode。
 	Node& addNode(std::unique_ptr<Node> node);
 
-	/// @brief 端口级接线：自动插入广播连接器（N=1）；同源口再次 connect 扩容扇出。
+	/// @brief 端口级接线：自动插入广播连接器；同源口再次 connect 扩容扇出。
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort);
 
-	/// @brief 标记图级输入口（alias 必填且唯一；不参与运行时寻址）。
+	/// @brief 标记图级输入口；alias 必填且唯一。
 	void bindInput(const std::string& nodeName, const std::string& portName,
 				   const std::string& alias);
 
-	/// @brief 标记图级输出绑定（alias 必填且唯一；重复绑定同一 node:port 为无操作）。
-	/// @throws GraphException(NonTerminalPort) 端口有出边（取数与出边传播共享消费槽）。
+	/// @brief 标记图级输出绑定；alias 必填且唯一，重复绑定同一 node:port 为无操作。
+	/// @throws GraphException(NonTerminalPort) 端口有出边。
 	void bindOutput(const std::string& nodeName, const std::string& portName,
 					const std::string& alias);
 
-	/// @brief 拓扑只读访问（compile 后读快照）。
+	/// @brief 拓扑只读访问；compile 后读快照。
 	const GraphStore& store() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store() : *_store;
 	}
 
-	/// @brief 获取节点可写指针（构建期专用；冻结后抛 Frozen）。
+	/// @brief 获取节点可写指针；构建期专用，冻结后抛 Frozen。
 	Node* node(const std::string& name) {
 		std::lock_guard lk(_mutex);
 		_ensureMutableLocked();
 		return _store->node(name);
 	}
 
-	/// @brief 获取节点指针（只读）。
+	/// @brief 获取只读节点指针。
 	const Node* node(const std::string& name) const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().node(name) : _store->node(name);
@@ -79,7 +77,7 @@ public:
 		return _snapshot ? _snapshot->store().nodeNames() : _store->nodeNames();
 	}
 
-	/// @brief 获取所有边（值副本；隔离并发构图导致的引用悬空）。
+	/// @brief 获取所有边的值副本，隔离并发构图导致的引用悬空。
 	std::vector<Edge> edges() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().edges() : _store->edges();
@@ -95,14 +93,14 @@ public:
 		return _snapshot ? _snapshot->signature().outputs : _outputBindings;
 	}
 
-	/// @brief 编译为不可变快照（幂等；此后构建 API 抛 Frozen）。
+	/// @brief 编译为不可变快照；幂等，此后构建 API 抛 Frozen。
 	std::shared_ptr<const CompiledGraph> compile();
 
 private:
 	/// @brief 构建守卫；调用方须持有 _mutex。
 	void _ensureMutableLocked() const;
 
-	/// @brief 输出绑定不变量校验（compile 期，封印前）：绑定端口必须无出边。
+	/// @brief 输出绑定不变量校验，compile 期封印前调用：绑定端口必须无出边。
 	/// @throws GraphException(NonTerminalPort)
 	void _validateOutputBindings() const;
 
@@ -122,7 +120,6 @@ private:
 	std::vector<OutputBinding> _outputBindings;
 	std::shared_ptr<const CompiledGraph> _snapshot;
 
-	// 构建面串行化：全部公开方法持锁。
 	mutable std::mutex _mutex;
 };
 

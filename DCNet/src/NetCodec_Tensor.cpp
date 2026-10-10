@@ -1,4 +1,4 @@
-// 张量 JSON codec：v1 线上格式（数值 base64 / 文本 UTF-8 直传）。
+// 张量 JSON codec：v1 线上格式，数值 base64、文本 UTF-8 直传。
 
 #include "DCNet/NetCodec_Tensor.h"
 #include "DCNet/NetError.h"
@@ -27,7 +27,7 @@ namespace {
 constexpr std::size_t kMaxTensorRank = 64;
 constexpr std::size_t kMaxTensorBytes = std::size_t{1} << 30; // 1 GiB
 
-// dtype 字符串 ↔ Tensor 类型映射
+// dtype 字符串与 Tensor 类型映射
 std::string dtypeToString(Tensor::TensorType type, size_t typeSize) {
 	switch (type) {
 	case Tensor::TensorType::Float:
@@ -62,7 +62,7 @@ bool dtypeFromString(const std::string& s, Tensor::TensorType& type, size_t& typ
 	return false;
 }
 
-/// Tensor → JSON（Data 文本 UTF-8 直传；数值 base64）
+/// Tensor 转 JSON：Data 文本 UTF-8 直传，数值 base64
 nlohmann::json encodeTensor(const Tensor& t) {
 	nlohmann::json j;
 	j["dtype"] = dtypeToString(t.type(), t.typeSize());
@@ -76,7 +76,7 @@ nlohmann::json encodeTensor(const Tensor& t) {
 	return j;
 }
 
-/// JSON → Tensor（支持 "text" 与全部数值 dtype）
+/// JSON 转 Tensor：支持 "text" 与全部数值 dtype
 Tensor decodeTensor(const nlohmann::json& j) {
 	if (!j.is_object())
 		throw std::runtime_error("tensor codec: frame must be an object");
@@ -96,12 +96,12 @@ Tensor decodeTensor(const nlohmann::json& j) {
 		if (!dim.is_number_integer())
 			throw std::runtime_error("tensor codec: shape dimensions must be integers");
 		const auto d = dim.get<std::int64_t>();
-		// 负数拒绝（无符号转换回绕）；零维允许——0 元素张量为合法空载荷表示
+		// 负数拒绝，防无符号转换回绕；零维允许，0 元素张量为合法空载荷表示
 		if (d < 0)
 			throw std::runtime_error("tensor codec: shape dimensions must be non-negative");
 		const auto ud = static_cast<std::size_t>(d);
 		if (ud == 0) {
-			// 零维置零后乘法恒 0 无溢出，同时避开下方对 ud 的除法（整数除零）
+			// 零维置零后乘法恒 0 无溢出，同时避开下方对 ud 的整数除零
 			elements = 0;
 			shape.push_back(d);
 			continue;
@@ -134,8 +134,8 @@ Tensor decodeTensor(const nlohmann::json& j) {
 	return Tensor(type, typeSize, std::move(shape), std::move(block));
 }
 
-/// 远端响应帧解码：解析 / dtype / 字段异常统一转抛 DcCodecRemoteError
-/// （映射为 RemoteMalformed 诊断）；本地端口写入不在此处，避免形状异常误分类。
+/// 远端响应帧解码：解析、dtype 与字段异常统一转抛 DcCodecRemoteError，
+/// 映射为 RemoteMalformed 诊断；本地端口写入不在此处，避免形状异常误分类。
 Tensor decodeRemoteTensorFrame(const Payload& payload, const char* context) {
 	try {
 		return decodeTensor(nlohmann::json::parse(payload));
@@ -215,8 +215,8 @@ public:
 		: _inputPort(std::move(inputPort)), _outputPort(std::move(outputPort)) {}
 
 	std::unordered_map<std::string, Tensor> decodeRequest(const Payload& request) override {
-		const auto j = nlohmann::json::parse(request); // 解析失败 → 监听器 415
-		return {{_inputPort, decodeTensor(j)}};        // 未知 dtype → 415
+		const auto j = nlohmann::json::parse(request); // 解析失败则监听器 415
+		return {{_inputPort, decodeTensor(j)}};        // 未知 dtype 则 415
 	}
 
 	Payload encodeResponse(const std::unordered_map<std::string, Tensor>& outputs) override {

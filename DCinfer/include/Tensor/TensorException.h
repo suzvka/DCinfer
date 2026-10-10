@@ -7,14 +7,14 @@ namespace DC {
 class TensorException : public Exception {
 public:
 	enum class ErrorType {
-		TypeMismatch, ///< C++ 类型与张量声明的 typeSize 不一致
-		ShapeMismatch, ///< 数据形状与规则形状或操作预期不符
-		InvalidPath, ///< 维度越界、路径长度超出张量秩
-		InvalidShape, ///< 形状参数本身不合法
-		NotAScalar, ///< 非单元素子视图被作为标量读取
-		NotData, ///< 访问尚未填充数据的张量
-		Frozen, ///< 已冻结，拒绝突变
-		Other ///< 其他未分类的错误
+		TypeMismatch,
+		ShapeMismatch,
+		InvalidPath,
+		InvalidShape,
+		NotAScalar,
+		NotData,
+		Frozen,
+		Other
 	};
 
 	TensorException(ErrorType errorType = ErrorType::Other, const std::string& source = "Unknown",

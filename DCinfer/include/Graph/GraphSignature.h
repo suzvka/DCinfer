@@ -8,9 +8,9 @@
 
 namespace DC {
 
-/// @brief 图级静态签名：冻结时一次性构建的绑定快照（序列化/内省元数据）。
+/// @brief 图级静态签名：冻结时一次性构建的绑定快照，供序列化与内省。
 ///
-/// 冻结后只读、无锁读取；运行时寻址一律按 (nodeName, portName) 坐标，不读本签名。
+/// 冻结后只读、无锁读取；运行时寻址一律按 nodeName、portName 坐标，不读本签名。
 struct GraphSignature {
 	std::vector<InputBinding> inputs;
 	std::vector<OutputBinding> outputs;

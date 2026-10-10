@@ -1,5 +1,5 @@
-// DCEngine_OpenAI 集成测试（MockHttpServer 假远端，真实 HTTP 传输）。
-// 覆盖：chat 端到端（/chat/completions 往返）；失败路径（500 归一化）。
+// DCEngine_OpenAI 集成测试：MockHttpServer 假远端，真实 HTTP 传输。
+// 覆盖：chat 端到端即 /chat/completions 往返；失败路径即 500 归一化。
 
 #include "DCEngine/OpenAiEngine.h"
 #include "NodeExecutor.h"
@@ -100,7 +100,7 @@ TEST(remoteServerErrorNormalized) {
 	});
 
 	auto& reg = EngineRegistry::instance();
-	// "OpenAI" 已被 chatRoundtrip 注册（保留首次）：此处沿用
+	// "OpenAI" 已被 chatRoundtrip 注册，保留首次：此处沿用
 	DC::OpenAI::registerOpenAiEngine(reg, {});
 
 	auto node = reg.createNode("OpenAI", "errNode",
@@ -182,7 +182,7 @@ TEST(malformedResponseRejected) {
 	CHECK(result.diagnostic.has_value(), "non-JSON → 附带领域诊断");
 	CHECK(result.diagnostic->domain == "dcnet", "诊断 domain=dcnet");
 
-	// 缺 choices[0].message.content（协议漂移）→ ExecutionFailed，而非空字符串成功
+	// 缺 choices[0].message.content 即协议漂移，归 ExecutionFailed，而非空字符串成功
 	MockHttpServer server2;
 	server2.start([&](const std::string&, const std::string&, int& status) {
 		status = 200;
@@ -219,7 +219,7 @@ TEST(emptyContentSucceeds) {
 	CHECK(out.bytes().empty(), "response should be empty string");
 }
 
-// maxRetries：传输级失败退避重试（500 一次后成功）
+// maxRetries：传输级失败退避重试，500 一次后成功
 TEST(transportRetryOnServerError) {
 	MockHttpServer server;
 	std::atomic<int> calls{0};

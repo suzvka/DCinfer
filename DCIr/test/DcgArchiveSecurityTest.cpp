@@ -1,6 +1,6 @@
 // DcgArchive 路径安全与完整性回归测试。
 // 覆盖：路径逃逸/符号链接/Windows 罪名字形拒绝；截断/zip bomb/条目数与体积预算；
-// 正常归档读写不被安全校验误伤（graph.json 往返 + 模型解压内容比对）。
+// 正常归档读写不被安全校验误伤：graph.json 往返加模型解压内容比对。
 #include <algorithm>
 #include <vector>
 #include <chrono>
@@ -69,7 +69,7 @@ std::string readFile(const std::filesystem::path& path) {
 	return content;
 }
 
-/// 经 minizip 底层 API 写入任意条目名，绕过写入侧校验——仅供读取侧防线验证。
+/// 经 minizip 底层 API 写入任意条目名，绕过写入侧校验，仅供读取侧防线验证。
 void writeRawEntry(const std::filesystem::path& dcgPath, const std::string& entryName,
 				   const std::string& content) {
 	zipFile z = ::zipOpen64(dcgPath.string().c_str(), APPEND_STATUS_CREATE);
@@ -174,7 +174,7 @@ static void testExtractOneRejectsTraversal() {
 		const auto escapedPath = std::filesystem::temp_directory_path() / escapedName;
 
 		writePayload(workDir / "payload.bin", "review-only marker");
-		// 经 minizip 底层构造恶意归档：读取侧防线独立成立（不信任写入方）。
+		// 经 minizip 底层构造恶意归档：读取侧防线独立成立，不信任写入方。
 		writeRawEntry(dcgPath, "../" + escapedName, "review-only marker");
 
 		auto r = DcgArchive::openRead(dcgPath);
@@ -398,7 +398,7 @@ static void testGraphJsonSizeBudgetRejected() {
 		const auto workDir = makeWorkDir("bigjson");
 		const auto dcgPath = workDir / "bigjson.dcg";
 
-		// > 64 MiB 的 graph.json：预算检查在读入前触发（不依赖压缩比检查）
+		// > 64 MiB 的 graph.json：预算检查在读入前触发，不依赖压缩比检查
 		const std::string bigJson = "{\"pad\":\"" + std::string(65u << 20, 'a') + "\"}";
 		{
 			auto w = DcgArchive::openWrite(dcgPath);
@@ -427,7 +427,7 @@ static void testMultiChunkModelRoundTrip() {
 		const auto workDir = makeWorkDir("multichunk");
 		const auto dcgPath = workDir / "multichunk.dcg";
 
-		// > 64 KiB 分块：跨多次循环迭代校验流式写入正确性（全程不整读入内存）
+		// > 64 KiB 分块：跨多次循环迭代校验流式写入正确性，全程不整读入内存
 		std::string payload;
 		payload.reserve((256u << 10) + 64);
 		for (int i = 0; payload.size() < (256u << 10); ++i)

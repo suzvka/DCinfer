@@ -189,7 +189,7 @@ TEST(wireCodeFor) {
 }
 
 TEST(wireRoundTripParity) {
-	// 语义一致性：对端归一化结果 == 本地 status（wire code 未知不影响归类）。
+	// 语义一致性：对端归一化结果等同本地 status，wire code 未知不影响归类。
 	using DC::Net::normalizeHttpResponse;
 	using DC::Net::wireHttpStatusFor;
 
@@ -217,7 +217,7 @@ TEST(wireRoundTripParity) {
 											 R"({"error":{"code":"internal_error","message":"x"}})");
 		CHECK(e.localStatus == Status::ExecutionFailed, "500+internal_error → ExecutionFailed（解析限度）");
 	}
-	// 无本地对应物的闸门类（监听/装配层直接应答）：
+	// 无本地对应物的闸门类，由监听与装配层直接应答：
 	CHECK(normalizeHttpResponse(401, R"({"error":{"code":"unauthorized"}})").localStatus == Status::InternalError,
 		  "401 → RemoteAuth → InternalError（remote:auth）");
 	CHECK(normalizeHttpResponse(429, R"({"error":{"code":"overloaded"}})").localStatus == Status::ExecutionFailed,

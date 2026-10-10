@@ -1,5 +1,5 @@
-// 04_task_lifecycle - 统一任务句柄：同步与异步同级
-// 预期输出：3.0 + 4.0 = 7 / 10.0 + 5.0 = 15
+// 04_task_lifecycle：统一任务句柄，同步与异步同级
+// 预期输出：3.0 + 4.0 = 7 与 10.0 + 5.0 = 15
 
 #include "InferGraph.h"
 #include "Tensor.hpp"
@@ -20,9 +20,9 @@ int main() {
 	graph.bindInput("b", "adder", "b");
 	graph.bindOutput("result", "pass", "y");
 
-	auto api = graph.interface(); // 取接口即定型：冻结图并解析别名 → 坐标
+	auto api = graph.interface(); // 取接口即定型：冻结图并解析别名到坐标
 
-	// 同步：run() = submit + wait（同一句柄）
+	// 同步：run 即 submit 加 wait，同一句柄
 	{
 		auto task = api.createTask();
 		auto ta = DC::Tensor::Create<float>();
@@ -40,7 +40,7 @@ int main() {
 		std::cout << "3.0 + 4.0 = " << task.takeTensor("result").item<float>() << std::endl;
 	} // 终态任务随析构自动释放
 
-	// 异步：submit 后做其他工作，再 wait(超时) + take
+	// 异步：submit 后做其他工作，再 wait 超时后 take
 	float asyncValue = 0.0f;
 	{
 		auto task = api.createTask();
@@ -50,7 +50,7 @@ int main() {
 		tb = 5.0f;
 		task.feed("a", std::move(ta)).feed("b", std::move(tb)).submit();
 
-		// …… 与本次推理无关的其他工作（同步/异步差别仅在此处）……
+		// …… 与本次推理无关的其他工作，同步与异步差别仅在此处 ……
 
 		auto result = task.wait(std::chrono::milliseconds(5000));
 		if (result.status == DC::TaskStatus::Succeeded)

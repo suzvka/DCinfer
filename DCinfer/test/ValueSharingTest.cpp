@@ -115,7 +115,7 @@ static Node::RunFn fanOutRunFn() {
 			ctx.output(outputs[0].name, ctx.pop("in"));
 			return ctx.success();
 		}
-		// N>1：发布时冻结 + 共享 N 份（只读零拷贝）
+		// N>1：发布时冻结加共享 N 份，只读零拷贝
 		Value in = ctx.pop("in");
 		if (auto* t = in.as<Tensor>())
 			t->freeze();

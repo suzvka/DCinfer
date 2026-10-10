@@ -7,9 +7,9 @@
 
 namespace DC {
 
-/// @brief 图级信号仓库：独立于数据流的键值对存储（atomic<bool> 无锁读写，任意线程可用）。
+/// @brief 图级信号仓库：独立于数据流的键值对存储，atomic<bool> 无锁读写，任意线程可用。
 ///
-/// 两级信号：全局广播信号与 task 级覆盖信号；查找顺序 task 级 → 全局 → defaultVal。
+/// 两级信号：全局广播信号与 task 级覆盖信号；查找顺序 task 级、全局、defaultVal。
 class SignalStore {
 public:
 	SignalStore() = default;
@@ -23,7 +23,7 @@ public:
 	/// @brief 写入 task 级信号值，仅对指定 taskId 生效。
 	void set(const std::string& name, const std::string& taskId, bool value);
 
-	/// @brief 读取信号值（task 级优先 → 全局回退 → defaultVal）。
+	/// @brief 读取信号值；task 级优先，全局回退，最后 defaultVal。
 	bool get(const std::string& name, const std::string& taskId, bool defaultVal = false) const;
 
 	/// @brief 移除单个 task 级信号。

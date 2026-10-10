@@ -89,7 +89,7 @@ static void testNoSchemeShorthandUnchanged() {
 		CHECK(ep.basePath == "/path", "shorthand explicit path");
 	}
 	{
-		// port=0 → 不附加端口；下游 Poco::URI 回退协议默认端口（兼容行为）
+		// port=0 则不附加端口；下游 Poco::URI 回退协议默认端口，属兼容行为
 		auto ep = NetEndpoint::parse("http://example.com");
 		CHECK(ep.port == 0 && !ep.useTls, "scheme without port defaults to protocol default port");
 		CHECK(ep.endpoint() == "http://example.com/v1", "endpoint composition unchanged");

@@ -21,22 +21,22 @@ namespace DC::Ir {
 
 namespace {
 
-/// 单条目未压缩体积上限（防大文件耗尽内存或磁盘）
+/// 单条目未压缩体积上限，防大文件耗尽内存或磁盘
 constexpr uint64_t kMaxEntryBytes = 1ull << 30;
-/// graph.json 专用上限（收紧于通用预算，限制 DOM 解析内存放大）
+/// graph.json 专用上限，收紧于通用预算以限制 DOM 解析内存放大
 constexpr uint64_t kMaxGraphJsonBytes = 64ull << 20;
-/// extractOne 累计解压总预算（graph.json 之外；防多条目聚合耗尽磁盘）
+/// extractOne 累计解压总预算，graph.json 之外，防多条目聚合耗尽磁盘
 constexpr uint64_t kMaxExtractTotalBytes = 4ull << 30;
-/// extractOne 条目数上限（防 O(M×N) 逐次定位的 CPU 放大）
+/// extractOne 条目数上限，防 O(M×N) 逐次定位的 CPU 放大
 constexpr std::size_t kMaxExtractEntries = 256;
-/// 归档全局条目数上限（openRead 校验）
+/// 归档全局条目数上限，openRead 校验
 constexpr uint64_t kMaxArchiveEntries = 4096;
-/// 压缩比上限（防 zip bomb：读取前拒绝低熵膨胀条目）
+/// 压缩比上限，防 zip bomb：读取前拒绝低熵膨胀条目
 constexpr uint64_t kMaxCompressionRatio = 200;
 /// 流式读取块大小
 constexpr std::size_t kReadChunkBytes = 64 * 1024;
 
-/// 读取前预算校验：体积 + 压缩比（只依赖目录声明，不解压）
+/// 读取前预算校验：体积与压缩比，只依赖目录声明不解压
 void ensureEntryWithinBudget(const unz_file_info64& info, const std::string& entry) {
 	if (info.uncompressed_size > kMaxEntryBytes) {
 		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
@@ -50,7 +50,7 @@ void ensureEntryWithinBudget(const unz_file_info64& info, const std::string& ent
 	}
 }
 
-/// 当前打开条目的 RAII 关闭（异常路径防句柄泄漏）
+/// 当前打开条目的 RAII 关闭，异常路径防句柄泄漏
 struct CurrentEntryGuard {
 	unzFile handle;
 	bool closed = false;
@@ -61,7 +61,7 @@ struct CurrentEntryGuard {
 	}
 };
 
-/// 流式读取当前条目至 EOF 并交给 sink；累计字节与声明体积比对（防截断/超读），
+/// 流式读取当前条目至 EOF 并交给 sink；累计字节与声明体积比对，防截断与超读，
 /// CRC 由调用方收尾校验。
 template <typename Sink>
 void streamCurrentEntry(unzFile handle, uint64_t expectedSize, const std::string& entry, Sink&& sink) {
@@ -89,7 +89,7 @@ void streamCurrentEntry(unzFile handle, uint64_t expectedSize, const std::string
 	}
 }
 
-/// CRC 校验收尾：unzCloseCurrentFile 返回非 OK（如 UNZ_CRCERROR）时拒绝
+/// CRC 校验收尾：unzCloseCurrentFile 返回非 OK 如 UNZ_CRCERROR 时拒绝
 void closeCurrentEntryWithCrcCheck(unzFile handle, CurrentEntryGuard& guard, const std::string& entry) {
 	const int ret = ::unzCloseCurrentFile(handle);
 	guard.closed = true;
@@ -115,7 +115,7 @@ std::unique_ptr<DcgArchive> DcgArchive::openRead(const std::filesystem::path& pa
 			"cannot open archive: " + pathStr);
 	}
 
-	// 海量条目使每次 unzLocateFile 线性定位昂贵（O(M×N)）；超限拒绝打开。
+	// 海量条目使每次 unzLocateFile 线性定位昂贵，即 O(M×N)；超限拒绝打开。
 	unz_global_info64 globalInfo{};
 	if (::unzGetGlobalInfo64(archive->_readHandle, &globalInfo) == UNZ_OK
 		&& globalInfo.number_entry > kMaxArchiveEntries) {
@@ -187,7 +187,7 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 			"failed to get info for: " + entryName);
 	}
 
-	// graph.json 走更严的专用预算（限制 DOM 解析内存放大）
+	// graph.json 走更严的专用预算，限制 DOM 解析内存放大
 	if (entryName == "graph.json" && info.uncompressed_size > kMaxGraphJsonBytes) {
 		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
 			"graph.json exceeds size budget (" + std::to_string(info.uncompressed_size) + " > "
@@ -203,7 +203,7 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 	}
 	CurrentEntryGuard guard{handle};
 
-	// 预分配不信任 ZIP 声明的体积（声明 1 GiB 会立即提交 1 GiB）：小量起步、按需增长。
+	// 预分配不信任 ZIP 声明的体积，声明 1 GiB 会立即提交 1 GiB：小量起步、按需增长。
 	std::vector<char> buffer;
 	buffer.reserve(static_cast<std::size_t>(std::min<uint64_t>(info.uncompressed_size, 1ull << 20)));
 	streamCurrentEntry(handle, info.uncompressed_size, entryName,
@@ -243,7 +243,7 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 
 	ensureEntryWithinBudget(info, archivePath);
 
-	// 聚合预算：单条目合规不代表聚合合规（多条目耗磁盘；逐次定位 O(M×N)）。
+	// 聚合预算：单条目合规不代表聚合合规，多条目耗磁盘且逐次定位 O(M×N)。
 	if (++_extractEntries > kMaxExtractEntries) {
 		throw GraphException(GraphException::ErrorType::Other, "DcgArchive::extractOne",
 			"too many extracted entries (limit " + std::to_string(kMaxExtractEntries) + ")");
@@ -346,7 +346,7 @@ void DcgArchive::addModelFile(const std::string& archivePath, const std::filesys
 	// store 模式：模型文件通常已压缩
 	int ret = ::zipOpenNewFileInZip64(_writeHandle, archivePath.c_str(),
 		nullptr, nullptr, 0, nullptr, 0, nullptr,
-		0, 0, 0); // method=0 → store
+		0, 0, 0); // method=0 即 store
 	if (ret != ZIP_OK) {
 		throw GraphException(GraphException::ErrorType::Other,
 			"DcgArchive::addModelFile",

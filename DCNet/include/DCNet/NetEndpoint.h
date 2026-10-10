@@ -6,10 +6,10 @@
 
 namespace DC::Net {
 
-/// url 优先；为空时由 host/port/basePath 组合。
+/// url 优先；为空时由 host、port 与 basePath 组合。
 ///
 /// modelPath 语义重载：EngineRegistry::createNode(engineType, name, modelPath)
-/// 的 modelPath 即端点描述串（URL 或 host[:port][/path]），经 parse() 填充本结构。
+/// 的 modelPath 即端点描述串，URL 或 host[:port][/path]，经 parse 填充本结构。
 struct NetEndpoint {
 	std::string url;
 	std::string host = "127.0.0.1";
@@ -24,8 +24,8 @@ struct NetEndpoint {
 	std::chrono::milliseconds requestTimeout{30000};
 	int maxRetries = 0;
 
-	/// 响应体大小上限（字节）；超限的成功响应按错误归一化。0 = 不限制。
-	/// 默认 512 MiB：防恶意远端致客户端无界分配。
+	/// 响应体大小上限，单位字节；超限的成功响应按错误归一化，0 表示不限制。
+	/// 默认 512 MiB，防恶意远端致客户端无界分配。
 	size_t maxResponseBody = 512u * 1024u * 1024u;
 
 	bool allowInsecureCredentials = false; ///< 仅限开发的明文凭据显式许可

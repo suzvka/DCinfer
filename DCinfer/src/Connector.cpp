@@ -9,7 +9,7 @@ namespace DC::Connector {
 Node::Schema broadcastSchema(size_t downstreamCount) {
 	Node::Schema s;
 
-	// Void + size=0 = 不校验类型
+	// Void 加 size=0 表示不校验类型
 	s.inputs = {{"in", Node::TensorType::Void, 0, {}}};
 
 	s.outputs.reserve(downstreamCount);
@@ -46,7 +46,7 @@ Node::RunFn broadcastRunFn() {
 }
 
 void registerBuiltinConnectors(EngineRegistry& reg) {
-	// 注册 1→1 占位模板；运行时按实际下游数创建实例。
+	// 注册 1 对 1 占位模板；运行时按实际下游数创建实例。
 	reg.registerOperator("Connector.Broadcast", broadcastSchema(1), broadcastRunFn());
 }
 

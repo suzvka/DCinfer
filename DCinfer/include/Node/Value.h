@@ -11,14 +11,14 @@ namespace DC {
 
 /// @brief 原生张量包装类：move-only 类型擦除容器，管理引擎原生张量的所有权与析构。
 ///
-/// 内部以 shared_ptr<void> 承载载荷（保留自定义 deleter）：move 为唯一所有权转移；
-/// share() 产生共享只读别名（引用计数 +1，零拷贝）；构造时从模板参数 T 推导
-/// SlotDataType 标签，用于 TensorSlot::store() 的校验路由。
+/// 内部以 shared_ptr<void> 承载载荷并保留自定义 deleter：move 为唯一所有权转移；
+/// share 产生共享只读别名，引用计数加一且零拷贝；构造时从模板参数 T 推导 SlotDataType
+/// 标签，用于 TensorSlot::store 的校验路由。
 class Value {
 public:
 	Value() = default;
 
-	/// @brief 从 unique_ptr 接管所有权（推荐方式）。
+	/// @brief 从 unique_ptr 接管所有权，推荐方式。
 	template <typename T, typename Deleter>
 	Value(std::unique_ptr<T, Deleter> ptr) {
 		ValidatorRegistry::ensureDefaults();
@@ -29,7 +29,7 @@ public:
 		}
 	}
 
-	/// @brief 从原始指针 + 自定义删除器接管所有权（C API 场景）。
+	/// @brief 从原始指针与自定义删除器接管所有权，用于 C API 场景。
 	template <typename T, typename Deleter>
 	Value(T* ptr, Deleter&& deleter) {
 		ValidatorRegistry::ensureDefaults();
@@ -43,7 +43,7 @@ public:
 	Value(Value&& other) noexcept = default;
 	Value& operator=(Value&& other) noexcept = default;
 
-	// 禁止拷贝：显式共享用 share()。
+	// 禁止拷贝：显式共享用 share。
 	Value(const Value&) = delete;
 	Value& operator=(const Value&) = delete;
 
@@ -52,7 +52,7 @@ public:
 		return _innerType;
 	}
 
-	/// @brief 转换为具体类型指针（调用者自行确保类型正确）。
+	/// @brief 转换为具体类型指针；调用者自行确保类型正确。
 	template <typename T>
 	T* as() {
 		return static_cast<T*>(_ptr.get());
@@ -73,7 +73,7 @@ public:
 		return _ptr != nullptr;
 	}
 
-	/// @brief 产生共享只读别名（零拷贝；发布标记粘性，见 isPublished）。
+	/// @brief 产生共享只读别名；零拷贝，发布标记粘性，见 isPublished。
 	Value share() const {
 		_published = true;
 		Value v;
@@ -88,19 +88,19 @@ public:
 		return _ptr && _ptr.use_count() > 1;
 	}
 
-	/// @brief 载荷处于（或曾处于）共享发布状态（粘性；发布过的载荷可能为冻结
-	///        只读态，需要可变所有权用 cloneOwned）。
+	/// @brief 载荷处于或曾处于共享发布状态，具粘性；发布过的载荷可能为冻结只读态，
+	///        需要可变所有权用 cloneOwned。
 	bool isPublished() const {
 		return _published || isShared();
 	}
 
-	/// @brief 当前引用计数（空 Value 返回 0）。
+	/// @brief 当前引用计数；空 Value 返回 0。
 	long useCount() const {
 		return _ptr ? _ptr.use_count() : 0;
 	}
 
 	/// @brief 深度克隆：经 ValueCloneRegistry 复制载荷，产出独立可变副本。
-	///        未注册深拷贝的类型（如 GPU 句柄）抛 NodeException（只能只读消费）。
+	///        未注册深拷贝的类型如 GPU 句柄抛 NodeException，只能只读消费。
 	Value cloneOwned() const {
 		if (!_ptr)
 			return {};
@@ -119,7 +119,7 @@ public:
 private:
 	std::shared_ptr<void> _ptr;
 	SlotDataType _innerType = SlotDataTypeUnknown;
-	mutable bool _published = false; // 粘性发布标记：句柄经 share() 发布过（随 move 流转）
+	mutable bool _published = false; // 粘性发布标记，随 move 流转
 };
 
 } // namespace DC

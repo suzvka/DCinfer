@@ -5,7 +5,7 @@
 namespace DC {
 
 /// @brief 张量元数据：类型标签、元素字节数、名称与规则形状。
-///        shape 为空 = 跳过检查；-1 = 动态维度。
+///        shape 为空则跳过检查，-1 表示动态维度。
 struct TensorMeta {
 
 	enum class TensorType {
@@ -21,7 +21,7 @@ struct TensorMeta {
 public:
 	TensorMeta();
 
-	/// @brief 确保 C++ 类型到 TensorType 的映射已注册（线程安全，仅执行一次）。
+	/// @brief 确保 C++ 类型到 TensorType 的映射已注册；线程安全，仅执行一次。
 	static void ensureTypeMap();
 
 	std::string name = "";

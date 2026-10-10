@@ -16,7 +16,7 @@ namespace DC {
 /// 仅擦除 Connector.Broadcast、N=1、恰一入一出且端口未被 GraphSignature 绑定的 wire；
 /// 融合沿唯一出边链追踪至首个保留节点，纯 wire 环上的融合边丢弃；
 /// 收尾校验运行边端点必须存在于运行节点集合，违反抛 GraphException。
-/// 被擦除的 wire 不再消耗 TTL（maxHops 只统计运行时顶点）；源图不受影响。
+/// 被擦除的 wire 不再消耗 TTL，maxHops 只统计运行时顶点；源图不受影响。
 struct GraphLoweringStats {
 	size_t erasedConnectors = 0;
 };

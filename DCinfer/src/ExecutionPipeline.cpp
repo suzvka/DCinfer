@@ -38,7 +38,7 @@ NodeResult ExecutionPipeline::execute(
 							"task '" + taskId + "' is not ready");
 	}
 
-	// ⓪½ 节点闸租约：同节点同时只允许一个 task 执行
+	// 节点闸租约：同节点同时只允许一个 task 执行
 	if (!gate.tryAcquire()) {
 		throw NodeException(NodeException::ErrorType::Reentrant, "ExecutionPipeline::execute",
 							"node '" + node.name() + "' is busy executing another task");
@@ -66,7 +66,7 @@ NodeResult ExecutionPipeline::execute(
 
 		workspace.clearOutputs();
 
-		// ②½ preRun 钩子：推理前引擎级准备，失败同样触发 onError 复位
+		// preRun 钩子：推理前引擎级准备，失败同样触发 onError 复位
 		try {
 			engine.preRun();
 		} catch (...) {
@@ -86,12 +86,12 @@ NodeResult ExecutionPipeline::execute(
 			result.message = "Unknown exception in RunFn";
 		}
 
-		// ③¼ onError 钩子：任一引擎相位失败时复位引擎状态
+		// onError 钩子：任一引擎相位失败时复位引擎状态
 		if (!result.ok()) {
 			safeTriggerOnError(engine);
 		}
 
-		// ③½ 同步：确保异步引擎计算已完成，仅成功路径；失败触发 onError
+		// 同步：确保异步引擎计算已完成，仅成功路径；失败触发 onError
 		if (result.ok()) {
 			try {
 				engine.synchronize();
@@ -101,7 +101,7 @@ NodeResult ExecutionPipeline::execute(
 			}
 		}
 
-		// ③¾ postRun 钩子：同步后处理，仅成功路径；失败触发 onError
+		// postRun 钩子：同步后处理，仅成功路径；失败触发 onError
 		if (result.ok()) {
 			try {
 				Node::RunContext ctx(workspace, engine, schema, node.type(), node.name(),
@@ -120,12 +120,12 @@ NodeResult ExecutionPipeline::execute(
 			result.message = "Not all required outputs were produced by RunFn";
 		}
 
-		// ⑥ 清理输入缓冲；输出缓冲保留供调用方拉取
+		// 清理输入缓冲；输出缓冲保留供调用方拉取
 		buffer.eraseInputs(taskId);
 
 		notifyOnce(result);
 	} catch (const std::exception& e) {
-		// 未捕获异常仍须通知完成回调（经门闩，可能 no-op）；租约由 GateGuard 释放
+		// 未捕获异常仍须通知完成回调，经门闩可能 no-op；租约由 GateGuard 释放
 		result.status = NodeStatus::ExecutionFailed;
 		result.message = e.what();
 		notifyOnce(result);

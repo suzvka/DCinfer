@@ -10,7 +10,6 @@
 
 namespace DC {
 
-// 线程池配置
 struct PoolConfig {
 	size_t totalThreads = 1;
 
@@ -23,25 +22,24 @@ struct PoolConfig {
 // 分发承载，池本身只保证任务串行出队执行，并发上限即 worker 数。
 class ThreadPool {
 public:
-	/// @brief 构造线程池。
 	explicit ThreadPool(const PoolConfig& config = {});
-	/// 必须由外部非 worker 线程销毁，违反打印诊断并 std::terminate。
+	/// 必须由外部非 worker 线程销毁，违反则 std::terminate。
 	~ThreadPool();
 
 	ThreadPool(const ThreadPool&) = delete;
 	ThreadPool& operator=(const ThreadPool&) = delete;
 
-	/// @brief 提交任务（fire-and-forget）。
+	/// @brief 提交任务，fire-and-forget。
 	/// @return true = 已入队；false = 池已关闭或入队失败，任务未被执行。
-	/// @note   队列无界（无背压）：宿主须自行做有界准入控制内存规模；
+	/// @note   队列无界无背压，宿主须自行做有界准入控制内存规模；
 	///         worker 不得阻塞等待由排队任务释放的准入票据。
 	bool submit(std::function<void()> task);
 
-	/// @brief 优雅关闭（丢弃队列中未执行的任务）。
+	/// @brief 优雅关闭，丢弃队列中未执行的任务。
 	/// @throws 在本池 worker 内调用抛 std::logic_error。
 	void shutdown();
 
-	/// @brief 当前线程是否为本池 worker（含载荷析构线程）。
+	/// @brief 当前线程是否为本池 worker。
 	bool isWorkerThread() const noexcept;
 	static const ThreadPool* currentWorkerPool() noexcept;
 
@@ -51,7 +49,7 @@ public:
 
 private:
 	void _workerLoop();
-	/// @brief 关停收尾（构造失败回收与 shutdown 共用；幂等）。
+	/// @brief 关停收尾，构造失败回收与 shutdown 共用；幂等。
 	void _drainWorkers();
 
 	size_t _totalThreads;
@@ -61,7 +59,7 @@ private:
 	std::condition_variable _cv;
 	std::queue<std::function<void()>> _taskQueue;
 
-	/// 串行化并发 shutdown：对同一 worker 并发 join 是 UB；单线程构造失败回收路径复用此锁。
+	/// 串行化并发 shutdown：对同一 worker 并发 join 是 UB。
 	std::mutex _drainMutex;
 
 	std::atomic<bool> _running{true};

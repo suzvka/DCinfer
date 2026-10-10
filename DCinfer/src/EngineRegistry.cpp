@@ -215,7 +215,7 @@ EngineCoreHandle EngineRegistry::getOrCreateEngineCore(const std::string& engine
 		error = std::current_exception();
 	}
 
-	// 发布：锁内写 ready / 清失败槽位；set_value 放锁外，避免被唤醒者抢锁
+	// 发布：锁内写 ready 或清失败槽位；set_value 放锁外，避免被唤醒者抢锁
 	{
 		std::lock_guard lk(_mutex);
 		if (handle) {
@@ -304,7 +304,7 @@ EngineHandle EngineRegistry::getOrCreateEngine(const std::string& engineType, co
 		error = std::current_exception();
 	}
 
-	// 发布：锁内写 ready / 清失败槽位；set_value 放锁外，避免被唤醒者抢锁
+	// 发布：锁内写 ready 或清失败槽位；set_value 放锁外，避免被唤醒者抢锁
 	std::vector<EngineHandle> overflow;
 	{
 		std::lock_guard lk(_mutex);
@@ -337,7 +337,7 @@ std::vector<EngineHandle> EngineRegistry::_evictOverflowLocked(const std::string
 		auto oldest = std::chrono::steady_clock::time_point::max();
 		for (auto it = _engineInstances.begin(); it != _engineInstances.end(); ++it) {
 			if (it->first == keepKey)
-				continue; // 刚发布/命中的条目不逐
+				continue; // 刚发布或命中的条目不逐
 			if (it->second.loading.valid())
 				continue; // single-flight 创建中：无可释放对象，保留
 			if (it->second.lastAccess < oldest) {

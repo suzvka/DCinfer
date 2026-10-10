@@ -304,7 +304,7 @@ void testCycleMultiNode() {
 
 		harness.feedInput("t1", "A", "x", makeFloatTensor(0.0f));
 
-		// 每圈 6 跳（3 节点 + 3 导线），3 圈 18 跳，TTL=19 恰好完成
+		// 每圈 6 跳，即 3 节点加 3 导线，3 圈 18 跳，TTL=19 恰好完成
 		harness.submit("t1", "C", "y", 3, 19);
 
 		CHECK(harness.awaitCompletion("t1"), "should complete within timeout");
@@ -1127,7 +1127,7 @@ void testWaitSemantics() {
 	END_TEST();
 }
 
-// 用裸 InferGraph（不经 TestHarness）：TestHarness 经完成回调捕获输出，
+// 用裸 InferGraph，不经 TestHarness：TestHarness 经完成回调捕获输出，
 // 会遮蔽 wait→takeOutput 窗口，测不到"wait 返回即可读"契约本身。
 void testWaitReturnsReadableResults() {
 	TEST("lifecycle: wait returns only after declared outputs are readable") {

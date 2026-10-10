@@ -15,7 +15,7 @@ inline std::string wireErrorBody(const char* code, const std::string& message) {
 	return j.dump();
 }
 
-/// HTTP 状态码标准短语（未列举状态回落通用短语）。
+/// HTTP 状态码标准短语；未列举状态回落通用短语。
 inline const char* wireStatusText(int status) {
 	switch (status) {
 	case 200: return "OK";

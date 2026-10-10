@@ -1,14 +1,14 @@
 // HttpTransport TLS 显式校验回归测试。
 //
-// 语义前提：connect() 仅做 TCP 就绪探测，TLS 握手延迟到首次 send——所有证书
-// 校验断言必须在 send/recv 层验证（在 connect 层断言会产生假阳性）。
+// 语义前提：connect() 仅做 TCP 就绪探测，TLS 握手延迟到首次 send，故所有证书
+// 校验断言必须在 send/recv 层验证，在 connect 层断言会产生假阳性。
 //
 // 覆盖：默认兜底上下文拒绝不受信自签证书；宿主注入信任锚后正常交换；
-// hostname 校验强制生效（SAN=localhost 对 127.0.0.1 拒绝）。
+// hostname 校验强制生效，SAN=localhost 对 127.0.0.1 拒绝。
 //
-// 服务端基础设施注记（均曾为真实缺陷）：监听 [::]:0 的双栈解析（Ubuntu 上
-// localhost 可能走 ::1）、accept 异常不得退出服务循环、caLocation 必须为文件
-// 路径（OpenSSL 目录模式需 hash 命名）。
+// 服务端基础设施注记，均曾为真实缺陷：监听 [::]:0 的双栈解析，Ubuntu 上
+// localhost 可能走 ::1；accept 异常不得退出服务循环；caLocation 必须为文件
+// 路径，OpenSSL 目录模式需 hash 命名。
 // Windows uses native SChannel; trust stays in Context::addTrustedCert (memory only).
 
 #include "DCNet/NetEndpoint.h"
@@ -56,7 +56,7 @@ static int g_failures = 0;
 
 using namespace DC::Net;
 
-// 自签证书（CN=localhost, SAN=DNS:localhost）与私钥：测试专用。
+// 自签证书 CN=localhost, SAN=DNS:localhost 与私钥：测试专用。
 static const char* kCertPem = R"PEM(-----BEGIN CERTIFICATE-----
 MIIDITCCAgmgAwIBAgIUSWFZRMI7usIfWbvcjKu+OEVtg3AwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDkzMDEwMzk1M1oYDzIxMjYw
@@ -268,7 +268,7 @@ private:
 };
 #endif
 
-/// 单连接 HTTPS mock 服务：SecureServerSocket + 回显（POST body → JSON）。
+/// 单连接 HTTPS mock 服务：SecureServerSocket 加回显，POST body 转 JSON。
 class MockHttpsServer {
 public:
 	bool start() {
@@ -329,8 +329,8 @@ private:
 					continue;
 				c = _socket->acceptConnection();
 			} catch (...) {
-				// stop 主动关闭 → 退出；客户端握手失败 / 裸 TCP probe（connect
-				// 探测先连后关）→ 循环必须存活，否则服务器被 probe 杀死、用例误报
+				// stop 主动关闭则退出；客户端握手失败或裸 TCP probe，即 connect
+				// 探测先连后关，循环必须存活，否则服务器被 probe 杀死、用例误报
 				if (_stop)
 					break;
 				continue;
@@ -407,7 +407,7 @@ int runTests() {
 	const std::string localhostEp = "https://localhost:" + std::to_string(server.port()) + "/v1";
 
 	// Test 1：默认兜底上下文拒绝不受信证书。自签证书不在系统 CA：connect 仅
-	// TCP 探测成功，send 触发握手拒绝（断言安全行为而非 mode 枚举）。
+	// TCP 探测成功，send 触发握手拒绝，断言安全行为而非 mode 枚举。
 	{
 		HttpTransport t;
 		auto ep = NetEndpoint::parse(localhostEp);
@@ -427,7 +427,7 @@ int runTests() {
 		}
 	}
 
-	// Test 2：宿主自定义信任锚（信任自签 CA）+ hostname 匹配 → 成功。
+	// Test 2：宿主自定义信任锚即信任自签 CA，加 hostname 匹配则成功。
 	{
 #if defined(_WIN32)
 		// VERIFY_RELAXED still checks chain and hostname but selects POCO's manual

@@ -632,7 +632,7 @@ static void testMissingBoundOutputFailFast() {
 	END_TEST();
 }
 
-// 等待型组合节点默认归 System 类（默认预算 4）：与子图 Operator 类隔离，
+// 等待型组合节点默认归 System 类，默认预算 4：与子图 Operator 类隔离，
 // 避免父节点占满 Operator 槽位后子图同池排队自锁
 static void testDefaultBudgetNesting() {
 	TEST("default budget: parent-subgraph nesting runs out of the box") {
@@ -667,7 +667,7 @@ int main() {
 
 		// 等待型节点在等待期间占住资源类槽位：嵌套等待链需同类预算覆盖全部
 		// 并发等待节点，本测试放宽为 1/8/8；configureInstance 仅在实例首次
-		// 创建前有效（检查返回值）。
+		// 创建前有效，检查返回值。
 		ResourceScheduler::resetInstance(); // 回归用例已创建默认实例，重置后才可重新预配置
 		if (!ResourceScheduler::configureInstance(SchedulerConfig{1, 8, 8})) {
 			std::cerr << "FAIL: ResourceScheduler::configureInstance rejected (instance pre-created)" << std::endl;

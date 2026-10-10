@@ -1,7 +1,7 @@
 // ServerAdapter 端到端测试：真实 HTTP，本地监听端 + 本地出站。
 //
-// 覆盖：语义一致性对拍（远程驱动 == 本地执行）；错误归一化（401/415/404/429）；
-// schema 违例一致性（本地 / 远程两条路径均拒绝）。
+// 覆盖：语义一致性对拍，远程驱动等同本地执行；错误归一化 401/415/404/429；
+// schema 违例一致性，本地与远程两条路径均拒绝。
 
 #include "DCNet/DcNetHttp.h"
 #include "NodeExecutor.h"
@@ -107,7 +107,7 @@ static void ensureDoublerEngine() {
 	EngineDescriptor ed;
 	ed.engineType = kEngineType;
 	ed.loadModel = [](const EngineCore&, const std::string&) -> EngineInstance {
-		return EngineInstance(std::make_shared<int>(0)); // 占位运行时对象（无状态引擎）
+		return EngineInstance(std::make_shared<int>(0)); // 占位运行时对象，无状态引擎
 	};
 	ed.getInputPorts = [](const EngineInstance&) { return doublerSchema().inputs; };
 	ed.getOutputPorts = [](const EngineInstance&) { return doublerSchema().outputs; };
@@ -192,7 +192,7 @@ static ServerHandle startServer(std::string authToken = {}, int maxInFlight = 8,
 	return {svc, svc->port()};
 }
 
-/// 裸连接辅助：半行请求头后静默——worker 阻塞在 readRequest，不计入在途请求。
+/// 裸连接辅助：半行请求头后静默，worker 阻塞在 readRequest，不计入在途请求。
 static void openHalfOpenConnection(Poco::Net::StreamSocket& conn, int port) {
 	conn.connect(Poco::Net::SocketAddress("127.0.0.1", static_cast<Poco::UInt16>(port)));
 	const std::string partial = "POST /v1/infer HTTP/1.1\r\n";
@@ -242,7 +242,7 @@ TEST(paritySuccess) {
 	srv.svc->stop();
 }
 
-// 鉴权闸门：无 token → 401 → RemoteAuth → InternalError（无本地对应物，不参与对拍）。
+// 鉴权闸门：无 token 返回 401 归 RemoteAuth 再归 InternalError，无本地对应物不参与对拍。
 
 TEST(authGate) {
 	ensureDoublerEngine();
@@ -258,7 +258,7 @@ TEST(authGate) {
 	CHECK(res.status == Node::Status::InternalError, "401 → InternalError");
 	CHECK_MSG_PREFIX(res.message, "remote:auth");
 
-	// 携带 token（直连注入 Authorization 头）→ 成功
+	// 携带 token 直连注入 Authorization 头，成功
 	HttpTransport t;
 	NetEndpoint ep = epFor(srv.port);
 	ep.authToken = "Bearer s3cret";
@@ -292,13 +292,13 @@ TEST(malformedFrame) {
 }
 
 // schema 违例一致性：类型违例输入在两条路径均被拒绝。
-// 远程腿 → 400 → InvalidInput；本地腿 → ValidatorRegistry 拒绝（NodeException）。
+// 远程腿返回 400 归 InvalidInput；本地腿由 ValidatorRegistry 拒绝抛 NodeException。
 
 TEST(paritySchemaViolation) {
 	ensureDoublerEngine();
 	auto srv = startServer();
 
-	// ① 本地执行：Data 张量注入 Float 端口 → 管线校验拒绝
+	// 本地执行：Data 张量注入 Float 端口，管线校验拒绝
 	{
 		auto node = EngineRegistry::instance().createNode(std::string(kEngineType), "local-p5",
 															  std::string(kModelRef));
@@ -315,7 +315,7 @@ TEST(paritySchemaViolation) {
 		CHECK(rejected, "local: violating input is rejected");
 	}
 
-	// ② 远程驱动：同一违例输入 → 400 → InvalidInput
+	// 远程驱动：同一违例输入返回 400 映射 InvalidInput
 	HttpTransport t;
 	t.connect(epFor(srv.port));
 	auto remoteErr = t.send(textPayload("hi"));
@@ -338,7 +338,7 @@ TEST(rateLimited) {
 		HttpTransport a;
 		a.connect(epFor(srv.port));
 		a.send(floatPayload({1.0f}));
-		a.recv(respA); // 占满唯一在途名额（300ms）
+		a.recv(respA); // 占满唯一在途名额 300ms
 		a.close();
 	});
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -398,8 +398,8 @@ TEST(configErrorsThrow) {
 	CHECK(threw, "unknown engineType → NodeException at config period");
 }
 
-// 半开连接（请求未读完、不计在途）期间的 stop() 必须等 worker 退净：
-// 排水以线程存活计数为准，grace 到期强制关闭在册连接（否则分离 worker 醒来即 UAF）。
+// 半开连接期间请求未读完、不计在途，其 stop() 必须等 worker 退净：
+// 排水以线程存活计数为准，grace 到期强制关闭在册连接，否则分离 worker 醒来即 UAF。
 
 TEST(stopDrainsHalfOpenConnection) {
 	ensureDoublerEngine();
@@ -441,13 +441,13 @@ TEST(stopDrainsHalfOpenConnection) {
 	// 进程存活至此 → 无 use-after-free
 }
 
-// 连接级闸门：超出 maxConnections 的连接在 accept 期即被拒（不起线程）。
+// 连接级闸门：超出 maxConnections 的连接在 accept 期即被拒，不起线程。
 
 TEST(connectionCapRejectsExcess) {
 	ensureDoublerEngine();
 	auto srv = startServer({}, 8, /*maxConnections*/ 1, std::chrono::milliseconds(2000));
 
-	Poco::Net::StreamSocket hog; // 占满唯一连接名额（半开，不产生请求）
+	Poco::Net::StreamSocket hog; // 占满唯一连接名额，半开不产生请求
 	openHalfOpenConnection(hog, srv.port);
 	std::this_thread::sleep_for(std::chrono::milliseconds(80));
 
@@ -472,8 +472,8 @@ TEST(connectionCapRejectsExcess) {
 	srv.svc->stop();
 }
 
-// 两节点共享同一 transport（同端点）时交换串行且不串号：引擎实例按
-// engineType:modelPath 缓存复用，执行闸在节点级——两线程并发进入同一 HttpTransport。
+// 两节点共享同一 transport 同端点时交换串行且不串号：引擎实例按
+// engineType:modelPath 缓存复用，执行闸在节点级，两线程并发进入同一 HttpTransport。
 
 TEST(transportSerializesSharedEndpointExchanges) {
 	ensureDoublerEngine();
@@ -524,7 +524,7 @@ static bool bindRejected(const NetServerEndpoint& ep) {
 }
 
 TEST(bindConfigValidation) {
-	// 默认形态（回环 + 无认证）保持可用
+	// 默认形态即回环加无认证保持可用
 	{
 		auto l = makeHttpListener();
 		NetServerEndpoint ok;
@@ -571,7 +571,7 @@ TEST(bindConfigValidation) {
 		ep.authToken = "   ";
 		CHECK(bindRejected(ep), "all-whitespace authToken must be rejected");
 	}
-	// 对外监听：0.0.0.0 无 token / 带 token 均拒绝（明文仅限回环）
+	// 对外监听：0.0.0.0 无 token 或带 token 均拒绝，明文仅限回环
 	{
 		NetServerEndpoint ep;
 		ep.listenHost = "0.0.0.0";
@@ -625,9 +625,9 @@ TEST(malformedContentLengthRejected) {
 	});
 	const int port = l->port();
 
-	// 负数 → 400（不再回绕为巨大值）
+	// 负数返回 400，不再回绕为巨大值
 	postRawExpectStatus(port, "POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: -5\r\n\r\n", 400);
-	// 部分数字（"100abc"）→ 400
+	// 部分数字如 "100abc" 返回 400
 	postRawExpectStatus(port, "POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: 100abc\r\n\r\n", 400);
 	// 重复 header：走私向量 → 400
 	postRawExpectStatus(port,

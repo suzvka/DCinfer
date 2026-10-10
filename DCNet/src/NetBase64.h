@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-// DCNet 内部工具：极简 base64（RFC 4648），仅用于 v1 张量 JSON 线上格式与测试。
+// DCNet 内部工具：极简 base64，遵循 RFC 4648，仅用于 v1 张量 JSON 线上格式与测试。
 
 namespace DC::Net::detail {
 
@@ -55,7 +55,7 @@ inline std::string base64Decode(const std::string& in) {
 			break;
 		const int v = val(c);
 		if (v < 0)
-			continue; // 容忍空白/换行
+			continue; // 容忍空白与换行
 		acc = (acc << 6) | uint32_t(v);
 		bits += 6;
 		if (bits >= 8) {

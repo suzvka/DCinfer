@@ -1,5 +1,5 @@
-// 01_hello_graph - 最简推理图示例：注册算子 → 构建图（Add → Identity）→ 取公开接口 →
-// 按别名注入数据、提交并取结果。预期输出：3 + 4 = 7
+// 01_hello_graph：最简推理图示例，注册算子、构建图 Add 到 Identity、取公开接口，
+// 再按别名注入数据、提交并取结果。预期输出：3 + 4 = 7
 
 #include "InferGraph.h"
 #include "Tensor.hpp"
@@ -21,12 +21,12 @@ int main() {
 	// connect 自动插入广播连接器
 	graph.connect("adder", "sum", "pass", "x");
 
-	// 声明图公开接口：别名 → 内部端口（构成图级签名）
+	// 声明图公开接口：别名映射到内部端口，构成图级签名
 	graph.bindInput("a", "adder", "a");
 	graph.bindInput("b", "adder", "b");
 	graph.bindOutput("result", "pass", "y");
 
-	// 取公开接口：冻结图并一次性解析别名 → 坐标
+	// 取公开接口：冻结图并一次性解析别名到坐标
 	auto api = graph.interface();
 	auto task = api.createTask(); // 任务句柄：析构自动释放已终止任务
 
@@ -37,7 +37,7 @@ int main() {
 
 	task.feed("a", std::move(tensorA)).feed("b", std::move(tensorB));
 
-	// 同步运行（内部 submitBound + 等待终止）
+	// 同步运行：内部 submitBound 加等待终止
 	auto result = task.run();
 	if (result.status != DC::TaskStatus::Succeeded) {
 		std::cerr << "Error: task ended with status " << static_cast<int>(result.status)

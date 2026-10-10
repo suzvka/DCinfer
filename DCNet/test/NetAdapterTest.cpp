@@ -89,7 +89,7 @@ struct EchoCodec : DcNetCodec {
 // FakeTransport：行为可配置；按 endpoint 登记，测试可取回。
 struct FakeTransport : DcNetTransport, std::enable_shared_from_this<FakeTransport> {
 	static inline int instances = 0;
-	/// endpoint → 实例（connect 时登记；同一端点复用同一 transport）
+	/// endpoint 到实例的映射，connect 时登记；同一端点复用同一 transport
 	static inline std::unordered_map<std::string, std::shared_ptr<FakeTransport>> byEndpoint;
 
 	NetError connectResult;
@@ -251,7 +251,7 @@ TEST(recvFailureNormalized) {
 	auto node = makeNetNode("Test.Net", "n4", "http://127.0.0.1:8080/v1");
 	CHECK(node != nullptr, "node should be created");
 	auto t = FakeTransport::byEndpoint["http://127.0.0.1:8080/v1"];
-	t->sendResult = {};  // 重置（共享实例可能被前一测试污染）
+	t->sendResult = {};  // 重置，共享实例可能被前一测试污染
 	t->recvResult = normalizeHttpResponse(503, R"({"error":{"code":"server_error","message":"down"}})");
 
 	NodeExecutor exec(*node);
@@ -266,7 +266,7 @@ TEST(remoteRejectedMapsToInvalidInput) {
 	auto node = makeNetNode("Test.Net", "n5", "http://127.0.0.1:8080/v1");
 	CHECK(node != nullptr, "node should be created");
 	auto t = FakeTransport::byEndpoint["http://127.0.0.1:8080/v1"];
-	t->sendResult = {};  // 重置（共享实例可能被前一测试污染）
+	t->sendResult = {};  // 重置，共享实例可能被前一测试污染
 	t->recvResult = normalizeHttpStatus(400, R"({"error":"bad request"})");
 
 	NodeExecutor exec(*node);
@@ -277,8 +277,8 @@ TEST(remoteRejectedMapsToInvalidInput) {
 	CHECK_MSG_PREFIX(result.message, "remote:invalid_request");
 }
 
-// codec 契约回归：远端响应结构异常必须升为 DcCodecRemoteError（不得漏入通用
-// std::exception 分支而丢诊断码）。
+// codec 契约回归：远端响应结构异常必须升为 DcCodecRemoteError，不得漏入通用
+// std::exception 分支而丢诊断码。
 
 TEST(malformedRemoteResponseMapsToRemoteMalformed) {
 	auto fake = std::make_shared<FakeTransport>();

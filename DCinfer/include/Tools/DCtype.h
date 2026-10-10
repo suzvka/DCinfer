@@ -20,14 +20,14 @@
 namespace DC::Type {
 
 #if DC_RTTI_ENABLED
-/// @brief RTTI 启用：以 std::type_index 作类型标识符；多模块（DLL/SO）环境下识别稳定。
+/// @brief RTTI 启用：以 std::type_index 作类型标识符；多模块 DLL/SO 环境下识别稳定。
 using TypeId = std::type_index;
 #else
 /// @brief RTTI 禁用：以静态对象地址作类型标识符；同一类型跨模块可能得到不同 ID，可为相关类型特化 CustomTypeKey。
 using TypeId = const void*;
 #endif
 
-/// @brief 特化此结构体可为类型提供自定义 TypeId 生成策略（用于禁用 RTTI 的跨模块场景）。
+/// @brief 特化此结构体可为类型提供自定义 TypeId 生成策略，用于禁用 RTTI 的跨模块场景。
 /// 约束：CustomTypeKey<T>::get() 必须返回跨模块稳定的 DC::TypeId。
 template <typename T>
 struct CustomTypeKey {};

@@ -1,8 +1,8 @@
-// install_smoke - 安装版 DCinfer 的 find_package 冒烟验证。
-// 验证：安装树头文件解析（裸文件名 include）+ 静态库链接 + 基础运行时行为。
-// 开关（经 CMake 变量注入，见 CMakeLists.txt）：
+// install_smoke：安装版 DCinfer 的 find_package 冒烟验证。
+// 验证：安装树头文件解析用裸文件名 include、静态库链接与基础运行时行为。
+// 开关经 CMake 变量注入，见 CMakeLists.txt：
 //   SMOKE_WITH_IR / SMOKE_WITH_BUILTIN / SMOKE_WITH_NET
-//   （分别验证 DCIr 安装链 / Builtin 算子图 / DCNet 回环监听）
+//   分别验证 DCIr 安装链、Builtin 算子图与 DCNet 回环监听
 // 预期输出：install smoke OK
 
 #include "InferGraph.h"
@@ -26,7 +26,7 @@
 #endif
 
 int main() {
-	// 链接验证：核心类型可构造/析构
+	// 链接验证：核心类型可构造与析构
 	DC::InferGraph graph;
 	static_cast<void>(graph);
 
@@ -37,7 +37,7 @@ int main() {
 #endif
 
 #ifdef SMOKE_WITH_BUILTIN
-	// Builtin 安装链：注册 → createOperator → 真实执行 2+3
+	// Builtin 安装链：注册、createOperator 到真实执行 2+3
 	DC::Builtin::registerBuiltinOperators();
 	auto node = DC::EngineRegistry::instance().createOperator("Add", "smoke_add");
 	if (!node) {
@@ -65,7 +65,7 @@ int main() {
 #endif
 
 #ifdef SMOKE_WITH_NET
-	// DCNet 安装链：创建监听器并 bind 回环随机端口（socket 生命周期；完整往返回归见 ServerAdapterTest）
+	// DCNet 安装链：创建监听器并 bind 回环随机端口，验证 socket 生命周期；完整往返回归见 ServerAdapterTest
 	try {
 		auto listener = DC::Net::makeHttpListener();
 		DC::Net::NetServerEndpoint ep;

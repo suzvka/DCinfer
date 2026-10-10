@@ -1,7 +1,7 @@
 #pragma once
 
-// 极简 HTTP/1.1 Mock 远端（POCO）：DCNet 传输测试与 DCEngines 适配器测试共用。
-// 单线程顺序处理；POST 请求体 → handler(path, body) → 响应体。
+// 极简 HTTP/1.1 Mock 远端，基于 POCO：DCNet 传输测试与 DCEngines 适配器测试共用。
+// 单线程顺序处理；POST 请求体经 handler(path, body) 得到响应体。
 
 #include <Poco/Net/ServerSocket.h>
 #include <Poco/Net/SocketAddress.h>
@@ -50,7 +50,7 @@ public:
 
 	int port() const { return _port; }
 
-	/// 最近一次请求的原始头部（\r\n 分隔）；响应返回后读取。
+	/// 最近一次请求的原始头部，以 \r\n 分隔；响应返回后读取。
 	std::string lastRequestHeaders() const {
 		std::lock_guard lk(_hdrMutex);
 		return _lastHeaders;
@@ -124,7 +124,7 @@ private:
 		try {
 			respBody = handler(path, body, status);
 		} catch (const std::exception& e) {
-			// handler 异常不得逃逸出服务线程（否则进程终止）
+			// handler 异常不得逃逸出服务线程，否则进程终止
 			status = 500;
 			respBody = std::string(R"({"error":{"code":"server_error","message":")") + e.what() + "\"}";
 		}

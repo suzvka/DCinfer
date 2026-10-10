@@ -40,7 +40,7 @@ static int failures = 0;
 	();                                                   \
 	std::cout << "PASSED" << std::endl
 
-/// @brief stderr 捕获器（RAII）
+/// @brief stderr 捕获器，RAII
 struct CerrCapture {
 	std::ostringstream oss;
 	std::streambuf* old;
@@ -49,8 +49,8 @@ struct CerrCapture {
 	std::string str() const { return oss.str(); }
 };
 
-/// @brief 构造 Void 端口（FP16 等无 C++ 类型载体，NodePort 工厂不适用；
-///        MSVC 对嵌套 braced-init-list 解析不稳，保留显式构造）
+/// @brief 构造 Void 端口：FP16 等无 C++ 类型载体，NodePort 工厂不适用；
+///        MSVC 对嵌套 braced-init-list 解析不稳，保留显式构造
 static Node::Port voidPort(std::string name, size_t typeSize, Tensor::Shape shape = {}) {
 	Node::Port p;
 	p.name = std::move(name);
@@ -60,13 +60,13 @@ static Node::Port voidPort(std::string name, size_t typeSize, Tensor::Shape shap
 	return p;
 }
 
-/// @brief 测试引擎调用计数（验证“编译期零引擎调用”）
+/// @brief 测试引擎调用计数，验证“编译期零引擎调用”
 static std::atomic<int> g_coreInitCalls{0};
 static std::atomic<int> g_modelLoadCalls{0};
 
-/// @brief 注册可配置测试引擎（EngineRegistry 全局单例，类型名必须唯一）
-/// @param withPortHooks     注册实例端口推导钩子（验证延迟物化不触发推导）
-/// @param throwOnCreate     loadModel 抛异常（模拟 ORT 加载失败行为）
+/// @brief 注册可配置测试引擎；EngineRegistry 全局单例，类型名必须唯一
+/// @param withPortHooks     注册实例端口推导钩子，验证延迟物化不触发推导
+/// @param throwOnCreate     loadModel 抛异常，模拟 ORT 加载失败行为
 static void registerTestEngine(const std::string& type, bool createSuccess,
 							   bool withPortHooks, bool checkFileExists,
 							   bool throwOnCreate = false) {
@@ -74,7 +74,7 @@ static void registerTestEngine(const std::string& type, bool createSuccess,
 	EngineDescriptor desc;
 	desc.engineType = type;
 	desc.factory = [type](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
-		// factory 提供真 RunFn：物化节点应可执行（未绑定实例时由引擎 RunFn 自行判错）
+		// factory 提供真 RunFn：物化节点应可执行，未绑定实例时由引擎 RunFn 自行判错
 		auto node = std::make_unique<Node>(type, p.nodeName, p.schema,
 										   [](Node::RunContext& ctx) { return ctx.success(); },
 										   ResourceClass::Compute);
@@ -240,7 +240,7 @@ void testCompileStringBroadcast() {
 })";
 		InferGraph graph; GraphCompiler::compileString(graph, json);
 
-		// 3 业务 + 1 broadcast + 3 包裹导线（connect 自动插入，序列化折叠、lowering 擦除）
+		// 3 业务 + 1 broadcast + 3 包裹导线，connect 自动插入、序列化折叠、lowering 擦除
 		CHECK(graph.nodeCount() == 7, "should have 7 nodes (3 biz + 1 bc + 3 wrapping wires)");
 		CHECK(graph.edgeCount() == 6, "should have 6 edges (3 connects × 2 edges each)");
 		CHECK(graph.outputBindings().size() == 2, "should have 2 output bindings");
@@ -352,7 +352,7 @@ void testExpandedFanOutRoundTrip() {
 		const std::string f1 = "test_expanded_fanout_1.json";
 		GraphCompiler::serialize(harness.graph(), f1);
 
-		// 两条同源 mode=broadcast 逻辑边（连接器折叠）
+		// 两条同源 mode=broadcast 逻辑边，连接器折叠
 		{
 			std::ifstream ifs(f1, std::ios::binary);
 			std::ostringstream oss;
@@ -591,7 +591,7 @@ void testDcgSerializeNoModels() {
 
 void testDynamicShapeRoundTrip() {
 	TEST("round-trip - dynamic dim (-1) stable in JSON and back") {
-		// 动态维度以 -1 表示（ONNX 语义）：序列化/反序列化应 int64_t 直通
+		// 动态维度以 -1 表示，即 ONNX 语义：序列化与反序列化应 int64_t 直通
 		constexpr int64_t kDyn = -1;
 
 		TestHarness harness;
@@ -617,7 +617,7 @@ void testDynamicShapeRoundTrip() {
 			CHECK(outShape[1].get<int64_t>() == -1, "output dynamic dim should be -1 in JSON");
 		}
 
-		// 编译回来：-1 经 int64_t 直通解码（不经过 size_t）
+		// 编译回来：-1 经 int64_t 直通解码，不经过 size_t
 		InferGraph graph2; GraphCompiler::compileFile(graph2, tmpFile);
 		auto* n = graph2.node("dyn1");
 		CHECK(n != nullptr, "dyn1 should exist");
@@ -690,7 +690,7 @@ void testEngineNodeMaterialization() {
 		InferGraph graph; GraphCompiler::compileString(graph, json);
 		auto* n = graph.node("eng1");
 		CHECK(n != nullptr, "engine node should be materialized");
-		// 声明 schema 保留：不触发实例推导（钩子产出 in/out，声明为 declaredIn/Out）
+		// 声明 schema 保留：不触发实例推导，钩子产出 in/out，声明为 declaredIn/Out
 		CHECK(n->schema().inputs.size() == 1 && n->schema().inputs[0].name == "declaredIn",
 			"JSON declared schema must be preserved (no instance derivation)");
 		CHECK(n->schema().outputs.size() == 1 && n->schema().outputs[0].name == "declaredOut",
@@ -885,7 +885,7 @@ void testDcgObjectShapedNodesRejected() {
 		std::string dcgFile = "test_object_nodes.dcg";
 		{
 			auto w = DC::Ir::DcgArchive::openWrite(dcgFile);
-			// 对象形状 nodes 必须被拒绝（buildGraph 对其静默迭代）
+			// 对象形状 nodes 必须被拒绝，否则 buildGraph 对其静默迭代
 			w->writeGraphJson(R"({"version":"1.0","nodes":{"a":{"name":"a","type":"Builtin","affinity":"Compute","inputs":[],"outputs":[]}},"edges":[],"outputBindings":[]})");
 			w->finalize();
 		}
@@ -906,8 +906,8 @@ void testDcgObjectShapedNodesRejected() {
 
 void testDcgModelPathPassThrough() {
 	TEST(".dcg modelPath passed through verbatim at compile") {
-		// 编译期不落盘、不做路径校验（modelPath 为不透明字符串）；落盘防御由
-		// DcgArchive::extractOne 承担（DcgArchiveSecurityTest 覆盖）。
+		// 编译期不落盘、不做路径校验，modelPath 为不透明字符串；落盘防御由
+		// DcgArchive::extractOne 承担，DcgArchiveSecurityTest 覆盖。
 		auto makeDcg = [](const std::string& dcgFile, const std::string& mp) {
 			auto w = DC::Ir::DcgArchive::openWrite(dcgFile);
 			std::string json = R"({"version":"1.0","nodes":[{"name":"n1","type":"Builtin","affinity":"Compute","modelPath":")"
@@ -916,7 +916,7 @@ void testDcgModelPathPassThrough() {
 			w->finalize();
 		};
 
-		// 用正斜杠形式覆盖（引号/反斜杠不落入 JSON 语法）
+		// 用正斜杠形式覆盖，引号与反斜杠不落入 JSON 语法
 		const std::string cases[] = {"../evil.onnx", "/tmp/evil.onnx", "C:/tmp/evil.onnx"};
 		constexpr size_t kCaseCount = 3;
 		for (size_t i = 0; i < kCaseCount; ++i) {

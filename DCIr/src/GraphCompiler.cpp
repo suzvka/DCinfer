@@ -16,17 +16,17 @@ namespace DC::Ir {
 
 namespace {
 
-/// JSON 输入总字节上限：入口拒绝异常图定义，防 nlohmann 解析内存放大
-/// （.dcg 路径解压侧已有预算，此处补齐 graph.json 字符串层防线）。
+/// JSON 输入总字节上限：入口拒绝异常图定义，防 nlohmann 解析内存放大；
+/// .dcg 路径解压侧已有预算，此处补齐 graph.json 字符串层防线。
 constexpr std::size_t kMaxGraphJsonBytes = 32ull * 1024 * 1024;
-/// 节点数上限（buildGraph 为全部编译路径的必经点）。
+/// 节点数上限；buildGraph 为全部编译路径的必经点。
 constexpr std::size_t kMaxGraphNodes = 4096;
 
 } // namespace
 
-// Node::Port::shape = vector<int64_t>：-1 动态维直通即可保证 roundtrip 稳定。
-// TensorData::Shape = vector<size_t> 不能表达 -1：隐式转换翻成 size_t::max
-// 且形状乘积溢出。属核心库数据路径的已知限制（见 GraphCompiler.h），不在 DCIr 侧解决。
+// Node::Port::shape 为 vector<int64_t>：-1 动态维直通即可保证 roundtrip 稳定。
+// TensorData::Shape 为 vector<size_t>，不能表达 -1：隐式转换翻成 size_t::max
+// 且形状乘积溢出。属核心库数据路径的已知限制，见 GraphCompiler.h，不在 DCIr 侧解决。
 
 static std::string affinityToString(ResourceClass a) {
 	switch (a) {
@@ -62,7 +62,7 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	Node::Port p;
 	p.name = j.at("name").get<std::string>();
 	p.type = TensorMeta::stringToType(j.at("tensorType").get<std::string>());
-	// 负值经 static_cast<size_t> 会穿透为 SIZE_MAX：显式拒绝；0 合法（Void + 0）。
+	// 负值经 static_cast<size_t> 会穿透为 SIZE_MAX，显式拒绝；0 合法，即 Void 加 0。
 	const int64_t typeSize = j.at("typeSize").get<int64_t>();
 	if (typeSize < 0 || typeSize > (1ll << 20)) {
 		throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::jsonToPort",
@@ -70,15 +70,15 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	}
 	p.typeSize = static_cast<size_t>(typeSize);
 	for (auto& dim : j.at("shape")) {
-		// 禁止有符号/无符号转换：-1 会被转为巨大值，破坏 roundtrip 对称性。
+		// 禁止有符号与无符号转换：-1 会被转为巨大值，破坏 roundtrip 对称性。
 		p.shape.push_back(dim.get<int64_t>());
 	}
 	p.required = j.value("required", true);
 	return p;
 }
 
-/// @brief 将 JSON 中的 tag / modelPath 应用到已创建节点（三分支共用）
-///        modelPath 为引擎自定义不透明信息，原样透传（不拼接/不校验/不做文件系统解释）。
+/// @brief 将 JSON 中的 tag 与 modelPath 应用到已创建节点，三分支共用。
+///        modelPath 为引擎自定义不透明信息，原样透传，不拼接、不校验、不做文件系统解释。
 static void applyNodeMeta(DC::Node& node, const nlohmann::json& j) {
 	if (j.contains("modelPath")) {
 		node.setModelPath(j["modelPath"].get<std::string>());
@@ -91,7 +91,7 @@ static void applyNodeMeta(DC::Node& node, const nlohmann::json& j) {
 nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 	nlohmann::json edgesArr = nlohmann::json::array();
 
-	// 索引：connector 名 → 其所有输出边。edges() 返回值为副本，快照必须
+	// 索引：connector 名映射到其所有输出边。edges 返回值为副本，快照必须
 	// 钉在局部变量上延长生命周期，否则 range-for 后元素指针悬垂。
 	const auto edgesSnapshot = graph.edges();
 	std::map<std::string, std::vector<const InferGraph::Edge*>, std::less<>> connectorOut;
@@ -109,8 +109,8 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 		return it != connectorOut.end() && it->second.size() > 1;
 	};
 
-	// 遍历 processor 源边：指向连接器时穿透链，展开为 processor → processor 逻辑边；
-	// 链上有分发 Broadcast 则标 mode=broadcast（重建时还原分发组），1:1 链折叠为直连边。
+	// 遍历 processor 源边：指向连接器时穿透链，展开为 processor 到 processor 逻辑边；
+	// 链上有分发 Broadcast 则标 mode=broadcast 以重建时还原分发组，1:1 链折叠为直连边。
 	for (auto& e : graph.edges()) {
 		auto* srcNode = graph.node(e.srcNode);
 		if (!srcNode || srcNode->isConnector()) continue;
@@ -127,7 +127,7 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 			continue;
 		}
 
-		// 连接器链穿透：迭代收集所有逻辑终点（非连接器节点）
+		// 连接器链穿透：迭代收集所有逻辑终点，即非连接器节点
 		struct WalkItem {
 			std::string nodeName;
 			std::string portName;
@@ -173,7 +173,7 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	nlohmann::json root;
 	root["version"] = "1.0";
 
-	// 节点：只序列化非连接器节点（处理器）
+	// 节点：只序列化非连接器节点，即处理器
 	nlohmann::json nodesArr = nlohmann::json::array();
 	for (auto& name : graph.nodeNames()) {
 		auto* node = graph.node(name);
@@ -275,7 +275,7 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 		if (targets.empty()) continue;
 
 		if (key.mode == "routing") {
-			// Routing 已移除（轮询属业务语义）：旧图显式报错而非静默降级。
+			// Routing 已移除，轮询属业务语义：旧图显式报错而非静默降级。
 			throw DC::GraphException(DC::GraphException::ErrorType::Other,
 									 "GraphCompiler::rebuildEdges",
 									 "edge mode \"routing\" is no longer supported; express "
@@ -298,14 +298,14 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 			connNode->setConnector(true);
 			graph.addNode(std::move(connNode));
 
-			// connect 自动包裹直通导线（序列化折叠后不可见，round-trip 幂等）；
+			// connect 自动包裹直通导线，序列化折叠后不可见且 round-trip 幂等；
 			// 连接失败直接透传 GraphException，反序列化 fail-fast。
 			graph.connect(key.srcNode, key.srcPort, connName, "in");
 			for (size_t i = 0; i < targets.size(); ++i) {
 				graph.connect(connName, "out_" + std::to_string(i), targets[i].dstNode, targets[i].dstPort);
 			}
 		} else {
-			// 默认 1→1：connect() 自动插入导线连接器；失败 fail-fast（同上）。
+			// 默认 1 对 1：connect 自动插入导线连接器；失败 fail-fast，同上。
 			for (auto& tgt : targets) {
 				graph.connect(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
 			}
@@ -345,11 +345,11 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 			applyNodeMeta(*node, j);
 			graph.addNode(std::move(node));
 		} else if (reg.hasEngine(type)) {
-			// 引擎节点：编译期只物化不加载（见头注释）；createLazyNode 以 JSON
+			// 引擎节点：编译期只物化不加载，见头注释；createLazyNode 以 JSON
 			// 声明 schema 调工厂构造；模型加载在宿主绑定期经 loadModel 钩子完成。
 			auto node = reg.createLazyNode(type, name, schema);
 			if (!node) {
-				// 已注册但无工厂：回退骨架（同未注册类型），保留 JSON schema 保证可序列化。
+				// 已注册但无工厂：回退骨架，同未注册类型，保留 JSON schema 保证可序列化。
 				std::cerr << "GraphCompiler: warning — engine node '" << name
 					<< "' (type '" << type << "') has no node factory, "
 					<< "creating skeleton (RunFn=nullptr); JSON schema preserved" << std::endl;
@@ -383,7 +383,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 		rebuildEdges(graph, root["edges"]);
 	}
 
-	// 输出绑定：alias 缺省回退 nodeName.portName（唯一且兼容旧版本文件）
+	// 输出绑定：alias 缺省回退 nodeName.portName，唯一且兼容旧版本文件
 	if (root.contains("outputBindings")) {
 		for (auto& b : root["outputBindings"]) {
 			graph.bindOutput(
@@ -393,7 +393,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 		}
 	}
 
-	// 输入绑定：alias 缺省回退 nodeName.portName（唯一且兼容旧版本文件）
+	// 输入绑定：alias 缺省回退 nodeName.portName，唯一且兼容旧版本文件
 	if (root.contains("inputBindings")) {
 		for (auto& b : root["inputBindings"]) {
 			graph.bindInput(
@@ -410,11 +410,11 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 	std::string ext = p.extension().string();
 
 	if (ext == ".dcg") {
-		// .dcg：只读取 graph.json；模型解压/加载由宿主处理（DcgArchive::extractOne，
-		// 含路径越界/符号链接/预算防御）。
+		// .dcg：只读取 graph.json；模型解压与加载由宿主处理，经 DcgArchive::extractOne，
+		// 含路径越界、符号链接与预算防御。
 		auto archive = DcgArchive::openRead(p);
 
-		// 读取 graph.json（解析前拒绝超限输入）
+		// 读取 graph.json，解析前拒绝超限输入
 		std::string json = archive->readGraphJson();
 		if (json.size() > kMaxGraphJsonBytes) {
 			throw GraphException(GraphException::ErrorType::Other,
@@ -439,7 +439,7 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 				"invalid .dcg graph.json: 'nodes' must be an array");
 		}
 
-		// 构建图（archive 析构自动清理空临时目录）
+		// 构建图；archive 析构自动清理空临时目录
 		compileInternal(graph, root);
 		return;
 	}
@@ -507,7 +507,7 @@ void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
 	if (ext == ".dcg") {
 		auto json = graphToJson(graph);
 
-		// 模型文件：原 modelPath → archive 内路径
+		// 模型文件：原 modelPath 映射到 archive 内路径
 		std::map<std::string, std::string> modelFiles;
 		std::set<std::string> usedNames;
 

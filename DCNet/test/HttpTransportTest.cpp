@@ -1,6 +1,6 @@
-// HttpTransport + DCNet.Tensor 集成测试（MockHttpServer 假远端，真实 HTTP 传输）。
-// 覆盖：传输层归一化（2xx / 404 / 500 / 连接拒绝）；张量 codec 端到端往返（数值 / 文本）。
-// OpenAI chat 端到端见 DCEngines/OpenAI（OpenAiEngineTest）。
+// HttpTransport + DCNet.Tensor 集成测试：MockHttpServer 假远端，真实 HTTP 传输。
+// 覆盖：传输层归一化 2xx、404、500 与连接拒绝；张量 codec 端到端往返，数值与文本。
+// OpenAI chat 端到端见 DCEngines/OpenAI 的 OpenAiEngineTest。
 
 #include "DCNet/DcNetHttp.h"
 #include "NodeExecutor.h"
@@ -158,7 +158,7 @@ TEST(connectionRefusedNormalized) {
 	CHECK(err.retryable, "unreachable retryable");
 	CHECK(err.localStatus == Node::Status::ExecutionFailed, "refused → ExecutionFailed");
 #ifdef _WIN32
-	// POCO/Windows：WSAPoll 不上报 connect 失败，拒绝连接表现为 Timeout（POSIX 报 unreachable）。
+	// POCO/Windows：WSAPoll 不上报 connect 失败，拒绝连接表现为 Timeout，POSIX 报 unreachable。
 	const bool unreachableOrTimeout = err.localMessage.rfind("net:unreachable", 0) == 0 ||
 									 err.localMessage.rfind("net:timeout", 0) == 0;
 	CHECK(unreachableOrTimeout, "refused → unreachable|timeout");
@@ -223,7 +223,7 @@ TEST(errorBodyTruncated) {
 	t.close();
 }
 
-// close 与慢 recv 竞速：强收中断读而非悬垂/挂死（副本保活 + abort）。
+// close 与慢 recv 竞速：强收中断读而非悬垂或挂死，靠副本保活加 abort。
 
 // 慢 body 服务器：先发响应头，剩余 body 延迟发送，使读跨越 close 的 5s 强收窗口。
 namespace {
@@ -239,7 +239,7 @@ public:
 		}
 		_thread = std::thread([this] {
 			try {
-				// 连接 1 是 connect() 的就绪探测（读到 EOF 即跳过），连接 2 才是真实交换。
+				// 连接 1 是 connect 的就绪探测，读到 EOF 即跳过，连接 2 才是真实交换。
 				Poco::Net::StreamSocket c;
 				for (int i = 0; i < 2; ++i) {
 					try {
@@ -297,7 +297,7 @@ TEST(closeRacingSlowRecv) {
 	CHECK(t.connect(ep).ok(), "connect");
 	CHECK(t.send("x").ok(), "send ok; response header received, body pending");
 
-	// 另一线程 close：等交换收尾 5s 超时后强收 abort（读方副本保活 session）。
+	// 另一线程 close：等交换收尾 5s 超时后强收 abort，读方副本保活 session。
 	std::thread closer([&] { t.close(); });
 	Payload resp;
 	const auto t0 = std::chrono::steady_clock::now();
@@ -312,7 +312,7 @@ TEST(closeRacingSlowRecv) {
 	t.close(); // 幂等收尾
 }
 
-// 端到端：DCNet.Tensor 节点 + 张量 JSON codec（真实 HTTP 往返）。
+// 端到端：DCNet.Tensor 节点 + 张量 JSON codec，真实 HTTP 往返。
 
 TEST(endToEndTensorOverHttp) {
 	MockHttpServer server;
@@ -360,7 +360,7 @@ TEST(endToEndTensorOverHttp) {
 	CHECK(vals.size() == 2 && vals[0] == 1.0f && vals[1] == 2.0f, "decoded tensor values");
 }
 
-// 端到端：DCNet.Tensor 节点 + Data 文本 codec（真实 HTTP 往返）。
+// 端到端：DCNet.Tensor 节点 + Data 文本 codec，真实 HTTP 往返。
 
 TEST(endToEndTextOverHttp) {
 	MockHttpServer server;
@@ -403,7 +403,7 @@ TEST(endToEndTextOverHttp) {
 }
 
 // 空文本响应端到端：服务器返回 shape=[0] 空载荷帧，解码侧与 TensorData
-// metadata-only 构造都必须接受；输入端仍用非空文本（输入端口要求稠密缓存，空载荷仅输出端合法）。
+// metadata-only 构造都必须接受；输入端仍用非空文本，因输入端口要求稠密缓存，空载荷仅输出端合法。
 TEST(emptyTextOverHttp) {
 	MockHttpServer server;
 	server.start([&](const std::string& path, const std::string& body, int& status) {
@@ -457,7 +457,7 @@ TEST(headerInjectionRejectedAtConnect) {
 	ep3.contentType = "application/json\n";
 	CHECK(!t.connect(ep3).ok(), "contentType containing LF must be rejected at connect");
 
-	// 合法 header 照常接受（含值内 tab）
+	// 合法 header 照常接受，含值内 tab
 	auto ep4 = epFor(1, "/");
 	ep4.headers = {"X-Trace: abc\t123"};
 	CHECK(t.connect(ep4).ok() || !t.alive(), "tab is allowed in header values");

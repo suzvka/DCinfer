@@ -1,4 +1,4 @@
-// OpenAI 兼容远端引擎适配器：POST {basePath}/chat/completions（DCNet HttpTransport + NetCodec）。
+// OpenAI 兼容远端引擎适配器：POST {basePath}/chat/completions，用 DCNet HttpTransport 与 NetCodec。
 
 #include "DCEngine/OpenAiEngine.h"
 
@@ -32,8 +32,8 @@ Tensor makeText(const std::string& s) {
 	return Tensor(Tensor::TensorType::Data, 1, {static_cast<int64_t>(s.size())}, std::move(block));
 }
 
-/// 可选 Data 端口（手工构造：NodePort::optional<T> 的默认值要求 T 平凡可拷贝，
-/// vector<char> 不满足；改用空 Tensor）。
+/// 可选 Data 端口，手工构造：NodePort::optional<T> 的默认值要求 T 平凡可拷贝，
+/// vector<char> 不满足，故改用空 Tensor。
 NodePort optionalDataPort(const std::string& name) {
 	NodePort p;
 	p.name = name;
@@ -44,7 +44,7 @@ NodePort optionalDataPort(const std::string& name) {
 	return p;
 }
 
-/// OpenAI 兼容 chat codec（NetCodec 契约实现）。
+/// OpenAI 兼容 chat codec，NetCodec 契约实现。
 class ChatCodec : public DC::Net::DcNetCodec {
 public:
 	explicit ChatCodec(std::string model) : _model(std::move(model)) {}
@@ -79,8 +79,8 @@ public:
 		j["messages"] = messages;
 		j["stream"] = false;
 
-		// params：请求级采样参数，逐请求覆盖；非法 JSON/非对象 → DcCodecInputError
-		//（映射 InvalidInput），与未提供 params（空 Tensor 静默跳过）严格区分。
+		// params：请求级采样参数，逐请求覆盖；非法 JSON 或非对象抛 DcCodecInputError
+		// 映射 InvalidInput，与未提供 params 空 Tensor 静默跳过严格区分。
 		if (const auto* t = ctx.input<Tensor>("params"); t) {
 			const std::string text = textOf(*t);
 			if (!text.empty()) {
@@ -118,7 +118,7 @@ public:
 	}
 
 	void decodeResponse(DC::Net::Payload& payload, Node::RunContext& ctx) override {
-		// 结构异常 → DcCodecRemoteError（映射 ExecutionFailed）；content 为空字符串
+		// 结构异常抛 DcCodecRemoteError 映射 ExecutionFailed；content 为空字符串
 		// 是合法成功，与字段缺失严格区分。
 		nlohmann::json j;
 		try {
@@ -149,7 +149,7 @@ void registerOpenAiEngine(EngineRegistry& reg, const OpenAiOptions& opts) {
 	desc.codec = std::move(codec);
 	desc.transportFactory = [] { return std::make_shared<DC::Net::HttpTransport>(); };
 
-	// 鉴权：tokenProvider 优先；裸 key 自动补 Bearer 前缀（自定义头用 headers）。
+	// 鉴权：tokenProvider 优先；裸 key 自动补 Bearer 前缀，自定义头用 headers。
 	std::string token = opts.authToken;
 	if (opts.tokenProvider) {
 		auto provided = opts.tokenProvider();

@@ -13,10 +13,10 @@ namespace DC::Net {
 
 namespace {
 
-/// 标准 RunFn：encode → send → recv → decode；失败经 NetError 归一化出口上报。
+/// 标准 RunFn：encode、send、recv、decode；失败经 NetError 归一化出口上报。
 ///
-/// send/recv 传输级失败按 maxRetries 退避重试（100ms × 已试次数），以 send+recv
-/// 为原子单元重放（幂等性由服务语义保证）；encode / decode 异常不重试。
+/// send 与 recv 传输级失败按 maxRetries 退避重试，间隔 100ms 乘已试次数，以 send 加 recv
+/// 为原子单元重放，幂等性由服务语义保证；encode 与 decode 异常不重试。
 Node::RunFn makeDefaultRunFn(std::shared_ptr<DcNetCodec> codec) {
 	return [codec = std::move(codec)](Node::RunContext& ctx) -> Node::Result {
 		auto* transport = static_cast<DcNetTransport*>(ctx.engine());
@@ -77,7 +77,7 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 	const Node::RunFn runFn = desc.runFn ? desc.runFn : makeDefaultRunFn(std::move(desc.codec));
 	const std::function<std::shared_ptr<DcNetTransport>()> transportFactory = std::move(desc.transportFactory);
 
-	// loadModel 钩子在 registry 锁外执行（single-flight），可反向调用 registry；
+	// loadModel 钩子在 registry 锁外执行 single-flight，可反向调用 registry；
 	// 同 key 并发只执行一次。覆盖项按值捕获：注册级配置固化。
 	const std::string epAuthToken = desc.authToken;
 	const std::vector<std::string> epHeaders = desc.headers;

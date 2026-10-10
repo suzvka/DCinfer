@@ -144,7 +144,7 @@ static void test_broadcastN2NotErased() {
 }
 
 static void test_ttlCountsRuntimeVertices() {
-	// 新语义 TTL 只计运行时顶点：2 跳链 maxHops=2 成功（旧语义需 3）
+	// 新语义 TTL 只计运行时顶点：2 跳链 maxHops=2 成功，旧语义需 3
 	InferGraph graph;
 	graph.addNode(makeId("a"));
 	graph.addNode(makeId("c"));
@@ -314,7 +314,7 @@ static void test_chainThroughKeptConnector() {
 	CHECK(std::abs(rc.item<float>() - 6.0f) < 1e-6f, "downstream 2 gets value through kept broadcast");
 }
 
-// connect() 无法构建裸环（二次 connect 引入第二条入边），故经 connectRaw 构建裸拓扑
+// connect 无法构建裸环，二次 connect 引入第二条入边，故经 connectRaw 构建裸拓扑
 static void test_wireOnlyCycleDropsFusedEdge() {
 	GraphStore store;
 	store.addNode(makeId("x"));

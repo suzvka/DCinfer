@@ -36,7 +36,7 @@ struct OutputBinding {
 	std::string alias;
 };
 
-/// @brief OutputZone：append-only 输出区，聚合纯任务态（声明/累加/artifact；公开方法线程安全）。
+/// @brief append-only 输出区，聚合声明、累加与 artifact；公开方法线程安全。
 class OutputZone {
 public:
 	using TaskId = std::string;
@@ -50,17 +50,17 @@ public:
 	bool accumulateAndCheck(const std::string& nodeName, const std::string& portName,
 							const TaskId& taskId);
 
-	/// @brief 检查所有声明是否满足（不累加）。
+	/// @brief 检查所有声明是否满足，不累加。
 	bool checkAllSatisfied(const TaskId& taskId) const;
 
-	/// @brief 查询尚未满足的声明及其当前累计次数（全部满足时为空）。
+	/// @brief 查询尚未满足的声明及其当前累计次数；全部满足时为空。
 	std::vector<UnsatisfiedDeclaration> unsatisfiedDeclarations(const TaskId& taskId) const;
 
-	/// @brief append-only 写入 artifact（数据所有权转移）。
+	/// @brief append-only 写入 artifact，数据所有权转移。
 	void append(const TaskId& taskId, const std::string& nodeName,
 				const std::string& portName, Value data, OutputAudit audit);
 
-	/// @brief 消费式读取 artifact（取出后内部清空）。
+	/// @brief 消费式读取 artifact，取出后内部清空。
 	std::optional<Value> take(const TaskId& taskId, const std::string& nodeName,
 							  const std::string& portName);
 
@@ -95,10 +95,8 @@ private:
 	std::unordered_map<TaskId, std::unordered_map<std::string, Artifact>> _artifacts;
 };
 
-// 内联实现
-
 inline void OutputZone::declare(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
-	// count=0 无诊断价值：正确语义是不声明；入口拒绝且零副作用
+	// count=0 无诊断价值，正确语义是不声明；入口拒绝且零副作用
 	for (const auto& d : declarations) {
 		if (d.count == 0)
 			throw GraphException(GraphException::ErrorType::NoDeclaration, "OutputZone::declare",
@@ -133,7 +131,7 @@ inline bool OutputZone::accumulateAndCheck(const std::string& nodeName, const st
 	std::lock_guard lk(_mutex);
 	auto declIt = _declarations.find(taskId);
 	if (declIt == _declarations.end())
-		return false; // 未声明（submit 期已拦截）
+		return false; // 未声明，submit 期已拦截
 
 	std::string key = _makeKey(nodeName, portName);
 	++_accumulated[taskId][key];

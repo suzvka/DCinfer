@@ -24,7 +24,7 @@
 
 namespace DC {
 
-/// @brief 张量转换钩子：DC::Tensor ↔ 引擎原生张量。
+/// @brief 张量转换钩子：DC::Tensor 与引擎原生张量互转。
 struct TensorConverter {
 	std::function<Value(const Tensor&)> toNative;
 	std::function<Tensor(const void*)> toDC;
@@ -35,7 +35,6 @@ class EngineInstance;
 class SignalStore;
 class GraphBuilder;
 
-// 内部组件前向声明
 class TaskBuffer;
 class SlotWorkspace;
 class SignalGate;
@@ -102,9 +101,9 @@ private:
 
 /// @brief 节点工厂参数。
 ///
-/// engineConfig 仅承载用户自定义配置；engineInstance 在 modelPath 路径非空
-/// （工厂经 Node::bindEngine 绑定后节点持有句柄）；schema 依创建路径：
-/// modelPath 路径由框架推导，createLazyNode 取调用方声明，engineConfig 路径为空。
+/// engineConfig 仅承载用户自定义配置；engineInstance 在 modelPath 路径非空时经
+/// Node::bindEngine 绑定，节点持有句柄；schema 依创建路径而定：modelPath 路径由框架推导，
+/// createLazyNode 取调用方声明，engineConfig 路径为空。
 struct NodeFactoryParams {
 	std::string nodeName;
 	const void* engineConfig = nullptr;
@@ -115,7 +114,7 @@ struct NodeFactoryParams {
 
 using NodeFactory = std::function<std::unique_ptr<class Node>(const NodeFactoryParams&)>;
 
-/// @brief 节点执行结果状态（细分错误经 NodeResult::diagnostic 附带上报）。
+/// @brief 节点执行结果状态；细分错误经 NodeResult::diagnostic 附带上报。
 enum class NodeStatus {
 	Ok,
 	InvalidInput,
@@ -128,7 +127,7 @@ enum class NodeStatus {
 struct NodeResult {
 	NodeStatus status = NodeStatus::Ok;
 	std::string message;
-	std::optional<Diagnostic> diagnostic; ///< 领域结构化诊断（可为空）
+	std::optional<Diagnostic> diagnostic;
 	bool ok() const { return status == NodeStatus::Ok; }
 };
 
@@ -157,7 +156,7 @@ public:
 	Node(Node&&) = delete;
 	Node& operator=(Node&&) = delete;
 
-	/// @brief 绑定引擎实例：节点持有共享句柄（节点存活 ⇒ 实例存活）。
+	/// @brief 绑定引擎实例：节点持有共享句柄，节点存活期间实例存活。
 	void bindEngine(std::shared_ptr<EngineInstance> engineInstance, const EngineDescriptor* engineDesc = nullptr);
 
 	const std::string& type() const { return _meta.type; }
@@ -166,7 +165,7 @@ public:
 
 	ResourceClass affinity() const { return _meta.affinity; }
 
-	/// @brief 自由标签（纯序列化元数据，无调度语义）。
+	/// @brief 自由标签，纯序列化元数据，无调度语义。
 	void setTag(std::string tag) {
 		std::lock_guard lk(_mutationMutex);
 		_ensureMutable("Node::setTag");
@@ -181,7 +180,7 @@ public:
 		_meta.isConnector = v;
 	}
 
-	/// @brief 追加输出端口（构建期）：新口按 "out_{N}" 命名，既有口序不变。
+	/// @brief 追加输出端口，构建期调用：新口按 out_{N} 命名，既有口序不变。
 	void appendOutputPort(Port port) {
 		std::lock_guard lk(_mutationMutex);
 		_ensureMutable("Node::appendOutputPort");
@@ -215,10 +214,10 @@ public:
 	/// @brief 完成回调。
 	const CompletionFn& completionCallback() const { return _onComplete; }
 
-	/// @brief 引擎适配器（借用；由节点执行闸串行化）。
+	/// @brief 引擎适配器，借用；由节点执行闸串行化。
 	EngineAdapter& engine() const;
 
-	/// @brief 就绪判定：readyOverride 优先，否则检查所有必选输入就绪（或存在默认值/形状锚定）。
+	/// @brief 就绪判定：readyOverride 优先，否则检查所有必选输入就绪或存在默认值/形状锚定。
 	bool isReady(const TaskId& taskId, const TaskBuffer& buffer) const;
 
 	/// @brief 是否注册了就绪覆盖委托。
@@ -245,12 +244,10 @@ private:
 	RunFn _fn;
 	CompletionFn _onComplete;
 
-	// 状态委托回调（注册后覆盖默认 isReady 语义）
 	std::function<bool(const TaskId&)> _readyOverride;
 
-	// 冻结门（Build → Freeze 边界）：compile() 时置位，此后一切配置入口抛
-	// NodeException(Frozen)；互斥门保证封印与在飞 setter 互斥。
-	// 未加入任何图的独立节点（单节点路径）永不封印。
+	// 冻结门：compile 时置位 _frozen，此后一切配置入口抛 NodeException(Frozen)；
+	// 互斥门保证封印与在飞 setter 互斥。未入图的独立节点永不封印。
 	mutable std::mutex _mutationMutex;
 	bool _frozen = false;
 
@@ -262,14 +259,14 @@ private:
 									"' is frozen (graph compiled); node configuration is immutable after freeze");
 	}
 
-	/// @brief 封印节点配置面（compile 时调用；一次性）。
+	/// @brief 封印节点配置面；compile 时调用，一次性。
 	void _sealForExecution() {
 		std::lock_guard lk(_mutationMutex);
 		_frozen = true;
 	}
 };
 
-// RunContext 方法定义在 Node.cpp（避免内联依赖组件完整类型）
+// RunContext 方法定义在 Node.cpp，避免内联依赖组件完整类型。
 class Node::RunContext {
 public:
 	const Value& peek(const std::string& name) const;
@@ -277,9 +274,9 @@ public:
 	void output(const std::string& name, Value tensor);
 	const Value* outputRaw(const std::string& name) const;
 
-	/// @brief 类型化输入访问器：peek + 类型校验 + 空值检查的组合。
-	/// @param error 失败原因输出（可为 nullptr）
-	/// @return 类型化只读指针（生命周期至本轮 RunFn 返回）；失败返回 nullptr
+	/// @brief 类型化输入访问器：peek、类型校验与空值检查的组合。
+	/// @param error 失败原因输出，可为 nullptr
+	/// @return 类型化只读指针，生命周期至本轮 RunFn 返回；失败返回 nullptr
 	template <typename T>
 	const T* input(const std::string& name, std::string* error = nullptr) const {
 		return static_cast<const T*>(_inputChecked(name, ensureSlotType<T>(), error));
@@ -296,10 +293,10 @@ public:
 	const std::string& type() const;
 	const std::string& name() const;
 
-	/// @brief 当前 task 标识（RunFn 内等待/轮询以此寻址）。
+	/// @brief 当前 task 标识；RunFn 内等待或轮询以此寻址。
 	const TaskId& taskId() const { return _taskId; }
 
-	/// @brief 取消感知（协作式）：所属 task 是否已被请求取消或已终止；未注入谓词时恒 false。
+	/// @brief 取消感知，协作式：所属 task 是否已被请求取消或已终止；未注入谓词时恒 false。
 	bool isCancellationRequested() const {
 		return _cancelProbe ? _cancelProbe() : false;
 	}
@@ -311,7 +308,7 @@ private:
 			   const Node::Schema& schema, const std::string& type, const std::string& name,
 			   TaskId taskId, std::function<bool()> cancelProbe);
 
-	/// @brief input<T> 的非模板实现（定义在 Node.cpp）：失败返回 nullptr 并填充 error。
+	/// @brief input<T> 的非模板实现，定义在 Node.cpp；失败返回 nullptr 并填充 error。
 	const void* _inputChecked(const std::string& name, SlotDataType type, std::string* error) const;
 
 	SlotWorkspace& _workspace;

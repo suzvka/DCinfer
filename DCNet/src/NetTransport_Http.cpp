@@ -36,7 +36,7 @@ namespace DC::Net {
 
 namespace {
 
-/// POCO 异常 → 传输层错误原语（子类优先，SSLException 覆盖全部 TLS 系异常）。
+/// POCO 异常映射到传输层错误原语；子类优先，SSLException 覆盖全部 TLS 系异常。
 NetTransportError classifyPocoException(const Poco::Exception& e) {
 	if (dynamic_cast<const Poco::TimeoutException*>(&e))
 		return NetTransportError::Timeout;
@@ -157,7 +157,7 @@ bool isPrintableHeaderBytes(const std::string& v) {
 }
 
 /// 客户端 TLS 上下文：宿主已初始化 SSLManager 时按宿主管辖；否则兜底初始化
-/// VERIFY_STRICT（证书链 + 主机名 + 默认 CA）。自定义信任锚可在首次 connect 前
+/// VERIFY_STRICT，即证书链、主机名与默认 CA。自定义信任锚可在首次 connect 前
 /// 调用 SSLManager::initializeClient(context) 接管。
 Poco::Net::Context::Ptr ensureClientTlsContext() {
 	try {
@@ -229,7 +229,7 @@ void HttpTransport::resetLocked() {
 
 NetError HttpTransport::connect(const NetEndpoint& ep) {
 	acquireClaim();
-	const ClaimScope scope{this}; // 所有出口回收占用（_ep 写入同样受保护）
+	const ClaimScope scope{this}; // 所有出口回收占用，_ep 写入同样受保护
 	resetLocked();
 
 	// 配置期校验：headers / authToken / contentType 中的 CR/LF / 控制字符
@@ -269,7 +269,7 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 
 	_ep = ep;
 
-	// 解析端点 URL（Poco::URI 处理默认端口与 IPv6）
+	// 解析端点 URL，Poco::URI 处理默认端口与 IPv6
 	Poco::URI uri;
 	try {
 		uri = Poco::URI(ep.endpoint());
@@ -298,7 +298,7 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 		return _connectError;
 	}
 
-	// TCP 就绪探测：拒连 / DNS 失败在 loadModel 配置期报告
+	// TCP 就绪探测：拒连或 DNS 失败在 loadModel 配置期报告
 	try {
 		Poco::Net::SocketAddress addr(uri.getHost(), static_cast<Poco::UInt16>(uri.getPort()));
 		Poco::Net::StreamSocket probe;
@@ -311,7 +311,7 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 		return _connectError;
 	}
 
-	// 会话：HTTPS 使用显式客户端 TLS 上下文（宿主已初始化则用宿主的）
+	// 会话：HTTPS 使用显式客户端 TLS 上下文，宿主已初始化则用宿主的
 	try {
 		const std::string host = uri.getHost();
 		const Poco::UInt16 port = static_cast<Poco::UInt16>(uri.getPort());
@@ -345,8 +345,8 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 }
 
 NetError HttpTransport::send(const Payload& payload) {
-	// 一次交换的起点：领取占用，连同后续 recv 整体串行化（多节点共享时不得
-	// A 的 send 接上 B 的 recv）；重试路径由 acquireClaim 回收遗留占用
+	// 一次交换的起点：领取占用，连同后续 recv 整体串行化，多节点共享时不得
+	// A 的 send 接上 B 的 recv；重试路径由 acquireClaim 回收遗留占用
 	acquireClaim();
 	ClaimScope scope{this};
 	// 会话快照：close 强收仅 abort 并释放其侧引用；本交换的 session 由副本
@@ -363,7 +363,7 @@ NetError HttpTransport::send(const Payload& payload) {
 	try {
 		const std::string path = requestTarget(_basePath, _ep.requestPath);
 
-		// 请求头：Content-Type / Authorization（authToken 为完整值，含 "Bearer "）/ 附加头
+		// 请求头：Content-Type、Authorization 与附加头；authToken 为完整值，含 "Bearer "
 		Poco::Net::HTTPRequest req(Poco::Net::HTTPRequest::HTTP_POST, path,
 								   Poco::Net::HTTPMessage::HTTP_1_1);
 		req.setContentType(_ep.contentType);
@@ -386,7 +386,7 @@ NetError HttpTransport::send(const Payload& payload) {
 			return normalizeTransportError(NetTransportError::Reset, "send request body failed");
 		}
 
-		// 状态码：2xx → None（体由 recv 读取）；非 2xx（含 3xx）→ 读错误体归一化
+		// 状态码：2xx 归 None，体由 recv 读取；非 2xx 含 3xx 读错误体归一化
 		Poco::Net::HTTPResponse res;
 		std::istream& rs = session->receiveResponse(res);
 		{
@@ -493,7 +493,7 @@ void HttpTransport::close() {
 
 Payload HttpTransport::readBody(std::istream& rs, size_t limit, bool* truncated) {
 	Payload out;
-	// 分块读取替代无界 copyToString：达 limit 截断返回（是否报错由调用方决定）
+	// 分块读取替代无界 copyToString：达 limit 截断返回，是否报错由调用方决定
 	char buffer[64 * 1024];
 	while (true) {
 		rs.read(buffer, sizeof(buffer));
@@ -531,7 +531,7 @@ void HttpTransport::abortResponse() {
 }
 
 void HttpTransport::dropSession() {
-	// 锁内置空成员，锁外释放；交换方副本保活对象（abort 中断其阻塞读）
+	// 锁内置空成员，锁外释放；交换方副本保活对象，abort 中断其阻塞读
 	std::shared_ptr<Poco::Net::HTTPClientSession> session;
 	{
 		std::lock_guard lk(_ioMutex);

@@ -99,7 +99,7 @@ static void testConstructorPartialFailureRecovers() {
 		}
 		ThreadPoolSpawnProbe::set(nullptr);
 		CHECK(threw, "partial thread creation failure must propagate as exception");
-		// 进程存活即主要断言（未 terminate、未挂死）
+		// 进程存活即主要断言：未 terminate、未挂死
 	}
 	END_TEST();
 }

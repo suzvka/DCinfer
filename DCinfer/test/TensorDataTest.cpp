@@ -303,7 +303,7 @@ static void runTensorDataExceptionTests() {
 							 1, TensorData::DataBlock(0));
 			},
 			"TensorData constructor shape product overflow rejected");
-		// 零维（0 元素张量）合法语义：metadata-only 空载荷构造成功；带载荷则 mismatch。
+		// 零维即 0 元素张量的合法语义：metadata-only 空载荷构造成功；带载荷则 mismatch。
 		{
 			TensorData td(std::vector<size_t>{0}, 1, TensorData::DataBlock(0));
 			if (td.typeSize() != 1 || !td.data().empty())

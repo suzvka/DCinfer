@@ -75,7 +75,7 @@ static bool hasMessage(const std::vector<TaskError>& errors, const std::string& 
 
 static void testReuseAfterCancelRace() {
 	TEST("F04: reuse after cancel (queued stale lambda must not consume fresh input)") {
-		// 默认 1/1/1 单槽位：阻塞节点占住 worker，旧轮次 lambda 滞留队列（确定性复刻）
+		// 默认 1/1/1 单槽位：阻塞节点占住 worker，旧轮次 lambda 滞留队列，确定性复刻
 		std::promise<void> entered, go;
 		auto ready = go.get_future().share();
 
@@ -284,7 +284,7 @@ static void testDiscardedCancelsAndReleases() {
 			auto t = api.createTask();
 			tid = t.taskId();
 			t.feed("num", floatTensor(7.0f));
-			t.submit(); // 异步启动（_submitted = true）
+			t.submit(); // 异步启动，_submitted = true
 			entered.get_future().wait();
 		}
 
@@ -512,7 +512,7 @@ static void testZombieRetryAfterFinalize() {
 		g.submit("A", "gate", "y");
 		entered.get_future().wait();
 
-		// B：gate 抛 Reentrant 重试排队，err 报错 → B 收尾为 Failed（终态迁移必置 terminated）
+		// B：gate 抛 Reentrant 重试排队，err 报错，B 收尾为 Failed，终态迁移必置 terminated
 		g.feedInput("B", "gate", "x", floatValue(2.0f));
 		g.feedInput("B", "err", "x", floatValue(2.0f));
 		g.submit("B", {{"gate", "y"}, {"err", "y"}});

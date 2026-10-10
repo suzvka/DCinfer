@@ -10,7 +10,7 @@ namespace DC::Net {
 
 namespace {
 
-/// HTTP 状态码 → 兜底分类。
+/// HTTP 状态码映射到兜底分类。
 NetErrorCategory categoryForHttpStatus(int status) {
 	if (status == 400 || status == 422)
 		return NetErrorCategory::RemoteRejected;
@@ -27,7 +27,7 @@ NetErrorCategory categoryForHttpStatus(int status) {
 	return NetErrorCategory::RemoteMalformed;
 }
 
-/// OpenAI 兼容服务常用错误码 → 精确分类。
+/// OpenAI 兼容服务常用错误码映射到精确分类。
 const std::unordered_map<std::string, NetErrorCategory>& knownRemoteCodes() {
 	static const std::unordered_map<std::string, NetErrorCategory> k = {
 		{"invalid_api_key", NetErrorCategory::RemoteAuth},
@@ -107,9 +107,7 @@ NetError finalize(NetError e) {
 	return e;
 }
 
-// 入站 wire 逆向表，与 categoryForHttpStatus / finalize 正向表对偶：
-//   Ok → 200；InvalidInput → 400；SchemaMismatch → 422（预留）；
-//   ExecutionFailed / InternalError → 500。
+// 入站 wire 逆向表，与 categoryForHttpStatus 及 finalize 正向表对偶。
 int wireHttpStatusFor(Node::Status status) {
 	switch (status) {
 	case Node::Status::Ok:

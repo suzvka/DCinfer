@@ -13,9 +13,9 @@ namespace DC {
 
 /// @brief 诊断级别。
 enum class DiagnosticLevel {
-	Info,    ///< 正常操作事件
-	Warning, ///< 可疑状态
-	Error    ///< 执行失败
+	Info,
+	Warning,
+	Error
 };
 
 /// @brief 单条 task 级诊断记录。
@@ -24,11 +24,10 @@ struct TaskError {
 	std::string nodeName;
 	std::string source;
 	std::string message;
-	/// @brief 领域结构化诊断（可为空；语义由 Diagnostic::domain 定义）。
 	std::optional<Diagnostic> diagnostic;
 };
 
-/// @brief 线程安全的 task 级错误收集器（所有公开方法持内部 mutex）。
+/// @brief 线程安全的 task 级错误收集器。
 class ErrorTracker {
 public:
 	using TaskId = std::string;
@@ -46,13 +45,13 @@ public:
 	/// @brief 记录一条 task 级信息。
 	void recordInfo(const TaskId& taskId, std::string nodeName, std::string source, std::string message);
 
-	/// @brief 查询指定 task 的所有诊断记录（按发生顺序）。
+	/// @brief 查询指定 task 的所有诊断记录，按发生顺序。
 	std::vector<TaskError> taskErrors(const TaskId& taskId) const;
 
 	/// @brief 清除所有 task 级错误记录。
 	void clearErrors();
 
-	/// @brief 清除指定 task 的诊断记录（复用/释放时防止上一轮残留）。
+	/// @brief 清除指定 task 的诊断记录。
 	void clearTask(const TaskId& taskId) {
 		std::lock_guard lk(_mutex);
 		_taskErrors.erase(taskId);
@@ -65,8 +64,6 @@ private:
 	mutable std::mutex _mutex;
 	std::unordered_map<TaskId, std::vector<TaskError>> _taskErrors;
 };
-
-// 内联实现
 
 inline void ErrorTracker::recordError(const TaskId& taskId, std::string nodeName, std::string source,
 									  std::string message) {

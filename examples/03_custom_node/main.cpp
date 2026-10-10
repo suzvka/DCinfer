@@ -1,11 +1,11 @@
-// 03_custom_node - 编写自定义节点的完整教程。
+// 03_custom_node：编写自定义节点的完整教程。
 //
-// 从零编写可注册算子（Scale：y = x * factor）的四步流程：
+// 从零编写可注册算子 Scale 的四步流程，该算子计算 y = x * factor：
 //   1. NodePort 工厂声明端口 Schema；2. RunFn 用 ctx.input<Tensor>() 类型化读取、
 //   经 ctx.failure() 报结构化错误；3. registerOperator 注册；4. createOperator 建图执行。
 //
-// 端口 Schema 两种等价写法（推荐工厂：类型与 typeSize 单点书写）：
-//   s.inputs = {Node::Port::in<float>("x")};                            // 工厂（推荐）
+// 端口 Schema 两种等价写法，推荐工厂以便类型与 typeSize 单点书写：
+//   s.inputs = {Node::Port::in<float>("x")};                            // 工厂，推荐
 //   s.inputs = {{"x", Tensor::TensorType::Float, sizeof(float), {}}};   // 聚合初始化
 //
 // 可选默认值：Node::Port::optional<float>("name", 1.0f)；形状锚定：
@@ -23,7 +23,7 @@ using namespace DC;
 
 namespace {
 
-// Schema：端口用工厂声明（shape 省略 = 标量）
+// Schema：端口用工厂声明，shape 省略即标量
 Node::Schema scaleSchema() {
 	Node::Schema s;
 	s.inputs = {Node::Port::in<float>("x")};
@@ -31,10 +31,10 @@ Node::Schema scaleSchema() {
 	return s;
 }
 
-// factor 为节点私有参数（闭包捕获）；真实算子可改为 engineConfig 或输入端口。
+// factor 为节点私有参数，经闭包捕获；真实算子可改为 engineConfig 或输入端口。
 Node::RunFn scaleRunFn(float factor) {
 	return [factor](Node::RunContext& ctx) -> Node::Result {
-		const auto* x = ctx.input<Tensor>("x"); // peek + 类型校验 + 空值检查的组合
+		const auto* x = ctx.input<Tensor>("x"); // peek、类型校验与空值检查的组合
 		if (!x)
 			return ctx.failure(Node::Status::InvalidInput, "scale: 'x' must be a float Tensor");
 
@@ -48,14 +48,14 @@ Node::RunFn scaleRunFn(float factor) {
 } // namespace
 
 int main() {
-	// 注册：轻量算子（DC::Tensor only、无引擎钩子）
+	// 注册：轻量算子，仅用 DC::Tensor、无引擎钩子
 	auto& reg = EngineRegistry::instance();
 	if (!reg.registerOperator("Scale", scaleSchema(), scaleRunFn(2.5f))) {
 		std::cerr << "register failed: operator 'Scale' already exists" << std::endl;
 		return 1;
 	}
 
-	// 建图：createOperator → addNode → 绑定图级输入输出
+	// 建图：createOperator、addNode 到绑定图级输入输出
 	InferGraph graph;
 	graph.addNode(reg.createOperator("Scale", "scale1"));
 	graph.bindInput("in", "scale1", "x");

@@ -195,7 +195,7 @@ static void testNonNodeExceptionClosure() {
 		InferGraph g;
 
 		auto n = std::make_unique<Node>("test", "n", passSchema(), passRunFn());
-		// 完成回调抛出后，catch 路径的重试通知必须为 no-op（回调至多一次）
+		// 完成回调抛出后，catch 路径的重试通知必须为 no-op，回调至多一次
 		std::atomic<int> callbackCalls{0};
 		n->setCompletionCallback([&](const Node::TaskId&, const Node::Result&) {
 			++callbackCalls;

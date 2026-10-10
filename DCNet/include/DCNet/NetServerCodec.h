@@ -9,20 +9,20 @@
 
 namespace DC::Net {
 
-/// 服务端协议映射（出站 DcNetCodec 镜像）：载荷格式复用出站 codec，不另造。
+/// 服务端协议映射，出站 DcNetCodec 镜像：载荷格式复用出站 codec，不另造。
 ///
-/// decodeRequest 抛异常 = wire 级垃圾报文（监听器回 415）；本地执行失败
-/// 经 wireStatusFor 逆向映射。codec 以「端口名 ↔ 张量」为界，不暴露 RunContext。
+/// decodeRequest 抛异常即 wire 级垃圾报文，监听器回 415；本地执行失败
+/// 经 wireStatusFor 逆向映射。codec 以端口名与张量为界，不暴露 RunContext。
 struct DcNetServerCodec {
 	virtual ~DcNetServerCodec() = default;
 
-	/// 对方请求报文 → 输入端口张量映射；抛异常 = 报文不可解析（wire 级损坏）。
+	/// 对方请求报文映射到输入端口张量；抛异常即报文不可解析，属 wire 级损坏。
 	virtual std::unordered_map<std::string, Tensor> decodeRequest(const Payload& request) = 0;
 
-	/// 输出端口张量映射 → 响应报文；缺端口 / 编码失败抛异常（按执行失败应答 5xx）。
+	/// 输出端口张量映射到响应报文；缺端口或编码失败抛异常，按执行失败应答 5xx。
 	virtual Payload encodeResponse(const std::unordered_map<std::string, Tensor>& outputs) = 0;
 
-	/// 协议子路径（与出站 codec 对称）；监听路径 = basePath + requestPath。
+	/// 协议子路径，与出站 codec 对称；监听路径为 basePath 加 requestPath。
 	virtual std::string requestPath() const { return "/infer"; }
 };
 

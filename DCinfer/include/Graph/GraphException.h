@@ -7,22 +7,22 @@ namespace DC {
 class GraphException : public Exception {
 public:
 	enum class ErrorType {
-		NodeNotFound,        ///< 目标节点不存在
-		DuplicateNode,       ///< 同名节点重复添加
-		PortNotFound,        ///< 端口不存在于节点 Schema
-		DirectConnect,       ///< 两个非 Connector 节点直连被拒
-		NoDeclaration,       ///< submit 时未声明输出期望
-		DuplicateTask,       ///< 同一 taskId 的活动任务被重复提交
-		DuplicateBinding,    ///< 图级绑定别名重复
-		InvalidBinding,      ///< 图级绑定缺别名
-		FeedFailed,          ///< feedInput 时 Node::setInput 失败
-		Frozen,              ///< 图已冻结，构建 API 拒绝
-		ExecutionFailed,     ///< 节点 tryExecute 抛出 NodeException
-		PropagateFailed,     ///< 数据传播链中写下游输入失败
-		UnreachableDeclaration, ///< 声明目标在拓扑上不可达
-		DuplicateEdge,       ///< 端口已有连接
-		NonTerminalPort,     ///< 输出取数端口非终端（有出边）
-		Other                ///< 其他未分类的错误
+		NodeNotFound,
+		DuplicateNode,
+		PortNotFound,
+		DirectConnect,
+		NoDeclaration,
+		DuplicateTask,
+		DuplicateBinding,
+		InvalidBinding,
+		FeedFailed,
+		Frozen,
+		ExecutionFailed,
+		PropagateFailed,
+		UnreachableDeclaration,
+		DuplicateEdge,
+		NonTerminalPort,
+		Other
 	};
 
 	GraphException(ErrorType errorType = ErrorType::Other, const std::string& source = "Unknown",

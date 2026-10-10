@@ -16,7 +16,7 @@ namespace DC {
 class Node;
 struct NodeSchema; // 定义见 Node.h
 
-/// @brief 线程安全的 task 级 I/O 缓冲区管理器（Schema 经参数传入，避免头文件循环依赖）。
+/// @brief 线程安全的 task 级 I/O 缓冲区管理器；Schema 经参数传入以避免头文件循环依赖。
 class TaskBuffer {
 public:
 	using TaskId = std::string;
@@ -24,31 +24,31 @@ public:
 
 	TaskBuffer() = default;
 
-	/// @brief 单端口写入（仅写缓冲，不触发执行）；端口名未声明抛 PortNotFound。
+	/// @brief 单端口写入，仅写缓冲不触发执行；端口名未声明抛 PortNotFound。
 	void setInput(const TaskId& taskId, const std::string& portName, Value data,
 				  const NodeSchema& schema);
 
-	/// @brief 单端口写入 + 就绪判定（同一临界区：多上游并发时仅"最后写入者"观察到就绪，无重复提交窗口）。
+	/// @brief 单端口写入与就绪判定，处于同一临界区：多上游并发时仅最后写入者观察到就绪，无重复提交窗口。
 	/// @return 写入后该 task 的全部必需输入是否已就绪
 	bool setInputAndCheckReady(const TaskId& taskId, const std::string& portName, Value data,
 						   const NodeSchema& schema);
 
-	/// @brief 批量写入（预校验所有端口名）。
+	/// @brief 批量写入，预校验所有端口名。
 	void setInputBatch(const TaskId& taskId,
 					   std::unordered_map<std::string, TaskData> inputs,
 					   const NodeSchema& schema);
 
-	/// @brief 所有必需输入是否已就绪（含默认值）。
+	/// @brief 所有必需输入是否已就绪，含默认值。
 	bool isReady(const TaskId& taskId, const NodeSchema& schema) const;
 
 	/// @brief 是否已产出指定输出端口的数据。
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
-	/// @brief 消费式取出输出（取出即清空）；任务不存在抛 TaskNotFound，端口为空抛 OutputNotProduced。
+	/// @brief 消费式取出输出，取出即清空；任务不存在抛 TaskNotFound，端口为空抛 OutputNotProduced。
 	Value takeOutput(const TaskId& taskId, const std::string& name);
 
-	/// @brief 消费式取出输出（检查+取数同一临界区，无 check-then-act 竞态）。
-	/// @return 任务不存在或端口为空返回 nullopt（不抛异常）
+	/// @brief 消费式取出输出，检查与取数处于同一临界区，无 check-then-act 竞态。
+	/// @return 任务不存在或端口为空返回 nullopt，不抛异常
 	std::optional<Value> tryTakeOutput(const TaskId& taskId, const std::string& name);
 
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
@@ -57,7 +57,7 @@ public:
 	void clearTask(const TaskId& taskId);
 	size_t taskCount() const;
 
-	/// @brief 将输入缓冲 move 到工作槽位（含默认值回退）。
+	/// @brief 将输入缓冲 move 到工作槽位，含默认值回退。
 	void drainInputsTo(const TaskId& taskId, class SlotWorkspace& workspace,
 					   const NodeSchema& schema);
 
@@ -65,10 +65,10 @@ public:
 	void fillOutputsFrom(const TaskId& taskId, class SlotWorkspace& workspace,
 						 const NodeSchema& schema);
 
-	/// @brief 验证所有必需输出端口已产生（fillOutputsFrom 之后调用）。
+	/// @brief 验证所有必需输出端口已产生；在 fillOutputsFrom 之后调用。
 	bool validateOutputs(const TaskId& taskId, const NodeSchema& schema) const;
 
-	/// @brief 仅擦除输入缓冲区（输出保留）。
+	/// @brief 仅擦除输入缓冲区，输出保留。
 	void eraseInputs(const TaskId& taskId);
 
 private:

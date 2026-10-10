@@ -1,6 +1,6 @@
-// 02_lowering_benchmark - Broadcast(1) lowering 内省与端到端延迟基线。
-// 构建链式图 → freeze 后对比源图/运行时视图（lowering 减少调度顶点与传播跳数）
-// → 经任务句柄重复提交测平均延迟。宿主循环无需手工 releaseTask（析构自动回收）。
+// 02_lowering_benchmark：Broadcast(1) lowering 内省与端到端延迟基线。
+// 构建链式图，freeze 后对比源图与运行时视图，lowering 减少调度顶点与传播跳数，
+// 再经任务句柄重复提交测平均延迟。宿主循环无需手工 releaseTask，析构自动回收。
 // 预期输出：runtimeNodeCount = 源图节点数 − 被擦除导线数
 
 #include "InferGraph.h"
@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
 	const int chainLength = argc > 1 ? std::atoi(argv[1]) : 100; // 业务节点数
 	const int taskCount = argc > 2 ? std::atoi(argv[2]) : 200;   // 提交任务数
 
-	// 链式图：id_0 → ... → id_{N-1}（connect 自动插 wire）
+	// 链式图：id_0 到 id_{N-1} 链式相连，connect 自动插 wire
 	InferGraph graph;
 	for (int i = 0; i < chainLength; ++i) {
 		graph.addNode(std::make_unique<Node>("Builtin", "id_" + std::to_string(i),
@@ -48,7 +48,7 @@ int main(int argc, char** argv) {
 	graph.bindOutput("out", "id_" + std::to_string(chainLength - 1), "y");
 
 	// 冻结：对比源图视角 vs 运行时视图
-	auto api = graph.interface(); // 取接口即定型：别名 → 坐标一次性解析
+	auto api = graph.interface(); // 取接口即定型：别名到坐标一次性解析
 	auto snapshot = graph.freeze(); // 幂等：与运行时共享同一份快照
 
 	std::cout << "chain length (business nodes): " << chainLength << "\n";

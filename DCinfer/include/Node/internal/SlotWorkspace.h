@@ -17,18 +17,18 @@ class SlotWorkspace {
 public:
 	using SlotMap = std::unordered_map<std::string, TensorSlot>;
 
-	/// @brief 从 Schema 构建工作槽位（含 shapeAnchor 的 DefaultProvider 安装）。
+	/// @brief 从 Schema 构建工作槽位，含 shapeAnchor 的 DefaultProvider 安装。
 	explicit SlotWorkspace(const NodeSchema& schema);
 
 	/// @brief 只读查看输入槽 Value。
 	const Value& peekInput(const std::string& name) const;
 
-	/// @brief 消费式取出输入槽 Value（槽位清空）。
+	/// @brief 消费式取出输入槽 Value，槽位清空。
 	Value popInput(const std::string& name);
 
 	void writeOutput(const std::string& name, Value tensor);
 
-	/// @brief 读取输出槽原始 Value（不消费）；不存在返回 nullptr。
+	/// @brief 读取输出槽原始 Value，不消费；不存在返回 nullptr。
 	const Value* peekOutputRaw(const std::string& name) const;
 
 	/// @brief 清空所有工作输出槽位。

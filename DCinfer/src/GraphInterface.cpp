@@ -126,7 +126,7 @@ GraphInterface::Task::~Task() { _releaseOnDestroy(); }
 void GraphInterface::Task::_releaseOnDestroy() noexcept {
 	if (!_iface)
 		return;
-	// 析构路径资源回收（弃置即取消）：
+	// 析构路径资源回收，弃置即取消：
 	// 终态立即释放；在飞先协作式取消再经 detachTask 回收兜底；未提交释放 feed 输入。
 	try {
 		const TaskStatus st = _iface->_graph->taskStatus(_taskId);
@@ -161,7 +161,7 @@ void GraphInterface::Task::submit() {
 }
 
 TaskResult GraphInterface::Task::run() {
-	return run(std::chrono::milliseconds(0)); // 0 = 无限等待
+	return run(std::chrono::milliseconds(0)); // 0 表示无限等待
 }
 
 TaskResult GraphInterface::Task::run(std::chrono::milliseconds timeout) {

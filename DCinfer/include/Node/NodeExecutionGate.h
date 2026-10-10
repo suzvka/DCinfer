@@ -18,7 +18,7 @@ public:
 	NodeExecutionGate(const NodeExecutionGate&) = delete;
 	NodeExecutionGate& operator=(const NodeExecutionGate&) = delete;
 
-	/// @brief 尝试获取执行租约；false = 已有 task 在执行（调度侧应登记重试）。
+	/// @brief 尝试获取执行租约；false = 已有 task 在执行，调度侧应登记重试。
 	bool tryAcquire() noexcept {
 		std::lock_guard lk(_m);
 		if (_busy)
@@ -27,7 +27,7 @@ public:
 		return true;
 	}
 
-	/// @brief 释放执行租约（全量投递已登记的重试）。
+	/// @brief 释放执行租约，全量投递已登记的重试。
 	void release() noexcept {
 		std::vector<std::pair<const void*, std::function<void()>>> pending;
 		{
@@ -45,7 +45,7 @@ public:
 		}
 	}
 
-	/// @brief 登记一次重试（空闲时立即投递；忙时随某次 release 全量投递）。
+	/// @brief 登记一次重试；空闲时立即投递，忙时随某次 release 全量投递。
 	/// @param key 去重键；同一 key 重复登记后到覆盖
 	void enqueueRetry(const void* key, std::function<void()> fn) {
 		bool immediate = false;
@@ -54,7 +54,7 @@ public:
 			if (_busy) {
 				for (auto& [k, pendingFn] : _pending) {
 					if (k == key) {
-						pendingFn = std::move(fn); // 后到覆盖
+						pendingFn = std::move(fn);
 						return;
 					}
 				}
@@ -72,7 +72,7 @@ public:
 	}
 
 private:
-	std::mutex _m; ///< 保护 _busy 与 _pending
+	std::mutex _m;
 	bool _busy = false;
 	std::vector<std::pair<const void*, std::function<void()>>> _pending;
 };

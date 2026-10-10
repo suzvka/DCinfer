@@ -1,5 +1,5 @@
 // OnnxEngineTest - ONNX Runtime 引擎适配器集成测试。
-// 测试模型为手工编码的最小 ONNX protobuf 字节流（不依赖 onnx/protobuf 库）：
+// 测试模型为手工编码的最小 ONNX protobuf 字节流，不依赖 onnx/protobuf 库：
 // 避免 onnxruntime.dll 内嵌描述符与外部 onnx 静态库重复注册导致
 // protobuf "File already exists in database" 崩溃。
 
@@ -31,7 +31,7 @@ void encodeTag(std::vector<std::byte>& out, uint32_t fieldNumber, uint32_t wireT
 	encodeVarint(out, (static_cast<uint64_t>(fieldNumber) << 3) | wireType);
 }
 
-// 变长字段（wire type 2）：tag + length + payload
+// 变长字段即 wire type 2：tag + length + payload
 void encodeLengthDelimited(std::vector<std::byte>& out, uint32_t fieldNumber,
 						   const std::vector<std::byte>& payload) {
 	encodeTag(out, fieldNumber, 2);
@@ -73,7 +73,7 @@ std::vector<std::byte> encodeTensorType(int32_t elemType, std::initializer_list<
 	return tt;
 }
 
-// TypeProto { tensor_type = 1 }（oneof，字段号 1）
+// TypeProto { tensor_type = 1 }，oneof 字段号 1
 std::vector<std::byte> encodeTypeProto(int32_t elemType, std::initializer_list<int64_t> dims) {
 	std::vector<std::byte> tp;
 	encodeLengthDelimited(tp, 1, encodeTensorType(elemType, dims));
@@ -111,7 +111,7 @@ std::vector<std::byte> encodeOpsetImport(const std::string& domain, int64_t vers
 	return opset;
 }
 
-// ── 生成 ONNX 模型字节流：Z = X + Y（opset 13），元素类型与形状参数化 ──
+// 生成 ONNX 模型字节流：Z = X + Y，opset 13，元素类型与形状参数化
 // ModelProto 字段：ir_version=1, graph=7, opset_import=8
 // GraphProto 字段：node=1, name=2, input=11, output=12；TensorProto 类型：FLOAT=1, FLOAT16=10
 std::vector<std::byte> buildAddModelBytes(int elemType, std::initializer_list<int64_t> dims) {
@@ -129,7 +129,7 @@ std::vector<std::byte> buildAddModelBytes(int elemType, std::initializer_list<in
 	return model;
 }
 
-// 将字节流写入临时文件（ORT 在 Session 创建时自行校验模型合法性）
+// 将字节流写入临时文件；ORT 在 Session 创建时自行校验模型合法性
 std::string generateAddModel(const std::string& fileName, int elemType,
 							 std::initializer_list<int64_t> dims) {
 	auto bytes = buildAddModelBytes(elemType, dims);
@@ -151,7 +151,7 @@ DC::Tensor makeFloatTensor(const float (&values)[4]) {
 	return DC::Tensor::Create<float>({1, 4}, std::move(block));
 }
 
-// fp32 → fp16 位模式（测试值均为 fp16 精确可表示，截断转换即得精确结果）
+// fp32 转 fp16 位模式；测试值均为 fp16 精确可表示，截断转换即得精确结果
 static uint16_t fp32ToFp16Bits(float value) {
 	uint32_t bits = 0;
 	std::memcpy(&bits, &value, sizeof(bits));
@@ -161,7 +161,7 @@ static uint16_t fp32ToFp16Bits(float value) {
 	if (exp >= 0x1F)
 		return static_cast<uint16_t>(sign | 0x7C00u); // ±Inf
 	if (exp <= 0)
-		return static_cast<uint16_t>(sign);           // 0 / subnormal（测试值不涉及）
+		return static_cast<uint16_t>(sign);           // 0 或 subnormal，测试值不涉及
 	return static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | mant);
 }
 
@@ -254,7 +254,7 @@ int main() {
 
 			const float src[4] = {1.0f, 2.0f, 3.0f, 4.0f};
 			// 注意：Ort::Value 是外部内存零拷贝视图，源 Tensor 必须具名存活至
-			// 使用结束（临时对象析构后 GetTensorData 读到悬垂指针）。
+			// 使用结束，否则临时对象析构后 GetTensorData 读到悬垂指针。
 			DC::Tensor srcTensor = makeFloatTensor(src);
 			auto native = desc->converter.toNative(srcTensor);
 			auto* ortVal = native.as<Ort::Value>();
@@ -270,7 +270,7 @@ int main() {
 			if (!ndata || ndata[0] != 1.0f || ndata[3] != 4.0f)
 				return fail("toNative data mismatch");
 
-			// Ort::Value → DC::Tensor（深拷贝）
+			// Ort::Value 转 DC::Tensor，深拷贝
 			DC::Tensor back = desc->converter.toDC(ortVal);
 			auto bdata = back.data<float>();
 			if (bdata.size() != 4 || bdata[0] != 1.0f || bdata[3] != 4.0f)
@@ -279,16 +279,16 @@ int main() {
 			if (bshape.size() != 2 || bshape[0] != 1 || bshape[1] != 4)
 				return fail("toDC shape mismatch");
 
-			// 无法映射的类型 → toNative 返回空（显式失败而非静默降级）
+			// 无法映射的类型使 toNative 返回空，显式失败而非静默降级
 			DC::Tensor unsupported(DC::Tensor::TensorType::Void, 4);
 			if (desc->converter.toNative(unsupported))
 				return fail("toNative should return empty for unmappable type");
 		}
 		std::cout << "[PASS] converter round-trip: DC::Tensor <-> Ort::Value" << std::endl;
 
-		// FP16 模型：挂 Float 族（typeSize=2）+ 推理；BF16 仍降级 Void。
-		// CPU EP 的 fp16/bf16 内核支持因 ORT 构建而异：内核缺失在 Session 构造期抛
-		//（createNode 暴露）——createNode 失败、推理失败、成功都是合法路径。
+		// FP16 模型：挂 Float 族 typeSize=2 并推理；BF16 仍降级 Void。
+		// CPU EP 的 fp16/bf16 内核支持因 ORT 构建而异：内核缺失在 Session 构造期抛，
+		// 经 createNode 暴露；createNode 失败、推理失败、成功都是合法路径。
 		{
 			auto fp16Path = generateAddModel("dcinfer_test_add_fp16.onnx", 10, {1, 4});
 			if (fp16Path.empty())
@@ -346,14 +346,14 @@ int main() {
 					}
 				}
 			} catch (const std::exception& e) {
-				// Session 构造期内核缺失（x64-linux 静态构建）：引擎归一化后上抛
+				// Session 构造期内核缺失，如 x64-linux 静态构建：引擎归一化后上抛
 				std::cout << "  fp16 createNode rejected: " << e.what() << std::endl;
 				if (std::string(e.what()).find("implementation") == std::string::npos)
 					return fail(std::string("FP16 createNode failure should be missing-kernel: ") + e.what());
 			}
 			std::filesystem::remove(fp16Path);
 
-			// BF16 与 FP16 同为 2 字节、反向映射歧义：显式降级 Void；无内核时构造期失败（合法路径）
+			// BF16 与 FP16 同为 2 字节、反向映射歧义：显式降级 Void；无内核时构造期失败，属合法路径
 			auto bf16Path = generateAddModel("dcinfer_test_add_bf16.onnx", 16, {1, 4});
 			if (bf16Path.empty())
 				return fail("BF16 model generation failed");
@@ -375,7 +375,7 @@ int main() {
 		}
 		std::cout << "[PASS] FP16 model: Float family (typeSize=2), inference or missing-kernel path verified; BF16 still Void" << std::endl;
 
-		// 动态 shape 模型（dim=-1）：推导保留 -1 且执行通过
+		// 动态 shape 模型 dim=-1：推导保留 -1 且执行通过
 		{
 			auto dynPath = generateAddModel("dcinfer_test_add_dyn.onnx", 1, {-1, 4});
 			if (dynPath.empty())
