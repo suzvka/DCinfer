@@ -27,7 +27,7 @@ project(DCinferInstallSmoke LANGUAGES CXX)
 
 # Release smoke is intentionally a Core + DCIr consumer.  Keep the expected
 # version explicit so a stale prefix or mismatched tag cannot pass silently.
-set(SMOKE_EXPECT_VERSION "0.7.5" CACHE STRING "Expected DCinfer/ DCIr package version")
+set(SMOKE_EXPECT_VERSION "0.7.6" CACHE STRING "Expected DCinfer/ DCIr package version")
 if (NOT SMOKE_EXPECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
     message(FATAL_ERROR "SMOKE_EXPECT_VERSION must be a semantic version")
 endif()

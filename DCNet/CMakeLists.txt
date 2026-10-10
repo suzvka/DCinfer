@@ -64,7 +64,7 @@ target_sources(DCNet PRIVATE ${DCNET_SRC})
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
-    set(DCINFER_PKG_VERSION "0.7.5")
+    set(DCINFER_PKG_VERSION "0.7.6")
 endif()
 
 install(TARGETS DCNet EXPORT DCNetTargets

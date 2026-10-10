@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-10-10
+
+引擎/模型分层（破坏性）：`EngineDescriptor` 的引擎生命周期钩子拆分为显式两层——
+引擎级一次性初始化（`createEngineCore`，缓存键 = `engineType`，每类型恰好一次，
+产物 `EngineCore` 由该类型全部模型实例共享持有）与模型级加载（`loadModel`，
+缓存键 = `engineType:modelPath`，每组合恰好一次）。此前 `createEngine` 名义上
+"创建引擎"、实际做模型加载，且与真正的引擎初始化（如 `Ort::Env`）混在一起；
+拆分后"引擎初始化一次、加载多个模型"成为一等语义。
+
+### Changed
+
+- **破坏性（0.x）钩子四名更换（旧名全部退场，迁移点由编译期强制暴露）**：
+  `createEngine` 拆分为 `createEngineCore()` → `EngineCore`（引擎级；无引擎级
+  资源的适配器留空，框架合成空核心）与 `loadModel(core, modelPath)` →
+  `EngineInstance`（模型级；core 供绑定引擎级资源，如 Session 绑定 Env）；
+  `releaseEngine` 更名 `releaseModel`（模型级释放，语义不变），新增
+  `releaseEngineCore`（引擎核心释放）。适配器迁移：OnnxRuntime 将
+  `Ort::Env` 归引擎核心（删除进程级 Env 单例）、`Ort::Session` 归模型加载；
+  DCNet/OpenAI 无引擎级共享资源（不注册核心钩子，忽略 core 参数）。
+- **`EngineRegistry` 公开方法语义更新（保留现名）**：`getOrCreateEngine`
+  内部先确保引擎核心就绪（`getOrCreateEngineCore`，single-flight 每类型一次）
+  再加载模型；`releaseAllEngines` 同清两级缓存（模型实例 + 引擎核心）；
+  待析构句柄仍锁外释放；实例经共享句柄持有核心（核心存活期覆盖全部实例，
+  原生资源析构顺序：模型级对象先于引擎核心）。
+- `EngineInstance` 新增 `attachCore` / `core()`：框架在实例发布前注入核心句柄；
+  适配器执行期可经 `ctx.engineInstance()->core()` 访问引擎级对象，无需全局状态。
+
+### Added
+
+- `EngineCore` / `EngineCoreHandle`（类型擦除的引擎级运行时句柄）；
+  `EngineDescriptor::createEngineCore` / `releaseEngineCore`；
+  `EngineRegistry::getOrCreateEngineCore` / `releaseEngineCore`。
+
+### Removed
+
+- **破坏性（0.x）`EnvRegistry` 设施整体移除**（`EnvRegistry.h` / `EnvRegistry.cpp` /
+  `EnvRegistryTest`）：该设施与引擎核心机制概念重复且语义更弱，框架内无生产
+  使用方；其"引擎运行时环境"职责已由本版本的 `createEngineCore` / `EngineCore` /
+  `releaseEngineCore` 完整承接（每 engineType single-flight 一次、句柄链保证环境
+  晚于全部模型实例销毁、清理钩子在真实析构时恰好一次）。迁移：适配器经
+  `EngineDescriptor::createEngineCore` 提供引擎级共享资源（如 `Ort::Env` /
+  CUDA context），执行期经 `ctx.engineInstance()->core()` 访问。
+
 ## [0.7.5] - 2026-10-09
 
 引擎节点编译语义修正（破坏性）：GraphCompiler 不再于编译期急切创建引擎
