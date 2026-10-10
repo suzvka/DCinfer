@@ -85,7 +85,7 @@ DCNet 是**张量网络传输框架**，与 `DCEngines` 的本地引擎适配器
    要求第三方反过来对接我们。
 2. **版本责任隔离**。自有协议一旦铺开，升级就是永久兼容包袱；协议外置后，版本
    问题被隔离在单个适配器内部。
-3. **架构一致性**。现有形态中 `converter`、`preRun/onError/releaseEngine` 全部是
+3. **架构一致性**。现有形态中 `converter`、`preRun/onError/releaseModel` 全部是
    可注入钩子（`EngineDescriptor`，`DCinfer/include/Graph/EngineRegistry.h`），
    通信协议本应属于同一类可注入策略。
 
@@ -94,7 +94,7 @@ DCNet 是**张量网络传输框架**，与 `DCEngines` 的本地引擎适配器
 - `EngineRegistry::registerOperator`（`EngineRegistry.h`）是无状态轻量路径，
   承载不了连接池、健康检查、重连等实例状态；
 - DCNet 网络算子有连接生命周期，且"与 ONNX 适配器形态类似"本身就指向
-  `EngineDescriptor` 形态（`createEngine` / 端口推导 / `factory` / 运行时钩子）。
+  `EngineDescriptor` 形态（`createEngineCore` / `loadModel` / 端口推导 / `factory` / 运行时钩子）。
 - 纯编解码类辅助（payload 组装/拆解）若确需独立算子形态，另行评估，不进 DCNet 核心。
 
 ### 2.3 ADR-3：开发者的心智模型是"双向翻译器"
@@ -173,7 +173,7 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 | 1 | 组件形态归属 | **独立服务端组件**：`DcNetListener` + `registerDcNetServerAdapter`（不注册 EngineDescriptor，不动出站契约，§8 只增不改）；ADR-6(5)「单独设计」落于此 |
 | 2 | 鉴权分级 | **P1 仅 Bearer token**：`NetServerEndpoint::authToken` 非空时启用 Authorization 头校验（镜像出站 `authToken` 注入语义，裸 key / `Bearer` 前缀等价）；mTLS 与服务端证书配置后置 |
 | 3 | `RemoteMalformed` 的 wire 取值 | **415**（未列举状态码 → 对端兜底 RemoteMalformed → ExecutionFailed + dcnet 诊断）；错误体 `malformed_frame` 仅为诊断细化 |
-| 4 | `bind` 错误出口 | **配置期抛 `NodeException`**（对齐 `createEngine` 先例与 DESIGN.md §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（不崩溃、不静默丢弃） |
+| 4 | `bind` 错误出口 | **配置期抛 `NodeException`**（对齐 `loadModel` 先例与 DESIGN.md §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（不崩溃、不静默丢弃） |
 | 5 | RunContext 生命周期 / 并发隔离 | **一请求一节点实例**（`EngineRegistry::createNode` 每请求构造，实例级隔离）；引擎实例按 `engineType + localModelRef` 缓存复用，本地执行互斥串行（引擎单任务语义）；**server codec 不暴露 `RunContext`**，以「端口名 ↔ 张量」为界 |
 | 6 | 装配入口命名 | 采用 **`registerDcNetServerAdapter(reg, DcNetServerAdapterDesc)`**；本地模型标识命名 **`localModelRef`**，避免与 modelPath=远端端点的全局约定冲突 |
 | 7 | 服务端配置结构 | **派生独立结构 `NetServerEndpoint`**（listenHost/port/basePath/requestPath/authToken/backlog/maxConnections/maxInFlight/requestTimeout），不复用出站 `NetEndpoint` 全套 |
@@ -205,7 +205,7 @@ ExecutionFailed），按「本地执行失败 → 5xx」应答 500 → 对端 Ex
 ```cpp
 struct DcNetTransport {
     virtual ~DcNetTransport() = default;
-    /// 连接建立 / 就绪探测（createEngine 时调用；失败抛 NodeException）
+    /// 连接建立 / 就绪探测（loadModel 时调用；失败抛 NodeException）
     virtual NetError connect(const NetEndpoint&) = 0;
     /// 发送请求载荷（阻塞，遵守超时；失败返回非 Ok 的 NetError）
     virtual NetError send(const Payload&) = 0;
@@ -213,7 +213,7 @@ struct DcNetTransport {
     virtual NetError recv(Payload&) = 0;
     /// 健康判定（进程存活 / 心跳 / 连接可用）
     virtual bool alive() const = 0;
-    /// 释放连接与资源（releaseEngine 调用）
+    /// 释放连接与资源（releaseModel 调用）
     virtual void close() = 0;
 };
 ```
@@ -366,7 +366,8 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 
 | 钩子 | 实现 |
 |---|---|
-| `createEngine(modelPath)` | `modelPath` 即远端端点（URL / host:port）；创建 transport + 连接 + 就绪探测；失败抛 `NodeException`（配置期错误） |
+| `createEngineCore` | 不注册——DCNet 无引擎级共享资源（框架合成空核心；连接生命周期归属模型实例） |
+| `loadModel(core, modelPath)` | `modelPath` 即远端端点（URL / host:port）；创建 transport + 连接 + 就绪探测；失败抛 `NodeException`（配置期错误）；`core` 为框架合成的空核心（忽略） |
 | `getInputPorts/getOutputPorts` | 返回静态本地形状规则表（§3.4），不依赖远端推导 |
 | `factory` | 构造节点：`ResourceClass::System` + RunFn + 绑定实例 |
 | `converter` | 不需要（文本经 `TensorType::Data` 承载）；tensor 级原生协议另行评估 |
@@ -375,7 +376,7 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | `preRun` | 留空 |
 | `postRun` | 留空（响应已在 RunFn 内解析） |
 | `onError` | 留空 |
-| `releaseEngine` | 留空（transport 随实例共享句柄析构释放连接） |
+| `releaseModel` | 留空（transport 随实例共享句柄析构释放连接） |
 
 ### 5.1 RunFn 请求流程
 

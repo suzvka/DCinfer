@@ -84,9 +84,11 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 	const Node::RunFn runFn = desc.runFn ? desc.runFn : makeDefaultRunFn(std::move(desc.codec));
 	const std::function<std::shared_ptr<DcNetTransport>()> transportFactory = std::move(desc.transportFactory);
 
-	// ── createEngine：modelPath 即远端端点 → 解析 + 覆盖 → 创建 transport → 连接 ──
+	// ── loadModel：modelPath 即远端端点 → 解析 + 覆盖 → 创建 transport → 连接 ──
 	// 注意：钩子在 single-flight 领导者线程锁外执行（不持有 registry 锁），
 	// 可安全反向调用 registry；同 key 并发调用只执行一次。
+	// 引擎级：DCNet 无引擎级共享资源——不注册 createEngineCore（框架合成
+	// 空核心），钩子忽略 core 参数。
 	// 覆盖项捕获为值：注册级配置固化（authToken 不参与日志/错误信息）。
 	const std::string epAuthToken = desc.authToken;
 	const std::vector<std::string> epHeaders = desc.headers;
@@ -94,8 +96,8 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 	const auto epRequestTimeout = desc.requestTimeout;
 	const int epMaxRetries = desc.maxRetries;
 	const bool allowInsecureCredentials = desc.allowInsecureCredentials;
-	ed.createEngine = [engineType, transportFactory, codec, epAuthToken, epHeaders,
-					   epConnectTimeout, epRequestTimeout, epMaxRetries, allowInsecureCredentials](const std::string& modelPath) -> EngineInstance {
+	ed.loadModel = [engineType, transportFactory, codec, epAuthToken, epHeaders,
+					   epConnectTimeout, epRequestTimeout, epMaxRetries, allowInsecureCredentials](const EngineCore& /*core*/, const std::string& modelPath) -> EngineInstance {
 		if (!transportFactory)
 			throw NodeException(NodeException::ErrorType::InternalError, "DCNet",
 								"engine '" + engineType + "' has no transportFactory");

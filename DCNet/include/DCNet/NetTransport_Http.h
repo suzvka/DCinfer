@@ -21,7 +21,7 @@ namespace DC::Net {
 /// 语义（对运行时同步接口，ADR-6）：
 /// - connect()：解析端点 URL（Poco::URI）→ TCP 就绪探测 → 建立会话
 ///   （HTTPClientSession / HTTPSClientSession，keep-alive 复用）；
-///   探测失败即返回归一化错误（createEngine 配置期报告）
+///   探测失败即返回归一化错误（loadModel 配置期报告）
 /// - send()：POST {basePath}{requestPath}，2xx → None（响应体留待 recv 读取）；
 ///   非 2xx（含 3xx：不自动跟随重定向，Poco 默认亦不跟随）→ 读取错误体
 ///   并归一化（normalizeHttpResponse）

@@ -304,7 +304,7 @@ NetError HttpTransport::connect(const NetEndpoint& ep) {
 		return _connectError;
 	}
 
-	// TCP 就绪探测（契约 §3.1：connect 即就绪探测，拒连/DNS 失败在 createEngine 配置期报告）
+	// TCP 就绪探测（契约 §3.1：connect 即就绪探测，拒连/DNS 失败在 loadModel 配置期报告）
 	try {
 		Poco::Net::SocketAddress addr(uri.getHost(), static_cast<Poco::UInt16>(uri.getPort()));
 		Poco::Net::StreamSocket probe;

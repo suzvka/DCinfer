@@ -198,12 +198,13 @@ std::shared_ptr<DcNetServerService> registerDcNetServerAdapter(EngineRegistry& r
 	if (!desc.codec)
 		throw NodeException(NodeException::ErrorType::InternalError, "registerDcNetServerAdapter",
 							"engine '" + desc.engineType + "' has no server codec");
-	// 预创建引擎实例：engineType 未注册 / createEngine 失败在此暴露（配置期报错）
+	// 预创建引擎核心与实例：engineType 未注册 / createEngineCore / loadModel
+	// 失败在此暴露（配置期报错）
 	if (!reg.getOrCreateEngine(desc.engineType, desc.localModelRef))
 		throw NodeException(NodeException::ErrorType::ExecutionFailed, "registerDcNetServerAdapter",
 							"engine '" + desc.engineType + ":" + desc.localModelRef +
 								"' not registered or creation failed");
-	// requestPath 由 codec 注入（镜像出站 createEngine 的端点装配）
+	// requestPath 由 codec 注入（镜像出站 loadModel 的端点装配）
 	desc.endpoint.requestPath = desc.codec->requestPath();
 
 	auto svc = std::make_shared<ServerService>(reg, std::move(desc));

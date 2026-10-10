@@ -18,7 +18,7 @@ using Payload = std::string;
 struct DcNetTransport {
 	virtual ~DcNetTransport() = default;
 
-	/// @brief 连接建立 / 就绪探测（createEngine 时调用；失败抛 NodeException）。
+	/// @brief 连接建立 / 就绪探测（loadModel 时调用；失败抛 NodeException）。
 	virtual NetError connect(const NetEndpoint&) = 0;
 
 	/// @brief 发送请求载荷（阻塞，遵守超时；失败返回非 Ok 的 NetError）。
@@ -34,7 +34,7 @@ struct DcNetTransport {
 	/// @brief 健康判定（进程存活 / 心跳 / 连接可用）。
 	virtual bool alive() const = 0;
 
-	/// @brief 释放连接与资源（releaseEngine 调用）。
+	/// @brief 释放连接与资源（releaseModel 调用）。
 	virtual void close() = 0;
 };
 

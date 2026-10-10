@@ -19,7 +19,7 @@ struct NetServerEndpoint {
 	std::string basePath = "/v1";         ///< 协议基路径（与出站 NetEndpoint::basePath 对称）
 
 	// ── 协议子路径 ──
-	std::string requestPath = "/infer";   ///< 由 server codec 注入（镜像出站 createEngine 装配）
+	std::string requestPath = "/infer";   ///< 由 server codec 注入（镜像出站 loadModel 装配）
 
 	// ── 鉴权（可选；仅 Bearer token，mTLS 后置）──
 	std::string authToken;                ///< 非空时启用 Authorization 校验（裸 key 或 "Bearer xxx"）

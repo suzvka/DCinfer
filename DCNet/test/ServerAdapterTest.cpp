@@ -112,7 +112,7 @@ static void ensureDoublerEngine() {
 		return;
 	EngineDescriptor ed;
 	ed.engineType = kEngineType;
-	ed.createEngine = [](const std::string&) -> EngineInstance {
+	ed.loadModel = [](const EngineCore&, const std::string&) -> EngineInstance {
 		return EngineInstance(std::make_shared<int>(0)); // 占位运行时对象（无状态引擎）
 	};
 	ed.getInputPorts = [](const EngineInstance&) { return doublerSchema().inputs; };
@@ -417,8 +417,8 @@ TEST(configErrorsThrow) {
 }
 
 // ── P0 回归：半开连接（请求未读完、不计在途）期间的 stop() 必须等 worker 退净 ──
-//   旧行为：排水只看 _inFlight → stop() 立即返回、监听器析构，分离 worker 醒来后
-//   访问已析构成员（UAF）。现排水以线程存活计数为准，并在 grace 到期强制关闭在册连接。
+//   排水若只看 _inFlight：stop() 立即返回、监听器析构，分离 worker 醒来后
+//   访问已析构成员（UAF）。排水以线程存活计数为准，并在 grace 到期强制关闭在册连接。
 //   ASan/TSan 构建下本用例即内存安全强证明；Release 下验证排水语义与收尾关连。
 
 TEST(stopDrainsHalfOpenConnection) {
@@ -458,7 +458,7 @@ TEST(stopDrainsHalfOpenConnection) {
 		refused = true;
 	}
 	CHECK(refused, "stop 后新连接被拒");
-	// 进程存活至此前进一步说明无 use-after-free（本文件末尾的汇总输出即证明）
+	// 进程存活至此，进一步说明无 use-after-free（本文件末尾的汇总输出即证明）
 }
 
 // ── 连接级闸门：超出 maxConnections 的连接在 accept 期即被拒（不起线程、不入在途）──

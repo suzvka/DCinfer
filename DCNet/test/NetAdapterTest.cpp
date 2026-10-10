@@ -191,7 +191,7 @@ TEST(createNodeSchemaAndAffinity) {
 		  "output schema from local rules");
 	auto t = FakeTransport::byEndpoint["http://127.0.0.1:8080/v1"];
 	CHECK(t != nullptr, "transport should be registered for endpoint");
-	CHECK(t->connectCalls == 1, "createEngine should connect once");
+	CHECK(t->connectCalls == 1, "loadModel should connect once");
 	CHECK(t->lastEndpoint.host == "127.0.0.1", "endpoint parsed and passed to transport");
 	CHECK(t->lastEndpoint.port == 8080, "endpoint port passed to transport");
 }

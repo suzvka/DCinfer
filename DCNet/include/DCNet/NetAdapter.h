@@ -25,7 +25,7 @@ struct DcNetAdapterDesc {
 	/// 本地形状规则（静态端口表，不依赖远端推导）。
 	Node::Schema schema;
 
-	/// 创建传输实例；createEngine 时调用并 connect（modelPath 即远端端点）。
+	/// 创建传输实例；loadModel 时调用并 connect（modelPath 即远端端点）。
 	std::function<std::shared_ptr<DcNetTransport>()> transportFactory;
 
 	/// 协议映射（无状态、可共享）。
@@ -54,8 +54,9 @@ struct DcNetAdapterDesc {
 /// @endcode
 ///
 /// 特性：
-/// - createEngine(modelPath) 解析端点为 NetEndpoint → transportFactory 创建实例
-///   → connect（失败抛 NodeException，配置期报错）
+/// - loadModel(core, modelPath) 解析端点为 NetEndpoint → transportFactory 创建实例
+///   → connect（失败抛 NodeException，配置期报错）；DCNet 无引擎级资源，
+///   不注册 createEngineCore（框架合成空核心，钩子忽略 core 参数）
 /// - getInputPorts/getOutputPorts 返回本地静态形状规则（不依赖远端）
 /// - 节点归属 ResourceClass::System（I/O 资源类，README 分工）
 /// - RunFn 失败经 NetError 归一化出口上报（NodeResult + ErrorTracker 兼容）

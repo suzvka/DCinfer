@@ -41,8 +41,8 @@ struct DcNetServerAdapterDesc {
 /// 引擎实例按 engineType + localModelRef 复用（Registry 缓存），本地执行以
 /// 互斥串行（引擎单任务语义）；监听器自持 I/O 线程（ADR-6(3)）。
 ///
-/// 配置期错误（codec 缺失 / engineType 未注册 / createEngine 失败 / bind
-/// 失败）抛 NodeException（ADR-7 配置期出口）；运行期失败一律 wire 应答，
+/// 配置期错误（codec 缺失 / engineType 未注册 / createEngineCore / loadModel
+/// 失败 / bind 失败）抛 NodeException（ADR-7 配置期出口）；运行期失败一律 wire 应答，
 /// 不抛出、不静默丢弃。
 ///
 /// @param reg  目标注册表；引用须比返回句柄存活更久
