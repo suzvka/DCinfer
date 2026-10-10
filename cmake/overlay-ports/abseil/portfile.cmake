@@ -12,9 +12,8 @@ vcpkg_from_github(
         001-mingw-dll.patch # Upstreamed (not yet in a release): https://github.com/abseil/abseil-cpp/commit/f2dee57baf19ceeb6d12cf9af7cbb3c049396ba5
         002-string-view.patch
         003-force-cxx-17.patch
-        # 来自 onnxruntime 1.28 官方 vcpkg-ports/abseil（对应 abseil/abseil-cpp#2075）：
-        # NVCC 13.3 (cudafe++) host 解析修复——abseil 头文件会被 ORT 的 .cu 编译单元
-        # 间接包含，未打补丁时 MSVC 19.51 host 通道报 C2794/C2938/C3856。
+        # 来自 onnxruntime 1.28 官方 vcpkg-ports/abseil（abseil-cpp#2075）：
+        # NVCC 13.3 cudafe++ host 解析修复——未打补丁时 MSVC 19.51 报 C2794/C2938/C3856。
         absl_windows.patch
         absl_cuda_warnings.patch
         absl_cuda13_member_template.patch

@@ -14,11 +14,9 @@ ValidatorRegistry& ValidatorRegistry::instance() {
 void ValidatorRegistry::ensureDefaults() {
 	static std::once_flag flag;
 	std::call_once(flag, []() {
-		// 自动分配类型标签（首次调用 ensureSlotType 触发递增分配）
 		auto dctensorId = ensureSlotType<DC::Tensor>();
 		auto valueId = ensureSlotType<DC::Value>();
 
-		// DCTensor 校验器
 		ValidatorRegistry::instance().registerValidator(
 			dctensorId, [](const void* data, SlotDataType, const TensorMeta& rule) -> SlotDataStatus {
 				const auto* t = static_cast<const Tensor*>(data);
@@ -35,13 +33,12 @@ void ValidatorRegistry::ensureDefaults() {
 				return s;
 			});
 
-		// Value 校验器：放行（由具体引擎校验）
+		// Value 放行，由具体引擎校验
 		ValidatorRegistry::instance().registerValidator(
 			valueId,
 			[](const void*, SlotDataType, const TensorMeta&) -> SlotDataStatus { return SlotDataStatus{}; });
 
-		// DCTensor 克隆器：深拷贝产出独立可变副本（共享/冻结载荷的 clone 出口；
-		// 拷贝构造自带非冻结语义——clone 结果可直接突变）
+		// DCTensor 克隆器：深拷贝产出独立可变副本；拷贝构造自带非冻结语义
 		ValueCloneRegistry::instance().registerClone(
 			dctensorId, [](const void* data) -> std::shared_ptr<void> {
 				return std::make_shared<Tensor>(*static_cast<const Tensor*>(data));
@@ -57,8 +54,7 @@ void ValidatorRegistry::registerValidator(SlotDataType type, SlotCheckFn fn) {
 const SlotCheckFn* ValidatorRegistry::find(SlotDataType type) const {
 	std::lock_guard lk(_mutex);
 	auto it = _validators.find(type);
-	// unordered_map 节点地址稳定（rehash 不移动节点），启动期注册完成后
-	// 返回的指针在运行期持续有效（契约：启动期注册、运行期并发读取）
+	// 启动期注册完成后指针持续有效：map 节点地址稳定，运行期可并发读取
 	return it != _validators.end() ? &it->second : nullptr;
 }
 
@@ -69,8 +65,6 @@ SlotDataStatus ValidatorRegistry::validate(const void* data, SlotDataType type, 
 	}
 	return (*fn)(data, type, rule);
 }
-
-// ── ValueCloneRegistry ──
 
 ValueCloneRegistry& ValueCloneRegistry::instance() {
 	static ValueCloneRegistry inst;
@@ -85,7 +79,6 @@ void ValueCloneRegistry::registerClone(SlotDataType type, ValueCloneFn fn) {
 const ValueCloneFn* ValueCloneRegistry::find(SlotDataType type) const {
 	std::lock_guard lk(_mutex);
 	auto it = _clones.find(type);
-	// 同 ValidatorRegistry：启动期注册、运行期并发读取（节点地址稳定）
 	return it != _clones.end() ? &it->second : nullptr;
 }
 

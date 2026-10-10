@@ -13,91 +13,69 @@
 
 namespace DC {
 
-// ── 审计信息：伴随每次 append 写入的元数据 ──
 struct OutputAudit {
-	std::string nodeName; // dc.node
-	std::string portName; // dc.port
-	std::string taskId;   // dc.task_id
+	std::string nodeName;
+	std::string portName;
+	std::string taskId;
 };
 
-// ── 输出声明：某 task 期望哪个节点的哪个端口产出多少次 ──
 struct OutputDeclaration {
 	std::string nodeName;
 	std::string portName;
 	size_t count = 1;
 };
 
-// ── 未满足声明：诊断用，携带当前已累计数量 ──
 struct UnsatisfiedDeclaration {
-	OutputDeclaration decl; ///< 原始声明
-	size_t current = 0;     ///< 当前已累计的产出次数（< decl.count）
+	OutputDeclaration decl;
+	size_t current = 0;
 };
 
-// ── 输出绑定（序列化用）──
 struct OutputBinding {
 	std::string nodeName;
 	std::string portName;
-	std::string alias;  ///< 公共别名（必填；序列化/内省元数据，不参与运行时寻址）
+	std::string alias;
 };
 
-/// @brief OutputZone：append-only 输出区，聚合纯任务态（声明/累加/artifact）。
-///
-/// 语义：
-/// - 图级输出绑定位于 GraphSignature（冻结快照，构建期在 GraphBuilder）
-/// - declare() 声明 task 的期望产出
-/// - append() 写入 artifact（数据 + 审计信息）
-/// - accumulateAndCheck() 累加计数并检查所有声明是否满足
-/// - take() 消费式读取 artifact
-///
-/// 所有公开方法线程安全（内部 mutex）。
+/// @brief OutputZone：append-only 输出区，聚合纯任务态（声明/累加/artifact；公开方法线程安全）。
 class OutputZone {
 public:
 	using TaskId = std::string;
-
-	// ── 声明管理 ──
 
 	void declare(const TaskId& taskId, std::vector<OutputDeclaration> declarations);
 	void declare(const TaskId& taskId, const std::string& nodeName,
 				 const std::string& portName, size_t count = 1);
 	bool hasDeclaration(const TaskId& taskId) const;
 
-	// ── 累加与检查 ──
-
-	/// @brief  累加指定端口的产出计数，返回 true 表示所有声明均已满足
+	/// @brief 累加指定端口的产出计数，返回 true 表示所有声明均已满足。
 	bool accumulateAndCheck(const std::string& nodeName, const std::string& portName,
 							const TaskId& taskId);
 
-	/// @brief  静态检查所有声明是否满足（不累加，供 _exhaustedCheck 使用）
+	/// @brief 检查所有声明是否满足（不累加）。
 	bool checkAllSatisfied(const TaskId& taskId) const;
 
-	/// @brief  查询指定 task 中尚未满足的声明列表（诊断用）
-	/// @return 每个未满足声明及其当前累计次数；全部满足时返回空向量
+	/// @brief 查询尚未满足的声明及其当前累计次数（全部满足时为空）。
 	std::vector<UnsatisfiedDeclaration> unsatisfiedDeclarations(const TaskId& taskId) const;
 
-	// ── Artifact 存储 ──
-
-	/// @brief  append-only 写入 artifact（消费式，数据所有权转移）
+	/// @brief append-only 写入 artifact（数据所有权转移）。
 	void append(const TaskId& taskId, const std::string& nodeName,
 				const std::string& portName, Value data, OutputAudit audit);
 
-	/// @brief  消费式读取 artifact（取出后内部清空）
+	/// @brief 消费式读取 artifact（取出后内部清空）。
 	std::optional<Value> take(const TaskId& taskId, const std::string& nodeName,
 							  const std::string& portName);
 
-	/// @brief  检查 artifact 是否存在
+	/// @brief 检查 artifact 是否存在。
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName,
 				   const std::string& portName) const;
 
-	/// @brief  查询指定 task 的全部输出声明（终止时从节点缓冲抢救最终结果用）
+	/// @brief 查询指定 task 的全部输出声明。
 	std::vector<OutputDeclaration> declarationsOf(const TaskId& taskId) const {
 		std::lock_guard lk(_mutex);
 		auto it = _declarations.find(taskId);
 		return it != _declarations.end() ? it->second : std::vector<OutputDeclaration>{};
 	}
 
-	// ── Task 清理 ──
-
-	/// @brief  清理指定 task 的所有声明、累加器、artifact
+	/// @brief 清理指定 task 的所有声明、累加器、artifact。
 	void clearTask(const TaskId& taskId);
 
 private:
@@ -117,14 +95,10 @@ private:
 	std::unordered_map<TaskId, std::unordered_map<std::string, Artifact>> _artifacts;
 };
 
-// ════════════════════════════════════════════
 // 内联实现
-// ════════════════════════════════════════════
 
 inline void OutputZone::declare(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
-	// P2-11：count=0 的声明立即视为满足，无任何诊断价值——显式 0 视为调用方
-	// 错误（"无需该输出"的正确语义是不声明），入口拒绝（校验先于写入，
-	// 拒绝路径零副作用）
+	// count=0 无诊断价值：正确语义是不声明；入口拒绝且零副作用
 	for (const auto& d : declarations) {
 		if (d.count == 0)
 			throw GraphException(GraphException::ErrorType::NoDeclaration, "OutputZone::declare",
@@ -141,7 +115,6 @@ inline void OutputZone::declare(const TaskId& taskId, std::vector<OutputDeclarat
 
 inline void OutputZone::declare(const TaskId& taskId, const std::string& nodeName,
 								const std::string& portName, size_t count) {
-	// P2-11：同上——count=0 在入口拒绝
 	if (count == 0)
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "OutputZone::declare",
 							 "output declaration count must be > 0 (node '" + nodeName
@@ -160,7 +133,7 @@ inline bool OutputZone::accumulateAndCheck(const std::string& nodeName, const st
 	std::lock_guard lk(_mutex);
 	auto declIt = _declarations.find(taskId);
 	if (declIt == _declarations.end())
-		return false; // 防御：未声明（submit 中已被拦截）
+		return false; // 未声明（submit 期已拦截）
 
 	std::string key = _makeKey(nodeName, portName);
 	++_accumulated[taskId][key];

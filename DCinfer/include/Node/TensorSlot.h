@@ -14,10 +14,7 @@
 
 namespace DC {
 
-/// @brief 张量数据槽位：类型擦除的运行时数据容器，支持 store/take/peek。
-///
-/// TensorSlot 是 Node 输入/输出端口的基础存储单元。
-/// 通过 ValidatorRegistry 在 store() 时自动完成类型校验。
+/// @brief 张量数据槽位：Node 输入/输出端口的基础存储单元（类型擦除，store() 经 ValidatorRegistry 校验）。
 class TensorSlot {
 	using TensorType = TensorMeta::TensorType;
 	using ErrorType = TensorException::ErrorType;
@@ -25,45 +22,35 @@ class TensorSlot {
 public:
 	using Shape = Tensor::Shape;
 
-	/// @brief 同节点内所有槽位的映射表，供 DefaultProvider 在懒求值时查阅锚定槽数据。
+	/// @brief 同节点内所有槽位的映射表（供 DefaultProvider 查阅锚定数据）。
 	using SlotMap = std::unordered_map<std::string, TensorSlot>;
 
-	/// @brief 懒求值默认值工厂：当槽位无显式输入且无静态默认值时，由该回调按需生成 Tensor。
-	/// @param peers 同节点所有输入槽位的映射（key=槽位名），可从中读取锚定张量的形状。
-	/// @return 生成的默认张量；返回 nullptr 表示放弃（槽位保持空）。
+	/// @brief 懒求值默认值工厂：槽位无显式输入且无静态默认值时按需生成 Tensor（返回 nullptr 保持空）。
 	using DefaultProvider = std::function<std::unique_ptr<Tensor>(const SlotMap&)>;
 
-	/// @brief 槽位配置：仅含位置标记（Input / Output / Auto）。
+	/// @brief 槽位配置。
 	class Config {
 	public:
-		/// @brief 槽位位置枚举。
 		enum class Position {
-			Input, ///< 输入槽位
-			Output, ///< 输出槽位
-			Auto ///< 自动推断
+			Input,
+			Output,
+			Auto
 		};
 
-		/// @brief  默认构造：位置标记为 Auto。
 		Config() : position(Position::Auto) {}
 
-		/// @brief  设置槽位位置。
 		Config& setPosition(Position p);
 
-		Position position; ///< 当前位置标记。
+		Position position;
 	};
 
-	// ── 生命周期 ──
 	TensorSlot(const TensorSlot&) = delete;
 	TensorSlot& operator=(const TensorSlot&) = delete;
 
-	/// @brief 析构：释放类型擦除的运行时数据（RAII）。未被 take/clear 的
-	///        残留值随槽位销毁释放——否则容器销毁或移动后源对象会泄漏
-	///        （LeakSanitizer 在常规执行路径可复现）。
+	/// @brief 析构：释放类型擦除的运行时数据（RAII）。
 	~TensorSlot() { releaseBlob(); }
 
-	/// @brief 移动构造：接管 other 的数据并清空源（防空析构双重释放）。
-	///        清空源只 reset 不走 deleter：std::function 的 moved-from 状态
-	///        由实现定义，依赖其"被置空"来判断释放会对已转移指针二次释放。
+	/// @brief 移动构造：接管数据；源只 reset 不走 deleter（防已转移指针二次释放）。
 	TensorSlot(TensorSlot&& other) noexcept
 		: _rule(std::move(other._rule)),
 		  _defaultData(std::move(other._defaultData)),
@@ -73,7 +60,7 @@ public:
 		other._blob.reset();
 	}
 
-	/// @brief 移动赋值：先释放自身数据，再接管并清空源。
+	/// @brief 移动赋值：先释放自身数据再接管。
 	TensorSlot& operator=(TensorSlot&& other) noexcept {
 		if (this != &other) {
 			releaseBlob();
@@ -81,91 +68,58 @@ public:
 			_defaultData = std::move(other._defaultData);
 			_defaultProvider = std::move(other._defaultProvider);
 			_blob = std::move(other._blob);
-			other._blob.reset(); // 所有权已转移：仅清空源，不调用 deleter
+			other._blob.reset(); // 仅清空源，不调用 deleter
 			_config = std::move(other._config);
 		}
 		return *this;
 	}
 
-	/// @brief 构造 TensorSlot。
-	/// @param name   槽位名称（对应端口名）。
-	/// @param type   期望的张量逻辑类型。
-	/// @param size   单元素字节数。
-	/// @param shape  期望的形状（空=不校验）。
-	/// @param config 槽位配置（默认 Auto）。
 	TensorSlot(const std::string& name, TensorMeta::TensorType type, size_t size, const Shape& shape,
 			   const Config& config = Config());
 
-	// ── 元数据 ──
-
-	/// @brief  设置默认张量数据（输入槽位 fallback）。
+	/// @brief 设置默认张量数据（输入槽位 fallback）。
 	TensorSlot& setDefaultTensor(const Tensor& data);
 
-	/// @brief  设置懒求值默认值工厂（输入槽位 fallback）。
-	///         当槽位无显式输入且无静态默认值时，resolveDefaultIfNeeded() 调用此工厂生成数据。
-	///         典型用途：形状锚定到同节点另一输入端口，运行时动态创建零张量。
+	/// @brief 设置懒求值默认值工厂（输入槽位 fallback；典型：形状锚定到同节点另一端口）。
 	TensorSlot& setDefaultProvider(DefaultProvider fn);
 
-	/// @brief  若槽位无运行时数据但有 DefaultProvider，调用工厂填充槽位。
-	/// @param peers 同节点所有输入槽位的映射，供工厂查阅锚定数据。
+	/// @brief 无运行时数据但有 DefaultProvider 时调用工厂填充。
 	void resolveDefaultIfNeeded(const SlotMap& peers);
 
-	/// @brief  槽位名称。
 	const std::string& name() const;
-	/// @brief  期望的张量逻辑类型。
 	TensorType type() const;
-	/// @brief  单元素字节数。
 	size_t typeSize() const;
-	/// @brief  期望形状。
 	Shape shape() const;
 
-	/// @brief  是否为输入槽位。
 	bool isInput() const;
-
-	/// @brief  是否已设置默认数据。
 	bool hasDefaultData() const;
 
-	/// @brief  槽位的张量逻辑类型是否与 T 匹配。
 	template <typename T>
 	bool isType() const;
 
-	// ── 运行时存储：类型擦除 ──
-
-	/// @brief  类型擦除存储：通过 ensureSlotType 推导类型标签，经 ValidatorRegistry 校验后存储。
-	/// @tparam T 要存储的数据类型（自动推导 SlotDataType 标签）。
-	/// @throws TensorException(TypeMismatch)     若类型不匹配且不可转换。
-	/// @throws TensorException(InvalidShape)      若数据无效。
-	/// @throws TensorException(ShapeMismatch)     若形状不匹配且不可对齐。
+	/// @brief 类型擦除存储；校验失败抛 TensorException（InvalidShape / TypeMismatch / ShapeMismatch）。
 	template <typename T>
 	TensorSlot& store(T&& data);
 
-	/// @brief  移动取出数据，运行时检查类型标签是否匹配。
-	/// @throws TensorException(NotData)       若槽位为空。
-	/// @throws TensorException(TypeMismatch)  若类型标签不匹配。
+	/// @brief 移动取出数据；空槽位抛 NotData，类型不匹配抛 TypeMismatch。
 	template <typename T>
 	T take();
 
-	/// @brief  只读指针访问，类型不匹配返回 nullptr。
+	/// @brief 只读指针访问；类型不匹配返回 nullptr。
 	template <typename T>
 	const T* peek() const;
 
-	/// @brief  以 const Tensor& 获取 DC::Tensor 数据（仅 DCTensor 类型有效）。
-	/// @throws TensorException(NotData) 若无数据。
+	/// @brief 以 const Tensor& 获取数据（仅 DCTensor 类型有效；无数据抛 NotData）。
 	const Tensor& view() const;
 
-	/// @brief  槽位是否有数据（含默认数据）。
 	bool hasData() const;
-	/// @brief  当前存储数据的 SlotDataType 标签。
 	SlotDataType storedType() const;
 
-	/// @brief  清空运行时数据与默认数据。
 	void clear();
 
-	/// @brief  工厂：创建默认 Config。
 	static Config CreateConfig();
 
 private:
-	// ── 类型擦除存储 ──
 	struct TypedBlob {
 		void* ptr = nullptr;
 		std::function<void(void*)> deleter;
@@ -173,12 +127,12 @@ private:
 	};
 
 	TensorMeta _rule;
-	std::unique_ptr<Tensor> _defaultData; // 默认数据（永远是 DC::Tensor）
-	DefaultProvider _defaultProvider; // 懒求值默认值工厂
-	std::optional<TypedBlob> _blob; // 运行时数据
+	std::unique_ptr<Tensor> _defaultData;
+	DefaultProvider _defaultProvider;
+	std::optional<TypedBlob> _blob;
 	Config _config;
 
-	/// @brief 释放类型擦除数据（幂等：ptr 置空后二次调用无操作）。
+	/// @brief 释放类型擦除数据（幂等）。
 	void releaseBlob() {
 		if (_blob.has_value() && _blob->deleter && _blob->ptr) {
 			_blob->deleter(_blob->ptr);
@@ -200,7 +154,6 @@ TensorSlot& TensorSlot::store(T&& data) {
 	ValidatorRegistry::ensureDefaults(); // 保证默认注册已执行（std::call_once）
 	auto typeEnum = ensureSlotType<std::decay_t<T>>();
 
-	// 校验：始终按存储的实际类型进行校验
 	auto status = ValidatorRegistry::instance().validate(std::addressof(data), typeEnum, _rule);
 
 	if (!status.ready()) {
@@ -215,15 +168,12 @@ TensorSlot& TensorSlot::store(T&& data) {
 		}
 	}
 
-	// 类型擦除存储（强异常安全，#5）：先在局部完成新值构造——构造抛出
-	// （内存压力下的 bad_alloc / 可抛的拷贝构造）时旧值保持完好，不出现
-	// "旧数据已释放、_blob 仍持悬垂指针"的 UAF / 双重释放窗口。
+	// 强异常安全：先在局部构造新值，成功后再释放旧数据（避免 UAF/双重释放窗口）。
 	TypedBlob blob;
 	blob.type = typeEnum;
 	blob.ptr = new std::decay_t<T>(std::forward<T>(data));
 	blob.deleter = [](void* p) { delete static_cast<std::decay_t<T>*>(p); };
 
-	// 新值构造成功后再释放旧数据
 	if (_blob.has_value() && _blob->deleter && _blob->ptr) {
 		_blob->deleter(_blob->ptr);
 	}
@@ -248,7 +198,7 @@ T TensorSlot::take() {
 	auto* typed = static_cast<T*>(_blob->ptr);
 	T result = std::move(*typed);
 
-	// 释放存储（但不调用 deleter，因为已移动）
+	// 释放存储（不调用 deleter：已移动）
 	typed->~T();
 	operator delete(typed);
 	_blob.reset();

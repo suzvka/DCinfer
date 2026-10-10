@@ -16,28 +16,14 @@ class HTTPClientSession;
 
 namespace DC::Net {
 
-/// @brief 内置 HTTP transport（POCO 实现，跨平台；DESIGN.md §9 方案 C）。
+/// 内置 HTTP transport（POCO 实现）：connect 探测 TCP 就绪；send POST
+/// {basePath}{requestPath}，非 2xx 读错误体归一化（不跟随 3xx）；recv 读取
+/// 2xx 响应体，超 maxResponseBody 按错误归一化。同步阻塞，无 I/O 线程。
 ///
-/// 语义（对运行时同步接口，ADR-6）：
-/// - connect()：解析端点 URL（Poco::URI）→ TCP 就绪探测 → 建立会话
-///   （HTTPClientSession / HTTPSClientSession，keep-alive 复用）；
-///   探测失败即返回归一化错误（loadModel 配置期报告）
-/// - send()：POST {basePath}{requestPath}，2xx → None（响应体留待 recv 读取）；
-///   非 2xx（含 3xx：不自动跟随重定向，Poco 默认亦不跟随）→ 读取错误体
-///   并归一化（normalizeHttpResponse）
-/// - recv()：读取 2xx 响应体；超过 NetEndpoint::maxResponseBody 的成功体
-///   按错误归一化（0 = 宿主显式豁免不限制）
-///
-/// 实现策略：transport 内部为同步阻塞调用，无 I/O 线程——简单 HTTP/JSON 场景
-/// 直接跑在 RunFn 所在 System 池线程（ADR-6 判定矩阵第一行）。
-///
-/// 线程安全（DESIGN.md §2.3 契约）：引擎实例按 engineType:modelPath 缓存复用，
-/// 同一 transport 可被多节点并发持有，而执行互斥粒度在节点级——故本类自行
-/// 把「一次 send → recv 交换」整体串行化（连接复用、交换串行）：send 领取交换权，
-/// recv（或失败/异常/close）释放。交换权为标志 + 条件变量而非锁持有，
-/// 避免“由另一线程解锁互斥量”的未定义行为；send/recv 应成对在同一线程调用
-/// （RunFn 契约），跨线程未收尾的占用由下一次同线程 send / close / 析构回收。
-/// POCO 细节不进契约：本头文件仅前置声明，TLS 会话等实现见 .cpp。
+/// 线程安全：同一 transport 可被多节点并发持有，故把「一次 send → recv 交换」
+/// 整体串行化——send 领取交换权，recv（或失败 / close）释放；交换权用标志 +
+/// 条件变量而非锁持有，避免“由另一线程解锁互斥量”的未定义行为。send / recv
+/// 应成对在同一线程调用，跨线程未收尾的占用由下一次同线程 send / close / 析构回收。
 class HttpTransport : public DcNetTransport {
 public:
 	HttpTransport();
@@ -46,28 +32,25 @@ public:
 	NetError connect(const NetEndpoint&) override;
 	NetError send(const Payload&) override;
 	NetError recv(Payload&) override;
-	/// @brief 端点快照：_ep 仅在 connect（持有交换权）时写入，运行期只读。
+	/// 端点快照：_ep 仅在 connect 时写入，运行期只读。
 	const NetEndpoint& endpoint() const override { return _ep; }
 	bool alive() const override;
 	void close() override;
 
 private:
-	/// 分块读取响应体（上限 limit 字节，0 = 不限制）：rs 为本地持有的流
-	/// 引用（对象生命期由 session 副本保证，不触碰成员状态）；truncated
-	/// 置位表示达上限被截断——2xx 成功体超限由调用方按错误处理，非 2xx
-	/// 错误体仅作诊断允许截断。
+	/// 分块读取响应体（limit = 0 不限制）；truncated 置位表示达上限被截断
+	/// （2xx 成功体超限按错误处理，非 2xx 错误体允许截断）。
 	Payload readBody(std::istream& rs, size_t limit, bool* truncated);
 	void abortResponse();
 	void dropSession();
-	/// 重置会话与错误位（调用者必须已持有交换权）。
+	/// 重置会话与错误位（须已持有交换权）。
 	void resetLocked();
-	/// 领取交换权（阻塞直到无人在交换）；同一线程已有遗留占用先回收再领。
+	/// 领取交换权（阻塞直到无人在交换；同线程遗留占用先回收）。
 	void acquireClaim();
-	/// 释放交换权（仅当本线程持有时），并唤醒等待者。
+	/// 释放交换权（仅当本线程持有时）并唤醒等待者。
 	void finishCall(bool releaseClaim);
 
-	/// 交换权 RAII 收尾：作用域结束默认释放；send 成功路径 dismiss() 把占用
-	/// 延续给 recv（跨调用租约）。
+	/// 交换权 RAII 收尾：默认释放；send 成功路径 dismiss() 延续给 recv。
 	struct ClaimScope {
 		HttpTransport* self;
 		bool release = true;
@@ -84,11 +67,9 @@ private:
 	bool _callActive = false;
 	bool _claimed = false;                          ///< 一次交换进行中（connect/send→recv/close）
 	std::thread::id _claimOwner{};                  ///< 交换权持有线程（同线程重入回收依据）
-	/// 会话（shared_ptr：交换中途被 close/析构强收时，交换方持有的本地
-	/// 副本保活对象直至读取结束，close 侧 abort 仅中断阻塞读不致悬垂）
+	/// 会话：shared_ptr 保活——交换中途被 close 强收时，副本保活至读取结束。
 	std::shared_ptr<Poco::Net::HTTPClientSession> _session; ///< HTTPS 时指向 HTTPSClientSession
-	/// 挂起的响应流（send → recv 之间有效；指向 session 内部流，仅在
-	/// 交换权持有期间访问——跨线程收尾方（close/析构）经 _ioMutex 置空）
+	/// 挂起的响应流（send → recv 之间有效；仅交换权持有期间访问）。
 	std::istream* _response = nullptr;
 	long long _responseLength = -1;
 	std::string _basePath;                          ///< 端点 basePath（不含 requestPath）

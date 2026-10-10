@@ -7,7 +7,7 @@
 >
 > 本文档为权威约定，实现与文档不一致处以实现为准并回改文档。
 >
-> **Preflight security boundary (NET-1..NET-10):** The listener has no inbound TLS or
+> **Security boundary:** The listener has no inbound TLS or
 > chunked support and binds only resolved loopback addresses, even with authentication.
 > Remote deployments require a trusted same-host TLS/mTLS reverse proxy and a backend
 > port inaccessible to untrusted local users. Transfer-Encoding, duplicate headers and
@@ -171,7 +171,7 @@ DCinfer 运行时 —— RunFn / NodeStatus / ErrorTracker，图级语义统一
 | # | 决策点 | 裁决 |
 |---|---|---|
 | 1 | 组件形态归属 | **独立服务端组件**：`DcNetListener` + `registerDcNetServerAdapter`（不注册 EngineDescriptor，不动出站契约，§8 只增不改）；ADR-6(5)「单独设计」落于此 |
-| 2 | 鉴权分级 | **P1 仅 Bearer token**：`NetServerEndpoint::authToken` 非空时启用 Authorization 头校验（镜像出站 `authToken` 注入语义，裸 key / `Bearer` 前缀等价）；mTLS 与服务端证书配置后置 |
+| 2 | 鉴权分级 | **仅 Bearer token**：`NetServerEndpoint::authToken` 非空时启用 Authorization 头校验（镜像出站 `authToken` 注入语义，裸 key / `Bearer` 前缀等价）；mTLS 与服务端证书配置后置 |
 | 3 | `RemoteMalformed` 的 wire 取值 | **415**（未列举状态码 → 对端兜底 RemoteMalformed → ExecutionFailed + dcnet 诊断）；错误体 `malformed_frame` 仅为诊断细化 |
 | 4 | `bind` 错误出口 | **配置期抛 `NodeException`**（对齐 `loadModel` 先例与 DESIGN.md §6「配置/编译期」约定）；start 后运行期错误不抛出，一律 wire 应答（不崩溃、不静默丢弃） |
 | 5 | RunContext 生命周期 / 并发隔离 | **一请求一节点实例**（`EngineRegistry::createNode` 每请求构造，实例级隔离）；引擎实例按 `engineType + localModelRef` 缓存复用，本地执行互斥串行（引擎单任务语义）；**server codec 不暴露 `RunContext`**，以「端口名 ↔ 张量」为界 |
@@ -440,13 +440,10 @@ registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc);
 | 未知路径 / 非 POST | 404 / 405 | RemoteRejected → `InvalidInput` / RemoteMalformed → `ExecutionFailed` |
 | 请求中止（对端已断开） | 无应答 | 对端自行归一化 `net:timeout` |
 
-> **解析限度（ADR-7）**：非鉴权 `InternalError` 无忠实 wire 表示（500 → 对端
-> ExecutionFailed），按「本地执行失败 → 5xx」采纳；严格一致的扩表方案
-> 见 ADR-7，暂不采纳。
-> **SchemaMismatch 备注**：本地当前无产出点（`Node.h` 预留），对端按 422
-> 归一化为 InvalidInput 与本地形状违例现行行为一致；本地改产后本表无需变更
-> （`SchemaMismatch` 与 `InvalidInput` 同映 422/400 → InvalidInput，若需区分再扩表）。
-> 建议 `NetErrorTest` 的入站类用例与出站映射表同构维护（已落地：`wireRoundTripParity`）。
+> **解析限度**：非鉴权 `InternalError` 无忠实 wire 表示（500 → 对端 ExecutionFailed），
+> 详见 §2.5 ADR-7。
+> **SchemaMismatch 备注**：本地当前无产出点（`Node.h` 预留），422 → InvalidInput 与
+> 本地形状违例行为一致；本地改产后本表无需变更。
 
 ---
 

@@ -3,42 +3,32 @@
 
 namespace DC {
 
-/// @brief Graph 组件专用异常，携带错误类型枚举以支持精确的错误分类处理。
-///
-/// 所有公开的 Graph API 在拓扑校验或运行时数据传播失败时均可能抛出此类异常。
-/// 可通过 getErrorType() 获取具体错误类型进行针对性处理。
+/// @brief Graph 组件专用异常，携带错误类型枚举供精确分类处理。
 class GraphException : public Exception {
 public:
-	/// @brief 错误类型枚举，覆盖 Graph 组件中常见的语义错误。
 	enum class ErrorType {
-		NodeNotFound,        ///< 目标节点在图不存在
+		NodeNotFound,        ///< 目标节点不存在
 		DuplicateNode,       ///< 同名节点重复添加
-		PortNotFound,        ///< 连线时端口在目标节点 Schema 中不存在
+		PortNotFound,        ///< 端口不存在于节点 Schema
 		DirectConnect,       ///< 两个非 Connector 节点直连被拒
 		NoDeclaration,       ///< submit 时未声明输出期望
 		DuplicateTask,       ///< 同一 taskId 的活动任务被重复提交
-		DuplicateBinding,    ///< 图级绑定别名重复（别名必须是图的唯一公共名）
-		InvalidBinding,      ///< 图级绑定缺别名（别名是绑定的必填公共名）
-		FeedFailed,          ///< feedInput 时调用 Node::setInput 失败
-		Frozen,              ///< 图已冻结（compile/首次提交后拓扑不可变，构建 API 拒绝）
-		ExecutionFailed,     ///< 线程池中 Node::tryExecute 抛出 NodeException
+		DuplicateBinding,    ///< 图级绑定别名重复
+		InvalidBinding,      ///< 图级绑定缺别名
+		FeedFailed,          ///< feedInput 时 Node::setInput 失败
+		Frozen,              ///< 图已冻结，构建 API 拒绝
+		ExecutionFailed,     ///< 节点 tryExecute 抛出 NodeException
 		PropagateFailed,     ///< 数据传播链中写下游输入失败
-		UnreachableDeclaration, ///< submit 时声明目标在拓扑上不可达（构图/断链错误）
-		DuplicateEdge,       ///< 端口已有连接：输出口既有连接不可扩容 / 输入口已有入边（禁止二次 connect）
-		NonTerminalPort,     ///< 输出取数端口非法：绑定端口必须是终端端口（无出边），否则数据流被截断
+		UnreachableDeclaration, ///< 声明目标在拓扑上不可达
+		DuplicateEdge,       ///< 端口已有连接
+		NonTerminalPort,     ///< 输出取数端口非终端（有出边）
 		Other                ///< 其他未分类的错误
 	};
 
-	/// @brief 构造 GraphException。
-	/// @param errorType 错误类型（默认 Other）。
-	/// @param source    错误来源组件名称（默认 "Unknown"）。
-	/// @param message   附加错误消息（默认 "No message"）。
-	/// @param level     严重级别（默认 Error）。
 	GraphException(ErrorType errorType = ErrorType::Other, const std::string& source = "Unknown",
 				   const std::string& message = "No message", Level level = Level::Error)
 		: _errorType(errorType), Exception(source, composeMessage(errorType, message), level) {}
 
-	/// @brief 获取错误类型。
 	ErrorType getErrorType() const noexcept {
 		return _errorType;
 	}

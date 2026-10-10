@@ -15,23 +15,16 @@ class InferGraph;
 
 /// @brief 图公开接口：只按公开别名（bindInput / bindOutput 的 alias）喂数据 / 取结果。
 ///
-/// 由 InferGraph::interface() 创建（构造即冻结图）：创建时一次性解析
-/// 公开绑定（alias → (nodeName, portName)）并校验坐标存在性；此后
-/// feed / take 仅按别名操作，内部转发至 InferGraph 的坐标寻址运行期 API——
-/// 不引入第二套寻址语义。
+/// 由 InferGraph::interface() 创建（构造即冻结图）；创建时解析绑定并校验坐标存在性，
+/// 内部转发至 InferGraph 的坐标寻址 API。
 class GraphInterface {
 public:
 	class Task;
 
-	/// @brief 公开输入别名列表（按绑定顺序）
 	std::vector<std::string> inputAliases() const;
-
-	/// @brief 公开输出别名列表（按绑定顺序）
 	std::vector<std::string> outputAliases() const;
 
-	/// @brief 创建任务句柄（自动分配 taskId；句柄析构按状态回收：
-	///        终态即释放 / 在飞弃置即请求取消并回收 / 未提交即释放输入）
-	/// @note  仅限具名对象调用：临时接口对象上的任务句柄生命周期不安全
+	/// @brief 创建任务句柄（自动分配 taskId；句柄析构按状态回收：终态释放 / 在飞弃置并取消 / 未提交清输入）。
 	Task createTask() &;
 
 private:
@@ -48,7 +41,7 @@ private:
 	std::vector<OutputBinding> _outputs;
 };
 
-/// @brief 统一任务句柄：按公开别名喂数据 →（同步）run /（异步）submit+wait → 取结果。
+/// @brief 统一任务句柄：按公开别名喂数据、执行（run / submit+wait）、取结果。
 class GraphInterface::Task {
 public:
 	Task(Task&& other) noexcept;
@@ -58,57 +51,45 @@ public:
 	Task(const Task&) = delete;
 	Task& operator=(const Task&) = delete;
 
-	/// @brief 自动分配的 taskId
 	const std::string& taskId() const { return _taskId; }
 
-	// ── 组装（按公开输入别名；链式）──
-
-	/// @brief 按公开输入别名喂数据（写入缓冲，不触发执行）
+	/// @brief 按公开输入别名喂数据（写入缓冲，不触发执行）。
 	Task& feed(const std::string& alias, Value data);
 
-	/// @brief 便捷接口：直接传入 DC::Tensor
+	/// @brief 便捷：直接传入 DC::Tensor。
 	Task& feed(const std::string& alias, Tensor data);
 
-	// ── 执行：同步与异步同级 ──
-
-	/// @brief 异步启动：以全部输出绑定提交并返回（不等待）
-	/// @throws GraphException(NoDeclaration/DuplicateTask/UnreachableDeclaration) 同 submitBound
+	/// @brief 异步启动：以全部输出绑定提交并返回（不等待）。
 	void submit();
 
-	/// @brief 同步运行：submit() + wait()（无限等待直至终止）
+	/// @brief 同步运行：submit() + wait()。
 	TaskResult run();
 
-	/// @brief 同步运行（显式超时）：超时未终止返回 {status=Running}，
-	///        不取消任务——仍可继续 wait()/cancel()；句柄析构则请求取消并回收
+	/// @brief 同步运行（显式超时）：超时未终止返回 {status=Running}，不取消任务。
 	TaskResult run(std::chrono::milliseconds timeout);
 
-	// ── 等待 / 控制（异步路径配套）──
-
-	/// @brief 同步等待 task 终止（无限等待）
+	/// @brief 同步等待 task 终止（无限等待）。
 	TaskResult wait();
 
-	/// @brief 同步等待 task 终止（显式超时；超时只放弃等待，不取消任务）
+	/// @brief 同步等待 task 终止（显式超时；超时只放弃等待，不取消任务）。
 	TaskResult wait(std::chrono::milliseconds timeout);
 
-	/// @brief 查询 task 当前状态
-	/// @return Unknown=未提交；Running=执行中；Succeeded/Failed/Cancelled=已终止
+	/// @brief 查询 task 当前状态。
 	TaskStatus status() const;
 
-	/// @brief 请求取消活动中的 task（协作式取消；幂等，未知或已终止返回 false）
+	/// @brief 请求取消活动中的 task（协作式；幂等，未知或已终止返回 false）。
 	bool cancel();
 
-	// ── 结果 / 诊断（按公开输出别名）──
-
-	/// @brief 按公开输出别名取结果（消费式；取出即消耗）
+	/// @brief 按公开输出别名取结果（消费式；取出即消耗）。
 	Value take(const std::string& alias);
 
-	/// @brief 便捷接口：消费式取出 DC::Tensor
+	/// @brief 便捷：消费式取出 DC::Tensor。
 	Tensor takeTensor(const std::string& alias);
 
-	/// @brief 检查指定输出别名是否已有结果
+	/// @brief 检查指定输出别名是否已有结果。
 	bool has(const std::string& alias) const;
 
-	/// @brief 查询 task 在整条传播链上的错误记录
+	/// @brief 查询 task 在整条传播链上的错误记录。
 	std::vector<TaskError> errors() const;
 
 private:
@@ -120,8 +101,7 @@ private:
 
 	GraphInterface* _iface = nullptr;
 	std::string _taskId;
-	/// 是否已成功 submit（run/submit 成功后置位；仅 submit 抛异常保持 false）——
-	/// 析构路径据此区分：未提交（清输入）/ 在飞弃置（请求取消并回收）
+	/// 已成功 submit 后置位；析构路径据此区分：未提交（清输入）/ 在飞弃置（取消并回收）。
 	bool _submitted = false;
 };
 

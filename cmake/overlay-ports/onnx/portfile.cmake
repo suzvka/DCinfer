@@ -7,7 +7,6 @@ vcpkg_from_github(
     SHA512 13fafff073a8e0bcf67fd06195da979c3c6273b3f5fdd25f5e5c39ad6af20eefe107f13dc73d52b6021e986d87401e46121e00bba8fbd09f098334e34f78462f
     PATCHES
         fix-cmakelists.patch
-        # fix-pr-7390.patch 已上游化（onnx 1.22 的 schema.h 已包含该修复），随 1.22.0 升级移除
 )
 
 string(COMPARE EQUAL "${VCPKG_CRT_LINKAGE}" "static" USE_STATIC_RUNTIME)
@@ -38,10 +37,8 @@ vcpkg_cmake_configure(
         -DONNX_USE_MSVC_STATIC_RUNTIME=${USE_STATIC_RUNTIME}
         -DONNX_BUILD_TESTS=OFF
         -DONNX_BUILD_CUSTOM_PROTOBUF=OFF
-        # onnxruntime port 要求：禁用 ONNX schema 静态注册，
-        # 否则 onnxruntime.dll 与 onnxruntime_providers_cuda.dll 各自链接的
-        # onnx 静态副本会重复注册 schema，加载 CUDA EP 时崩溃
-        # （"Trying to register schema with name X ... already registered"）。
+        # onnxruntime 要求禁用 ONNX schema 静态注册，否则两份 onnx 静态副本
+        # 重复注册 schema，加载 CUDA EP 时崩溃。
         -DONNX_DISABLE_STATIC_REGISTRATION=ON
     MAYBE_UNUSED_VARIABLES
         ONNX_USE_MSVC_STATIC_RUNTIME

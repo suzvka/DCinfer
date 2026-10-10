@@ -19,13 +19,9 @@
 
 namespace DC {
 
-// TensorData: 存储张量的底层数据容器
-// - 支持两种内部表示：稀疏块视图（_dataMain / _dataCatalog，称为 "view"）
-//   与连续稠密缓存（_dataCache，称为 "cache"）。
-// - view 表示为：按除最后一维外的坐标索引到一个字节块（DataBlock），
-//   每个块内按 _typeSize 解释元素；最后一维为块内元素数量（元素字节数 = _typeSize）。
-// - cache 表示为：完整连续的字节缓冲区，按稠密形状和 _typeSize 存放所有元素，
-//   未写入的元素以 0 填充。类在需要时会在两种表示之间物化（materialize）或构建缓存（flatten）。
+// 存储张量的底层数据容器：两种内部表示——稀疏块视图（view：按除最后一维外的
+// 坐标索引到字节块，块内按 _typeSize 解释元素）与连续稠密缓存（cache：按稠密
+// 形状存放全部元素，未写入处补零）；按需在两种表示间物化。
 class TensorData {
 public:
 	using Shape = std::vector<size_t>;
@@ -37,22 +33,16 @@ public:
 	TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseBytes);
 	TensorData(const Shape& shape, DataBlock&& data);
 
-	// ── 拷贝/移动（自定义：内部互斥锁不可复制；拷贝产出非冻结副本）──
-
-	/// @brief 拷贝构造：深拷贝全部数据，产出独立的**非冻结**副本（clone 语义）。
+	/// @brief 拷贝构造：深拷贝数据，产出非冻结副本。
 	TensorData(const TensorData& other);
-	/// @brief 拷贝赋值：深拷贝全部数据，目标变为非冻结副本（clone 语义）。
+	/// @brief 拷贝赋值：深拷贝数据，目标变为非冻结副本。
 	TensorData& operator=(const TensorData& other);
-	/// @brief 移动构造：接管资源；冻结状态随载荷身份转移。
+	/// @brief 移动构造：接管资源（冻结状态随身份转移）。
 	TensorData(TensorData&& other) noexcept;
-	/// @brief 移动赋值：接管资源；冻结状态随载荷身份转移。
+	/// @brief 移动赋值：接管资源（冻结状态随身份转移）。
 	TensorData& operator=(TensorData&& other) noexcept;
 
-	// ── 冻结（共享发布）──
-
-	/// @brief 冻结：预物化稠密缓存并置冻结位（发布到共享网络前的一次性固化）。
-	///        冻结后：写路径抛 TensorException(Frozen)；只读访问不再触发任何惰性物化
-	///        （共享后的并发只读前提）。拷贝/克隆产出非冻结副本。
+	/// @brief 冻结：预物化稠密缓存并置冻结位；冻结后写路径抛 TensorException(Frozen)，只读不再触发惰性物化。
 	void freeze();
 
 	/// @brief 是否已冻结。
@@ -67,71 +57,43 @@ public:
 		return (_validFlags.load(std::memory_order_acquire) & FlagCache) != 0;
 	}
 
-	// 获取当前数据的字节视图（优先返回稠密 cache，如果 cache 不存在则尝试从 view 构建 cache）。
-	// 返回值：连续字节视图，表示稠密缓冲区的全部内容；若无数据则返回空的 span。
-	// 备注：返回的是按字节的视图，不保证对任何对齐或类型重解释是安全的（调用方应使用 data<T>() 进行类型检查）。
+	// 获取稠密字节视图（cache 缺失时从 view 构建）；类型解释安全性由 data<T>() 保证。
 	std::span<const std::byte> data() const;
 
-	// 以类型 T 解释并返回稠密数据的视图。
-	// 要求：T 为 trivially_copyable，且 _typeSize % sizeof(T) == 0。
-	// 行为：若当前无稠密 cache，会尝试构建；若仍无数据则抛出或返回空（取决于 _typeSize 状态）。
-	// 返回值：按 T 的元素数构造的 const span；元素数 = _dataCache.size() / sizeof(T)。
+	// 以类型 T 解释稠密数据（要求 trivially_copyable 且 typeSize % sizeof(T) == 0）。
 	template <typename T>
 	std::span<const T> data() const;
 
-	// 返回当前张量使用的总字节数（等同于稠密形状的元素数量 * _typeSize）。
-	// 如果未设置 _typeSize 或无数据，返回 0。
+	// 当前张量总字节数（稠密形状元素数 * _typeSize）；无数据返回 0。
 	size_t size() const;
 
-	// 设置类型字节数
 	void setTypeSize(size_t typeSize);
 
-	// 写入一个完整的块（block）到稀疏视图（view）。
-	// 参数：
-	//  - path: 块路径，长度等于张量秩 - 1（即不包含最后一维）；对于 0-D 标量写入，path 可为空且应使用 write(element) 重载。
-	//  - data: 要写入的元素（按元素类型 T），其元素数量应等于最后一维的元素数（可小于或等于当前块大小，超出部分将扩展并用 0 填充）。
-	// 返回：写入成功返回 true。若写入导致维度数量变化（path 长度与现有不同），会重置旧数据并以新维度初始化。
+	// 写入完整块到稀疏视图：path 长度 = 秩 - 1（0-D 标量用 write(element) 重载）。
 	template <typename T>
 	bool write(const Shape& path, std::span<const T> data);
 
-	// vector overload: 将 vector 拷贝为 span 后委托给上面的 write。
 	template <typename T>
 	bool write(const Shape& path, const std::vector<T>& data);
 
 	bool write(const Shape& path, const std::vector<bool>& data);
 
-	// 写入单个元素（按坐标全路径）。
-	// 参数：
-	//  - fullPath: 完整坐标路径，长度等于张量秩；最后一个元素为块内索引（element index）。
-	//    传入空路径表示对 0-D 标量写入（会将张量重置为单元素标量，并保留/采用当前的 _typeSize）。
-	//  - value: 要写入的值，类型为 T。若 sizeof(T) < _typeSize，则仅拷贝 sizeof(T) 字节并将其余字节清零；
-	//    如果 sizeof(T) 不整除 _typeSize 的约束将由 validateAndSetTypeSize 检查（允许 _typeSize 为已有值且为 sizeof(T) 的倍数）。
-	// 返回：写入成功返回 true。
+	// 写入单个元素（fullPath 长度 = 秩，最后一项为块内索引；空路径 = 0-D 标量写入）。
 	template <typename T>
 	bool write(const Shape& fullPath, const T& value);
 
-	// 读取稠密表示下的子范围或元素视图。
-	// 参数：
-	//  - path: 若长度 == rank，则表示读取单个元素（返回可能包含多个 T，取决于 _typeSize / sizeof(T)）；
-	//    若长度 < rank，则表示按该前缀读取一个子张量（返回值包含后续维度展开的元素数 * (_typeSize / sizeof(T))）。
-	// 返回：按 T 类型解释的 const span；若无数据则返回空 span。若请求越界或类型尺寸不匹配则抛出异常。
+	// 读取子范围或元素视图（path 长度 == 秩读单元素；< 秩按前缀读子张量）。
 	template <typename T>
 	std::span<const T> read(const Shape& path) const;
 
-	// 读取单个元素的值（按类型 T）。若位置无数据，返回 T{}。
+	// 读取单个元素；无数据返回 T{}。
 	template <typename T>
 	T readElement(const Shape& fullPath) const;
 
-	// 直接写入稠密缓存（_dataCache）中的区域。
-	// 要求：当前对象必须处于 cache 模式（hasCache() == true），否则写入会失败或抛出。
-	// 参数 path 的形式仅支持两种：
-	//  - full element path（rank == shape.size()）：写入单元素（element count == 1）
-	//  - block path（rank == shape.size() - 1）：写入整块（元素数 == shape.back()）
-	// data 的字节大小必须精确匹配目标区域的字节数（element_count * _typeSize），否则抛出。
+	// 写入稠密缓存区域（须处于 cache 模式；path 为元素路径或块路径，字节数须精确匹配）。
 	template <typename T>
 	bool writeCache(const Shape& path, const std::span<const T>& data);
 
-	// vector overload for writeCache
 	template <typename T>
 	bool writeCache(const Shape& path, const std::vector<T>& data);
 
@@ -155,19 +117,15 @@ public:
 		_isScalar = scalar;
 	}
 
-	// 获取当前动态形状
-	// 即稠密形状（最大索引 + 1）+ 数据块大小（元素数量）
+	// 当前动态形状：稠密形状（最大索引 + 1）+ 块内元素数。
 	Shape getCurrentShape() const;
 
-	// 直接设置为稠密（连续）数据。
-	// 适用于外部已是稠密张量的场景（例如推理输出接收），避免数据块登记/拼装开销。
-	// shape 为张量形状（元素维度），typeSize 为单元素字节数。
+	// 直接装入稠密数据（外部已是稠密张量时避免逐块登记开销）。
 	void loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes);
 
-	// 显式进入可编辑模式：若当前为稠密直通模式，则会将稠密 bytes 物化为稀疏块映射。
+	// 进入可编辑模式：稠密直通数据物化为稀疏块映射。
 	void editMode();
 
-	// 取出数据
 	DataBlock getData();
 
 	template <typename T>
@@ -176,44 +134,34 @@ public:
 	TensorData& crop(const Shape& targetShape);
 
 private:
-	/// @brief 冻结门校验：冻结后一切突变抛 TensorException(Frozen)。
-	///        仅覆盖载荷写路径（write/writeCache/fill/set/expand/editMode/getData/
-	///        crop/loadData/setTypeSize）；对象级赋值（拷贝/移动赋值）不在其列。
+	/// @brief 冻结门校验；仅覆盖载荷写路径（对象级赋值不在其列）。
 	void _ensureMutable(const char* api) const;
 
-	// 更新 _shapeCache / _dataSize / _size 等缓存元信息以匹配给定的稠密形状。
-	// 参数 denseShape: 当前稠密表示的形状（最后一维为块内元素数）。
-	// 影响：修改 _shapeCache、_dataSize、_size。
+	// 按稠密形状更新 _shapeCache / _dataSize / _size。
 	void syncDenseCacheMeta(const Shape& denseShape);
 
-	// 确保稠密缓存存在：若当前没有 cache 但有 view，则调用 buildFlattenedCache() 构建稠密缓存。
-	// 行为：可能会改变 _dataCache、_shapeCache，并设置 FlagCache。此方法在 const 情况下通过 mutable 或 const_cast 被调用。
+	// 确保稠密缓存存在（view → cache）；const 路径经 const_cast 调用。
 	void ensureCache();
 
-	// 确保稀疏视图已物化（materialized）：若当前为 cache 模式且没有 view，则根据 cache 调用 materializeFromDense() 并设置 FlagView。
-	// 影响：可能会填充 _dataMain、_dataCatalog，并设置 FlagView。
+	// 确保稀疏视图已物化（cache → view）。
 	void ensureView();
 
 	DataMap _dataMain;
 	DataCatalog _dataCatalog;
-	size_t _typeSize; // 类型字节数
-	size_t _dataSize; // 单个数据块的大小
+	size_t _typeSize;
+	size_t _dataSize;
 	bool _isScalar;
 
 	DataBlock _dataCache;
 	Shape _shapeCache;
 	static constexpr uint8_t FlagView = 0x1;
 	static constexpr uint8_t FlagCache = 0x2;
-	// 有效标志位（原子：读取快路径无锁，与惰性物化构建者以 release/acquire 配对；
-	// 构建者写标志时的 release 保证其写入的数据内容对快路径读方可见）。
+	// 有效标志位（release/acquire 配对：构建者写标志的 release 保证数据对快路径可见）。
 	std::atomic<uint8_t> _validFlags{0};
 
-	// 冻结位：载荷发布到共享网络（多消费者只读共享）前一次性固化。
-	// 冻结后一切写路径抛 TensorException(Frozen)；拷贝/克隆产出非冻结副本。
 	bool _frozen = false;
 
-	// 惰性物化串行化锁（双重检查构建）：ensureCache/ensureView 的唯一写点收敛。
-	// 共享发布（freeze）会预物化 cache，使共享后的只读路径零惰性物化；本锁为纵深保护。
+	// 惰性物化串行化锁（双重检查构建）。
 	mutable std::mutex _lazyMutex;
 
 	void setViewFlag() {
@@ -227,71 +175,49 @@ private:
 
 	DataBlock deposit(const std::vector<bool>& data);
 
-	// Offset helpers (bytes)
-	// - blockPath: rank-1 indices, pointing to a full last-dimension block
-	// - elementPath: rank indices, pointing to a single element
+	// 字节偏移辅助：blockPath = rank-1 索引（整块）；elementPath = rank 索引（单元素）。
 	size_t blockOffset(const Shape& blockPath, const Shape& denseShape) const;
 	size_t elementOffset(const Shape& elementPath, const Shape& denseShape) const;
 
-	// 获取稠密形状
 	Shape getDenseShape() const;
 
-	// 构建稠密缓存：根据当前稀疏数据块映射和维度集合，构建一个完整的连续字节缓冲区（dataCache）表示稠密张量。未覆盖的元素填充为零。
+	// 从稀疏块映射构建完整连续字节缓冲区（未覆盖元素补零）。
 	void buildCache();
 
-	// 从稠密缓存物化为稀疏块映射：根据当前稠密缓存和形状，重建稀疏数据块映射（_dataMain）和维度集合（_dataCatalog）。这会清空现有的稀疏结构，并将所有元素视为存在于一个完整的块中。
+	// 从稠密缓存物化为稀疏块映射（清空并重建 _dataMain/_dataCatalog，视为单个完整块）。
 	void buildView();
 
-	// 校验 _typeSize。
-	// 参数 expectedSize: 期望的单个元素字节数（通常为 sizeof(T)）。
+	// 校验 _typeSize（expectedSize 通常为 sizeof(T)）。
 	bool checkType(size_t expectedSize, const std::string& callerName) const;
 
-	// 校验写入路径并根据 path 更新 _dataCatalog（维度索引集合）。
-	// 参数 path: 块路径（rank = tensor_rank - 1）。
-	// 行为：若 path 长度与当前 _dataCatalog 不同，则会清空现有数据并按新的 path 长度重置维度集合；
-	//       否则仅将 path 中的每个索引插入对应的维度集合。对负索引抛出 out_of_range。
+	// 按块路径更新 _dataCatalog；path 长度变化时清空数据并重置维度集合。
 	void updateCatalog(const Shape& path, const std::string& callerName);
 
-	// 将给定的 DataBlock 提交到稀疏视图（_dataMain），并更新相关元信息。
-	// 参数 path: 块路径；block: 要移动进来的字节块（右值引用）。
-	// 行为：更新 _dataSize（若 block 更大），将 block 放入 _dataMain[path]，重新计算 _size，并清除稠密缓存（invalidate cache）。
+	// 提交字节块到稀疏视图并更新元信息（清除稠密缓存）。
 	void commitData(const Shape& path, DataBlock&& block);
 
-	// 计算稠密形状的元素总数（所有维度的乘积）。对于空形状（标量）返回 1。
+	// 稠密形状元素总数（空形状返回 1）。
 	static size_t denseElementCount(const Shape& shape);
 
 	void clearCache();
 
 	void clearView();
 
-	// 计算并返回稠密缓存中对应 path 的可写区域（按字节）。
-	// 参数 path: 与 writeCache 的 path 语义一致（element path 或 block path）。
-	// 返回：指向 _dataCache 中目标区域的可变 span；若 path 与 _shapeCache 不匹配或超出范围则抛出异常。
+	// 稠密缓存中 path 对应区域的可写字节 span（越界抛异常）。
 	std::span<std::byte> calcWriteRegion(const Shape& path);
 
-	// 直接用 rawBytes 覆盖稠密缓存的目标区域（按字节）。
-	// 参数:
-	//  - path: 目标区域（参见 calcWriteRegion）。
-	//  - rawBytes: 要写入的字节数据（右值引用，大小必须等于目标区域大小）。
-	//  - typeSize: 提供的元素字节数，用于 validateAndSetTypeSize 校验。
-	//  - apiName: 报错信息中使用的调用者名称。
-	// 返回：写入成功返回 true；当不处于 cache 模式时返回 false（不会抛出）。
+	// 用 rawBytes 覆盖稠密缓存目标区域；非 cache 模式返回 false（不抛出）。
 	bool writeCacheRaw(const Shape& path, DataBlock&& rawBytes, size_t typeSize, const char* apiName);
 
-	// 辅助函数：将任意可转换为 DataBlock 的范围（Range）首先 deposit 为 DataBlock，然后调用 writeCacheRaw。
-	// Range 可以是 std::span<const T>、std::vector<T> 或 std::vector<bool> 等。此函数负责调用 deposit 并传递右值到 writeCacheRaw。
+	// 将 Range deposit 为 DataBlock 后转调 writeCacheRaw。
 	template <class Range>
 	bool writeCacheByDeposit(const Shape& path, Range&& r, size_t typeSize, const char* apiName);
 };
 
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// Template Implementations: TensorData
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
 template <typename T>
 std::span<const T> TensorData::data() const {
 	static_assert(std::is_trivially_copyable_v<T>, "TensorData::data requires trivially copyable type");
-	// Ensure dense cache is available for const reads: allow logical-const cache build
+	// const 读路径允许惰性构建缓存
 	if (!hasCache()) {
 		const_cast<TensorData*>(this)->ensureCache();
 	}
@@ -338,22 +264,18 @@ bool TensorData::write(const Shape& path, const std::vector<T>& data) {
 template <typename T>
 bool TensorData::write(const Shape& fullPath, const T& value) {
 	_ensureMutable("TensorData::write");
-	// Allow writing when stored element size is a multiple of incoming type size.
-	// If _typeSize is not initialized, adopt sizeof(T). Otherwise require divisibility.
+	// 未初始化时采用 sizeof(T)，否则要求整除关系
 	if (!checkType(sizeof(T), "TensorData::write(element)")) {
 		setTypeSize(sizeof(T));
 	}
 
-	// 0-D 标量处理
 	if (fullPath.empty()) {
-		// preserve validated _typeSize across clear()
 		clear();
 		setScalar(true);
 		setTypeSize(sizeof(T));
 		_dataSize = typeSize();
 
 		DataBlock block(typeSize(), std::byte());
-		// Copy only sizeof(T) bytes; zero the remaining bytes in the element slot if any.
 		std::memcpy(block.data(), &value, sizeof(T));
 		if (sizeof(T) < typeSize()) {
 			std::memset(block.data() + sizeof(T), 0, typeSize() - sizeof(T));
@@ -364,18 +286,11 @@ bool TensorData::write(const Shape& fullPath, const T& value) {
 		return true;
 	}
 
-	// 拆分出 blockPath
 	Shape blockPath(fullPath.begin(), fullPath.end() - 1);
 	size_t elementIndex = static_cast<size_t>(fullPath.back());
 
-	// Guard against multiplication overflow before any catalog/view mutation
-	//（检查前置：巨大/负索引（int64 负值经 static_cast 回绕为巨大 size_t）
-	// 不得先污染 catalog 再被拒）。
-	// 精确安全界：targetBlockSize = (elementIndex + 1) * typeSize 不回绕
-	// ⟺ elementIndex < SIZE_MAX / typeSize。旧条件 ">" 放行了边界值
-	// elementIndex == SIZE_MAX / typeSize：其 (elementIndex+1)*typeSize
-	// 恰好回绕（typeSize 为 2 的幂时归零），而写入偏移仍是天文数字，
-	// 后续 memcpy 将越界写。
+	// 乘法回绕防护（先检查再改动 catalog）：elementIndex >= SIZE_MAX/typeSize 时
+	// (元素数+1)*typeSize 回绕，后续 memcpy 越界写。
 	if (typeSize() == 0)
 		throw std::out_of_range("TensorData::write(element): typeSize not initialized");
 	{
@@ -385,7 +300,6 @@ bool TensorData::write(const Shape& fullPath, const T& value) {
 	}
 	const size_t targetBlockSize = (elementIndex + 1) * typeSize();
 
-	// 复用路径准备和物化逻辑
 	updateCatalog(blockPath, "TensorData::write(element)");
 	ensureView();
 	auto it = _dataMain.find(blockPath);
@@ -393,11 +307,10 @@ bool TensorData::write(const Shape& fullPath, const T& value) {
 	if (it == _dataMain.end()) {
 		block.assign(targetBlockSize, std::byte());
 	} else {
-		block = it->second; // copy existing
+		block = it->second; // 拷贝已有块
 		if (block.size() < targetBlockSize)
 			block.resize(targetBlockSize, std::byte());
 	}
-	// Copy only sizeof(T) bytes into the element slot; zero remainder to avoid stale data.
 	size_t elementOffset = elementIndex * typeSize();
 	std::memcpy(block.data() + elementOffset, &value, sizeof(T));
 	if (sizeof(T) < typeSize()) {
@@ -425,7 +338,7 @@ std::span<const T> TensorData::read(const Shape& path) const {
 	if (!hasCache()) {
 		const_cast<TensorData*>(this)->ensureCache();
 		if (!hasCache()) {
-			return std::span<const T>(); // 无数据可读
+			return std::span<const T>();
 		}
 	}
 
@@ -435,27 +348,23 @@ std::span<const T> TensorData::read(const Shape& path) const {
 	}
 
 	if (path.size() == denseShape.size()) {
-		// 单元素：返回元素对应字节在新类型下的视图（可能为多个 T）
 		for (size_t i = 0; i < path.size(); ++i)
 			if (path[i] >= denseShape[i])
 				throw std::out_of_range("TensorData::readSpan: element index out of range");
 		size_t offsetBytes = elementOffset(path, denseShape);
-		// 纵深防御：单元素路径与前缀路径同样校验不越过稠密缓存——
-		// 声明与数据不一致的脏数据在此显式暴露，而非静默越界读
+		// 纵深防御：声明与数据不一致的脏数据在此显式暴露，而非静默越界读
 		const size_t spanBytes = ratio * sizeof(T);
 		if (offsetBytes + spanBytes > _dataCache.size())
 			throw std::out_of_range("TensorData::readSpan: element view exceeds dense cache size");
 		return std::span<const T>(reinterpret_cast<const T*>(_dataCache.data() + offsetBytes), ratio);
 	}
 
-	// 前缀情况：补 0 或直接计算后缀乘积
 	for (size_t i = 0; i < path.size(); ++i)
 		if (path[i] >= denseShape[i])
 			throw std::out_of_range("TensorData::readSpan: element index out of range");
 	size_t elementCount = 1;
 	for (size_t i = path.size(); i < denseShape.size(); ++i)
 		elementCount *= static_cast<size_t>(denseShape[i]);
-	// 在新类型下的元素数量需要乘以 ratio
 	size_t tElementCount = elementCount * ratio;
 
 	Shape fullPath = path;
@@ -530,8 +439,7 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	auto current = getCurrentShape();
 	if (current == targetShape)
 		return *this;
-	// 秩校验（#8-5）：目标秩必须与当前一致——原实现对空 shape 的 back()
-	// 与低秩目标 T 为 UB，对一维目标静默不做任何填充；现显式拒绝
+	// 目标秩必须与当前一致
 	if (targetShape.size() != current.size()) {
 		throw std::invalid_argument(
 			"TensorData::expand: rank mismatch (target rank must equal current rank)");
@@ -548,14 +456,10 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	size_t blockLen = targetShape.back();
 	const size_t blockBytes = blockLen * typeSize();
 
-	// fill pattern：单元素 deposit 为 typeSize 字节（sizeof(T) < typeSize
-	// 时尾随 0，与 write(element) 的元素槽位语义一致）
+	// fill pattern：单元素 deposit（与 write(element) 槽位语义一致）
 	auto pattern = deposit(std::span<const T>(&fillData, 1));
 
-	// 块一致性保证：扩块后存储与形状同表 targetShape——缺失块整块填充
-	// （原语义）；已有块扩容到目标块长且仅新区域按 fillData 填充（旧值
-	// 保留）。每维 targetShape >= current 校验 + current 最后一维 =
-	// _dataSize/typeSize（历史最大块）保证块只扩不缩。
+	// 块一致性：缺失块整块填充；已有块扩容且仅新区域填充（旧值保留）。
 	auto ensureBlock = [&](const Shape& path) {
 		auto it = _dataMain.find(path);
 		if (it == _dataMain.end()) {
@@ -563,8 +467,7 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 			std::vector<T> vals(blockLen, fillData);
 			commitData(path, deposit(std::span<const T>(vals.data(), vals.size())));
 		} else if (it->second.size() < blockBytes) {
-			// 已有块小于目标块长：扩容并仅对新区域填充（修复：原实现
-			// 对已存在块完全不扩，导致 {2}→{4} 后形状与存储仍停留 {2}）
+			// 已有块扩容：仅对新区域按 pattern 填充
 			const size_t oldBytes = it->second.size();
 			DataBlock block = std::move(it->second);
 			block.resize(blockBytes, std::byte(0));
@@ -573,22 +476,19 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 			updateCatalog(path, "TensorData::expand");
 			commitData(path, std::move(block));
 		} else {
-			// 块已不小于目标块长：仅补登记 catalog（幂等），确保
-			// getCurrentShape() 与 targetShape 一致
+			// 补登记 catalog（幂等），确保形状与 targetShape 一致
 			updateCatalog(path, "TensorData::expand");
 		}
 	};
 
 	if (blockRank == 0) {
-		// 一维目标：整个数据即单块（root path）
+		// 一维目标：整块 = root path
 		ensureBlock({});
 	} else {
-		// iterate over all block paths (multi-index loop)
 		Shape blockPath(blockRank, 0);
 		bool done = false;
 		while (!done) {
 			ensureBlock(blockPath);
-			// increment blockPath lexicographically with carry
 			for (size_t i = 0; i < blockRank; ++i) {
 				if (++blockPath[i] < targetShape[i])
 					break;
@@ -600,7 +500,7 @@ TensorData& TensorData::expand(const Shape& targetShape, const T& fillData) {
 	}
 
 	setViewFlag();
-	clearCache(); // commitData may already clear cache, ensure consistency
+	clearCache(); // commitData 可能已清缓存，此处兜底一致性
 	return *this;
 }
 } // namespace DC

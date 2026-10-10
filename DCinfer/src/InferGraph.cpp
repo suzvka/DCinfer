@@ -5,27 +5,16 @@
 
 namespace DC {
 
-// ════════════════════════════════════════════
-// 构造
-// ════════════════════════════════════════════
-
 InferGraph::InferGraph(std::shared_ptr<ResourceScheduler> scheduler)
 	: _state(std::make_shared<GraphRuntimeState>()),
 	  _scheduler(scheduler ? std::move(scheduler) : ResourceScheduler::instance()),
 	  _engine(std::make_unique<ExecutionEngine>(_scheduler)) {}
 
-// ════════════════════════════════════════════
-// 数据注入
-// ════════════════════════════════════════════
-
 void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 						   const std::string& portName, Value data) {
-	_ensureFrozen(); // 惰性冻结：运行期 API 入口统一编译（此后拓扑不可变）
+	_ensureFrozen(); // 惰性冻结：运行期入口统一编译，拓扑此后不可变
 
-	// 收尾窗口（终态已发布、结果抢救未完成）快速预检拒绝；原子保障在
-	// 下方 tryWriteTaskState——写入与收尾抢救同锁互斥，不存在
-	// "检查通过后写入随即被 clearTaskState 摘除"的静默丢失（#8-12）。
-	// 复用语义：waitForResult 返回（结果可读）后再 feed。
+	// 复用语义：waitForResult 返回后再 feed；收尾窗口写入与抢救同锁互斥，无静默丢失。
 	if (_engine->isFinalizing(taskId))
 		throw GraphException(GraphException::ErrorType::DuplicateTask, "InferGraph::feedInput",
 							 "task '" + taskId
@@ -36,9 +25,7 @@ void InferGraph::feedInput(const TaskId& taskId, const std::string& nodeName,
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "InferGraph::feedInput",
 							 "node '" + nodeName + "' not found");
 	try {
-		// 写入经引擎收尾协议保护（轮次锁内执行）：收尾窗口拒绝时抛出，
-		// 不给旧轮（即将被 clearTaskState 摘除）写入任何输入；
-		// shared_ptr 先落局部量，防止临时量析构导致引用悬垂
+		// 轮次锁内写入：收尾窗口拒绝时不给旧轮写输入；taskState 先落局部量防悬垂
 		const bool accepted = _engine->tryWriteTaskState(taskId, [&] {
 			auto ts = _state->exec->taskState(taskId);
 			auto& ns = ts->ensure(nodeName, n->schema());
@@ -73,16 +60,12 @@ void InferGraph::submitBound(const TaskId& taskId, uint32_t maxHops) {
 	submit(taskId, std::move(declarations), maxHops);
 }
 
-// ════════════════════════════════════════════
-// 结果获取
-// ════════════════════════════════════════════
-
 Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 							const std::string& portName) {
-	// 优先查 OutputZone（OutputZone 绑定端口的数据在 _propagateFrom 第二步已搬运至此）
+	// 优先查 OutputZone：绑定端口数据已由传播搬运至此
 	auto ozVal = _state->output.take(taskId, nodeName, portName);
 	if (ozVal) {
-		// 发布残留载荷（广播共享/冻结）：产出独立可变副本
+		// 共享/冻结载荷产出独立可变副本
 		if (ozVal->isPublished())
 			return ozVal->cloneOwned();
 		return std::move(*ozVal);
@@ -100,7 +83,7 @@ Value InferGraph::takeOutput(const TaskId& taskId, const std::string& nodeName,
 		throw NodeException(NodeException::ErrorType::TaskNotFound, "TaskBuffer::takeOutput",
 							"task '" + taskId + "' not found");
 	Value v = ns->buffer.takeOutput(taskId, portName);
-	// 发布残留载荷（广播共享/冻结）：产出独立可变副本
+	// 共享/冻结载荷产出独立可变副本
 	if (v.isPublished())
 		return v.cloneOwned();
 	return v;
@@ -113,7 +96,7 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 	if (ozVal) {
 		auto* t = ozVal->as<Tensor>();
 		if (t) {
-			// 发布残留载荷（广播共享/冻结）：深拷贝产出独立可变副本
+			// 共享/冻结载荷深拷贝
 			if (ozVal->isPublished())
 				return Tensor(*t);
 			return std::move(*t);
@@ -140,7 +123,7 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 							"output '" + portName + "' is not a DC::Tensor (innerType=" +
 								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
-	// 发布残留载荷（广播共享/冻结）：深拷贝产出独立可变副本
+	// 共享/冻结载荷深拷贝
 	if (nt.isPublished())
 		return Tensor(*t);
 	return std::move(*t);
@@ -160,14 +143,10 @@ bool InferGraph::hasOutput(const TaskId& taskId, const std::string& nodeName,
 	return ns && ns->buffer.hasOutput(taskId, portName);
 }
 
-// ════════════════════════════════════════════
-// task 生命周期：状态 / 结构化等待 / 资源回收
-// ════════════════════════════════════════════
-
 TaskStatus InferGraph::taskStatus(const TaskId& taskId) const {
 	auto st = _engine->status(taskId);
 	if (st == TaskStatus::Succeeded) {
-		// 正常终止但存在 Error 级诊断 → 归一化为 Failed（部分节点执行失败）
+		// 存在 Error 级诊断时归一化为 Failed
 		for (const auto& e : _state->errors.taskErrors(taskId)) {
 			if (e.level == DiagnosticLevel::Error)
 				return TaskStatus::Failed;
@@ -184,10 +163,7 @@ TaskResult InferGraph::waitForResult(const TaskId& taskId, std::chrono::millisec
 	const bool ready = _engine->wait(taskId, timeout); // timeout <= 0 视为无限等待
 	TaskResult result;
 	if (!ready) {
-		// 等待未满足（超时，或 taskId 未知/已释放）：如实返回 {Running / Unknown}。
-		// 终态已迁移但收尾（结果抢救）尚未完成的竞争窗口同样按未完成报告——
-		// "wait 返回 true 才保证结果可读"契约不因状态表提前可见而失真，
-		// 调用方可继续 wait 或按 Running 语义处理。
+		// 超时/未知/收尾未完成时如实返回 Running 或 Unknown；wait 返回 true 才保证结果可读。
 		const TaskStatus st = taskStatus(taskId);
 		result.status = (st == TaskStatus::Unknown) ? TaskStatus::Unknown : TaskStatus::Running;
 		result.errors = _state->errors.taskErrors(taskId);
@@ -200,15 +176,13 @@ TaskResult InferGraph::waitForResult(const TaskId& taskId, std::chrono::millisec
 
 void InferGraph::releaseTask(const TaskId& taskId) {
 	if (!_engine->releaseTask(taskId))
-		return; // 未知或活动任务：引擎拒绝释放，结果/诊断保持不动（待终态后再释放）
-	_state->output.clearTask(taskId);   // 释放结果 artifact
-	_state->errors.clearTask(taskId);   // 释放诊断记录
+		return; // 引擎拒绝释放；结果/诊断保持不动
+	_state->output.clearTask(taskId);
+	_state->errors.clearTask(taskId);
 }
 
 void InferGraph::discardUnsubmitted(const TaskId& taskId) {
-	// 仅清理"已喂数据但从未成功提交"（Unknown 状态）的输入执行态/声明/诊断。
-	// 活动或已终止任务不受影响：前者须保留输入（在飞执行），后者分别由
-	// detachTask（弃置回收）与 releaseTask（显式释放）路径管理。
+	// 仅清理未知状态任务；活动与已终止任务由 detachTask/releaseTask 路径管理。
 	if (_engine->status(taskId) != TaskStatus::Unknown)
 		return;
 	_state->exec->clearTaskState(taskId);
@@ -217,8 +191,7 @@ void InferGraph::discardUnsubmitted(const TaskId& taskId) {
 }
 
 void InferGraph::detachTask(const TaskId& taskId) {
-	// 转发引擎：不取消在飞任务；完成收尾时自动回收
-	// （状态表条目 / OutputZone 结果 / 诊断）；已终止立即释放；未知 no-op。
+	// 转发引擎：不取消在飞任务；收尾自动回收，已终止立即释放，未知 no-op。
 	_engine->detachTask(taskId);
 }
 

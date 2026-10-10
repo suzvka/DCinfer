@@ -1,5 +1,4 @@
-// CORE-1/2: deterministic lifecycle checks; prohibited destruction runs in
-// isolated children, with a bounded parent wait (no detached production workers).
+// CORE lifecycle regressions: prohibited destruction runs in isolated children
 #include "ExecutionEngine.h"
 #include "InferGraph.h"
 #include "Tensor.hpp"

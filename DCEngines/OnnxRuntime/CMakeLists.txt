@@ -1,12 +1,7 @@
 # DCEngine_OnnxRuntime - ONNX Runtime 引擎适配器
 #
-# 需要 vcpkg onnxruntime feature：
-#   1. 在 vcpkg.json 中启用 feature（已配置）
-#   2. cmake -B build -S . -DBUILD_ENGINE_ONNXRUNTIME=ON
-#
-# 安装依赖（二选一）：
-#   vcpkg install --feature onnxruntime          # 命令行
-#   或在 CMake 配置时自动通过 manifest 安装
+# 需要 vcpkg onnxruntime feature（vcpkg.json 已配置）：
+#   cmake -B build -S . -DBUILD_ENGINE_ONNXRUNTIME=ON
 
 find_package(onnxruntime CONFIG REQUIRED)
 
@@ -15,8 +10,7 @@ add_library(DCEngine::OnnxRuntime ALIAS DCEngine_OnnxRuntime)
 
 target_compile_features(DCEngine_OnnxRuntime PUBLIC cxx_std_20)
 
-# ── EP 编译宏注入：由 DCINFER_ORT_EP 决定编译期默认 ExecutionProvider ──
-# （依赖注入在 cmake/vcpkg-toolchain.cmake 中完成；此处仅映射编译宏）
+# EP 编译宏注入：DCINFER_ORT_EP → 编译期默认 ExecutionProvider（依赖注入见 toolchain）
 if (DCINFER_ORT_EP STREQUAL "CUDA")
     target_compile_definitions(DCEngine_OnnxRuntime PUBLIC DCINFER_ORT_ENABLE_CUDA=1)
 elseif (DCINFER_ORT_EP STREQUAL "TENSORRT")
@@ -40,18 +34,14 @@ target_include_directories(DCEngine_OnnxRuntime
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# ORT 1.28 起导出 target 不再携带 include 路径（上游移除了
-# $<INSTALL_INTERFACE:...> 声明，头文件改经 PUBLIC_HEADER 安装到
-# <prefix>/include/onnxruntime 平铺目录）——1.23 的动态导入 target 自带
-# INTERFACE_INCLUDE_DIRECTORIES，1.28 的静态导入 target（x64-linux 默认
-# static linkage）则完全缺失。按需补齐，保证 #include <onnxruntime_cxx_api.h>
-# 在两种 linkage 下均可解析。
+# ORT 1.28 起导出 target 不再携带 include 路径（1.23 动态 target 自带，
+# 1.28 静态 target 缺失）：按需 find_path 补齐，保证
+# #include <onnxruntime_cxx_api.h> 在两种 linkage 下均可解析。
 get_target_property(_ort_include_dirs onnxruntime::onnxruntime
                     INTERFACE_INCLUDE_DIRECTORIES)
 if(NOT _ort_include_dirs OR _ort_include_dirs STREQUAL "_ort_include_dirs-NOTFOUND")
-	# onnxruntime_DIR 指向 <installed>/<triplet>/share/onnxruntime，头文件在
-	# <installed>/<triplet>/include/onnxruntime/（vcpkg 标准布局）——即
-	# onnxruntime_DIR 的上两级。多候选兼容安装根层级差异。
+	# onnxruntime_DIR = <installed>/<triplet>/share/onnxruntime → 头文件在其上两级
+	#（vcpkg 标准布局）；多候选兼容安装根层级差异。
 	find_path(onnxruntime_INCLUDE_DIR
 		NAMES onnxruntime_cxx_api.h
 		HINTS "${onnxruntime_DIR}/../../include/onnxruntime"
@@ -69,7 +59,7 @@ file(GLOB_RECURSE DCENGINE_ONNX_SRC CONFIGURE_DEPENDS
 )
 target_sources(DCEngine_OnnxRuntime PRIVATE ${DCENGINE_ONNX_SRC})
 
-# ── 集成测试（DCINFER_BUILD_TESTS 开启时编译）──
+# 集成测试（DCINFER_BUILD_TESTS）
 if (DCINFER_BUILD_TESTS)
     add_subdirectory(test)
 endif()

@@ -1,17 +1,13 @@
 # DCinfer coding style configuration
-# Tab indentation, attach braces with leading space
 
 Language: Cpp
 
-# ── 缩进：使用 Tab ──
 UseTab: Always
 TabWidth: 4
 IndentWidth: 4
 
-# 根据 AccessModifierOffset 修正访问修饰符
 AccessModifierOffset: -4
 
-# ── 大括号：不换行，前面加空格 ──
 BreakBeforeBraces: Custom
 BraceWrapping:
   AfterCaseLabel:  false
@@ -33,17 +29,12 @@ BraceWrapping:
   SplitEmptyRecord: false
   SplitEmptyNamespace: true
 
-# 在控制语句后加空格（if ( 而不是 if(）
 SpaceBeforeParens: ControlStatements
 
-# ── 列宽 ──
 ColumnLimit: 120
 
-# ── 指针和引用对齐 ──
-# 靠左：int *p; int &r;
 PointerAlignment: Left
 
-# ── 其他格式 ──
 AlignAfterOpenBracket: Align
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false

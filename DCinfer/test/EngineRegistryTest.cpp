@@ -11,7 +11,6 @@
 
 using namespace DC;
 
-// ── Mock schema ──
 static Node::Schema mockSchema() {
 	Node::Schema s;
 	s.inputs = {Node::Port::in<float>("in")};
@@ -19,7 +18,6 @@ static Node::Schema mockSchema() {
 	return s;
 }
 
-// ── Mock 计算逻辑（magic 值来自 engineConfig）──
 static Node::Result mockRunImpl(Node::RunContext& ctx, int magic) {
 	const auto& inNT = ctx.peek("in");
 	const auto* inVal = inNT.as<Tensor>();
@@ -29,7 +27,6 @@ static Node::Result mockRunImpl(Node::RunContext& ctx, int magic) {
 	return ctx.success();
 }
 
-// ── 模拟转换钩子 ──
 static Value mockToNative(const Tensor& dc) {
 	return Value(std::make_unique<Tensor>(dc));
 }
@@ -41,18 +38,12 @@ static Tensor mockToDC(const void* native) {
 	return result;
 }
 
-// ── Mock 模型引擎：验证 createNode(modelPath) 单路径 ──
-// loadModel 计数验证"一次加载 + 缓存"，端口推导与 schema 传递验证"框架驱动"
-
 struct MockSession {
 	std::string modelPath;
 };
 
 static std::atomic<int> mockEngineCreateCount{0};
 static std::atomic<int> mockFactorySchemaSeen{0};
-
-// ── 生命周期计数引擎：验证 EngineHandle 句柄语义 ──
-// （releaseAllEngines 后保活 / 释放钩子恰好一次 / 缓存再加载互不干扰）
 
 struct LifecycleSession {
 	std::string modelPath;
@@ -103,19 +94,16 @@ static void registerLifecycleEngine(EngineRegistry& reg, const std::string& type
 	reg.registerEngine(desc);
 }
 
-// ── single-flight 专项引擎：交错阻塞与失败传播验证 ──
-
-static std::atomic<int> g_blockEntered{0};   // 进入 loadModel 的次数
-static std::atomic<bool> g_blockRelease{false}; // 慢路径放行开关
-static std::atomic<int> g_blockCreated{0};   // 完成创建的次数
+static std::atomic<int> g_blockEntered{0};
+static std::atomic<bool> g_blockRelease{false};
+static std::atomic<int> g_blockCreated{0};
 
 static Node::Result noopRunImpl(Node::RunContext& ctx) {
 	(void)ctx;
 	return ctx.success();
 }
 
-/// loadModel 慢路径（models/slow.onnx）阻塞至 g_blockRelease 放行；
-/// 快路径（其他 path）立即完成——用于验证慢 key 不阻塞其他 key。
+// 慢路径 models/slow.onnx 阻塞至 g_blockRelease 放行：验证慢 key 不阻塞其他 key
 static void registerFlightEngine(EngineRegistry& reg, const std::string& type) {
 	if (reg.hasEngine(type))
 		return;
@@ -152,7 +140,6 @@ static void registerFlightEngine(EngineRegistry& reg, const std::string& type) {
 static std::atomic<bool> g_failNext{true};
 static std::atomic<int> g_failCalls{0};
 
-/// loadModel 按 g_failNext 抛出异常或成功——验证失败传播与重试。
 static void registerFailingEngine(EngineRegistry& reg, const std::string& type) {
 	if (reg.hasEngine(type))
 		return;
@@ -176,8 +163,6 @@ static void registerFailingEngine(EngineRegistry& reg, const std::string& type) 
 	};
 	reg.registerEngine(desc);
 }
-
-// ── 执行相位失败传播引擎：验证执行相位协议契约（onError 覆盖任一相位失败）──
 
 struct PhaseSession {
 	std::string modelPath;
@@ -275,7 +260,6 @@ static void registerMockModelEngine(EngineRegistry& reg, const std::string& type
 		return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
 	};
 
-	// 从实例推导端口：两个 Float 标量端口
 	desc.getInputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
 		if (!inst.get())
 			return {};
@@ -303,7 +287,6 @@ static void registerMockModelEngine(EngineRegistry& reg, const std::string& type
 static void runTests() {
 	auto& reg = EngineRegistry::instance();
 
-	// ── Test 1: 注册引擎（使用 makeNodeFactory）──
 	{
 		EngineDescriptor desc;
 		desc.engineType = "Mock";
@@ -315,7 +298,6 @@ static void runTests() {
 	}
 	std::cout << "Test 1 passed: register engine" << std::endl;
 
-	// ── Test 2: 重复注册被拒绝 ──
 	{
 		EngineDescriptor desc;
 		desc.engineType = "Mock";
@@ -324,7 +306,6 @@ static void runTests() {
 	}
 	std::cout << "Test 2 passed: duplicate registration rejected" << std::endl;
 
-	// ── Test 3: 按名查找引擎 ──
 	{
 		auto* desc = reg.find("Mock");
 		if (!desc)
@@ -338,7 +319,6 @@ static void runTests() {
 	}
 	std::cout << "Test 3 passed: find engine" << std::endl;
 
-	// ── Test 4: hasEngine / engineTypes ──
 	{
 		if (!reg.hasEngine("Mock"))
 			throw std::runtime_error("hasEngine should be true");
@@ -357,7 +337,6 @@ static void runTests() {
 	}
 	std::cout << "Test 4 passed: hasEngine / engineTypes" << std::endl;
 
-	// ── Test 5: createNode 通过工厂创建节点 ──
 	{
 		int magic = 42;
 		auto node = reg.createNode("Mock", "testNode", &magic);
@@ -374,7 +353,6 @@ static void runTests() {
 	}
 	std::cout << "Test 5 passed: createNode" << std::endl;
 
-	// ── Test 6: createNode 未知引擎返回 null ──
 	{
 		auto node = reg.createNode("UnknownEngine", "test");
 		if (node)
@@ -382,7 +360,6 @@ static void runTests() {
 	}
 	std::cout << "Test 6 passed: createNode unknown engine" << std::endl;
 
-	// ── Test 7: 创建的节点可以正常运行 ──
 	{
 		int magic = 100;
 		auto node = reg.createNode("Mock", "runner", &magic);
@@ -405,12 +382,10 @@ static void runTests() {
 	}
 	std::cout << "Test 7 passed: created node runs correctly" << std::endl;
 
-	// ── Test 8: 转换钩子功能验证 ──
 	{
 		Tensor dc(Tensor::TensorType::Float, sizeof(float));
 		dc = 3.14f;
 
-		// DC → Native
 		auto native = mockToNative(dc);
 		if (!native)
 			throw std::runtime_error("toNative returned empty");
@@ -420,14 +395,12 @@ static void runTests() {
 		if (std::abs(t->item<float>() - 3.14f) > 1e-6f)
 			throw std::runtime_error("toNative value mismatch");
 
-		// Native → DC
 		auto back = mockToDC(native.get());
 		if (std::abs(back.item<float>() - 3.14f) > 1e-6f)
 			throw std::runtime_error("toDC round-trip mismatch");
 	}
 	std::cout << "Test 8 passed: TensorConverter round-trip" << std::endl;
 
-	// ── Test 9: 空 engineType 注册被拒绝 ──
 	{
 		EngineDescriptor desc;
 		desc.engineType = "";
@@ -436,13 +409,11 @@ static void runTests() {
 	}
 	std::cout << "Test 9 passed: empty engineType rejected" << std::endl;
 
-	// ── Test 10: createNode(modelPath) 单路径：一次加载 + schema 传递 + 缓存命中 ──
 	{
 		mockEngineCreateCount = 0;
 		mockFactorySchemaSeen = 0;
 		registerMockModelEngine(reg, "MockModel");
 
-		// 首次建图：加载一次，schema 由框架从实例推导并传入 factory
 		auto node1 = reg.createNode("MockModel", "n1", std::string("models/a.onnx"));
 		if (!node1)
 			throw std::runtime_error("createNode(modelPath) returned null");
@@ -455,14 +426,12 @@ static void runTests() {
 		if (mockFactorySchemaSeen != 1)
 			throw std::runtime_error("factory should receive non-empty schema");
 
-		// 同 modelPath 缓存命中：不重新加载
 		auto node2 = reg.createNode("MockModel", "n2", std::string("models/a.onnx"));
 		if (!node2)
 			throw std::runtime_error("second createNode(modelPath) returned null");
 		if (mockEngineCreateCount != 1)
 			throw std::runtime_error("same modelPath should reuse cached instance");
 
-		// 不同 modelPath 创建新实例
 		auto node3 = reg.createNode("MockModel", "n3", std::string("models/b.onnx"));
 		if (!node3)
 			throw std::runtime_error("third createNode(modelPath) returned null");
@@ -471,13 +440,12 @@ static void runTests() {
 	}
 	std::cout << "Test 10 passed: createNode(modelPath) single-load + schema passing + cache" << std::endl;
 
-	// ── Test 10b: createLazyNode：声明 schema 物化，不创建实例（编译期零加载）──
 	{
 		mockEngineCreateCount = 0;
 		mockFactorySchemaSeen = 0;
 		registerMockModelEngine(reg, "LazyMockModel");
 
-		// 声明 schema 与实例端口（in/out）不同：验证不做实例推导、原样透传
+		// 声明 schema 与实例端口不同：验证原样透传、不做实例推导
 		Node::Schema declared;
 		declared.inputs = {Node::Port::in<float>("declaredIn")};
 		declared.outputs = {Node::Port::out<float>("declaredOut")};
@@ -495,13 +463,11 @@ static void runTests() {
 		if (mockFactorySchemaSeen != 1)
 			throw std::runtime_error("factory must be invoked once with the declared schema");
 
-		// 未知引擎 → nullptr
 		if (reg.createLazyNode("UnknownLazyEngine", "ln2", {}))
 			throw std::runtime_error("createLazyNode for unknown engine should return null");
 	}
 	std::cout << "Test 10b passed: createLazyNode declared-schema materialization, zero load" << std::endl;
 
-	// ── Test 11: 并发 getOrCreateEngine：同 key 只创建一个实例，全部拿到同一句柄 ──
 	{
 		mockEngineCreateCount = 0;
 		constexpr int kThreads = 8;
@@ -530,7 +496,6 @@ static void runTests() {
 	}
 	std::cout << "Test 11 passed: concurrent getOrCreateEngine creates once" << std::endl;
 
-	// ── Test 12: 句柄保活：releaseAllEngines 后已建图节点继续可用，销毁钩子恰好一次 ──
 	{
 		g_lifecycleCreateCount = 0;
 		g_lifecycleReleaseCount = 0;
@@ -542,12 +507,10 @@ static void runTests() {
 		if (g_lifecycleCreateCount != 1)
 			throw std::runtime_error("engine should be created exactly once");
 
-		// 释放缓存：节点持有共享句柄，实例不被销毁，释放钩子不触发
 		reg.releaseAllEngines();
 		if (g_lifecycleReleaseCount != 0)
 			throw std::runtime_error("releaseAllEngines must not destroy node-held instances");
 
-		// 节点继续执行成功（实例经共享句柄保活）
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 1.0f;
 		NodeExecutor exec(*node);
@@ -558,14 +521,12 @@ static void runTests() {
 		if (!exec.hasOutput("task1", "out"))
 			throw std::runtime_error("output should be produced after releaseAllEngines");
 
-		// 释放节点：最后一个句柄析构，释放钩子恰好调用一次
 		node.reset();
 		if (g_lifecycleReleaseCount != 1)
 			throw std::runtime_error("release hook should fire exactly once when last handle dies");
 	}
 	std::cout << "Test 12 passed: handle keeps engine alive after releaseAllEngines" << std::endl;
 
-	// ── Test 13: 缓存再加载：release 后同 key 重建新实例，旧句柄持有者不受影响 ──
 	{
 		g_lifecycleCreateCount = 0;
 		g_lifecycleReleaseCount = 0;
@@ -577,25 +538,21 @@ static void runTests() {
 		if (g_lifecycleCreateCount != 1)
 			throw std::runtime_error("cache hit should not reload");
 
-		// 移除缓存条目：句柄仍被 oldNode/oldHandle 持有，实例存活
 		reg.releaseEngine("Lifecycle", "models/reload.onnx");
 		if (g_lifecycleReleaseCount != 0)
 			throw std::runtime_error("releaseEngine must not destroy node-held instances");
 
-		// 同 key 重新加载：创建新实例，旧持有者不受影响
 		auto newNode = reg.createNode("Lifecycle", "new", std::string("models/reload.onnx"));
 		if (!newNode)
 			throw std::runtime_error("reload after releaseEngine failed");
 		if (g_lifecycleCreateCount != 2)
 			throw std::runtime_error("same key should create a fresh instance after release");
 
-		// 旧持有者全部释放：旧实例销毁，释放钩子恰好一次
 		oldNode.reset();
 		oldHandle.reset();
 		if (g_lifecycleReleaseCount != 1)
 			throw std::runtime_error("old instance should be released exactly once");
 
-		// 新实例：节点释放后由缓存条目继续持有；清缓存后随最后句柄析构
 		newNode.reset();
 		if (g_lifecycleReleaseCount != 1)
 			throw std::runtime_error("cached handle should keep instance alive");
@@ -605,27 +562,24 @@ static void runTests() {
 	}
 	std::cout << "Test 13 passed: cache reload creates fresh instance without disturbing holders" << std::endl;
 
-	// ── Test 14: single-flight 锁外创建：慢 key 不阻塞其他 key ──
 	{
 		g_blockEntered = 0;
 		g_blockCreated = 0;
 		g_blockRelease = false;
 		registerFlightEngine(reg, "Flight");
 
-		// 线程 A：慢 key 创建（阻塞至放行）
 		std::thread slowThread([&] {
 			auto h = reg.getOrCreateEngine("Flight", "models/slow.onnx");
 			if (!h)
 				throw std::runtime_error("slow key should eventually succeed");
 		});
 
-		// 等 A 进入创建回调（此刻 A 已释放 registry 锁）
+		// 等 A 进入创建回调：此刻 A 已释放 registry 锁
 		for (int i = 0; i < 5000 && g_blockEntered.load() < 1; ++i)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		if (g_blockEntered.load() < 1)
 			throw std::runtime_error("slow loadModel should have been entered");
 
-		// 线程 B：快 key 创建——不等待 A 放行即完成
 		auto fastHandle = reg.getOrCreateEngine("Flight", "models/fast.onnx");
 		if (!fastHandle)
 			throw std::runtime_error("fast key should not be blocked by slow key");
@@ -633,7 +587,6 @@ static void runTests() {
 			throw std::runtime_error(
 				"only fast key should have completed while slow key is still pending");
 
-		// 放行 A，完成创建
 		g_blockRelease = true;
 		slowThread.join();
 		if (g_blockCreated.load() != 2)
@@ -641,13 +594,11 @@ static void runTests() {
 	}
 	std::cout << "Test 14 passed: slow key creation does not block other keys" << std::endl;
 
-	// ── Test 15: single-flight 失败传播：异常透传、跟随者同收失败、失败后可重试 ──
 	{
 		g_failNext = true;
 		g_failCalls = 0;
 		registerFailingEngine(reg, "Failing");
 
-		// 首个调用者：loadModel 异常透传
 		bool threw = false;
 		try {
 			reg.getOrCreateEngine("Failing", "models/fail.onnx");
@@ -659,7 +610,6 @@ static void runTests() {
 		if (g_failCalls != 1)
 			throw std::runtime_error("leader should invoke loadModel exactly once");
 
-		// 失败清除槽位：后续调用重试创建（失败可恢复）
 		g_failNext = false;
 		auto recovered = reg.getOrCreateEngine("Failing", "models/fail.onnx");
 		if (!recovered)
@@ -667,7 +617,6 @@ static void runTests() {
 		if (g_failCalls != 2)
 			throw std::runtime_error("retry should create a fresh instance");
 
-		// 并发失败：跟随者经 shared_future 收到与领导者相同的异常
 		g_failNext = true;
 		constexpr int kThreads = 4;
 		std::atomic<int> failures{0};
@@ -688,7 +637,6 @@ static void runTests() {
 	}
 	std::cout << "Test 15 passed: failure propagates to followers; retry after failure" << std::endl;
 
-	// ── Test 16: 执行相位协议——preRun 抛异常触发 onError 复位，后续相位跳过 ──
 	{
 		registerPhaseEngine(reg, "Phase");
 		auto node = reg.createNode("Phase", "p1", std::string("models/phase.onnx"));
@@ -715,7 +663,6 @@ static void runTests() {
 	}
 	std::cout << "Test 16 passed: preRun failure triggers onError, later phases skipped" << std::endl;
 
-	// ── Test 17: synchronize 抛异常触发 onError 复位，postRun 跳过 ──
 	{
 		auto node = reg.createNode("Phase", "p2", std::string("models/phase.onnx"));
 		if (!node)
@@ -741,7 +688,6 @@ static void runTests() {
 	}
 	std::cout << "Test 17 passed: synchronize failure triggers onError, postRun skipped" << std::endl;
 
-	// ── Test 18: 失败路径矩阵——RunFn 失败经 NodeResult 返回，onError 恰好一次 ──
 	{
 		auto node = reg.createNode("Phase", "p3", std::string("models/phase.onnx"));
 		if (!node)
@@ -762,13 +708,11 @@ static void runTests() {
 	}
 	std::cout << "Test 18 passed: RunFn failure returns via NodeResult, onError fired once" << std::endl;
 
-	// ── Test 19: onError 自身抛异常被吞——不产生次生传播 ──
 	{
 		auto node = reg.createNode("Phase", "p4", std::string("models/phase.onnx"));
 		if (!node)
 			throw std::runtime_error("createNode(modelPath) failed");
 
-		// RunFn 失败 + onError 抛异常：失败经 NodeResult 正常返回，无异常逃逸
 		resetPhaseState(PhaseFailAt::RunFn, true);
 		Tensor in(Tensor::TensorType::Float, sizeof(float));
 		in = 4.0f;
@@ -782,7 +726,6 @@ static void runTests() {
 		if (g_phaseOnError != 1)
 			throw std::runtime_error("onError should be attempted exactly once");
 
-		// preRun 失败 + onError 抛异常：透传的是原 preRun 异常，而非 onError 异常
 		resetPhaseState(PhaseFailAt::PreRun, true);
 		Tensor in2(Tensor::TensorType::Float, sizeof(float));
 		in2 = 5.0f;
@@ -798,7 +741,6 @@ static void runTests() {
 	}
 	std::cout << "Test 19 passed: onError's own exception swallowed, no secondary propagation" << std::endl;
 
-// ── Test 20: 实例缓存 LRU 驱逐（P2-13 容量上限）──
 	{
 		static std::atomic<int> g_lruCreateCount{0};
 		if (!reg.hasEngine("LruMock")) {
@@ -807,16 +749,14 @@ static void runTests() {
 			desc.converter = {mockToNative, mockToDC};
 			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
 				++g_lruCreateCount;
-				// 聚合显式构造：直接传 (path) 依赖 C++20 P0960 括号聚合初始化，
-				// clang-14（最低工具链）不支持；对齐本文件其余 mock 构造风格。
+				// clang-14（最低工具链）不支持 P0960 括号聚合初始化，显式构造
 				return EngineInstance(std::make_shared<MockSession>(MockSession{path}));
 			};
 			if (!reg.registerEngine(desc))
 				throw std::runtime_error("register LruMock engine failed");
 		}
 
-		// 创建 70 个不同 modelPath 的实例（> 上限 64）：最旧条目按 LRU 逐出，
-		// 仍被句柄持有的实例由共享计数保活（不销毁）
+		// 创建 70 个实例（> 上限 64）：最旧条目被 LRU 逐出，句柄持有的实例保活
 		std::vector<EngineHandle> recent;
 		for (int i = 0; i < 70; ++i)
 			recent.push_back(reg.getOrCreateEngine("LruMock", "lru-model-" + std::to_string(i)));
@@ -824,13 +764,11 @@ static void runTests() {
 			throw std::runtime_error("latest instance must be cached");
 
 		const int createsBefore = g_lruCreateCount.load();
-		// 最早创建的条目已被驱逐：再次请求触发重建
 		auto evicted = reg.getOrCreateEngine("LruMock", "lru-model-0");
 		if (!evicted)
 			throw std::runtime_error("evicted instance must be recreated on demand");
 		if (g_lruCreateCount.load() != createsBefore + 1)
 			throw std::runtime_error("recreating evicted instance must hit loadModel again");
-		// 最近条目仍在缓存：同一句柄且不重建
 		auto latest = reg.getOrCreateEngine("LruMock", "lru-model-69");
 		if (latest != recent.back())
 			throw std::runtime_error("recent entry must remain cached (same handle)");
@@ -839,7 +777,6 @@ static void runTests() {
 	}
 	std::cout << "Test 20 passed: instance cache LRU eviction at capacity limit" << std::endl;
 
-	// ── Test 21: 引擎核心跨模型共享：同 engineType 多 modelPath → 核心恰好一次 ──
 	{
 		static std::atomic<int> g_coreOnceInit{0};
 		static std::atomic<int> g_coreOnceLoad{0};
@@ -872,7 +809,6 @@ static void runTests() {
 		if (h1->core().get() != h2->core().get())
 			throw std::runtime_error("both instances should share the same engine core");
 
-		// 显式预热接口：缓存命中，不重复初始化
 		auto core = reg.getOrCreateEngineCore("CoreOnce");
 		if (!core || core.get() != h1->core().get())
 			throw std::runtime_error("getOrCreateEngineCore should hit the cached core");
@@ -881,7 +817,6 @@ static void runTests() {
 	}
 	std::cout << "Test 21 passed: engine core initialized once, shared across models" << std::endl;
 
-	// ── Test 22: 核心失败语义：抛异常/空返回不缓存，可重试；loadModel 不被调用 ──
 	{
 		static std::atomic<int> g_coreFailInit{0};
 		static std::atomic<int> g_coreFailLoad{0};
@@ -895,7 +830,7 @@ static void runTests() {
 				if (g_coreFailMode.load() == 1)
 					throw std::runtime_error("simulated core init failure");
 				if (g_coreFailMode.load() == 2)
-					return EngineCore(); // 空核心 = 失败
+					return EngineCore();
 				return EngineCore(std::make_shared<int>(9));
 			};
 			desc.loadModel = [](const EngineCore&, const std::string& path) -> EngineInstance {
@@ -906,7 +841,6 @@ static void runTests() {
 				throw std::runtime_error("register CoreFail engine failed");
 		}
 
-		// 1) 核心抛异常 → 上抛，且 loadModel 从未被调用
 		g_coreFailMode = 1;
 		bool threw = false;
 		try {
@@ -919,7 +853,6 @@ static void runTests() {
 		if (g_coreFailLoad.load() != 0)
 			throw std::runtime_error("loadModel must not run when core init fails");
 
-		// 2) 空核心 → nullptr（不抛）
 		g_coreFailMode = 2;
 		auto emptyResult = reg.getOrCreateEngine("CoreFail", "models/core-fail.onnx");
 		if (emptyResult)
@@ -927,7 +860,6 @@ static void runTests() {
 		if (g_coreFailLoad.load() != 0)
 			throw std::runtime_error("loadModel must not run for empty core");
 
-		// 3) 失败不缓存：修复后可重试成功
 		g_coreFailMode = 0;
 		auto recovered = reg.getOrCreateEngine("CoreFail", "models/core-fail.onnx");
 		if (!recovered)
@@ -939,7 +871,6 @@ static void runTests() {
 	}
 	std::cout << "Test 22 passed: core failure semantics (throw/empty, no cache, retry)" << std::endl;
 
-	// ── Test 23: 分层释放：releaseAllEngines 清两级缓存；实例保活核心；钩子各恰好一次 ──
 	{
 		static std::atomic<int> g_lifeInit{0};
 		static std::atomic<int> g_lifeLoad{0};
@@ -970,31 +901,26 @@ static void runTests() {
 		if (!core)
 			throw std::runtime_error("instance should carry its core");
 
-		// 清两级缓存：实例/核心均由外部句柄保活，释放钩子不触发
 		reg.releaseAllEngines();
 		if (g_lifeModelRelease.load() != 0 || g_lifeCoreRelease.load() != 0)
 			throw std::runtime_error("cache clear must not destroy handle-held objects");
 
-		// 仅释放实例句柄：模型钩子恰好一次；核心仍被本地句柄持有 → 核心钩子不触发
 		h.reset();
 		if (g_lifeModelRelease.load() != 1)
 			throw std::runtime_error("releaseModel should fire exactly once");
 		if (g_lifeCoreRelease.load() != 0)
 			throw std::runtime_error("core should stay alive while held by local handle");
 
-		// 释放核心句柄：核心钩子恰好一次
 		core.reset();
 		if (g_lifeCoreRelease.load() != 1)
 			throw std::runtime_error("releaseEngineCore should fire exactly once");
 
-		// 重新获取：缓存已清 → 核心重建（计数 +1）
 		auto h2 = reg.getOrCreateEngine("CoreLifecycle", "models/core-life2.onnx");
 		if (!h2 || g_lifeInit.load() != 2)
 			throw std::runtime_error("core should be re-initialized after full release");
 	}
 	std::cout << "Test 23 passed: two-level release, core outlives instance, hooks fire once" << std::endl;
 
-	// ── Test 24: 核心层 single-flight：同 engineType 不同 modelPath 并发 → 核心恰好一次 ──
 	{
 		static std::atomic<int> g_coreConcInit{0};
 		static std::atomic<int> g_coreConcLoad{0};
@@ -1006,7 +932,6 @@ static void runTests() {
 			desc.converter = {mockToNative, mockToDC};
 			desc.createEngineCore = []() -> EngineCore {
 				++g_coreConcEntered;
-				// 阻塞至放行：确保全部并发调用者在核心创建期间进入等待
 				while (!g_coreConcRelease.load())
 					std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				++g_coreConcInit;
@@ -1034,7 +959,7 @@ static void runTests() {
 				}
 			});
 		}
-		// 等核心回调被进入（此刻领导者已锁外执行，其余线程进入 core 等待）
+		// 等核心回调被进入：领导者已锁外执行，其余线程进入 core 等待
 		for (int i = 0; i < 5000 && g_coreConcEntered.load() < 1; ++i)
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 让其余线程抵达 core single-flight
@@ -1055,7 +980,6 @@ static void runTests() {
 	}
 	std::cout << "Test 24 passed: core single-flight under concurrent multi-model access" << std::endl;
 
-	// ── Test 25: releaseEngineCore：旧实例保活旧核心；重建后新实例获得新核心 ──
 	{
 		static std::atomic<int> g_reCoreInit{0};
 		static std::atomic<int> g_reCoreRelease{0};
@@ -1082,12 +1006,10 @@ static void runTests() {
 		if (!oldCore)
 			throw std::runtime_error("h1 should carry the initial core");
 
-		// 移除核心缓存条目：h1 仍持有旧核心 → 不销毁
 		reg.releaseEngineCore("CoreRelease");
 		if (g_reCoreRelease.load() != 0)
 			throw std::runtime_error("releaseEngineCore must not destroy instance-held core");
 
-		// 新模型路径：核心缓存已空 → 重新初始化（旧核心不受影响）
 		auto h2 = reg.getOrCreateEngine("CoreRelease", "models/cr-2.onnx");
 		if (!h2 || g_reCoreInit.load() != 2)
 			throw std::runtime_error("core should be re-initialized after releaseEngineCore");
@@ -1096,9 +1018,8 @@ static void runTests() {
 		if (g_reCoreRelease.load() != 0)
 			throw std::runtime_error("old core must stay alive while h1 holds it");
 
-		// 释放旧实例（本地句柄 + 实例缓存条目）与旧核心句柄：旧核心钩子恰好一次
 		h1.reset();
-		reg.releaseEngine("CoreRelease", "models/cr-1.onnx"); // 移除实例缓存引用（含实例持有的核心引用）
+		reg.releaseEngine("CoreRelease", "models/cr-1.onnx");
 		oldCore.reset();
 		if (g_reCoreRelease.load() != 1)
 			throw std::runtime_error("old core release hook should fire once");

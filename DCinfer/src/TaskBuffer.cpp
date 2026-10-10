@@ -5,8 +5,6 @@
 
 namespace DC {
 
-// ── 输入 ──
-
 void TaskBuffer::setInput(const TaskId& taskId, const std::string& portName, Value data,
 						  const NodeSchema& schema) {
 	if (!schema.findInput(portName)) {
@@ -26,7 +24,7 @@ bool TaskBuffer::setInputAndCheckReady(const TaskId& taskId, const std::string& 
 							"port '" + portName + "' not found in schema");
 	}
 
-	// 写入与就绪判定同一临界区：多上游并发传播时仅最后写入者观察到 ready
+	// 写入与就绪判定同一临界区：仅最后写入者观察到 ready
 	std::unique_lock lk(_mutex);
 	_ensureTaskExists(taskId, schema);
 	_taskInputs[taskId].at(portName) = std::move(data);
@@ -36,7 +34,6 @@ bool TaskBuffer::setInputAndCheckReady(const TaskId& taskId, const std::string& 
 void TaskBuffer::setInputBatch(const TaskId& taskId,
 							   std::unordered_map<std::string, TaskData> inputs,
 							   const NodeSchema& schema) {
-	// 预校验：所有端口名必须存在
 	for (const auto& [name, data] : inputs) {
 		if (!schema.findInput(name)) {
 			throw NodeException(NodeException::ErrorType::PortNotFound, "TaskBuffer::setInputBatch",
@@ -51,8 +48,6 @@ void TaskBuffer::setInputBatch(const TaskId& taskId,
 		_taskInputs[taskId].at(name) = std::move(data);
 	}
 }
-
-// ── 就绪判断 ──
 
 bool TaskBuffer::isReady(const TaskId& taskId, const NodeSchema& schema) const {
 	std::shared_lock lk(_mutex);
@@ -78,8 +73,6 @@ bool TaskBuffer::_isReadyLocked(const TaskId& taskId, const NodeSchema& schema) 
 	}
 	return true;
 }
-
-// ── 输出 ──
 
 bool TaskBuffer::hasOutput(const TaskId& taskId, const std::string& name) const {
 	std::shared_lock lk(_mutex);
@@ -139,8 +132,6 @@ std::unordered_map<std::string, TaskBuffer::TaskData> TaskBuffer::collectOutputs
 	return result;
 }
 
-// ── 生命周期 ──
-
 bool TaskBuffer::hasTask(const TaskId& taskId) const {
 	std::shared_lock lk(_mutex);
 	return _taskInputs.contains(taskId) || _taskOutputs.contains(taskId);
@@ -154,8 +145,7 @@ void TaskBuffer::clearTask(const TaskId& taskId) {
 
 size_t TaskBuffer::taskCount() const {
 	std::shared_lock lk(_mutex);
-	// 与 hasTask 同口径（#8-17）：输入表 ∪ 输出表——执行后输入已擦除
-	// 但输出未取走的任务（eraseInputs 后）仍被计入
+	// 与 hasTask 同口径：输入表 ∪ 输出表；执行后输入已擦除但输出未取走的任务仍计入
 	size_t count = _taskInputs.size();
 	for (const auto& [tid, entry] : _taskOutputs) {
 		if (!_taskInputs.contains(tid))
@@ -163,8 +153,6 @@ size_t TaskBuffer::taskCount() const {
 	}
 	return count;
 }
-
-// ── 批量传输（供 ExecutionPipeline 使用）──
 
 void TaskBuffer::drainInputsTo(const TaskId& taskId, SlotWorkspace& workspace,
 							   const NodeSchema& schema) {
@@ -179,7 +167,7 @@ void TaskBuffer::drainInputsTo(const TaskId& taskId, SlotWorkspace& workspace,
 		if (taskIt != taskInputs.end() && taskIt->second.has_value()) {
 			auto& nativeData = taskIt->second.value();
 
-			// 对 DCTensor 类型的 Value 进行类型校验
+			// DCTensor 类型校验
 			if (nativeData.innerType() == ensureSlotType<Tensor>() && port.type != Tensor::TensorType::Void) {
 				const auto* t = static_cast<const Tensor*>(nativeData.get());
 				if (!t || !t->valid()) {
@@ -192,11 +180,8 @@ void TaskBuffer::drainInputsTo(const TaskId& taskId, SlotWorkspace& workspace,
 										"TaskBuffer::drainInputsTo",
 										"type mismatch for port '" + port.name + "'");
 				}
-				// 元素宽度校验（P1）：逻辑类型相同但 typeSize 不一致（schema 声明
-				// 与实际内存布局不符）→ 后端按错误元素宽度解释数据，入口拒绝。
-				// 仅对数值类型生效：Data（字节流）端口的 port.typeSize 是
-				// sizeof(std::vector<char>) 容器外壳大小（NodePort::in<T> 推导），
-				// 与 Tensor 元素宽度（char → 1）非同一语义，不参与比对
+				// 元素宽度校验：逻辑类型相同但 typeSize 不一致则入口拒绝。
+				// Data 端口的 port.typeSize 是容器外壳大小，与元素宽度非同一语义，不参与比对。
 				if (port.type != Tensor::TensorType::Data && t->typeSize() != port.typeSize) {
 					throw NodeException(NodeException::ErrorType::TypeMismatch,
 										"TaskBuffer::drainInputsTo",
@@ -213,7 +198,7 @@ void TaskBuffer::drainInputsTo(const TaskId& taskId, SlotWorkspace& workspace,
 		}
 	}
 
-	// 第二遍：懒求值 DefaultProvider（形状锚定等动态默认值）
+	// 第二遍：懒求值 DefaultProvider，解析动态默认值
 	for (auto& [name, slot] : workspace.mutableInputSlots()) {
 		slot.resolveDefaultIfNeeded(workspace.inputSlots());
 	}
@@ -261,8 +246,6 @@ bool TaskBuffer::validateOutputs(const TaskId& taskId, const NodeSchema& schema)
 	}
 	return true;
 }
-
-// ── 内部方法 ──
 
 void TaskBuffer::_ensureTaskExists(const TaskId& taskId, const NodeSchema& schema) {
 	if (_taskInputs.contains(taskId))

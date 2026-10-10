@@ -45,10 +45,9 @@ vcpkg_cmake_configure(
 vcpkg_cmake_install()
 vcpkg_cmake_config_fixup(CONFIG_PATH "lib/cmake/NvidiaCutlass" PACKAGE_NAME "NvidiaCutlass")
 
-# ORT 1.28 的 cutlass_fmha（MemoryEfficientAttention，kernel_forward.h）通过
-# #include "41_fused_multi_head_attention/..." 引用 cutlass examples 目录下的头文件，
-# 而基线 port 只安装 include/。补装该 example 的头文件到 include/cutlass_examples/，
-# ORT 侧由 fix-cmake-cuda.patch 中的 find_path 探测并加入 include 路径。
+# ORT 1.28 的 cutlass_fmha 经 #include "41_fused_multi_head_attention/..." 引用
+# examples 头文件（基线 port 只安装 include/）；补装到 include/cutlass_examples/，
+# ORT 侧由 fix-cmake-cuda.patch 的 find_path 探测。
 file(COPY "${SOURCE_PATH}/examples/41_fused_multi_head_attention"
      DESTINATION "${CURRENT_PACKAGES_DIR}/include/cutlass_examples")
 

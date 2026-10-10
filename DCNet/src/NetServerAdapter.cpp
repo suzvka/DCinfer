@@ -1,7 +1,5 @@
-// 节点服务化装配：把本地 DCinfer 节点暴露为可被出站 send→recv 驱动的监听服务
-// （M-server / DESIGN.md §3.6）。执行走与本地完全相同的节点管线，task 态由
-// NodeExecutor 显式承载（setInput → tryExecute → collectOutputs），
-// 图级语义与本地执行无差别。
+// 节点服务化装配：把本地节点暴露为可被出站 send→recv 驱动的监听服务。
+// 执行走与本地相同的节点管线（NodeExecutor 承载 task 态），图级语义无差别。
 
 #include "DCNet/NetServerAdapter.h"
 
@@ -25,10 +23,8 @@ namespace DC::Net {
 
 namespace {
 
-/// @brief 输入边界本地形状规则校验（镜像出站 decodeResponse「校验本地形状规则
-/// 后 ctx.output」的职责，DESIGN.md §3.2/§3.4）：端口名 / 类型 / 形状（-1 动态维）
-/// 不符 → 返回 false 并填 reason。wire 上按 schema 违例应答 400（DESIGN.md §6.1：
-/// 对端 RemoteRejected → InvalidInput）。
+/// 输入边界形状规则校验（端口名 / 类型 / 形状，-1 为动态维）：
+/// 不符返回 false 并填 reason，wire 上应答 400。
 bool validateAgainstSchema(const Node::Schema& schema, const std::unordered_map<std::string, Tensor>& inputs,
 						   std::string& reason) {
 	for (const auto& [name, tensor] : inputs) {
@@ -70,7 +66,7 @@ public:
 
 	void launch() {
 		_listener = makeHttpListener();
-		_listener->bind(_endpoint); // 配置期出口（ADR-7）：失败抛 NodeException
+		_listener->bind(_endpoint); // 配置期出口：失败抛 NodeException
 		_listener->start([this](const std::string& path, const std::string& body) {
 			return execute(path, body);
 		});
@@ -92,9 +88,7 @@ public:
 private:
 	WireResponse execute(const std::string& /*path*/, const std::string& body) {
 		try {
-			// ① decodeRequest：报文 → 本地输入端口张量
-			//    解析失败 = wire 级垃圾报文（DESIGN.md §6.1）→ 415，对端归一化
-			//    为 ExecutionFailed（dcnet 诊断 code=RemoteMalformed），与 schema 违例区分
+			// ① decodeRequest：报文 → 输入端口张量；解析失败 = wire 级垃圾 → 415
 			std::unordered_map<std::string, Tensor> inputs;
 			try {
 				inputs = _codec->decodeRequest(body);
@@ -103,8 +97,7 @@ private:
 												   "request payload not parseable")};
 			}
 
-			// ② 每请求一个节点实例（ADR-7：实例级隔离）；引擎实例由
-			//    Registry 缓存复用，本地执行互斥串行（引擎单任务语义）
+			// ② 每请求一个节点实例（实例级隔离）；引擎实例由 Registry 缓存复用
 			const std::string taskId = "dcnet-server-" + std::to_string(_taskSeq.fetch_add(1));
 			std::unique_ptr<Node> node;
 			try {
@@ -115,7 +108,7 @@ private:
 			if (!node)
 				return {500, internalError("engine_unavailable")};
 
-			// ③ 输入边界 schema 校验（DESIGN.md §6.1：schema 违例 → InvalidInput）
+			// ③ 输入边界 schema 校验（违例 → InvalidInput）
 			std::string reason;
 			if (!validateAgainstSchema(node->schema(), inputs, reason))
 				return {400, detail::wireErrorBody("invalid_input", reason)};
@@ -124,12 +117,12 @@ private:
 			std::unordered_map<std::string, Tensor> outputs;
 			{
 				std::lock_guard lk(_execMutex);
-				// task 态随每请求的执行器走（ADR-7 实例级隔离），节点仅作执行计划
+				// task 态随执行器走（实例级隔离）；节点仅作执行计划
 				NodeExecutor exec(*node);
 				try {
 					exec.setInput(taskId, std::move(inputs));
 				} catch (const NodeException& e) {
-					// 端口名不在 schema（PortNotFound）→ schema 违例 → 400
+					// 端口名不在 schema → 400
 					return {400, detail::wireErrorBody("invalid_input", e.what())};
 				}
 				if (!exec.isReady(taskId))
@@ -137,8 +130,7 @@ private:
 				try {
 					result = exec.tryExecute(taskId);
 				} catch (const NodeException& e) {
-					// 深层形状/类型校验（ValidatorRegistry abort 漏网到 drain 层）
-					// 同属输入违例 → 400；其余按本地执行失败语义 → 500
+					// 深层校验（ValidatorRegistry 漏网）同属输入违例 → 400；其余 → 500
 					switch (e.getErrorType()) {
 					case NodeException::ErrorType::NotReady:
 						return {400, detail::wireErrorBody("missing_input", e.what())};
@@ -156,13 +148,13 @@ private:
 				exec.clearTask(taskId);
 			}
 
-			// ④ 本地执行失败 → wire 逆向映射（DESIGN.md §6.1；语义一致性）
+			// ④ 本地执行失败 → wire 逆向映射
 			if (!result.ok() && wireHttpStatusFor(result.status) >= 500) return {500, internalError("execute_failed")};
 			if (!result.ok())
 				return {wireHttpStatusFor(result.status),
 						detail::wireErrorBody(wireCodeFor(result.status), result.message)};
 
-			// ⑤ encodeResponse：输出张量 → 报文（编码失败按本地失败语义应答 5xx）
+			// ⑤ encodeResponse：输出张量 → 报文（失败 → 5xx）
 			try {
 				return {200, _codec->encodeResponse(outputs)};
 			} catch (const std::exception& e) {
@@ -194,17 +186,16 @@ private:
 } // namespace
 
 std::shared_ptr<DcNetServerService> registerDcNetServerAdapter(EngineRegistry& reg, DcNetServerAdapterDesc desc) {
-	// 配置期校验（ADR-7）：失败抛 NodeException，不产生 wire
+	// 配置期校验：失败抛 NodeException，不产生 wire
 	if (!desc.codec)
 		throw NodeException(NodeException::ErrorType::InternalError, "registerDcNetServerAdapter",
 							"engine '" + desc.engineType + "' has no server codec");
-	// 预创建引擎核心与实例：engineType 未注册 / createEngineCore / loadModel
-	// 失败在此暴露（配置期报错）
+	// 预创建引擎核心与实例：未注册 / 加载失败在配置期暴露
 	if (!reg.getOrCreateEngine(desc.engineType, desc.localModelRef))
 		throw NodeException(NodeException::ErrorType::ExecutionFailed, "registerDcNetServerAdapter",
 							"engine '" + desc.engineType + ":" + desc.localModelRef +
 								"' not registered or creation failed");
-	// requestPath 由 codec 注入（镜像出站 loadModel 的端点装配）
+	// requestPath 由 codec 注入
 	desc.endpoint.requestPath = desc.codec->requestPath();
 
 	auto svc = std::make_shared<ServerService>(reg, std::move(desc));

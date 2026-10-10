@@ -34,15 +34,11 @@ static int failures = 0;
 	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
 
-// ── 辅助 ──
-
 static Tensor floatTensor(float value) {
 	auto t = Tensor::Create<float>();
 	t = value;
 	return t;
 }
-
-// ── 增 1 算子 ──
 
 static Node::Schema incSchema() {
 	Node::Schema s;
@@ -63,8 +59,6 @@ static Node::RunFn incRunFn() {
 	};
 }
 
-// ── 慢速增 1 算子（保证句柄析构发生在任务运行中）──
-
 static Node::RunFn slowIncRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
 		std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -77,8 +71,6 @@ static Node::RunFn slowIncRunFn() {
 		return ctx.success();
 	};
 }
-
-// ── 加法算子 ──
 
 static Node::Schema addSchema() {
 	Node::Schema s;
@@ -100,10 +92,6 @@ static Node::RunFn addRunFn() {
 	};
 }
 
-// ════════════════════════════════════════════
-// 别名路径 = 坐标路径（同一冻结图）
-// ════════════════════════════════════════════
-
 static void testAliasPathMatchesCoordinatePath() {
 	InferGraph graph;
 	graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
@@ -116,7 +104,6 @@ static void testAliasPathMatchesCoordinatePath() {
 	CHECK(inAliases.size() == 1 && inAliases[0] == "num", "input aliases should list 'num'");
 	CHECK(outAliases.size() == 1 && outAliases[0] == "result", "output aliases should list 'result'");
 
-	// 别名路径
 	auto task = api.createTask();
 	task.feed("num", floatTensor(41.0f));
 	CHECK(task.run().status == TaskStatus::Succeeded, "alias path should complete");
@@ -129,17 +116,12 @@ static void testAliasPathMatchesCoordinatePath() {
 	CHECK(task2.run().status == TaskStatus::Succeeded, "second task should complete");
 	CHECK(std::abs(task2.takeTensor("result").item<float>() - 8.0f) < 1e-6f, "second task should yield 8");
 
-	// 同一冻结图：坐标寻址照常（高级入口）
 	graph.feedInput("t3", "inc", "x", floatTensor(1.0f));
 	graph.submitBound("t3");
 	CHECK(graph.waitForResult("t3").status == TaskStatus::Succeeded, "coordinate path should complete");
 	CHECK(std::abs(graph.takeOutputTensor("t3", "inc", "y").item<float>() - 2.0f) < 1e-6f,
 		  "coordinate path should yield 2");
 }
-
-// ════════════════════════════════════════════
-// 未知别名：报错并列出全部可用别名
-// ════════════════════════════════════════════
 
 static void testUnknownAliasListsAvailable() {
 	InferGraph graph;
@@ -174,16 +156,11 @@ static void testUnknownAliasListsAvailable() {
 	CHECK(badTake, "unknown output alias should throw InvalidBinding");
 	CHECK(takeMsg.find("answer") != std::string::npos, "take error should list available output aliases");
 
-	// 正确别名照常
 	task.feed("prompt", floatTensor(2.0f));
 	task.feed("context", floatTensor(3.0f));
 	CHECK(task.run().status == TaskStatus::Succeeded, "valid aliases should run");
 	CHECK(std::abs(task.takeTensor("answer").item<float>() - 5.0f) < 1e-6f, "result should be 5");
 }
-
-// ════════════════════════════════════════════
-// 取接口即定型：interface() 冻结图
-// ════════════════════════════════════════════
 
 static void testInterfaceFreezesGraph() {
 	InferGraph graph;
@@ -191,7 +168,7 @@ static void testInterfaceFreezesGraph() {
 	graph.bindInput("num", "inc", "x");
 	graph.bindOutput("result", "inc", "y");
 
-	graph.interface(); // 取接口即定型
+	graph.interface();
 
 	bool bindRejected = false;
 	try {
@@ -210,12 +187,7 @@ static void testInterfaceFreezesGraph() {
 	CHECK(addRejected, "interface() should freeze the graph (addNode rejected)");
 }
 
-// ════════════════════════════════════════════
-// 绑定坐标在创建时校验（fail-fast）
-// ════════════════════════════════════════════
-
 static void testBindingValidationAtCreation() {
-	// 输入绑定 → 不存在的节点
 	{
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
@@ -228,7 +200,6 @@ static void testBindingValidationAtCreation() {
 		}
 		CHECK(threw, "input binding on missing node should fail at interface()");
 	}
-	// 输出绑定 → 不存在的端口
 	{
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
@@ -241,7 +212,6 @@ static void testBindingValidationAtCreation() {
 		}
 		CHECK(threw, "output binding on missing port should fail at interface()");
 	}
-	// 输入绑定 → 方向错误的端口（输出端口）
 	{
 		InferGraph graph;
 		graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
@@ -256,10 +226,6 @@ static void testBindingValidationAtCreation() {
 	}
 }
 
-// ════════════════════════════════════════════
-// 任务句柄：移动交权 / 析构释放 / 外部提交不受析构影响
-// ════════════════════════════════════════════
-
 static void testTaskHandleLifecycle() {
 	InferGraph graph;
 	graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
@@ -267,7 +233,6 @@ static void testTaskHandleLifecycle() {
 	graph.bindOutput("result", "inc", "y");
 	auto api = graph.interface();
 
-	// 移动语义：源句柄交权后不再持有
 	std::string movedId;
 	{
 		auto moved = api.createTask();
@@ -280,7 +245,6 @@ static void testTaskHandleLifecycle() {
 	}
 	CHECK(graph.taskStatus(movedId) == TaskStatus::Unknown, "moved handle should be released at scope end");
 
-	// 终止后析构 → 资源释放（taskStatus 回到 Unknown）
 	std::string doneId;
 	{
 		auto task = api.createTask();
@@ -291,7 +255,6 @@ static void testTaskHandleLifecycle() {
 	}
 	CHECK(graph.taskStatus(doneId) == TaskStatus::Unknown, "destructor should release terminated task");
 
-	// 外部提交（submitBound）的在飞任务不受句柄析构影响（句柄仅接管自身提交的任务）
 	InferGraph slowGraph;
 	slowGraph.addNode(std::make_unique<Node>("Builtin", "slow", incSchema(), slowIncRunFn()));
 	slowGraph.bindInput("num", "slow", "x");
@@ -303,7 +266,7 @@ static void testTaskHandleLifecycle() {
 		auto task = slowApi.createTask();
 		runningId = task.taskId();
 		task.feed("num", floatTensor(10.0f));
-		slowGraph.submitBound(runningId); // 句柄外提交（坐标层）；析构发生在运行中也不受影响
+		slowGraph.submitBound(runningId);
 	}
 	const auto slowResult = slowGraph.waitForResult(runningId);
 	CHECK(slowResult.status == TaskStatus::Succeeded, "handle destruction must not cancel an externally submitted task");
@@ -311,14 +274,10 @@ static void testTaskHandleLifecycle() {
 		  "in-flight result should be intact");
 }
 
-// ════════════════════════════════════════════
-// run() 无输出绑定：转发 NoDeclaration
-// ════════════════════════════════════════════
-
 static void testRunWithoutOutputBindings() {
 	InferGraph graph;
 	graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
-	graph.bindInput("num", "inc", "x"); // 未声明输出绑定
+	graph.bindInput("num", "inc", "x");
 
 	auto api = graph.interface();
 	auto task = api.createTask();
@@ -332,12 +291,6 @@ static void testRunWithoutOutputBindings() {
 	}
 	CHECK(threw, "run() without output bindings should throw NoDeclaration");
 }
-
-// ═══════════════════════════════════════════════════════════
-// 统一任务句柄：同步与异步同级（submit / wait / status / cancel）
-// ═══════════════════════════════════════════════════════════
-
-// ── 必败算子（触发 Error 级诊断）──
 
 static Node::RunFn failRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
@@ -355,10 +308,10 @@ static void testAsyncSubmitWaitStatusCancel() {
 	auto task = api.createTask();
 	CHECK(task.status() == TaskStatus::Unknown, "fresh handle should be Unknown");
 
-	task.feed("num", floatTensor(10.0f)).submit(); // 链式组装 + 异步启动
+	task.feed("num", floatTensor(10.0f)).submit();
 	CHECK(task.status() == TaskStatus::Running, "submitted task should be Running");
 
-	auto done = task.wait(); // 异步配套：同步等待终止
+	auto done = task.wait();
 	CHECK(done.status == TaskStatus::Succeeded, "async path should complete");
 	CHECK(task.status() == TaskStatus::Succeeded, "status should be Succeeded after wait");
 	CHECK(task.has("result"), "output should exist after completion");
@@ -379,7 +332,7 @@ static void testRunWithTimeout() {
 	auto timedOut = task.run(std::chrono::milliseconds(50));
 	CHECK(timedOut.status == TaskStatus::Running, "run(timeout) should return Running on timeout");
 
-	auto done = task.wait(); // 任务未被取消：继续等待可完成
+	auto done = task.wait();
 	CHECK(done.status == TaskStatus::Succeeded, "task should still complete after timeout");
 	CHECK(std::abs(task.takeTensor("result").item<float>() - 3.0f) < 1e-6f,
 		  "result should be 3 after timeout recovery");
@@ -414,17 +367,12 @@ static void testFailedTaskReportsErrors() {
 	CHECK(!task.errors().empty(), "errors() should report node diagnostics");
 }
 
-// ════════════════════════════════════════════
-// 内核 API 保持坐标唯一寻址（alias 不可用）
-// ════════════════════════════════════════════
-
 static void testCoreRemainsCoordinateOnly() {
 	InferGraph graph;
 	graph.addNode(std::make_unique<Node>("Builtin", "inc", incSchema(), incRunFn()));
 	graph.bindInput("num", "inc", "x");
 	graph.bindOutput("result", "inc", "y");
 
-	// alias 不能冒充 nodeName 用于内核 API
 	bool feedRejected = false;
 	try {
 		graph.feedInput("t1", "num", "x", floatTensor(1.0f));
@@ -441,7 +389,6 @@ static void testCoreRemainsCoordinateOnly() {
 	}
 	CHECK(takeRejected, "alias must not address core takeOutput");
 
-	// 正路：坐标寻址
 	graph.feedInput("t3", "inc", "x", floatTensor(5.0f));
 	graph.submitBound("t3");
 	CHECK(graph.waitForResult("t3").status == TaskStatus::Succeeded, "coordinate addressing should complete");

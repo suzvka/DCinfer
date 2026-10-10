@@ -16,7 +16,6 @@ using TensorType = DC::Tensor::TensorType;
 using Tensor = DC::Tensor;
 using Shape = DC::Tensor::Shape;
 
-// ── Schema 辅助 ──
 static Node::Schema scalarAddSchema() {
 	Node::Schema s;
 	s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("b")};
@@ -31,7 +30,6 @@ static Node::Schema shapedAddSchema(Shape shape) {
 	return s;
 }
 
-// ── Add 计算逻辑 ──
 static Node::Result addRunImpl(Node::RunContext& self) {
 	const auto& aNT = self.peek("a");
 	const auto& bNT = self.peek("b");
@@ -54,7 +52,6 @@ static Node::Result addRunImpl(Node::RunContext& self) {
 	return self.success();
 }
 
-// ── 创建辅助张量（用于 setInput 的 Value 包装）──
 static Value makeScalarNative(float value) {
 	auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 	*t = value;
@@ -75,7 +72,6 @@ static Value makeIntNative(int value) {
 	return Value(std::move(t));
 }
 
-// ── 创建辅助张量（用于默认值等 Schema 定义）──
 static Tensor makeVectorFloat(const std::vector<float>& values) {
 	std::vector<std::byte> bytes(values.size() * sizeof(float));
 	std::memcpy(bytes.data(), values.data(), bytes.size());
@@ -83,7 +79,6 @@ static Tensor makeVectorFloat(const std::vector<float>& values) {
 				  Tensor::DataBlock(std::move(bytes)));
 }
 
-// ── 测试入口 ──
 static int failures = 0;
 
 #define CHECK(cond, msg)                                                                                               \
@@ -112,12 +107,9 @@ static int failures = 0;
 	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
 
-// ════════════════════════════════════════════
-
 void runTests() {
 	auto& reg = EngineRegistry::instance();
 
-	// ── Test 1: 基本乱序 setInput ──
 	TEST("out-of-order setInput with explicit tryExecute") {
 		auto node = reg.createNode("add1", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -134,12 +126,10 @@ void runTests() {
 			completed = true;
 		});
 
-		// a 先到，不应触发
 		exec.setInput("task1", "a", makeScalarNative(3.0f));
 		CHECK(!completed, "should not complete after only 'a'");
 		CHECK_THROWS(exec.tryExecute("task1"), NodeException, "tryExecute should throw when not ready");
 
-		// b 后到 → 就绪
 		exec.setInput("task1", "b", makeScalarNative(4.0f));
 		exec.tryExecute("task1");
 		CHECK(completed, "should complete after 'b'");
@@ -147,7 +137,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 2: 批量 setInputs ──
 	TEST("batch setInputs") {
 		auto node = reg.createNode("add2", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -175,7 +164,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 3: 多任务交织 ──
 	TEST("multi-task interleaving") {
 		auto node = reg.createNode("add3", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -190,19 +178,18 @@ void runTests() {
 
 		exec.setInput("task1", "a", makeScalarNative(1.0f));
 		exec.setInput("task2", "b", makeScalarNative(6.0f));
-		exec.setInput("task1", "b", makeScalarNative(2.0f)); // task1 就绪
+		exec.setInput("task1", "b", makeScalarNative(2.0f));
 		exec.tryExecute("task1");
 
 		CHECK(completedTasks.size() == 1, "task1 should complete");
 		CHECK(completedTasks[0] == "task1", "task1 should complete first");
 
-		exec.setInput("task2", "a", makeScalarNative(5.0f)); // task2 就绪
+		exec.setInput("task2", "a", makeScalarNative(5.0f));
 		exec.tryExecute("task2");
 		CHECK(completedTasks.size() == 2, "task2 should also complete");
 	}
 	END_TEST();
 
-	// ── Test 4: 尚不就绪不触发 ──
 	TEST("not ready - no execution") {
 		auto node = reg.createNode("add4", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -218,12 +205,11 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 5: 有默认值不阻塞 ──
 	TEST("default value unblocks") {
 		auto schema = []() {
 			Node::Schema s;
 			s.inputs = {Node::Port::in<float>("a"),
-						Node::Port::optional<float>("b", 100.0f)}; // b 有默认值 100
+						Node::Port::optional<float>("b", 100.0f)};
 			s.outputs = {Node::Port::out<float>("s")};
 			return s;
 		}();
@@ -245,7 +231,6 @@ void runTests() {
 			exec.clearTask(taskId);
 		});
 
-		// 只设置 a，b 有默认值 100 → 应立即触发
 		exec.setInput("task1", "a", makeScalarNative(5.0f));
 		CHECK(exec.isReady("task1"), "task should be ready with default value");
 		exec.tryExecute("task1");
@@ -254,7 +239,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 6: 默认值被显式覆盖 ──
 	TEST("default value overridden") {
 		auto schema = []() {
 			Node::Schema s;
@@ -280,7 +264,6 @@ void runTests() {
 			exec.clearTask(taskId);
 		});
 
-		// 批量同时设置 a 和 b，覆盖默认值
 		std::unordered_map<std::string, Node::TaskData> inputs;
 		inputs.emplace("a", makeScalarNative(5.0f));
 		inputs.emplace("b", makeScalarNative(200.0f));
@@ -292,7 +275,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 7: RunFn 抛异常 ──
 	TEST("RunFn exception handled") {
 		auto schema = []() {
 			Node::Schema s;
@@ -315,13 +297,12 @@ void runTests() {
 		});
 
 		exec.setInput("task1", "x", makeScalarNative(1.0f));
-		exec.tryExecute("task1"); // RunFn throws internally, caught by _checkAndExecute
+		exec.tryExecute("task1");
 		CHECK(completed, "callback should be invoked even on failure");
 		CHECK(lastStatus == Node::Status::ExecutionFailed, "status should be ExecutionFailed");
 	}
 	END_TEST();
 
-	// ── Test 8: RunFn 不产出 output ──
 	TEST("RunFn missing output") {
 		auto schema = []() {
 			Node::Schema s;
@@ -331,7 +312,6 @@ void runTests() {
 		}();
 
 		auto node = reg.createNode("bad", schema, [](Node::RunContext& self) -> Node::Result {
-			// 故意不调用 output
 			return self.success();
 		});
 		NodeExecutor exec(*node);
@@ -346,13 +326,12 @@ void runTests() {
 		});
 
 		exec.setInput("task1", "x", makeScalarNative(1.0f));
-		exec.tryExecute("task1"); // output not produced → InternalError in callback
+		exec.tryExecute("task1");
 		CHECK(completed, "callback should be invoked");
 		CHECK(lastStatus == Node::Status::InternalError, "status should be InternalError for missing output");
 	}
 	END_TEST();
 
-	// ── Test 9: 无回调时轮询模式 ──
 	TEST("polling without callback") {
 		auto node = reg.createNode("add9", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -362,7 +341,7 @@ void runTests() {
 		exec.tryExecute("task1");
 
 		CHECK(exec.hasOutput("task1", "s"), "hasOutput should be true");
-		// #8-17 并集口径：执行后输入已擦除、输出未取——任务仍须计入
+		// 并集口径：输入已擦除、输出未取的任务仍计入
 		CHECK(exec.taskCount() == 1, "task with undrained outputs must still be counted");
 		auto outNT = exec.takeOutput("task1", "s");
 		auto* out = outNT.as<Tensor>();
@@ -374,7 +353,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 10: 端口名不存在 ──
 	TEST("invalid port name") {
 		auto node = reg.createNode("add10", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -385,18 +363,15 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 11: 类型不匹配（tryExecute 时在校验阶段抛出 NodeException::TypeMismatch）──
 	TEST("type mismatch rejected at tryExecute") {
 		auto node = reg.createNode("add11", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
 
-		// 设置 a 为 int（类型不匹配），b 为 float → 缓冲阶段不校验
 		exec.setInput("task1", "b", makeScalarNative(1.0f));
 		exec.setInput("task1", "a", makeIntNative(42));
 
 		CHECK(exec.isReady("task1"), "task should appear ready");
 
-		// tryExecute 时在校验阶段抛出 NodeException::TypeMismatch
 		bool threw = false;
 		try {
 			exec.tryExecute("task1");
@@ -407,7 +382,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 12: 同一 taskId/port 重复 setInput ──
 	TEST("duplicate setInput overwrites") {
 		auto node = reg.createNode("add12", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -426,7 +400,7 @@ void runTests() {
 		});
 
 		exec.setInput("task1", "a", makeScalarNative(1.0f));
-		exec.setInput("task1", "a", makeScalarNative(10.0f)); // 覆盖
+		exec.setInput("task1", "a", makeScalarNative(10.0f));
 		exec.setInput("task1", "b", makeScalarNative(2.0f));
 		exec.tryExecute("task1");
 
@@ -435,7 +409,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 13: setInputs 中途失败（批量中包含非法端口名）──
 	TEST("setInputs fails on invalid port") {
 		auto node = reg.createNode("add13", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -443,19 +416,16 @@ void runTests() {
 		std::atomic<bool> completed{false};
 		node->setCompletionCallback([&](const Node::TaskId&, const Node::Result&) { completed = true; });
 
-		// 先正常设置一个端口
 		exec.setInput("task1", "a", makeScalarNative(1.0f));
 
-		// 批量设置中包含非法端口名 → 应该抛异常
 		std::unordered_map<std::string, Node::TaskData> inputs;
 		inputs.emplace("b", makeScalarNative(2.0f));
-		inputs.emplace("no_such", makeScalarNative(3.0f)); // 非法端口
+		inputs.emplace("no_such", makeScalarNative(3.0f));
 
 		CHECK_THROWS(exec.setInput("task1", std::move(inputs)), NodeException,
 					 "setInputs should throw on invalid port");
 		CHECK(!completed, "should not execute after failed setInputs");
 
-		// 之前正常设置的端口数据应保留
 		exec.setInput("task1", "b", makeScalarNative(5.0f));
 		CHECK(exec.isReady("task1"), "task should be ready");
 		exec.tryExecute("task1");
@@ -463,7 +433,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 14: 回调中 takeOutput + clearTask ──
 	TEST("callback takeOutput and clearTask") {
 		auto node = reg.createNode("add14", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -489,7 +458,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 15: 回调中 setInput 但不重入执行 ──
 	TEST("callback sets input without re-entrant execution") {
 		auto node = reg.createNode("add15", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -502,7 +470,6 @@ void runTests() {
 			CHECK(result.ok(), "result should be Ok");
 			exec.clearTask(taskId);
 
-			// 在回调中设置新任务输入（但不执行，禁止重入）
 			if (callCount == 1) {
 				exec.setInput("task2", "a", makeScalarNative(1.0f));
 				exec.setInput("task2", "b", makeScalarNative(1.0f));
@@ -514,7 +481,6 @@ void runTests() {
 		exec.setInput("task1", "b", makeScalarNative(3.0f));
 		exec.tryExecute("task1");
 
-		// 回调中设置了 task2 的输入，需要外部触发执行
 		CHECK(needsTask2, "callback should have set up task2");
 		CHECK(callCount == 1, "only task1 completed so far");
 		exec.tryExecute("task2");
@@ -523,7 +489,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 16: 单线程环境：乱序 setInput 多任务 ──
 	TEST("multi-task interleaving 2") {
 		auto node = reg.createNode("add16", scalarAddSchema(), addRunImpl);
 				NodeExecutor exec(*node);
@@ -536,7 +501,6 @@ void runTests() {
 			exec.clearTask(taskId);
 		});
 
-		// 模拟多任务乱序（单线程下顺序仿真）
 		exec.setInput("task1", "a", makeScalarNative(1.0f));
 		exec.setInput("task2", "a", makeScalarNative(10.0f));
 		exec.setInput("task1", "b", makeScalarNative(2.0f));
@@ -548,7 +512,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test 17: 向量加法 ──
 	TEST("vector addition with task API") {
 		std::vector<float> aVals = {1, 2, 3, 4};
 		std::vector<float> bVals = {5, 6, 7, 8};
@@ -583,7 +546,6 @@ void runTests() {
 	}
 	END_TEST();
 
-	// ── Test: 非法 schema 构造期拒绝（P1-4：SchemaError 前置暴露）──
 	TEST("invalid schema rejected at Node construction (duplicate port names)") {
 		Node::Schema s;
 		s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("a")};
@@ -604,26 +566,20 @@ void runTests() {
 	}
 	END_TEST();
 
-	// GraphStore::addNode 的双保险校验依赖 Node 构造门（单测内不存在绕过
-	// 构造的可达路径），不变量由上方两个构造期用例覆盖。
+	// GraphStore 双保险校验依赖 Node 构造门，不变量由上方构造期用例覆盖
 
-	// ── Test: 元素宽度校验（P1-4：typeSize mismatch 拒绝）──
 	TEST("typeSize mismatch rejected at execution") {
 		auto node = reg.createNode("addTS", scalarAddSchema(), addRunImpl);
 		NodeExecutor exec(*node);
 		exec.setInput("t1", "a", makeScalarNative(1.0f));
-		// Float 逻辑类型相同但元素宽度 8 ≠ 端口声明的 4：schema 声明与实际
-		// 内存布局不符，drainInputsTo 必须拒绝
 		auto wide = std::make_unique<Tensor>(TensorType::Float, sizeof(double));
 		*wide = 2.0;
 		exec.setInput("t1", "b", Value(std::move(wide)));
-		// 与逻辑类型不一致同路径：执行期 NodeException(TypeMismatch) 传播
 		CHECK_THROWS(exec.tryExecute("t1"), NodeException,
 					 "4-byte port must reject 8-byte tensor (typeSize mismatch)");
 	}
 	END_TEST();
 
-	// ── Test: OutputDeclaration count=0 拒绝（P2-11）──
 	TEST("output declaration count=0 rejected") {
 		OutputZone zone;
 		CHECK_THROWS(zone.declare("t1", "n", "y", 0), GraphException,

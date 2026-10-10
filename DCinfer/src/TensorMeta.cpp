@@ -6,10 +6,6 @@
 
 namespace DC {
 
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// TensorMeta implementation
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
 TensorMeta::TensorMeta() {
 	ensureTypeMap();
 }

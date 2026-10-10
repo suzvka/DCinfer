@@ -6,9 +6,7 @@
 namespace DC {
 
 namespace {
-/// 形状乘积守卫（CORE-03）：shape 含 0 维（或空乘积）时乘积为 0，
-/// 作为除数即未定义行为——前置拒绝并抛出明确异常。
-/// 仅供双参构造的 typeSize 推导使用（委托构造的初始化列表中无法先行校验）。
+/// 形状乘积守卫：乘积为 0 作除数即 UB，前置拒绝；仅供双参构造的 typeSize 推导。
 size_t checkedShapeProduct(size_t product) {
 	if (product == 0)
 		throw std::invalid_argument("TensorData: shape product must be > 0 for typeSize inference");
@@ -28,21 +26,15 @@ size_t checkedShapeProduct(const TensorData::Shape& shape) {
 }
 } // namespace
 
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// TensorData implementation
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
 TensorData::TensorData()
 	: _dataSize(0), _dataMain({}), _dataCatalog({}), _dataCache({}), _shapeCache({}), _validFlags(0), _isScalar(false),
 	  _typeSize(0) {}
-
-// ── 拷贝/移动（自定义：内部互斥锁不可复制；拷贝产出非冻结副本）──
 
 TensorData::TensorData(const TensorData& other)
 	: _dataMain(other._dataMain), _dataCatalog(other._dataCatalog), _typeSize(other._typeSize),
 	  _dataSize(other._dataSize), _isScalar(other._isScalar), _dataCache(other._dataCache),
 	  _shapeCache(other._shapeCache), _validFlags(other._validFlags.load(std::memory_order_acquire)) {
-	// _frozen 默认 false：拷贝产出独立的可变副本（clone 语义）
+	// _frozen 默认 false：拷贝为独立可变副本
 }
 
 TensorData& TensorData::operator=(const TensorData& other) {
@@ -55,7 +47,7 @@ TensorData& TensorData::operator=(const TensorData& other) {
 		_dataCache = other._dataCache;
 		_shapeCache = other._shapeCache;
 		_validFlags.store(other._validFlags.load(std::memory_order_acquire), std::memory_order_release);
-		_frozen = false; // 拷贝产出独立的可变副本（clone 语义）
+		_frozen = false; // 拷贝为独立可变副本
 	}
 	return *this;
 }
@@ -65,7 +57,7 @@ TensorData::TensorData(TensorData&& other) noexcept
 	  _typeSize(other._typeSize), _dataSize(other._dataSize), _isScalar(other._isScalar),
 	  _dataCache(std::move(other._dataCache)), _shapeCache(std::move(other._shapeCache)),
 	  _validFlags(other._validFlags.load(std::memory_order_acquire)), _frozen(other._frozen) {
-	// 移动 = 载荷身份转移：冻结状态随行
+	// 移动即身份转移：冻结状态随行
 }
 
 TensorData& TensorData::operator=(TensorData&& other) noexcept {
@@ -78,12 +70,10 @@ TensorData& TensorData::operator=(TensorData&& other) noexcept {
 		_dataCache = std::move(other._dataCache);
 		_shapeCache = std::move(other._shapeCache);
 		_validFlags.store(other._validFlags.load(std::memory_order_acquire), std::memory_order_release);
-		_frozen = other._frozen; // 移动 = 载荷身份转移：冻结状态随行
+		_frozen = other._frozen; // 移动即身份转移：冻结状态随行
 	}
 	return *this;
 }
-
-// ── 冻结（共享发布）──
 
 void TensorData::_ensureMutable(const char* api) const {
 	if (_frozen) {
@@ -99,7 +89,7 @@ void TensorData::freeze() {
 		return;
 	}
 	if (!hasCache() && hasView()) {
-		buildCache(); // 预物化：冻结后只读路径零惰性物化（并发共享的前提）
+		buildCache(); // 预物化：冻结后只读路径零惰性物化，并发共享的前提
 	}
 	_frozen = true;
 }
@@ -116,10 +106,8 @@ TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseByt
 	size_t elementCount = 1;
 	for (auto d : shape) {
 		if (d == 0) {
-			// 零维 = 0 元素张量：空文本/空集合的既有合法表示（如 OpenAI 空响应
-			// 文本、wire 空文本帧）——无分配无溢出风险；空载荷走 metadata-only
-			// lazy 语义，带载荷则 expectedBytes=0 与非空缓冲必然 mismatch 拒绝。
-			// （loadData 的稠密直通路径仍拒绝零维——见其入口不变量。）
+			// 零维 = 0 元素张量：空文本/空集合的合法表示，无分配无溢出风险；
+			// 空载荷走 metadata-only lazy 语义，带载荷走下方 mismatch 拒绝。
 			elementCount = 0;
 			break;
 		}
@@ -129,8 +117,7 @@ TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseByt
 	}
 	if (elementCount > std::numeric_limits<size_t>::max() / typeSize)
 		throw std::invalid_argument("TensorData: required byte size overflows");
-	// An empty block means metadata-only construction; preserve the public
-	// Tensor API's lazy/no-payload semantics after validating the shape.
+	// 空块 = metadata-only 构造：校验形状后保持惰性/无载荷语义。
 	if (denseBytes.empty()) {
 		setTypeSize(typeSize);
 		return;
@@ -202,19 +189,16 @@ TensorData::Shape TensorData::getCurrentShape() const {
 		}
 	}
 	if (_dataSize > 0 && typeSize() > 0) {
-		shape.push_back(_dataSize / typeSize()); // Last dimension is block element count
+		shape.push_back(_dataSize / typeSize()); // 最后一维 = 块内元素数
 	}
 	return shape;
 }
 
 void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes) {
 	_ensureMutable("TensorData::loadData");
-	// 入口校验（与三参构造同一不变量）：shape 元素总数 × typeSize 必须精确
-	// 等于缓冲区字节数——稠密直通语义是"全部数据都在本缓冲区"，声明与
-	// 实际不一致时下游按 shape 寻址将越过缓冲区。校验先于 clear：失败时
-	// 对象状态不变。注意：校验对象是调用方自身声明的自洽性（元数据），
-	// 字节载荷本身仍原样进入 cache，不做任何解释（"不透明传递"哲学
-	// 仅适用于载荷内容，不适用于用于寻址的元数据）。
+	// 入口校验：shape 积 × typeSize 必须等于缓冲字节数，否则下游按 shape
+	// 寻址将越界；校验先于 clear，失败时对象状态不变。载荷原样进入 cache
+	// 不做解释，“不透明传递”仅适用于载荷内容，不适用于寻址元数据。
 	if (typeSize == 0)
 		throw std::invalid_argument("TensorData::loadData: typeSize must be > 0");
 	size_t elementCount = 1;
@@ -250,25 +234,17 @@ void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes
 
 void TensorData::editMode() {
 	_ensureMutable("TensorData::editMode");
-	// Ensure sparse view is materialized from dense cache when needed
 	ensureView();
 	if (hasCache()) {
-		// materialization happened: invalidate cache and mark view valid
 		clearCache();
 		setViewFlag();
 		return;
 	}
-	// If no view exists but we are entering edit mode,
-	// create an empty view state rather than failing.
 	if (!hasView()) {
 		setViewFlag();
 		return;
 	}
 }
-
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// Private helpers implementation
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 void TensorData::syncDenseCacheMeta(const Shape& denseShape) {
 	_shapeCache = denseShape;
@@ -280,9 +256,9 @@ void TensorData::syncDenseCacheMeta(const Shape& denseShape) {
 
 void TensorData::ensureCache() {
 	if (hasCache()) {
-		return; // 快路径：已物化（含冻结发布后的全部只读访问）
+		return; // 快路径：已物化
 	}
-	std::lock_guard lk(_lazyMutex); // 双重检查：惰性物化的唯一构建路径
+	std::lock_guard lk(_lazyMutex); // 双重检查：惰性物化唯一路径
 	if (!hasCache() && hasView()) {
 		buildCache();
 	}
@@ -293,7 +269,7 @@ void DC::TensorData::ensureView() {
 		setViewFlag();
 		return; // 快路径：已物化
 	}
-	std::lock_guard lk(_lazyMutex); // 双重检查：惰性物化的唯一构建路径
+	std::lock_guard lk(_lazyMutex); // 双重检查：惰性物化唯一路径
 	if (hasCache() && !hasView()) {
 		buildView();
 	}
@@ -365,8 +341,7 @@ void TensorData::buildCache() {
 	_dataCache.assign(totalBytes, std::byte(0));
 	for (const auto& [path, block] : _dataMain) {
 		const size_t offset = blockOffset(path, denseShape);
-		// 越界/超长块（catalog 与数据不一致导致的脏数据）保持跳过容错，
-		// debug 构建经断言暴露不一致（#8-7：不再完全无诊断）
+		// 越界/超长块（脏数据）跳过容错；debug 构建经断言暴露不一致
 		const size_t copyBytes = std::min(block.size(), _dataSize);
 		assert(block.size() <= _dataSize
 			   && "TensorData::buildCache: block exceeds _dataSize (silently truncated)");
@@ -393,14 +368,12 @@ void TensorData::buildView() {
 	clearView();
 
 	if (isScalar()) {
-		// Treat whole data as one block at root path {}
 		_dataMain[{}] = _dataCache;
 		_dataSize = _dataCache.size();
-		setViewFlag(); // 视图已从缓存重建（#8-8：与多维路径一致，不依赖调用顺序）
+		setViewFlag(); // 视图已从缓存重建，与多维路径一致
 		return;
 	}
 
-	// Block size: last dim count * typeSize
 	_dataSize = _shapeCache.back() * typeSize();
 	if (_dataSize == 0) {
 		return;
@@ -409,17 +382,14 @@ void TensorData::buildView() {
 	const size_t pathDims = (_shapeCache.size() >= 2) ? (_shapeCache.size() - 1) : 0;
 	_dataCatalog.resize(pathDims);
 	for (size_t i = 0; i < pathDims; ++i) {
-		// iterate in unsigned domain to match _shapeCache element type (size_t)
 		for (size_t idx = 0; idx < _shapeCache[i]; ++idx) {
-			// store as int64_t in the index sets
 			_dataCatalog[i].insert(idx);
 		}
 	}
 
 	if (pathDims == 0) {
-		// Degrade to 1D: store whole block at root path {}
 		_dataMain[{}] = _dataCache;
-		setViewFlag(); // 视图已从缓存重建（#8-8：与多维路径一致）
+		setViewFlag(); // 视图已从缓存重建，与多维路径一致
 		return;
 	}
 
@@ -436,7 +406,6 @@ void TensorData::buildView() {
 		std::ptrdiff_t dim = static_cast<std::ptrdiff_t>(pathDims) - 1;
 		while (dim >= 0) {
 			path[dim]++;
-			// Use shape bounds, not data bytes.
 			if (path[dim] < _shapeCache[dim]) {
 				break;
 			}
@@ -593,13 +562,9 @@ TensorData& TensorData::crop(const Shape& targetShape) {
 		throw std::runtime_error("TensorData::crop: calculated byte size exceeds current cache size");
 	}
 
-	// 多维前缀裁剪（行主序）：保留每个维度的前 targetShape[i] 个坐标所
-	// 寻址的元素。旧的"扁平 resize 到新元素总数"只对一维正确——对
-	// {2,3}→{2,2} 会保留 1,2,3,4（裁成 [[1,2],[3,4]]），而每维前缀
-	// 语义应为 1,2,4,5（[[1,2],[4,5]]）。
-	// 实现：新建目标缓冲；外层按 row-major 遍历去掉最后一维的块坐标，
-	// 对每行在源/目标布局下分别计算块偏移，整行 memcpy（最后一维长度
-	// 个元素）；一维退化为 root 单块拷贝，与旧扁平行为一致。
+	// 多维前缀裁剪（行主序）：每维保留前 targetShape[i] 个坐标；旧扁平
+	// resize 仅一维正确（{2,3}→{2,2} 应得 1,2,4,5 而非 1,2,3,4）。
+	// 实现：按 row-major 块坐标逐行 memcpy；一维退化为 root 单块拷贝。
 	DataBlock cropped;
 	cropped.resize(newByteSize);
 	if (targetShape.empty()) {
@@ -613,7 +578,7 @@ TensorData& TensorData::crop(const Shape& targetShape) {
 			const size_t srcOffset = blockOffset(blockPath, currentShape);
 			const size_t dstOffset = blockOffset(blockPath, targetShape);
 			std::memcpy(cropped.data() + dstOffset, _dataCache.data() + srcOffset, rowBytes);
-			// 字典序递增（带进位，最内维最先）；最高位进位溢出即遍历完成
+			// 字典序递增（进位，最内维最先）；最高位溢出即遍历完成
 			bool carry = true;
 			for (size_t i = blockRank; i-- > 0;) {
 				if (++blockPath[i] < targetShape[i]) {
@@ -629,7 +594,7 @@ TensorData& TensorData::crop(const Shape& targetShape) {
 
 	_dataCache = std::move(cropped);
 	syncDenseCacheMeta(targetShape);
-	// 稀疏视图仍指向旧形状的块布局：一并失效，后续读写经惰性重建保持一致
+	// 稀疏视图指向旧形状：一并失效，后续经惰性重建
 	clearView();
 	return *this;
 }

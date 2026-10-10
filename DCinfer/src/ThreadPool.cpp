@@ -16,9 +16,7 @@ namespace {
 const ThreadPool* ThreadPool::currentWorkerPool() noexcept { return g_workerPool; }
 bool ThreadPool::isWorkerThread() const noexcept { return g_workerPool == this; }
 
-// ── ThreadPool ──
-
-// 测试注入钩子（生产路径恒为空，见 ThreadPool.h 注释）
+// 测试注入钩子：生产路径恒为空
 std::function<bool(size_t)> ThreadPool::s_spawnFilter = nullptr;
 
 ThreadPool::ThreadPool(const PoolConfig& config)
@@ -27,9 +25,7 @@ ThreadPool::ThreadPool(const PoolConfig& config)
 		throw std::invalid_argument("ThreadPool: config.totalThreads must be > 0");
 	}
 
-	// 启动工作线程：任一 std::thread 构造失败（含测试注入）时，先回收
-	// 已启动 worker 再传播异常——否则构造未完成、成员 _workers 析构时
-	// 对 joinable 线程触发 std::terminate（构造异常安全）
+	// 任一线程构造失败时先回收已启动 worker 再传播异常，避免 joinable 触发 std::terminate
 	_workers.reserve(_totalThreads);
 	for (size_t i = 0; i < _totalThreads; ++i) {
 		try {
@@ -47,9 +43,7 @@ ThreadPool::ThreadPool(const PoolConfig& config)
 
 ThreadPool::~ThreadPool() {
 	if (isWorkerThread()) {
-		// fail-fast 诊断必须可靠送达：宿主可将 stderr 重定向到文件（freopen），
-		// glibc 下重定向后的流可能为全缓冲，随后 _Exit 不经 flush 会丢掉诊断
-		// 文本——显式 flush 兜底（unbuffered 时为空操作）。
+		// stderr 重定向后可能全缓冲，崩溃路径不经 flush 会丢诊断；显式 flush 兜底。
 		std::fputs("ThreadPool: prohibited destruction on own worker; retain external ownership\n", stderr);
 		std::fflush(stderr);
 		std::terminate();
@@ -60,12 +54,10 @@ ThreadPool::~ThreadPool() {
 bool ThreadPool::submit(std::function<void()> task) {
 	{
 		std::lock_guard lk(_mutex);
-		// 已关闭（shutdown 后）拒绝：任务入队后无消费者，返回失败让调用方
-		// 按失败语义收尾，避免任务静默滞留（#8-1）
+		// 已关闭：任务入队后无消费者，返回失败让调用方收尾
 		if (!_running.load(std::memory_order_acquire))
 			return false;
-		// 入队可能因内存压力抛 bad_alloc：捕获后按拒绝处理（#7）——
-		// 提交方（_submitNodeRun）据返回值回滚在飞计数，不静默丢任务
+		// 入队抛 bad_alloc 按拒绝处理：提交方据返回值回滚计数
 		try {
 			_taskQueue.push(std::move(task));
 		} catch (...) {
@@ -83,9 +75,7 @@ void ThreadPool::shutdown() {
 void ThreadPool::_drainWorkers() {
 	if (isWorkerThread())
 		throw std::logic_error("ThreadPool::shutdown: prohibited on own worker");
-	// 排水锁（P2-13）：并发 shutdown 时两个线程同时 joinable+join 同一
-	// worker 是竞态（UB）——串行化后第二个调用者看到已清空的 _workers，
-	// 顺序幂等性保持（joinable 检查 + clear）
+	// 排水锁：并发 shutdown 同时 join 同一 worker 是 UB；串行化后幂等
 	std::lock_guard drainLk(_drainMutex);
 	_running.store(false, std::memory_order_release);
 
@@ -123,7 +113,6 @@ void ThreadPool::_workerLoop() {
 			_taskQueue.pop();
 		}
 
-		// 执行任务
 		try {
 			task();
 		} catch (const std::exception& e) {

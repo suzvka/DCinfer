@@ -9,10 +9,8 @@
 #include <iostream>
 
 int main() {
-	// ── 1. 注册内置 CPU 算子 ──
 	DC::Builtin::registerBuiltinOperators();
 
-	// ── 2. 建图：Add → Identity，绑定图级输入输出 ──
 	auto& reg = DC::EngineRegistry::instance();
 	DC::InferGraph graph;
 	graph.addNode(reg.createOperator("Add", "adder"));
@@ -24,7 +22,7 @@ int main() {
 
 	auto api = graph.interface(); // 取接口即定型：冻结图并解析别名 → 坐标
 
-	// ── 3. 同步一发：run() = submit + wait（同一句柄）──
+	// 同步：run() = submit + wait（同一句柄）
 	{
 		auto task = api.createTask();
 		auto ta = DC::Tensor::Create<float>();
@@ -42,7 +40,7 @@ int main() {
 		std::cout << "3.0 + 4.0 = " << task.takeTensor("result").item<float>() << std::endl;
 	} // 终态任务随析构自动释放
 
-	// ── 4. 异步：同一句柄换一种节奏——submit 后做其他工作，再 wait(超时) + take ──
+	// 异步：submit 后做其他工作，再 wait(超时) + take
 	float asyncValue = 0.0f;
 	{
 		auto task = api.createTask();
@@ -50,14 +48,14 @@ int main() {
 		ta = 10.0f;
 		auto tb = DC::Tensor::Create<float>();
 		tb = 5.0f;
-		task.feed("a", std::move(ta)).feed("b", std::move(tb)).submit(); // 异步启动（不等待）
+		task.feed("a", std::move(ta)).feed("b", std::move(tb)).submit();
 
-		// …… 此处可执行与本次推理无关的其他工作 ……（同步/异步同级的差别仅在此处）
+		// …… 与本次推理无关的其他工作（同步/异步差别仅在此处）……
 
 		auto result = task.wait(std::chrono::milliseconds(5000));
 		if (result.status == DC::TaskStatus::Succeeded)
 			asyncValue = task.takeTensor("result").item<float>();
-	} // 终态任务随析构自动释放；在飞弃置将请求取消（协作式）
+	} // 终态任务随析构释放；在飞弃置触发协作式取消
 	std::cout << "10.0 + 5.0 = " << asyncValue << std::endl;
 
 	return 0;

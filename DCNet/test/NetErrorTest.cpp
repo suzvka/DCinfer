@@ -1,5 +1,4 @@
-// NetError 归一化映射表纯单测（DESIGN.md §6）
-// 验证：网络错误 / HTTP 状态 / 远端错误体 → category / retryable / localStatus / 消息前缀
+// NetError 归一化映射表：网络错误 / HTTP 状态 / 远端错误体 → category / localStatus / 消息前缀。
 
 #include "DCNet/NetError.h"
 
@@ -142,32 +141,27 @@ TEST(remoteBodyMalformed) {
 	auto e = DC::Net::normalizeRemoteBody("this is not json at all");
 	CHECK(e.category == NetErrorCategory::RemoteMalformed, "non-json → RemoteMalformed");
 	CHECK(!e.retryable, "malformed not retryable");
-	CHECK(e.localStatus == Status::ExecutionFailed, "malformed → ExecutionFailed（核心枚举保持通用）");
+	CHECK(e.localStatus == Status::ExecutionFailed, "malformed → ExecutionFailed");
 	CHECK_MSG_PREFIX(e.localMessage, "remote:malformed");
 	CHECK(e.diagnostic.domain == "dcnet", "领域诊断 domain=dcnet");
 	CHECK(e.diagnostic.code == static_cast<int>(NetErrorCategory::RemoteMalformed), "诊断 code 保留原始分类");
 }
 
 TEST(httpResponseCombo) {
-	// 2xx → 成功
 	CHECK(DC::Net::normalizeHttpResponse(200, "ok").ok(), "2xx should be success");
 
-	// 已知 code 优先于状态码
 	auto e = DC::Net::normalizeHttpResponse(400, R"({"error":{"code":"invalid_api_key","message":"bad"}})");
 	CHECK(e.category == NetErrorCategory::RemoteAuth, "known code should override 400 status");
 	CHECK(e.localStatus == Status::InternalError, "auth → InternalError");
 
-	// 未知 code → 按状态码兜底
 	e = DC::Net::normalizeHttpResponse(500, R"({"error":{"code":"weird","message":"x"}})");
 	CHECK(e.category == NetErrorCategory::RemoteServer, "unknown code on 500 → RemoteServer");
 	CHECK(e.retryable, "5xx retryable");
 
-	// 无报文 → 状态码兜底
 	e = DC::Net::normalizeHttpResponse(404, "");
 	CHECK(e.category == NetErrorCategory::RemoteRejected, "404 without body → RemoteRejected");
 	CHECK_MSG_PREFIX(e.localMessage, "remote:not_found");
 
-	// 报文不可解析 → 状态码兜底
 	e = DC::Net::normalizeHttpResponse(503, "oops");
 	CHECK(e.category == NetErrorCategory::RemoteServer, "unparseable body on 503 → RemoteServer");
 	CHECK_MSG_PREFIX(e.localMessage, "remote:server_error");
@@ -177,8 +171,6 @@ TEST(defaultIsSuccess) {
 	NetError e;
 	CHECK(e.ok(), "default NetError should be success");
 }
-
-// ── 入站类：服务端 wire 逆向映射（M-server / DESIGN.md §6.1）──
 
 TEST(wireStatusMapping) {
 	CHECK(DC::Net::wireHttpStatusFor(Status::Ok) == 200, "Ok → 200");
@@ -197,8 +189,7 @@ TEST(wireCodeFor) {
 }
 
 TEST(wireRoundTripParity) {
-	// 语义一致性（DESIGN.md §6.1）：对端 normalizeHttpResponse 归一化结果 == 本地 status。
-	// 请求体携带推荐 code（未知 code 不影响归类，按状态码兜底）。
+	// 语义一致性：对端归一化结果 == 本地 status（wire code 未知不影响归类）。
 	using DC::Net::normalizeHttpResponse;
 	using DC::Net::wireHttpStatusFor;
 
@@ -210,9 +201,7 @@ TEST(wireRoundTripParity) {
 		CHECK(e.localStatus == Status::InvalidInput, "400+invalid_input → InvalidInput（与本地一致）");
 	}
 	{
-		// SchemaMismatch 预留行：本地当前不产出该值（Node.h 预留），
-		// 对端按 422 归一化为 InvalidInput —— 与本地形状违例的现行行为一致；
-		// 本地改产后按需扩表维持一致（DESIGN.md §6.1 备注）。
+		// SchemaMismatch 预留行：本地当前不产出该值；对端按 422 归一化为 InvalidInput。
 		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::SchemaMismatch),
 											 R"({"error":{"code":"schema_mismatch","message":"x"}})");
 		CHECK(e.localStatus == Status::InvalidInput, "422+schema_mismatch → InvalidInput（预留行）");
@@ -223,13 +212,12 @@ TEST(wireRoundTripParity) {
 		CHECK(e.localStatus == Status::ExecutionFailed, "500+execution_failed → ExecutionFailed（与本地一致）");
 	}
 	{
-		// 解析限度（DESIGN.md §6.1 备注）：非鉴权 InternalError 无忠实 wire 表示，
-		// 按「本地执行失败 → 5xx」应答，对端归一化为 ExecutionFailed。
+		// 解析限度：非鉴权 InternalError 无忠实 wire 表示，按 5xx 应答。
 		const auto e = normalizeHttpResponse(wireHttpStatusFor(Status::InternalError),
 											 R"({"error":{"code":"internal_error","message":"x"}})");
 		CHECK(e.localStatus == Status::ExecutionFailed, "500+internal_error → ExecutionFailed（解析限度）");
 	}
-	// 无本地对应物的闸门类（DESIGN.md §6.1，由监听/装配层直接应答）：
+	// 无本地对应物的闸门类（监听/装配层直接应答）：
 	CHECK(normalizeHttpResponse(401, R"({"error":{"code":"unauthorized"}})").localStatus == Status::InternalError,
 		  "401 → RemoteAuth → InternalError（remote:auth）");
 	CHECK(normalizeHttpResponse(429, R"({"error":{"code":"overloaded"}})").localStatus == Status::ExecutionFailed,

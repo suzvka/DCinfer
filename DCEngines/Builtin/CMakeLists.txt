@@ -14,9 +14,9 @@ target_link_libraries(DCEngine_Builtin PUBLIC DCinfer::DCinfer)
 
 target_include_directories(DCEngine_Builtin
     PUBLIC
-        # BUILD_INTERFACE：源码内消费（DCinfer 扁平头路径经 DCinfer::DCinfer 传递）
+        # 源码内消费（扁平头路径经 DCinfer::DCinfer 传递）
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        # INSTALL_INTERFACE：安装树（include/DCEngine/ 结构保留，消费方 include "DCEngine/BuiltinOps.h"）
+        # 安装树（消费方 include "DCEngine/BuiltinOps.h"）
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
@@ -25,13 +25,10 @@ file(GLOB_RECURSE DCENGINE_BUILTIN_SRC CONFIGURE_DEPENDS
 )
 target_sources(DCEngine_Builtin PRIVATE ${DCENGINE_BUILTIN_SRC})
 
-# ── 安装与 find_package 支持 ──
-# 包名 DCEngine：目标导出为 DCEngine::Builtin，与源码内 alias 一致
-# （target 名 DCEngine_Builtin 需经 EXPORT_NAME 改名）。OnnxRuntime / OpenAI
-# 适配器依赖 vcpkg 重型依赖，暂不纳入安装导出，仍以 add_subdirectory 消费。
-# GNUInstallDirs is included before target interface paths above.
+# 安装与 find_package 支持：包名 DCEngine，目标导出 DCEngine::Builtin
+# （EXPORT_NAME 改名）；OnnxRuntime / OpenAI 依赖重型依赖，暂不纳入安装导出。
 
-# 包版本：与 DCinfer 模块同一约定（仅顶层构建时 PROJECT_VERSION 权威，否则回落字面版本）
+# 包版本：仅顶层构建时 PROJECT_VERSION 权威，否则回落字面版本
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
@@ -46,7 +43,7 @@ install(TARGETS DCEngine_Builtin EXPORT DCEngineTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# 头文件保留 DCEngine/ 目录结构（源码以 "DCEngine/BuiltinOps.h" 前缀风格 include）
+# 保留 DCEngine/ 目录结构
 install(DIRECTORY include/DCEngine DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 set(DCENGINE_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/DCEngine")

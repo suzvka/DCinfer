@@ -11,47 +11,17 @@
 
 namespace DC {
 
-/// @brief 编译期 lowering pass：把语义等价于"边"的连接器从运行时视图擦除。
+/// @brief 编译期 lowering pass：把语义等价于导线的连接器从运行时视图擦除。
 ///
-/// 擦除规则（刻意窄化）：
-///
-///   Broadcast(N=1)（零拷贝 move 直通，等效导线） → 直接运行时边
-///
-/// 识别条件（全部满足才擦除）：
-/// - isConnector() 且 type == "Connector.Broadcast" 且 schema.outputs.size() == 1；
-/// - 恰有 1 条入边（in）与 1 条出边（out_0）——多出边意味着实际是 1→多
-///   分发（takeOutput 消费式下第二条边拿不到数据，语义不完整），不擦除；
-/// - wire 的输出端口未被 GraphSignature 绑定为图级输出（否则声明永不满足）；
-/// - wire 的输入端口未被 GraphSignature 绑定为图级输入（否则 feedInput 直喂
-///   wire，必须保留其可执行性）。
-///
-/// 边融合（组合语义）：
-/// - 擦除判定逐节点独立，但边融合沿唯一出边链追踪至首个保留节点——
-///   wire→wire 链（GraphStore::connectRaw 允许连接器与连接器相连，合法构图）不会
-///   产生指向已擦除节点的悬空边；
-/// - 纯 wire 环上的融合边丢弃（环上无保留端点，数据在源语义中同样
-///   永远无法到达任何业务节点）；
-/// - 收尾执行不变量校验：运行边端点必须存在于运行节点集合，违反即抛
-///   GraphException（悬空边在运行期表现为数据静默滞留 + 任务无法完成）。
-///
-/// 语义说明（两个显式决策）：
-/// - TTL（maxHops）：hop 计数只统计运行时顶点，被擦除的 wire 不再消耗 TTL
-///   ——成环图 TTL 触发时机后移（方向安全：更不易误杀深图）；
-/// - 资源类亲和：直连后传播握手在上游节点的完成线程执行；
-///   N=1 wire 本就是零拷贝 move 直通、无数据搬运，不违背资源类隔离初衷
-///   （Broadcast(N>1) 等重型连接器不受影响，仍在 System 资源类）。
-///
-/// 源图不受影响：图序列化、nodeCount/edges 内省均反映源图。
+/// 仅擦除 Connector.Broadcast、N=1、恰一入一出且端口未被 GraphSignature 绑定的 wire；
+/// 融合沿唯一出边链追踪至首个保留节点，纯 wire 环上的融合边丢弃；
+/// 收尾校验运行边端点必须存在于运行节点集合，违反抛 GraphException。
+/// 被擦除的 wire 不再消耗 TTL（maxHops 只统计运行时顶点）；源图不受影响。
 struct GraphLoweringStats {
-	size_t erasedConnectors = 0; ///< 被擦除的退化连接器数量
+	size_t erasedConnectors = 0;
 };
 
-/// @brief  从源图构建 lowering 后的运行时视图。
-/// @param  source    源图拓扑（只读）
-/// @param  signature 图级签名（输入/输出绑定，参与擦除防护判定）
-/// @param  outNodes  [out] 运行时节点表（借用源图节点指针，源图存活期由快照保证）
-/// @param  outEdges  [out] 运行时边表（1:1 wire 的入边已改写为直连边）
-/// @param  stats     [out] lowering 统计
+/// @brief 从源图构建 lowering 后的运行时视图；1:1 wire 的入边已改写为直连边。
 void buildRuntimeView(const GraphStore& source, const GraphSignature& signature,
 					  std::unordered_map<std::string, const Node*>& outNodes,
 					  std::vector<GraphStore::Edge>& outEdges, GraphLoweringStats& stats);

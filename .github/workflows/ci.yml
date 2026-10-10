@@ -1,8 +1,8 @@
 name: CI
 
-# 供应链加固（P2-6）：默认最小权限；需要写权限的 workflow（release.yml）
-# 自行声明。第三方 action 全部 pin 到不可变 commit SHA；checkout 关闭
-# 凭据持久化（避免 GITHUB_TOKEN 泄漏进 runner 文件系统）。
+# 默认最小权限；需要写权限的 workflow（release.yml）自行声明。第三方 action
+# 全部 pin 到不可变 commit SHA；checkout 关闭凭据持久化，避免 GITHUB_TOKEN
+# 泄漏进 runner 文件系统。
 permissions:
   contents: read
 
@@ -17,9 +17,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ──────────────────────────────────────────────
-  # Core-only（README core-only 预设：零 vcpkg 依赖）
-  # ──────────────────────────────────────────────
   core-only:
     name: Core only (no vcpkg)
     runs-on: ubuntu-24.04
@@ -47,11 +44,7 @@ jobs:
       - name: Build
         run: cmake --build build/core-only -j
 
-  # ──────────────────────────────────────────────
-  # README 首个上手路径（可运行文档）：Builtin + hello_graph
-  # 逐字执行 README「10 分钟上手」的配置/构建命令，并校验预期输出
-  # （无 submodule、无 vcpkg toolchain——验证零依赖路径）
-  # ──────────────────────────────────────────────
+  # README「10 分钟上手」的可运行守护：逐字执行其配置/构建命令、校验预期输出
   readme-hello-graph:
     name: README quick start (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -72,8 +65,8 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
 
-      # ↓↓ 与 README「10 分钟上手」保持逐字一致（README 修改必须同步此处）↓↓
-      # 不带 vcpkg toolchain：README 核心路径零外部依赖，CI 必须验证同一路径
+      # 与 README「10 分钟上手」逐字一致：不带 vcpkg toolchain，验证与 README
+      # 相同的零依赖路径；修改 README 必须同步此处
       - name: Configure (README command)
         run: cmake -B build -S . -G Ninja -DBUILD_ENGINE_BUILTIN=ON
 
@@ -101,10 +94,7 @@ jobs:
       - name: Core tests
         run: ctest --test-dir build -C Release --output-on-failure --timeout 120 --no-tests=error
 
-  # ──────────────────────────────────────────────
-  # DCNet + OpenAI mock（网络框架与远端适配器，MockHttpServer 真实 HTTP）
   # 时间敏感测试以 --repeat until-fail 加严（Flaky 守护）
-  # ──────────────────────────────────────────────
   dcnet-openai:
     name: DCNet + OpenAI mock (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -135,9 +125,8 @@ jobs:
         with:
           arch: x64
 
-      # Windows runner 默认 pwsh：`-DKEY=值.含点` 会被参数重写切分
-      # （vcpkg-toolchain.cmake → vcpkg-toolchain + .cmake，配置期直接失败）。
-      # 含点值必须整体加引号（bash 下等效；无点值如 =ON/=Release 不受影响）。
+      # Windows runner 默认 pwsh：含点参数值会被参数重写按点拆开、配置期直接
+      # 失败，含点值必须整体加引号
       - name: Configure
         run: >
           cmake -B build -S . -G Ninja
@@ -162,9 +151,6 @@ jobs:
       - name: Time-sensitive tests x3 (until-fail)
         run: ctest --test-dir build -C Release -R "InferGraphTest|GraphOperatorTest" --repeat until-fail:3 --output-on-failure --timeout 120 --no-tests=error
 
-  # ──────────────────────────────────────────────
-  # Windows / MSVC (Release)
-  # ──────────────────────────────────────────────
   msvc-release:
     name: Windows MSVC Release
     runs-on: windows-2022
@@ -195,9 +181,6 @@ jobs:
         run: |
           ctest --test-dir build/msvc-release -C Release --output-on-failure --timeout 120 --no-tests=error
 
-  # ──────────────────────────────────────────────
-  # Linux / GCC (Release)
-  # ──────────────────────────────────────────────
   gcc-release:
     name: Linux GCC Release
     runs-on: ubuntu-24.04
@@ -224,9 +207,6 @@ jobs:
         run: |
           ctest --test-dir build/gcc-release -C Release --output-on-failure --timeout 120 --no-tests=error
 
-  # ──────────────────────────────────────────────
-  # Linux / Clang (Release) — bonus cross-compiler check
-  # ──────────────────────────────────────────────
   clang-release:
     name: Linux Clang Release
     runs-on: ubuntu-24.04
@@ -253,18 +233,15 @@ jobs:
         run: |
           ctest --test-dir build/clang-release -C Release --output-on-failure --timeout 120 --no-tests=error
 
-  # ──────────────────────────────────────────────
-  # Linux / GCC + ThreadSanitizer — 并发正确性（冻结边界 / 任务生命周期）
-  # 说明：MSVC 无 TSan；若协程跨线程恢复引发 fiber 误报，先收敛到
-  # FreezeBoundaryTest 子集（冻结边界用例）再逐步扩围
-  # ──────────────────────────────────────────────
+  # MSVC 无 TSan；若协程跨线程恢复引发 fiber 误报，先收敛到 FreezeBoundaryTest
+  # 子集再逐步扩围
   tsan:
     name: Linux GCC ThreadSanitizer
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          submodules: false # 核心测试零 vcpkg 依赖（镜像 README quick start 路径）
+          submodules: false # 核心测试零 vcpkg 依赖
           persist-credentials: false
 
       - name: Install build dependencies
@@ -296,12 +273,9 @@ jobs:
           --repeat until-fail:3
           --output-on-failure --timeout 120 --no-tests=error
 
-  # ──────────────────────────────────────────────
-  # 安装闭环冒烟（README「引入」路径）：构建 → cmake --install → 独立工程
-  # find_package(DCinfer 0.7) → 链接 → 运行。版本请求由 install_smoke 的
-  # CMakeLists 强约束（SameMinorVersion），minor 升级漏同步时本作业红灯
-  # （P2-6 类发布链路缺陷的回归守护）。
-  # ──────────────────────────────────────────────
+  # 安装闭环冒烟：构建 → cmake --install → 独立工程 find_package → 链接 → 运行。
+  # 版本请求由 install_smoke 的 CMakeLists 强约束（SameMinorVersion），minor
+  # 升级漏同步时本作业红灯。
   install-smoke:
     name: Install smoke (find_package loopback)
     runs-on: ubuntu-24.04
@@ -326,8 +300,7 @@ jobs:
       - name: Install to prefix (DCinfer + DCIr)
         run: cmake --install build/core-ir --prefix "${{ github.workspace }}/install-prefix"
 
-      # 安装树二：DCNet + Builtin——覆盖 DCNet 与 DCEngine 两个包
-      #（core-ir 预设不开引擎/网络，冒烟三/四所需的包必须由此安装树提供）
+      # 安装树二：DCNet + Builtin——冒烟三/四所需包（core-ir 不开引擎/网络）
       - name: Configure (net + builtin)
         run: >
           cmake -B build/core-net -S . -G Ninja
@@ -350,7 +323,7 @@ jobs:
           cmake --build build-smoke-core -j
           ./build-smoke-core/install_smoke | grep -q "install smoke OK"
 
-      # 冒烟二：DCIr 安装链（传递依赖经 install_smoke 自身 manifest 的 feature 'ir' 解析）
+      # 冒烟二：DCIr 安装链（依赖经 install_smoke manifest 的 feature 'ir' 解析）
       - name: Smoke test (with DCIr)
         run: |
           cmake -B build-smoke-ir -S examples/install_smoke \
@@ -361,7 +334,7 @@ jobs:
           cmake --build build-smoke-ir -j
           ./build-smoke-ir/install_smoke | grep -q "install smoke OK"
 
-      # 冒烟三：Builtin 引擎安装链（零外部依赖，无需 vcpkg）——真实跑一次算子图
+      # 冒烟三：Builtin 引擎安装链（零外部依赖）——真实跑一次算子图
       - name: Smoke test (with Builtin engine)
         run: |
           cmake -B build-smoke-builtin -S examples/install_smoke \
@@ -370,9 +343,8 @@ jobs:
           cmake --build build-smoke-builtin -j
           ./build-smoke-builtin/install_smoke | grep -q "install smoke OK"
 
-      # 冒烟四：DCNet 安装链（传递依赖经 install_smoke manifest 的 feature 'net'
-      # 解析；feature 由 toolchain wrapper 按 -DDCINFER_BUILD_DCNET=ON 注入，
-      # 与冒烟二的 -DDCINFER_BUILD_IR=ON 同机制）
+      # 冒烟四：DCNet 安装链（依赖经 install_smoke manifest 的 feature 'net'
+      # 解析，由 toolchain wrapper 按 -DDCINFER_BUILD_DCNET=ON 注入）
       - name: Smoke test (with DCNet)
         run: |
           cmake -B build-smoke-net -S examples/install_smoke \
@@ -383,10 +355,8 @@ jobs:
           cmake --build build-smoke-net -j
           ./build-smoke-net/install_smoke | grep -q "install smoke OK"
 
-  # ──────────────────────────────────────────────
-  # ONNX Runtime 适配器编译不进 CI（仅本地验证：预设 msvc-ort-cpu /
-  # msvc-ort-cuda）；CI 只验证核心逻辑与零/低依赖路径
-  # ──────────────────────────────────────────────
+  # ONNX Runtime 适配器不进 CI（仅本地验证，预设 msvc-ort-cpu / msvc-ort-cuda）；
+  # CI 只验证核心逻辑与零/低依赖路径
   debug-sanitizers:
     name: Linux Debug ASan + UBSan (core and net)
     runs-on: ubuntu-24.04
@@ -439,8 +409,7 @@ jobs:
         with:
           persist-credentials: false
       - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-11 clang-14
-      # PyPI 上 cmake 3.17.x 最高为 3.17.3（3.17.5 不存在，pip 解析直接失败）——
-      # 保持“最小 3.17 线”验证意图
+      # PyPI 上 cmake 3.17.x 最高为 3.17.3（3.17.5 不存在），保持最小 3.17 线
       - run: python3 -m pip install --user cmake==3.17.3
       # Preset schema v3 needs newer CMake; exercise the advertised minimum via -S/-B.
       - run: >

@@ -18,27 +18,13 @@ namespace detail { class SecureExtraction; }
 /// @brief 轻量 ZIP 容器读写器（基于 minizip）
 ///
 /// .dcg 格式 = ZIP 容器，内含 graph.json + models/* 模型文件。
-///
-/// 读取流程：
-///   1. openRead() 打开 .dcg，创建临时目录
-///   2. readGraphJson() 从 ZIP 中解压 graph.json 到内存
-///   3. extractOne("models/x.onnx") 解压单个模型到临时目录
-///   4. 引擎加载模型后调用 cleanup() 删除临时文件
-///   5. 析构时自动清理残留临时目录
-///
-/// 写入流程：
-///   1. openWrite() 创建 .dcg
-///   2. writeGraphJson() 写入图描述（deflate 压缩）
-///   3. addModelFile() 逐个添加模型文件（store 模式）
-///   4. finalize() 关闭 ZIP（析构时自动调用）
+/// 读取：openRead 创建临时目录，extractOne 解压模型；析构自动清理残留。
+/// 写入：graph.json 走 deflate；模型文件走 store；finalize 关闭 ZIP（析构自动调用）。
 class DcgArchive {
 public:
-	// ── 工厂方法 ──
-
-	/// @brief 打开 .dcg 文件用于读取，创建临时目录
+	/// @brief 打开 .dcg 读取，创建临时解压目录
 	static std::unique_ptr<DcgArchive> openRead(const std::filesystem::path& path);
 
-	/// @brief 创建 .dcg 文件用于写入
 	static std::unique_ptr<DcgArchive> openWrite(const std::filesystem::path& path);
 
 	~DcgArchive();
@@ -50,18 +36,13 @@ public:
 
 	// ── 读取接口 ──
 
-	/// @brief 从 ZIP 中读取并解压 graph.json，返回内容字符串
 	std::string readGraphJson();
 
 	/// @brief 解压 archive 内的单个文件到临时目录，返回绝对路径
-	/// @param archivePath ZIP 内路径，如 "models/resnet.onnx"（必须为安全相对路径：
-	///        禁止空/内嵌 NUL/绝对路径/盘符/父目录跳转/归一化越界/经符号链接逃逸）
-	/// @return 临时目录下的绝对路径
-	/// @throws GraphException(Other) 路径不安全、超预算（单条目体积/压缩比/
-	///         条目数/累计解压总量聚合）、CRC/完整性校验失败或写盘失败
+	/// @param archivePath ZIP 内路径（如 "models/resnet.onnx"）；必须为安全相对路径，否则拒绝
+	/// @throws GraphException(Other) 路径不安全、超预算（单条目/压缩比/条目数/总量）、CRC 或写盘失败
 	std::filesystem::path extractOne(const std::string& archivePath);
 
-	/// @brief 删除 extractOne 产生的临时文件
 	void cleanup(const std::filesystem::path& tempPath);
 
 	/// @brief 临时目录路径（反序列化时作为模型路径的 baseDir）
@@ -72,9 +53,8 @@ public:
 	/// @brief 将 graph.json 写入 ZIP（deflate 压缩）
 	void writeGraphJson(std::string_view json);
 
-	/// @brief 将磁盘上的模型文件添加到 ZIP（store 模式，不压缩）
+	/// @brief 添加磁盘模型文件到 ZIP（store 模式，不压缩）
 	/// @param archivePath ZIP 内路径，如 "models/resnet.onnx"
-	/// @param diskPath   磁盘上的模型文件路径
 	void addModelFile(const std::string& archivePath, const std::filesystem::path& diskPath);
 
 	/// @brief 写入 Central Directory + EOCD，关闭文件
@@ -85,13 +65,13 @@ private:
 	std::unique_ptr<detail::SecureExtraction> _extraction;
 
 	// ── minizip 句柄 ──
-	unzFile _readHandle = nullptr;   // unzFile
-	zipFile _writeHandle = nullptr;  // zipFile
+	unzFile _readHandle = nullptr;
+	zipFile _writeHandle = nullptr;
 	std::filesystem::path _tempDir;
 	std::filesystem::path _archivePath;
 	bool _finalized = false;
 
-	// 解包预算聚合（IR-04）：extractOne 累计解压字节与条目计数
+	// 解包预算聚合：extractOne 累计解压字节与条目计数
 	uint64_t _extractTotalBytes = 0;
 	std::size_t _extractEntries = 0;
 };

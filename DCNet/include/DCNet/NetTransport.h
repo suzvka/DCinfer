@@ -7,34 +7,30 @@
 
 namespace DC::Net {
 
-/// @brief 传输载荷（v1：UTF-8 / JSON 文本；二进制帧由 DCNet.Native 另行约定）。
+/// 传输载荷（v1：UTF-8 / JSON 文本；二进制帧另行约定）。
 using Payload = std::string;
 
-/// @brief 传输抽象（DESIGN.md §3.1）。
-///
-/// 契约约束（ADR-6）：对运行时永远呈现**同步接口**；I/O 线程 / 事件循环 /
-/// 子进程全部是 transport 内部实现细节，换策略不动 RunFn / 图 / 契约。
-/// 返回的 NetError 须已归一化（localStatus/localMessage 已填）。
+/// 传输抽象：对运行时呈现同步接口；I/O 线程 / 事件循环 / 子进程为内部实现细节。
+/// 返回的 NetError 须已归一化（localStatus / localMessage 已填）。
 struct DcNetTransport {
 	virtual ~DcNetTransport() = default;
 
-	/// @brief 连接建立 / 就绪探测（loadModel 时调用；失败抛 NodeException）。
+	/// 连接建立 / 就绪探测（loadModel 时调用；失败抛 NodeException）。
 	virtual NetError connect(const NetEndpoint&) = 0;
 
-	/// @brief 发送请求载荷（阻塞，遵守超时；失败返回非 Ok 的 NetError）。
+	/// 发送请求载荷（阻塞，遵守超时）。
 	virtual NetError send(const Payload&) = 0;
 
-	/// @brief 接收响应载荷（阻塞，遵守超时；失败时 remoteDetail 保留原始错误报文）。
+	/// 接收响应载荷（阻塞，遵守超时；失败时 remoteDetail 保留原文）。
 	virtual NetError recv(Payload&) = 0;
 
-	/// @brief 当前连接的端点配置（含超时/重试/鉴权字段；connect 后有效）。
-	///         供标准 RunFn 读取 maxRetries 等编排参数。
+	/// 当前端点配置（connect 后有效）；供标准 RunFn 读取编排参数。
 	virtual const NetEndpoint& endpoint() const = 0;
 
-	/// @brief 健康判定（进程存活 / 心跳 / 连接可用）。
+	/// 健康判定（进程存活 / 心跳 / 连接可用）。
 	virtual bool alive() const = 0;
 
-	/// @brief 释放连接与资源（releaseModel 调用）。
+	/// 释放连接与资源（releaseModel 调用）。
 	virtual void close() = 0;
 };
 

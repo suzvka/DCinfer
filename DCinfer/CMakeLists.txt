@@ -5,39 +5,29 @@ add_library(DCinfer::DCinfer ALIAS DCinfer)
 
 target_compile_features(DCinfer PUBLIC cxx_std_20)
 
-# MSVC：源码为 UTF-8（含中文注释），目标级启用（add_subdirectory 消费时同样生效）
+# MSVC：源码 UTF-8（含中文注释），目标级启用
 if (MSVC)
     target_compile_options(DCinfer PRIVATE /utf-8)
 endif()
 
-# Linux: <thread>, <mutex>, <semaphore>, <condition_variable> 均需链接 pthread
-# Windows: Threads::Threads 是空操作，不影响
-#
-# 探测与 libatomic 同域隔离（RESET + 恢复）：宿主 add_subdirectory 前可能设置
-# CMAKE_REQUIRED_LIBRARIES/FLAGS（如探针哨兵值）——CMake 3.17 的 FindThreads
-# 会把它们带入 pthread.h 探测的链接行，链接不存在的库导致误判 not found。
+# Linux 需链接 pthread（Windows 的 Threads::Threads 为空操作）。
+# 探测与 libatomic 同域隔离（RESET + 恢复）：宿主预置的 CMAKE_REQUIRED_*
+# 会被 CMake 3.17 的 FindThreads 带入探测链接行，导致误判 not found。
 include(CMakePushCheckState)
 cmake_push_check_state(RESET)
 find_package(Threads REQUIRED)
 cmake_pop_check_state()
 target_link_libraries(DCinfer PUBLIC Threads::Threads)
 
-# ── GCC 特化处理 ──
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 
-    # GCC 的 <semaphore> / std::counting_semaphore 内部使用 64 位原子操作，
-    # 在某些平台/架构上必须显式链接 libatomic 才能解析符号。
-    # MSVC / Clang 的对应实现在标准库内，无需额外链接。
-    #
-    # 先不带 atomic 测试，失败再尝试链接 libatomic。
-    # Function scope restores *all* CMAKE_REQUIRED_* and language settings,
-    # including whether the parent defined them, when the probe returns.
+    # GCC 的 <semaphore> 使用 64 位原子操作，部分平台须显式链接 libatomic
+    # （MSVC/Clang 在标准库内）。先不带 atomic 探测，失败再尝试链接。
     function(_dcinfer_check_atomic)
         include(CheckCXXSourceCompiles)
         include(CMakePushCheckState)
         cmake_push_check_state(RESET)
-        # Probe DCinfer's own link requirements, not arbitrary parent test inputs.
-        # Re-evaluate when reconfigured; a cached answer may reflect another context.
+        # 只探测 DCinfer 自身的链接需求；重配置时重评估，避免缓存反映其他上下文
         unset(DCINFER_ATOMIC_BUILTIN_OK CACHE)
         unset(DCINFER_NEEDS_LIBATOMIC CACHE)
         set(CMAKE_REQUIRED_LIBRARIES "")
@@ -72,15 +62,15 @@ endif()
 
 target_include_directories(DCinfer
     PUBLIC
-        # BUILD_INTERFACE：源码内消费（多子目录扁平路径，裸文件名 include）。
-        # 必须用生成器表达式包装——裸源码绝对路径会被 install(EXPORT) 拒绝。
+        # BUILD_INTERFACE：源码内消费（扁平路径，裸文件名 include）；须用
+        # 生成器表达式包装，裸绝对路径会被 install(EXPORT) 拒绝。
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Tensor>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Tools>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Node>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Graph>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/Compose>
-        # INSTALL_INTERFACE：安装树（各子目录公开头扁平合并到 include/，见下方 install 规则）
+        # INSTALL_INTERFACE：安装树（公开头扁平合并到 include/，见下方 install 规则）
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
@@ -89,14 +79,11 @@ file(GLOB_RECURSE DCINFER_SRC_FILES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c
 )
 target_sources(DCinfer PRIVATE ${DCINFER_SRC_FILES})
-# Tests are handled in DCinfer/test when DCINFER_BUILD_TESTS is enabled from the root CMakeLists
 
-# ── 安装与 find_package 支持 ──
-# 消费方式二选一：add_subdirectory()（BUILD_INTERFACE 源码路径）或安装后
-# find_package(DCinfer CONFIG REQUIRED)（INSTALL_INTERFACE 相对路径）。
-# GNUInstallDirs is included before target interface paths above.
-# 宿主直接 add_subdirectory 本目录时它指向宿主版本，必须回落到字面版本，
-# 否则写出的 *ConfigVersion.cmake 会带宿主版本号（需与顶层 project() 同步维护）。
+# 安装与 find_package 支持：消费方式 add_subdirectory() 或安装后
+# find_package(DCinfer CONFIG REQUIRED)。
+# 宿主直接 add_subdirectory 本目录时 PROJECT_VERSION 为宿主版本，须回落到
+# 字面版本，否则写出的 *ConfigVersion.cmake 会带宿主版本号。
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
@@ -109,9 +96,9 @@ install(TARGETS DCinfer EXPORT DCinferTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# 公开头扁平安装：源码与示例均以裸文件名 include（如 "InferGraph.h"、"Tensor.hpp"），
-# 因此各子目录公开头直接合并进 include/，与 BUILD_INTERFACE 的搜索路径语义等价。
-# Node/internal/ 为 Pimpl 私有组件头（公开头零引用），不进入安装树。
+# 公开头扁平安装：源码以裸文件名 include（如 "InferGraph.h"），各子目录
+# 公开头合并进 include/。Node/internal/ 为 Pimpl 私有头（公开头零引用），
+# 不进入安装树。
 install(DIRECTORY
     include/Graph/
     include/Node/

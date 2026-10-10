@@ -9,12 +9,11 @@ namespace DC {
 
 namespace {
 
-/// @brief 触发 onError 引擎复位（尽力而为）：onError 自身抛异常时吞掉
+/// @brief 触发 onError 复位；onError 自身抛异常时吞掉
 void safeTriggerOnError(EngineAdapter& engine) {
 	try {
 		engine.onError();
 	} catch (...) {
-		// 复位失败不传播次生异常
 	}
 }
 
@@ -34,20 +33,18 @@ NodeResult ExecutionPipeline::execute(
 	const auto& fn = node.runFn();
 	const auto& onComplete = node.completionCallback();
 
-	// ⓪ 就绪预检：必选输入未就绪则拒绝执行
 	if (!node.isReady(taskId, buffer)) {
 		throw NodeException(NodeException::ErrorType::NotReady, "ExecutionPipeline::execute",
 							"task '" + taskId + "' is not ready");
 	}
 
-	// ⓪½ 节点闸租约：同一节点同时只允许一个 task 执行（Reentrant 语义）
+	// ⓪½ 节点闸租约：同节点同时只允许一个 task 执行
 	if (!gate.tryAcquire()) {
 		throw NodeException(NodeException::ErrorType::Reentrant, "ExecutionPipeline::execute",
 							"node '" + node.name() + "' is busy executing another task");
 	}
 
-	// 租约 RAII（H-1/H-2）：任何退出路径（含完成回调在异常分支二次抛出）
-	// 都必须释放租约——闸泄漏会让重试登记永久滞留、节点永久不可再执行。
+	// 租约 RAII：任何退出路径都必须释放；闸泄漏会让重试登记永久滞留。
 	struct GateGuard {
 		NodeExecutionGate& gate;
 		~GateGuard() { gate.release(); }
@@ -55,9 +52,7 @@ NodeResult ExecutionPipeline::execute(
 
 	NodeResult result;
 
-	// 完成回调至多一次（P1）：正常路径与异常路径共用同一门闩——回调自身
-	// 抛出时 completed 已置位，catch 路径的重试通知为 no-op，不重复提交
-	// 状态/通知/释放资源；第二次抛出也不会覆盖首次错误语义。
+	// 完成回调至多一次：共用同一门闩，重复通知为 no-op，不覆盖首次错误语义。
 	bool completed = false;
 	auto notifyOnce = [&](const NodeResult& r) {
 		if (!onComplete || completed)
@@ -67,13 +62,11 @@ NodeResult ExecutionPipeline::execute(
 	};
 
 	try {
-		// ① 加载输入：task 缓冲区 → 工作输入槽位
 		buffer.drainInputsTo(taskId, workspace, schema);
 
-		// ② 清空上一轮工作输出
 		workspace.clearOutputs();
 
-		// ②½ preRun 钩子：推理前引擎级准备（钩子自身失败同样触发 onError 复位）
+		// ②½ preRun 钩子：推理前引擎级准备，失败同样触发 onError 复位
 		try {
 			engine.preRun();
 		} catch (...) {
@@ -81,7 +74,6 @@ NodeResult ExecutionPipeline::execute(
 			throw;
 		}
 
-		// ③ 执行 RunFn
 		try {
 			Node::RunContext ctx(workspace, engine, schema, node.type(), node.name(),
 								 taskId, isCancelRequested);
@@ -94,13 +86,12 @@ NodeResult ExecutionPipeline::execute(
 			result.message = "Unknown exception in RunFn";
 		}
 
-		// ③¼ onError 钩子：任一引擎相位失败时重置引擎状态
-		//（RunFn 失败经 result 汇总；相位钩子抛异常在各自 catch 中触发）
+		// ③¼ onError 钩子：任一引擎相位失败时复位引擎状态
 		if (!result.ok()) {
 			safeTriggerOnError(engine);
 		}
 
-		// ③½ 同步：确保异步引擎计算已完成（仅成功路径；自身失败同样触发 onError 复位）
+		// ③½ 同步：确保异步引擎计算已完成，仅成功路径；失败触发 onError
 		if (result.ok()) {
 			try {
 				engine.synchronize();
@@ -110,7 +101,7 @@ NodeResult ExecutionPipeline::execute(
 			}
 		}
 
-		// ③¾ postRun 钩子：同步后的后处理（仅成功路径；自身失败同样触发 onError 复位）
+		// ③¾ postRun 钩子：同步后处理，仅成功路径；失败触发 onError
 		if (result.ok()) {
 			try {
 				Node::RunContext ctx(workspace, engine, schema, node.type(), node.name(),
@@ -122,24 +113,19 @@ NodeResult ExecutionPipeline::execute(
 			}
 		}
 
-		// ④ 保存输出：工作输出槽位 → task 输出缓冲区
 		buffer.fillOutputsFrom(taskId, workspace, schema);
 
-		// ⑤ 验证输出完整性
 		if (result.ok() && !buffer.validateOutputs(taskId, schema)) {
 			result.status = NodeStatus::InternalError;
 			result.message = "Not all required outputs were produced by RunFn";
 		}
 
-		// ⑥ 清理输入缓冲（输出缓冲保留，供调用方拉取）
+		// ⑥ 清理输入缓冲；输出缓冲保留供调用方拉取
 		buffer.eraseInputs(taskId);
 
-		// ⑦ 调用回调（至多一次）
 		notifyOnce(result);
 	} catch (const std::exception& e) {
-		// 加载阶段或执行阶段抛出未捕获异常，必须通知完成回调（经门闩，
-		// 若异常源自回调自身则此处 no-op——回调已执行且只执行过一次）；
-		// 租约由 GateGuard 统一释放（含回调在此再次抛出的路径）
+		// 未捕获异常仍须通知完成回调（经门闩，可能 no-op）；租约由 GateGuard 释放
 		result.status = NodeStatus::ExecutionFailed;
 		result.message = e.what();
 		notifyOnce(result);

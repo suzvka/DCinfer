@@ -21,24 +21,22 @@ namespace DC::Ir {
 
 namespace {
 
-// ── 解包安全与预算（审查 F01 / 归档健壮性）──
-
-/// 单条目未压缩体积上限（防大文件/损坏归档耗尽内存或磁盘）
-constexpr uint64_t kMaxEntryBytes = 1ull << 30; // 1 GiB
-/// graph.json 专用单条目上限（图描述文件；收紧于通用 1 GiB，限制 DOM 解析内存放大）
-constexpr uint64_t kMaxGraphJsonBytes = 64ull << 20; // 64 MiB
-/// 一次性解包总预算（graph.json 之外的 extractOne 累计；防多条目聚合耗尽磁盘）
-constexpr uint64_t kMaxExtractTotalBytes = 4ull << 30; // 4 GiB
-/// extractOne 条目数上限（防多条目磁盘耗尽与 O(M×N) 定位 CPU 放大）
+/// 单条目未压缩体积上限（防大文件耗尽内存或磁盘）
+constexpr uint64_t kMaxEntryBytes = 1ull << 30;
+/// graph.json 专用上限（收紧于通用预算，限制 DOM 解析内存放大）
+constexpr uint64_t kMaxGraphJsonBytes = 64ull << 20;
+/// extractOne 累计解压总预算（graph.json 之外；防多条目聚合耗尽磁盘）
+constexpr uint64_t kMaxExtractTotalBytes = 4ull << 30;
+/// extractOne 条目数上限（防 O(M×N) 逐次定位的 CPU 放大）
 constexpr std::size_t kMaxExtractEntries = 256;
-/// 归档全局条目数上限（openRead 校验，防海量条目拖慢逐次定位）
+/// 归档全局条目数上限（openRead 校验）
 constexpr uint64_t kMaxArchiveEntries = 4096;
-/// 压缩比上限（防 zip bomb：低熵膨胀条目在读取前拒绝；真实模型/JSON 远低于此）
+/// 压缩比上限（防 zip bomb：读取前拒绝低熵膨胀条目）
 constexpr uint64_t kMaxCompressionRatio = 200;
 /// 流式读取块大小
 constexpr std::size_t kReadChunkBytes = 64 * 1024;
 
-/// 读取前预算校验：体积 + 压缩比（只依赖 ZIP 目录声明，不解压）
+/// 读取前预算校验：体积 + 压缩比（只依赖目录声明，不解压）
 void ensureEntryWithinBudget(const unz_file_info64& info, const std::string& entry) {
 	if (info.uncompressed_size > kMaxEntryBytes) {
 		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
@@ -52,7 +50,7 @@ void ensureEntryWithinBudget(const unz_file_info64& info, const std::string& ent
 	}
 }
 
-/// 当前打开条目的 RAII 关闭（异常路径防句柄泄漏；CRC 检查后置 closed 标志）
+/// 当前打开条目的 RAII 关闭（异常路径防句柄泄漏）
 struct CurrentEntryGuard {
 	unzFile handle;
 	bool closed = false;
@@ -63,9 +61,8 @@ struct CurrentEntryGuard {
 	}
 };
 
-/// 流式读取当前打开条目：分块循环至 EOF，边读边交给 sink；
-/// 累计字节与声明体积比对（防截断/超读），CRC 由调用方经
-/// closeCurrentEntryWithCrcCheck 收尾校验。
+/// 流式读取当前条目至 EOF 并交给 sink；累计字节与声明体积比对（防截断/超读），
+/// CRC 由调用方收尾校验。
 template <typename Sink>
 void streamCurrentEntry(unzFile handle, uint64_t expectedSize, const std::string& entry, Sink&& sink) {
 	std::vector<char> buf(kReadChunkBytes);
@@ -104,10 +101,6 @@ void closeCurrentEntryWithCrcCheck(unzFile handle, CurrentEntryGuard& guard, con
 
 } // namespace
 
-// ════════════════════════════════════════════
-// 工厂方法
-// ════════════════════════════════════════════
-
 DcgArchive::DcgArchive() = default;
 
 std::unique_ptr<DcgArchive> DcgArchive::openRead(const std::filesystem::path& path) {
@@ -122,8 +115,7 @@ std::unique_ptr<DcgArchive> DcgArchive::openRead(const std::filesystem::path& pa
 			"cannot open archive: " + pathStr);
 	}
 
-	// 全局条目数上限（IR-04）：海量条目的归档会使每次 unzLocateFile 线性定位
-	// 变得昂贵（O(M×N) CPU 放大）；超限直接拒绝打开。
+	// 海量条目使每次 unzLocateFile 线性定位昂贵（O(M×N)）；超限拒绝打开。
 	unz_global_info64 globalInfo{};
 	if (::unzGetGlobalInfo64(archive->_readHandle, &globalInfo) == UNZ_OK
 		&& globalInfo.number_entry > kMaxArchiveEntries) {
@@ -154,7 +146,6 @@ std::unique_ptr<DcgArchive> DcgArchive::openWrite(const std::filesystem::path& p
 }
 
 DcgArchive::~DcgArchive() {
-	// 写入模式：自动 finalize
 	if (_writeHandle && !_finalized) {
 		try {
 			finalize();
@@ -163,13 +154,11 @@ DcgArchive::~DcgArchive() {
 		}
 	}
 
-	// 关闭读取句柄
 	if (_readHandle) {
 		::unzClose(_readHandle);
 	}
 
 	_extraction.reset(); // release pinned handles before removing the private directory
-	// 清理临时目录
 	if (!_tempDir.empty()) {
 		std::error_code ec;
 		std::filesystem::remove_all(_tempDir, ec);
@@ -181,7 +170,6 @@ DcgArchive::~DcgArchive() {
 // ════════════════════════════════════════════
 
 static std::vector<char> readEntryToMemory(unzFile handle, const std::string& entryName) {
-	// 定位条目
 	int ret = ::unzLocateFile(handle, entryName.c_str(), 2); // case-insensitive
 	if (ret != UNZ_OK) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -189,7 +177,6 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 			"entry not found in archive: " + entryName);
 	}
 
-	// 获取文件信息
 	unz_file_info64 info{};
 	char filenameBuf[256]{};
 	ret = ::unzGetCurrentFileInfo64(handle, &info, filenameBuf, sizeof(filenameBuf),
@@ -200,8 +187,7 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 			"failed to get info for: " + entryName);
 	}
 
-	// 读取前预算校验（体积/压缩比）；graph.json 走更严的专用预算（IR-05：
-	// 限制图描述文件的内存驻留与 DOM 解析放大）
+	// graph.json 走更严的专用预算（限制 DOM 解析内存放大）
 	if (entryName == "graph.json" && info.uncompressed_size > kMaxGraphJsonBytes) {
 		throw GraphException(GraphException::ErrorType::Other, "DcgArchive",
 			"graph.json exceeds size budget (" + std::to_string(info.uncompressed_size) + " > "
@@ -209,7 +195,6 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 	}
 	ensureEntryWithinBudget(info, entryName);
 
-	// 打开条目
 	ret = ::unzOpenCurrentFile(handle);
 	if (ret != UNZ_OK) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -218,21 +203,15 @@ static std::vector<char> readEntryToMemory(unzFile handle, const std::string& en
 	}
 	CurrentEntryGuard guard{handle};
 
-	// 流式读取全部数据（分块循环）。预分配不再信任 ZIP 声明的体积
-	// （声明 1 GiB 实际 1 KiB 也会立即提交 1 GiB —— IR-05）：小量起步、按需增长。
+	// 预分配不信任 ZIP 声明的体积（声明 1 GiB 会立即提交 1 GiB）：小量起步、按需增长。
 	std::vector<char> buffer;
 	buffer.reserve(static_cast<std::size_t>(std::min<uint64_t>(info.uncompressed_size, 1ull << 20)));
 	streamCurrentEntry(handle, info.uncompressed_size, entryName,
 		[&buffer](const char* p, std::size_t n) { buffer.insert(buffer.end(), p, p + n); });
 
-	// CRC/完整性校验收尾（unzCloseCurrentFile 返回值）
 	closeCurrentEntryWithCrcCheck(handle, guard, entryName);
 	return buffer;
 }
-
-// ════════════════════════════════════════════
-// 公开读取接口
-// ════════════════════════════════════════════
 
 std::string DcgArchive::readGraphJson() {
 	auto data = readEntryToMemory(_readHandle, "graph.json");
@@ -240,7 +219,6 @@ std::string DcgArchive::readGraphJson() {
 }
 
 std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
-	// 路径安全校验（F01）：拒绝空/内嵌 NUL/绝对路径/盘符/父目录跳转/归一化越界
 	std::string reason;
 	if (!detail::isSafeArchiveRelPath(archivePath, _tempDir, &reason)) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -248,7 +226,6 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 			"unsafe archive path '" + archivePath + "': " + reason);
 	}
 
-	// 定位条目
 	int ret = ::unzLocateFile(_readHandle, archivePath.c_str(), 2);
 	if (ret != UNZ_OK) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -256,7 +233,6 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 			"entry not found in archive: " + archivePath);
 	}
 
-	// 获取文件信息
 	unz_file_info64 info{};
 	ret = ::unzGetCurrentFileInfo64(_readHandle, &info, nullptr, 0, nullptr, 0, nullptr, 0);
 	if (ret != UNZ_OK) {
@@ -265,11 +241,9 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 			"failed to get info for: " + archivePath);
 	}
 
-	// 读取前预算校验（体积/压缩比）
 	ensureEntryWithinBudget(info, archivePath);
 
-	// 聚合预算（IR-04）：条目数 + 累计解压量——单条目合规不代表聚合合规，
-	// 多条目同样能耗尽磁盘；逐次 unzLocateFile 线性扫描还存在 O(M×N) CPU 放大。
+	// 聚合预算：单条目合规不代表聚合合规（多条目耗磁盘；逐次定位 O(M×N)）。
 	if (++_extractEntries > kMaxExtractEntries) {
 		throw GraphException(GraphException::ErrorType::Other, "DcgArchive::extractOne",
 			"too many extracted entries (limit " + std::to_string(kMaxExtractEntries) + ")");
@@ -289,7 +263,6 @@ std::filesystem::path DcgArchive::extractOne(const std::string& archivePath) {
 	detail::SecureExtraction::Output output;
 	_extraction->createOutput(relative, output);
 
-	// 打开条目
 	ret = ::unzOpenCurrentFile(_readHandle);
 	if (ret != UNZ_OK) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -310,10 +283,6 @@ void DcgArchive::cleanup(const std::filesystem::path& tempPath) {
 	std::filesystem::remove(tempPath, ec);
 }
 
-// ════════════════════════════════════════════
-// 写入
-// ════════════════════════════════════════════
-
 void DcgArchive::writeGraphJson(std::string_view json) {
 	int ret = ::zipOpenNewFileInZip64(_writeHandle, "graph.json",
 		nullptr, nullptr, 0, nullptr, 0, nullptr,
@@ -324,7 +293,7 @@ void DcgArchive::writeGraphJson(std::string_view json) {
 			"failed to open graph.json entry");
 	}
 
-	// 防御：graph.json 实际规模受序列化侧约束，此处兜底 unsigned 写入上限
+	// graph.json 实际规模受序列化侧约束，此处兜底 unsigned 写入上限
 	if (json.size() > std::numeric_limits<unsigned>::max()) {
 		throw GraphException(GraphException::ErrorType::Other,
 			"DcgArchive::writeGraphJson",
@@ -346,9 +315,7 @@ void DcgArchive::writeGraphJson(std::string_view json) {
 }
 
 void DcgArchive::addModelFile(const std::string& archivePath, const std::filesystem::path& diskPath) {
-	// 条目名安全校验（P2-12）：与读取侧（extractOne）同一不变量——写入侧
-	// 拒绝空/绝对路径/盘符/".."/内嵌 NUL/Windows 罪名字形，防止构造出的
-	// 归档经无防护解压器造成 Zip Slip，保持归档格式不变量
+	// 与读取侧同一不变量：拒绝不安全条目名，防构造归档经无防护解压器造成 Zip Slip。
 	std::string reason;
 	if (!detail::isSafeArchiveEntryName(archivePath, nullptr, &reason)) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -356,7 +323,6 @@ void DcgArchive::addModelFile(const std::string& archivePath, const std::filesys
 			"unsafe archive path '" + archivePath + "': " + reason);
 	}
 
-	// 读取整个文件
 	std::ifstream ifs(diskPath, std::ios::binary | std::ios::ate);
 	if (!ifs.is_open()) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -369,8 +335,7 @@ void DcgArchive::addModelFile(const std::string& archivePath, const std::filesys
 			"DcgArchive::addModelFile",
 			"cannot determine size of model file: " + diskPath.string());
 	}
-	// minizip 单次写入长度参数为 unsigned，且本写入路径未启用 zip64 条目：
-	// >4 GiB 的文件此前会静默截断（只写低 32 位且无报错）——现显式拒绝（IR-06）。
+	// minizip 写入长度参数为 unsigned：> 4 GiB 显式拒绝而非静默截断。
 	if (static_cast<uint64_t>(endPos) > std::numeric_limits<unsigned>::max()) {
 		throw GraphException(GraphException::ErrorType::Other,
 			"DcgArchive::addModelFile",
@@ -378,7 +343,7 @@ void DcgArchive::addModelFile(const std::string& archivePath, const std::filesys
 	}
 	ifs.seekg(0);
 
-	// 写入 ZIP（store 模式，因为模型文件通常已经压缩）
+	// store 模式：模型文件通常已压缩
 	int ret = ::zipOpenNewFileInZip64(_writeHandle, archivePath.c_str(),
 		nullptr, nullptr, 0, nullptr, 0, nullptr,
 		0, 0, 0); // method=0 → store
@@ -388,8 +353,7 @@ void DcgArchive::addModelFile(const std::string& archivePath, const std::filesys
 			"failed to open entry: " + archivePath);
 	}
 
-	// 分块流式写入（64 KiB）：不再把整模型读入内存（IR-05）；每块长度
-	// 转换 unsigned 安全（块大小远小于 4 GiB 上限）。
+	// 分块流式写入：避免整模型驻留内存；块大小远小于 unsigned 上限。
 	std::vector<char> buf(kReadChunkBytes);
 	while (ifs) {
 		ifs.read(buf.data(), static_cast<std::streamsize>(buf.size()));

@@ -69,7 +69,7 @@ auto node = EngineRegistry::instance().createNode(
 ## 构建
 
 ```bash
-# OpenAI 适配器依赖 DCNet（HTTP 传输）；未启用 DCNet 时 CMake 直接 FATAL_ERROR（不再静默跳过）
+# 依赖 DCNet（HTTP 传输）；未启用时 CMake FATAL_ERROR
 cmake -B build -S . -DDCINFER_BUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON
 ```
 
@@ -80,12 +80,9 @@ cmake -B build -S . -DDCINFER_BUILD_DCNET=ON -DBUILD_ENGINE_OPENAI=ON
 
 `OpenAiEngineTest`（MockHttpServer 假远端，真实 HTTP 传输）：
 
-- chat 端到端：prompt/system/params → response，校验 model / messages / stream / 参数覆盖
-- 鉴权：Bearer Token 注入 Authorization 头（服务端可断言）
-- 错误分类：非法 params → InvalidInput；响应缺 content / 非 JSON → ExecutionFailed
-  （dcnet 诊断 code=RemoteMalformed）；content="" 合法空内容成功返回
-- 重试：500 一次后成功（maxRetries=1，服务端恰好收到 2 次请求）
-- 失败路径：远端 500 → NetError 归一化（`ExecutionFailed` / `remote:server_error`）
+- chat 端到端：prompt/system/params → response（校验 model / messages / stream / 参数覆盖）
+- 鉴权注入（Bearer）；重试（500 一次后成功，恰好 2 次请求）；远端 500 归一化
+- 错误分类：非法 params → InvalidInput；缺 content / 非 JSON → ExecutionFailed；content="" 成功
 
 ## 设计要点
 

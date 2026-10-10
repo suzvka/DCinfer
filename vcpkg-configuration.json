@@ -1,5 +1,5 @@
 {
-  "$comment": "artifact registry 固定到具体 commit（P1-5）：refs/heads/main.zip 会随上游漂移，\n导致工具获取不可复现。此处固定 vcpkg-ce-catalog main@ae1a296（上游目录更新频率低，\n升版时显式改 SHA 并验证工具可用）。",
+  "$comment": "artifact registry 固定到具体 commit：refs/heads/main.zip 会随上游漂移，\n导致工具获取不可复现。此处固定 vcpkg-ce-catalog main@ae1a296（升版时显式改 SHA 并验证）。",
   "registries": [
     {
       "kind": "artifact",

@@ -64,10 +64,8 @@ vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
         framework onnxruntime_BUILD_APPLE_FRAMEWORK
         framework onnxruntime_BUILD_OBJC
         nccl      onnxruntime_USE_NCCL
-    # 注：1.23.2 时代的 INVERTED_FEATURES（cuda → USE_MEMORY_EFFICIENT_ATTENTION=OFF）
-    # 已移除——1.28 中 MEA 随 CUDA 默认开启，且 attention.cc 无条件引用
-    # kCutlassSafeMaskFilterValue（定义在 USE_MEMORY_EFFICIENT_ATTENTION 守卫内），
-    # 关闭 MEA 会导致 C2039 编译失败。
+    # 不要关闭 MEA（USE_MEMORY_EFFICIENT_ATTENTION）：1.28 的 attention.cc
+    # 无条件引用其守卫内的 kCutlassSafeMaskFilterValue，关闭会 C2039 编译失败。
 )
 
 if("cuda" IN_LIST FEATURES)
@@ -75,12 +73,8 @@ if("cuda" IN_LIST FEATURES)
     list(APPEND FEATURE_OPTIONS
         "-DCMAKE_CUDA_COMPILER=${NVCC}"
         "-DCUDAToolkit_ROOT=${cuda_toolkit_root}"
-        # 注：1.23.2 时代的 -std=c++17 / --compiler-options=/std:c++17 方言 workaround 已移除——
-        # ORT 1.25+ 源码构建强制 C++20（onnxruntime_language_standard_versions.cmake），
-        # 且上游已内置 CUDA 13.3 cudafe++ regression workaround（ort_cuda133_patch_cccl_header）
-        # 与 VS 2026 / CUDA 13.3 Windows 构建修复（#29042, #29266）。
-        # 平台条件化（P1）：/Zc:preprocessor /wd4996 为 MSVC 专用，Linux GCC/Clang
-        # 直接失败——仅 Windows 追加；非 Windows 仅保留 NVCC 诊断抑制
+        # /Zc:preprocessor /wd4996 为 MSVC 专用，Linux GCC/Clang 直接失败——
+        # 仅 Windows 追加；非 Windows 仅保留 NVCC 诊断抑制
         "-DCMAKE_CUDA_FLAGS=-Xcudafe --diag_suppress=2803 -D__NV_NO_VECTOR_DEPRECATION_DIAG"
     )
     if(VCPKG_TARGET_IS_WINDOWS)
@@ -103,9 +97,9 @@ if("tensorrt" IN_LIST FEATURES)
     endif()
 endif()
 
-# 目标 GPU（P1 可配置化）：经环境变量 DCINFER_CUDA_ARCHS / triplet 变量覆盖
-#（如 "89-real;86-real" 多架构或 "80-real;90-real"）；默认 89-real（RTX 4070）。
-# CUDA 13 已移除 sm_60 等旧架构，ORT 默认列表含 60 会配置失败。
+# 目标 GPU：经 DCINFER_CUDA_ARCHS 环境变量/triplet 变量覆盖（多架构如
+# "89-real;86-real"），默认 89-real（RTX 4070）。CUDA 13 已移除 sm_60 等
+# 旧架构，ORT 默认含 60 会配置失败。
 if(NOT DEFINED DCINFER_CUDA_ARCHS)
     if(DEFINED ENV{DCINFER_CUDA_ARCHS})
         set(DCINFER_CUDA_ARCHS "$ENV{DCINFER_CUDA_ARCHS}")
@@ -115,12 +109,6 @@ if(NOT DEFINED DCINFER_CUDA_ARCHS)
 endif()
 
 string(COMPARE EQUAL "${VCPKG_LIBRARY_LINKAGE}" "dynamic" BUILD_SHARED)
-
-# 注：1.23.2 时代的三处源码 workaround 已随升级到 1.28.0 移除——
-# 1) ft_moe/MoE 排除：1.28 的 MoE 实现已重写（moe.cc + qmoe_kernels.cu，ft_moe 已删除），
-#    上游 CUDA 13 CI 正常编译，MoE/QMoE 算子恢复可用；
-# 2) cuda_contrib_kernels.cc MoE 注册行清理：随 1) 一并移除；
-# 3) concat_impl.cu 顶层 const 补写：上游已修复（显式实例化现为 const void** const）。
 
 # see tools/ci_build/build.py
 vcpkg_cmake_configure(
@@ -145,13 +133,9 @@ vcpkg_cmake_configure(
         -Donnxruntime_ENABLE_LAZY_TENSOR=OFF
         -Donnxruntime_DISABLE_RTTI=OFF
         -Donnxruntime_DISABLE_ABSEIL=OFF
-        # 内存保护：本机 16GB RAM。nvcc 默认 --threads 4 与 ninja 并行度相乘
-        # 会耗尽内存（CUTLASS/attention 重模板 TU 单进程峰值数 GB），
-        # 固定为 1；并行度由 VCPKG_MAX_CONCURRENCY=4（见 cmake/vcpkg-toolchain.cmake）统一控制
+        # 内存保护：nvcc --threads 固定为 1，并行度由 VCPKG_MAX_CONCURRENCY 统一控制
         -Donnxruntime_NVCC_THREADS=1
-        # 目标 GPU：默认 RTX 4070 (sm_89)，经 DCINFER_CUDA_ARCHS 覆盖（见上方说明）
         "-DCMAKE_CUDA_ARCHITECTURES=${DCINFER_CUDA_ARCHS}"
-        # some other customizations ...
         --compile-no-warning-as-error
     OPTIONS_DEBUG
         -Donnxruntime_ENABLE_MEMLEAK_CHECKER=OFF

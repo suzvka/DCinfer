@@ -1,4 +1,3 @@
-# DCIr 测试
 cmake_minimum_required(VERSION 3.12)
 
 if (NOT TARGET DCIr::DCIr)
@@ -13,8 +12,7 @@ file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 foreach(test_src IN LISTS TEST_SOURCES)
 	get_filename_component(test_name ${test_src} NAME_WE)
 	add_executable(${test_name} ${test_src})
-	# 相对定位，不依赖顶层源码目录（外层工程 add_subdirectory 消费时同样成立）；
-	# ../src 供测试直接引用模块内私有头（如 PathGuard.h）
+	# 相对定位（外层 add_subdirectory 消费同样成立）；../src 供测试引用模块内私有头
 	target_include_directories(${test_name} PRIVATE
 			${CMAKE_CURRENT_SOURCE_DIR}/../../DCinfer/test
 			${CMAKE_CURRENT_SOURCE_DIR}/../src

@@ -1,10 +1,6 @@
-# DCNet - 张量网络传输框架
-#
-# 依赖 DCinfer 核心库 + nlohmann-json + POCO（HTTP/TLS，跨平台，经 vcpkg 管理）。
-# 形态与 DCEngines/OnnxRuntime 一致：EngineDescriptor 家族，运行时注入。
-# 设计见 DCNet/DESIGN.md。
-#
-# 构建：cmake -B build -S . -DDCINFER_BUILD_DCNET=ON（默认 OFF，与 vcpkg feature 'net' 对应）
+# DCNet - 张量网络传输框架（设计见 DCNet/DESIGN.md）
+# 依赖 DCinfer + nlohmann-json + POCO（vcpkg 管理）
+# 构建：-DDCINFER_BUILD_DCNET=ON（默认 OFF，与 vcpkg feature 'net' 对应）
 
 include(GNUInstallDirs)
 
@@ -13,17 +9,14 @@ add_library(DCNet::DCNet ALIAS DCNet)
 
 target_compile_features(DCNet PUBLIC cxx_std_20)
 
-# MSVC：源码为 UTF-8（含中文注释），目标级启用（add_subdirectory 消费时同样生效）
+# MSVC：源码 UTF-8（含中文注释），目标级启用
 if (MSVC)
     target_compile_options(DCNet PRIVATE /utf-8)
 endif()
 
-# 外部依赖
 find_package(nlohmann_json CONFIG REQUIRED)
-# POCO：HTTP 客户端 + TLS（见 vcpkg.json / cmake/overlay-ports/poco）。
-# TLS 实现：Windows 用 NetSSLWin(SChannel，经 cmake/triplets/x64-windows.cmake
-# 的 POCO_ENABLE_NETSSL_WIN)；POSIX 用 NetSSL(OpenSSL)。
-# 两模块的 HTTPSClientSession 头文件与 API 一致，业务代码零条件编译。
+# POCO TLS：Windows 用 NetSSLWin(SChannel)，POSIX 用 NetSSL(OpenSSL)；
+# 两模块 HTTPSClientSession API 一致，业务代码零条件编译。
 if (WIN32)
     find_package(Poco CONFIG REQUIRED COMPONENTS Foundation Net NetSSLWin)
 else()
@@ -45,9 +38,9 @@ endif()
 
 target_include_directories(DCNet
     PUBLIC
-        # BUILD_INTERFACE：源码内消费（DCinfer 扁平头路径经 DCinfer::DCinfer 传递）
+        # BUILD_INTERFACE：源码内消费（DCinfer 扁平头路径经目标传递）
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        # INSTALL_INTERFACE：安装树（include/DCNet/ 结构保留，消费方 include "DCNet/NetAdapter.h"）
+        # INSTALL_INTERFACE：安装树（消费方 include "DCNet/NetAdapter.h"）
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
@@ -56,11 +49,9 @@ file(GLOB_RECURSE DCNET_SRC CONFIGURE_DEPENDS
 )
 target_sources(DCNet PRIVATE ${DCNET_SRC})
 
-# ── 安装与 find_package 支持 ──
-# 依赖链：DCNetConfig → find_dependency(DCinfer) + json + Poco，与
-# vcpkg feature 'net' 分层一致。MockServer.h 为 header-only 测试基建
-# （经 DCNet::DCNet 传递包含），随包安装以保持该用法可用。
-# GNUInstallDirs is included before target interface paths above.
+# 安装与 find_package 支持：依赖链 DCNetConfig → find_dependency(DCinfer)
+# + json + Poco（与 vcpkg feature 'net' 分层一致）。MockServer.h 为
+# header-only 测试基建，随包安装保持可用。
 if (PROJECT_NAME STREQUAL "DCinfer" AND PROJECT_VERSION)
     set(DCINFER_PKG_VERSION "${PROJECT_VERSION}")
 else()
@@ -73,7 +64,7 @@ install(TARGETS DCNet EXPORT DCNetTargets
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-# 头文件保留 DCNet/ 目录结构（源码以 "DCNet/NetAdapter.h" 前缀风格 include）
+# 保留 DCNet/ 目录结构（源码以前缀风格 include）
 install(DIRECTORY include/DCNet DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 set(DCNET_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/DCNet")
@@ -101,7 +92,7 @@ install(EXPORT DCNetTargets
     DESTINATION ${DCNET_INSTALL_CMAKEDIR}
 )
 
-# ── 测试（DCINFER_BUILD_TESTS 开启时编译）──
+# 测试
 if (DCINFER_BUILD_TESTS)
     add_subdirectory(test)
 endif()

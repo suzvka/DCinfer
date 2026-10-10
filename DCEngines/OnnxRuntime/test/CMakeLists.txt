@@ -1,16 +1,12 @@
 # DCEngine_OnnxRuntime 集成测试
 #
-# 测试在运行时用手工编码的 protobuf 字节流生成小型 ONNX 模型，
-# 无需外部模型文件，也不依赖 onnx/protobuf 库——
-# 避免 onnxruntime.dll 内嵌的 ONNX 描述符与 onnx 静态库重复注册导致崩溃。
+# 测试在运行时用手工编码的 protobuf 字节流生成 ONNX 模型，无需外部模型文件，
+# 也不依赖 onnx/protobuf 库（避免描述符重复注册崩溃，见 OnnxEngineTest.cpp）。
 #
-# ⚠ 已知问题（vcpkg onnxruntime:x64-windows@1.23.2 Debug 配置）：
-# Debug 版 onnxruntime.dll 内嵌的 ONNX schema 静态注册表不完整
-# （断言 "4 schema were exposed ... 741 were expected"），任何模型都无法加载，
-# 且 vcpkg 会在每次构建末期重新部署覆盖手工替换的 DLL。
-# 因此仅 Windows 多配置 Debug 测试通过 RunOrtTest.bat 包装执行；
-# Release 与单配置预设直接执行目标。Debug 的前置条件是先构建 Release：
-#   cmake --build build --config Release
+# ⚠ 已知问题（vcpkg onnxruntime:x64-windows@1.23.2 Debug）：Debug DLL 内嵌的
+# ONNX schema 注册表不完整（加载任何模型即断言），且构建末期会被重新部署覆盖。
+# 因此 Windows 多配置 Debug 经 RunOrtTest.bat 包装执行（前置：先构建 Release）；
+# 其余配置直接执行目标。
 
 cmake_minimum_required(VERSION 3.12)
 

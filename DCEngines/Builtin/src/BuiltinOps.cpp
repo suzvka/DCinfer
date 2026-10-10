@@ -5,10 +5,6 @@
 
 namespace DC::Builtin {
 
-// ════════════════════════════════════════════
-// Add 算子：两个 Float 标量相加
-// ════════════════════════════════════════════
-
 static Node::Schema addSchema() {
 	Node::Schema s;
 	s.inputs = {Node::Port::in<float>("a"), Node::Port::in<float>("b")};
@@ -30,10 +26,6 @@ static Node::RunFn addRunFn() {
 		return ctx.success();
 	};
 }
-
-// ════════════════════════════════════════════
-// Mul 算子：两个 Float 标量相乘
-// ════════════════════════════════════════════
 
 static Node::Schema mulSchema() {
 	Node::Schema s;
@@ -57,10 +49,6 @@ static Node::RunFn mulRunFn() {
 	};
 }
 
-// ════════════════════════════════════════════
-// Identity 算子：恒等映射
-// ════════════════════════════════════════════
-
 static Node::Schema identitySchema() {
 	Node::Schema s;
 	s.inputs = {Node::Port::in<float>("x")};
@@ -81,10 +69,6 @@ static Node::RunFn identityRunFn() {
 		return ctx.success();
 	};
 }
-
-// ════════════════════════════════════════════
-// 注册入口
-// ════════════════════════════════════════════
 
 void registerBuiltinOperators(EngineRegistry& reg) {
 	reg.registerOperator("Add", addSchema(), addRunFn());

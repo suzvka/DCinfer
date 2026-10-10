@@ -18,164 +18,82 @@
 
 namespace DC {
 
-// ── 推理图：DC 电路图语义 ──
-//
-// InferGraph 是用户唯一接触的 Facade，生命周期分两个阶段：
-//
-//   Build（构建期）── GraphBuilder 承接 addNode/connect/bind... 等可变构建 API
-//        │ compile()（惰性：首次运行期 API 自动触发；或显式 freeze()）
-//        v
-//   Freeze/Execute（执行期）── 构建面关闭（Frozen），运行期只读冻结快照：
-//   - CompiledGraph  不可变拓扑 + GraphSignature（图级签名：绑定快照，序列化/内省元数据）
-//   - ExecutionEngine 执行调度与事件驱动数据传播
-//   - OutputZone      输出聚合（纯任务态）
-//   - ErrorTracker    错误收集
-//   - SignalStore     信号仓库
-//
-// Node 不知下游，Connector 即 Node。Graph 对一切顶点统一处理。
-
+// 推理图：用户唯一接触的 Facade。生命周期：构建期（GraphBuilder 可变构建 API）
+// 经 compile() 惰性冻结（首次运行期 API 自动触发，或显式 freeze()）进入执行期——
+// 构建面关闭，运行期只读 CompiledGraph 冻结快照。
 class InferGraph {
 public:
 	using TaskId = Node::TaskId;
 
-	/// @brief  端口级边（类型别名，定义见 GraphStore::Edge）
 	using Edge = GraphStore::Edge;
 
-	/// @brief  默认最大跳数（TTL），防止循环无限传播
+	/// @brief 默认最大跳数（TTL），防止循环无限传播
 	static constexpr uint32_t kDefaultMaxHops = ExecutionEngine::kDefaultMaxHops;
 
-	/// @brief  构造推理图（默认共享进程级调度器；可注入自定义调度器）。
-	/// @param  scheduler 资源调度器共享句柄；nullptr = 进程级默认实例
-	///         （ResourceScheduler::instance()——多图默认共享进程预算）
+	/// @brief 构造推理图（scheduler 为空时共享进程级默认实例）。
 	explicit InferGraph(std::shared_ptr<ResourceScheduler> scheduler = nullptr);
-	/// Retain external ownership while APIs/nodes/callbacks execute. Never destroy
-	/// this graph from its own RunFn or completion callback (including cancel on
-	/// nonworkers): the engine diagnoses and terminates in all builds instead of
-	/// self-waiting or returning into freed state. Destroy from an external owner.
+	/// 必须由外部持有者销毁：从自身 RunFn/完成回调中销毁本图会打印诊断并 terminate。
 	~InferGraph() = default;
 
 	InferGraph(const InferGraph&) = delete;
 	InferGraph& operator=(const InferGraph&) = delete;
 
-	// 移动语义禁止：ExecutionEngine 持有活跃任务状态表与引擎级状态，
-	// 移动后调度器 worker 上飞行任务的 this 捕获会悬空。
+	// 禁止移动：在飞任务持有 this 捕获，移动会悬空。
 	InferGraph(InferGraph&&) = delete;
 	InferGraph& operator=(InferGraph&&) = delete;
 
-	// ── 图构建（构建期 API：惰性冻结后抛 GraphException(Frozen)）──
-	//
-	// Build → Freeze → Execute：构建方法仅可在首次运行期 API（submit/feedInput）
-	// 之前使用；届时构建面自动编译为不可变 CompiledGraph 快照（惰性冻结），
-	// 也可经 freeze() 显式提前冻结。执行期拓扑不可变——
-	// "Can topology change while tasks are active?" 的答案恒为 No。
-	// 拓扑演进路径：重新构建 GraphBuilder → compile 产生新快照，旧图任务排空后替换。
+	// 构建期 API：首次运行期 API（submit/feedInput）或 freeze() 后抛 GraphException(Frozen)。
+	// 拓扑演进：重建 GraphBuilder 并 compile 新快照。
 
-	/// @brief  添加节点（转移所有权），返回引用供后续接线引用
-	/// @throws GraphException(DuplicateNode) 若节点名为空或重名
-	/// @throws GraphException(Frozen) 若图已冻结
+	/// @brief 添加节点（转移所有权）；空名或重名抛 DuplicateNode。
 	Node& addNode(std::unique_ptr<Node> node) {
 		_ensureNotFrozen("InferGraph::addNode");
 		return _builder->addNode(std::move(node));
 	}
 
-	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
-	///         自动插入广播连接器（Broadcast Connector, N=1）——
-	///         1→1 直连；同一输出口再次 connect 时既有导线原地扩容为
-	///         N 路广播扇出（增加连接即多分一份，无需手写 Broadcast(N)）
-	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
-	/// @throws GraphException(DuplicateEdge) 若该输入端口已有入边（多上游汇聚
-	///         必须使用不同输入口）；或输出口既有连接不可扩容（内部拓扑）
-	/// @throws GraphException(Frozen) 若图已冻结
-	/// @return 指向承载该连接的广播连接器的引用（扩容返回同一对象）
+	/// @brief 端口级接线（自动插入广播连接器 N=1；同源口再次 connect 扩容扇出）。
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort) {
 		_ensureNotFrozen("InferGraph::connect");
 		return _builder->connect(srcNode, srcPort, dstNode, dstPort);
 	}
 
-	/// @brief  图级输入绑定（强制公共别名）
-	///
-	/// 绑定构成图级签名，随冻结快照固化：供内省、序列化与
-	/// submitBound 声明推导使用。alias 不参与运行时寻址——运行期数据注入/取用
-	/// 一律按 (nodeName, portName) 内部坐标（feedInput / takeOutput）；
-	/// 按公开别名操作见 interface()。
-	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一）
-	/// @throws GraphException(InvalidBinding) 若别名为空
-	/// @throws GraphException(DuplicateBinding) 若别名已被其他输入绑定使用
-	/// @throws GraphException(Frozen) 若图已冻结
+	/// @brief 图级输入绑定（alias 必填且唯一；不参与运行时寻址，见 interface()）。
 	void bindInput(const std::string& alias, const std::string& nodeName,
 				   const std::string& portName) {
 		_ensureNotFrozen("InferGraph::bindInput");
 		_builder->bindInput(nodeName, portName, alias);
 	}
 
-	/// @brief  图级输出绑定（强制公共别名）
-	///
-	/// 绑定构成图级签名的一部分：submitBound 以此为输出声明来源，
-	/// 结果仍按内部寻址取用（takeOutput / takeOutputTensor）；
-	/// alias 不参与运行时寻址，按公开别名操作见 interface()。
-	///
-	/// 端口约束：绑定端口必须是终端端口（无出边）——取数（OutputZone 搬运）
-	/// 与出边传播共享同一消费槽，非终端绑定会截断下游数据流（下游饿死 /
-	/// 任务挂起）。中间结果既要对外可见又要继续参与下游时，显式插入分支：
-	/// 把该端口 connect 到直通节点（如恒等算子），绑定挂分支叶子；同源口
-	/// 再次 connect 自动扩容为扇出，无需手写 Broadcast(N)。
-	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一）
-	/// @throws GraphException(InvalidBinding) 若别名为空
-	/// @throws GraphException(DuplicateBinding) 若别名已被其他输出绑定使用
-	/// @throws GraphException(NonTerminalPort) 若绑定端口有出边（首次提交/
-	///         冻结期拒绝，不引为隐式拷贝：需要中间输出时显式建分支）
-	/// @throws GraphException(Frozen) 若图已冻结
+	/// @brief 图级输出绑定（alias 必填且唯一；submitBound 以此为声明来源）。
+	/// @throws GraphException(NonTerminalPort) 绑定端口有出边（取数与出边传播共享消费槽）。
 	void bindOutput(const std::string& alias, const std::string& nodeName,
 					const std::string& portName) {
 		_ensureNotFrozen("InferGraph::bindOutput");
 		_builder->bindOutput(nodeName, portName, alias);
 	}
 
-	// ── 公开接口（按别名操作）──
-
-	/// @brief  取图公开接口：冻结图并一次性解析公开绑定（alias → (nodeName, portName)）。
-	///         返回的 GraphInterface 按公开别名喂数据 / 取结果，内部仍转发
-	///         坐标寻址运行期 API；绑定坐标存在性在创建时校验（fail-fast）。
-	/// @return GraphInterface 值对象（别名列表随冻结签名固定）
-	/// @throws GraphException(NodeNotFound/PortNotFound) 若绑定坐标不存在
+	/// @brief 取图公开接口：冻结图并一次性解析绑定（坐标存在性创建时校验）。
 	GraphInterface interface();
 
-	// ── 数据注入 ──
-
-	/// @brief  从图外注入数据到指定节点的输入端口（写入缓冲，不触发执行）
-	/// @throws GraphException(NodeNotFound) 若节点不存在
-	/// @throws GraphException(FeedFailed) 若 setInput 失败
-	/// @throws GraphException(DuplicateTask) 若 task 处于收尾窗口（终态已发布、
-	///         waitForResult 返回前）——此时注入会写入随旧轮清理摘除的执行态；
-	///         复用语义：waitForResult 返回后再 feed
+	/// @brief 从图外注入数据到指定节点的输入端口（写入缓冲，不触发执行）。
+	/// @throws GraphException(DuplicateTask) task 处于收尾窗口（waitForResult 返回后再 feed）。
 	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data);
 
-	/// @brief  便捷接口：直接传入 DC::Tensor
+	/// @brief 便捷：直接传入 DC::Tensor。
 	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Tensor data);
 
-	// ── 执行驱动 ──
-
-	/// @brief  异步启动整张图的计算。输出声明直接作为 submit 参数，消除 temporal coupling。
-	/// @param  declarations  期望产出：{nodeName, portName, count} 列表
-	/// @throws GraphException(DuplicateTask) 若同 taskId 任务仍在执行，或处于收尾窗口
-	///         （终态已发布、结果可读（waitForResult 返回）前）
-	/// @throws GraphException(UnreachableDeclaration) 声明目标拓扑不可达（提交期即暴露）
-	/// @note   声明清理/写入与轮次登记由引擎在单事务内原子完成（并发同 ID 提交恰一方
-	///         成功）。复用已收尾的 taskId 合法：上一轮的声明/结果/诊断随之清理。
-	///         输出在 task 终止后仍保留，供 waitForResult → takeOutput 取用。
-	///         声明是任务的完成条件：全部声明满足即终止，未被声明覆盖的分支
-	///         不保证执行完毕（需其完成时一并声明对应端口）。声明不被终端
-	///         约束（循环计数/部分求值依赖此自由度：声明有出边端口合法，但
-	///         数据可得性随传播时序——想稳定取中间值请走绑定+显式分支）。
-	///         执行超时由节点实现方自行负责（失败经 NodeResult + Diagnostic 自报）。
+	/// @brief 异步启动整张图的计算；声明是完成条件：全部声明满足即终止。
+	/// @param declarations 期望产出 {nodeName, portName, count} 列表
+	/// @throws GraphException DuplicateTask（同 taskId 在飞或收尾窗口内）/
+	///         UnreachableDeclaration（拓扑不可达，提交期即暴露）。
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				uint32_t maxHops = kDefaultMaxHops) {
 		_ensureFrozen(); // 惰性冻结：首次提交即编译（此后拓扑不可变）
 		_engine->submit(taskId, maxHops, _state, std::move(declarations));
 	}
 
-	/// @brief  单输出便捷重载（生命周期语义同上）
+	/// @brief 单输出便捷重载。
 	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 				size_t count = 1,
 				uint32_t maxHops = kDefaultMaxHops) {
@@ -184,158 +102,98 @@ public:
 		_engine->submit(taskId, maxHops, _state, std::move(declarations));
 	}
 
-	// ── 结果获取（消费式：取出即消耗）──
-
-	/// @brief  消费式取出输出区中指定端口的结果（取出后内部清空，不可重复读取）
-	/// @note   结果在 task 终止（waitForResult 返回）后仍然有效，直至下一次同 ID submit
-	///         或 releaseTask()——支持 submit → waitForResult → takeOutput 的同步用法；
-	/// @throws GraphException(NodeNotFound) 若节点不存在
+	/// @brief 消费式取出输出（取出即清空；结果存活至下一次同 ID submit 或 releaseTask）。
 	Value takeOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
-	/// @brief  便捷接口：消费式取出 DC::Tensor
-	/// @throws GraphException(NodeNotFound) 若节点不存在
+	/// @brief 便捷：消费式取出 DC::Tensor。
 	Tensor takeOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName);
 
-	/// @brief  检查输出区中是否有结果
+	/// @brief 检查输出区中是否有结果。
 	bool hasOutput(const TaskId& taskId, const std::string& nodeName, const std::string& portName) const;
 
-	/// @brief  便捷提交：以全部 bindOutput 绑定作为输出声明（各 count=1）。
-	///         已 bindOutput 的端口无需在 submit 时重复声明。
-	/// @throws GraphException(NoDeclaration) 未 bindOutput 任何端口
+	/// @brief 以全部 bindOutput 绑定作为输出声明提交（各 count=1）；无绑定抛 NoDeclaration。
 	void submitBound(const TaskId& taskId,
 					 uint32_t maxHops = kDefaultMaxHops);
 
-	// ── task 生命周期（状态 / 取消 / 结构化等待 / 资源回收）──
-
-	/// @brief  查询 task 当前状态
-	/// @return Unknown=从未提交；Running=执行中；Succeeded/Failed/Cancelled=已终止；
-	///         Succeeded 但存在 Error 级诊断时归一化为 Failed（部分节点执行失败）
+	/// @brief 查询 task 当前状态（Succeeded 但存在 Error 级诊断时归一化为 Failed）。
 	TaskStatus taskStatus(const TaskId& taskId) const;
 
-	/// @brief  请求取消活动中的 task（幂等；未知或已终止返回 false）。
-	///         协作式取消：在飞节点执行不被中断，传播链即刻停止，
-	///         waitForResult() 被唤醒，状态置 Cancelled。
+	/// @brief 请求取消活动中的 task（幂等；协作式：在飞节点不中断，状态置 Cancelled）。
 	bool cancel(const TaskId& taskId) { return _engine->cancel(taskId); }
 
-	/// @brief  同步等待 task 终止并返回结构化结果（无限等待直至终止）
-	/// @note   可能长时间阻塞（远端/慢引擎/信号阻塞）的场景应改用
-	///         显式超时重载，或从其他线程调用 cancel() 唤醒等待
+	/// @brief 同步等待 task 终止并返回结果（无限等待；长阻塞场景用超时重载）。
 	TaskResult waitForResult(const TaskId& taskId);
 
-	/// @brief  同步等待 task 终止并返回结构化结果（显式超时）
-	/// @param  timeout 等待超时（等待未满足时 status 为 Running，调用方可据此区分
-	///         "仍在运行"与各类终止态）；超时只放弃等待，不取消任务
-	/// @note   输出数据在终止后仍由 OutputZone 持有，经 takeOutput 取出；
-	///         等待未满足（含终态已迁移、结果尚未就绪的收尾窗口）一律
-	///         按 {status=Running} 如实报告——wait 返回 true 才保证结果可读
+	/// @brief 同步等待 task 终止并返回结果（显式超时）。
+	/// @param timeout 等待超时；未满足时按 {status=Running} 返回，超时只放弃等待不取消任务
 	TaskResult waitForResult(const TaskId& taskId, std::chrono::milliseconds timeout);
 
-	/// @brief  释放已终止 task 的全部资源（状态表条目、OutputZone 结果、诊断记录）
-	/// @note   此后 taskStatus 返回 Unknown、hasOutput 返回 false；
-	///         活动或收尾中 task 不可释放（引擎拒绝时结果/诊断保持不动）；
-	///         "大量短任务"场景建议在消费结果后调用以防内存增长
+	/// @brief 释放已终止 task 的全部资源（状态/结果/诊断；活动或收尾中不可释放）。
 	void releaseTask(const TaskId& taskId);
 
-	/// @brief  弃置"已喂数据但从未成功提交"（Unknown 状态）的任务输入。
-	///         供任务句柄析构路径调用：清理执行态输入缓冲 / 声明 / 诊断；
-	///         活动或已终止任务不受影响（分别由 detachTask / releaseTask 管理）。
+	/// @brief 弃置"已喂数据但从未提交"的任务输入（句柄析构路径调用）。
 	void discardUnsubmitted(const TaskId& taskId);
 
-	/// @brief  弃置在飞任务的托管句柄：不取消任务，终态收尾时自动回收
-	///         状态表条目 / OutputZone 结果 / 诊断；已终止 → 立即等价
-	///         releaseTask；未知 → no-op。
-	/// @note   句柄析构路径的回收兜底：先请求 cancel()，随后调用本接口——
-	///         正常路径已终态（立即释放）；仅取消竞态窗口内按在飞自动回收。
+	/// @brief 弃置在飞任务的托管句柄：不取消任务，终态收尾时自动回收状态/结果/诊断；
+	///        已终止 → 等价 releaseTask；未知 → no-op。
 	void detachTask(const TaskId& taskId);
 
-	// ── 查询（源图视角：冻结前后均反映源图拓扑/绑定，供内省与序列化）──
-
-	/// @brief  获取节点指针（非拥有），不存在返回 nullptr。
-	///         构建期专用（冻结后抛 Frozen）：运行期节点不可变，
-	///         只读访问用 const 重载。
+	/// @brief 获取节点可写指针（构建期专用；冻结后抛 Frozen）。
 	Node* node(const std::string& name) {
 		_ensureNotFrozen("InferGraph::node");
 		return _builder->node(name);
 	}
 
-	/// @brief  获取节点指针（只读）
+	/// @brief 获取节点指针（只读）。
 	const Node* node(const std::string& name) const { return _topology().node(name); }
 
-	/// @brief  节点数量
 	size_t nodeCount() const { return _topology().nodeCount(); }
-
-	/// @brief  边数量
 	size_t edgeCount() const { return _topology().edgeCount(); }
-
-	/// @brief  获取所有节点名的列表
 	std::vector<std::string> nodeNames() const { return _topology().nodeNames(); }
 
-	/// @brief  获取所有边（值副本）：内部容器引用永不外泄（并发/冻结边界
-	/// 下引用悬空风险归零；GraphStore 内部引用版仅限持锁或封印后路径）
+	/// @brief 获取所有边（值副本）。
 	std::vector<Edge> edges() const { return _topology().edges(); }
 
-	/// @brief  获取所有输入绑定（值副本）
 	std::vector<InputBinding> inputBindings() const { return _inputBindingsView(); }
-
-	/// @brief  获取所有输出绑定的只读引用
 	const std::vector<OutputBinding>& outputBindings() const { return _outputBindingsView(); }
 
-	// ── 执行载体 ──
-
-	/// @brief  资源调度器共享句柄（本图执行派发载体；默认与其它图共享
-	///         进程级实例，注入自定义调度器可独立预算）
+	/// @brief 资源调度器共享句柄。
 	const std::shared_ptr<ResourceScheduler>& scheduler() const { return _scheduler; }
 
-	// ── 冻结 ──
-
-	/// @brief  显式冻结（高级用法）：立即编译构建面为不可变快照。
-	///         此后所有构建 API 抛 GraphException(Frozen)；运行期 API 照常。
-	/// @return 冻结快照（与运行时共享同一份；幂等：重复调用返回同一快照）
+	/// @brief 显式冻结：立即编译为不可变快照（幂等；此后构建 API 抛 Frozen）。
 	std::shared_ptr<const CompiledGraph> freeze() { return _ensureFrozen(); }
 
-	// ── 错误诊断 ──
-
-	/// @brief  查询指定 task 在整条传播链上的所有错误记录
+	/// @brief 查询指定 task 的所有错误记录。
 	std::vector<TaskError> taskErrors(const TaskId& taskId) const { return _state->errors.taskErrors(taskId); }
 
-	/// @brief  清除所有 task 级错误记录（通常在重新 submit 前调用）
+	/// @brief 清除所有 task 级错误记录。
 	void clearErrors() { _state->errors.clearErrors(); }
 
-	/// @brief  是否有任何 task 发生过错误
+	/// @brief 是否有任何 task 发生过错误。
 	bool hasErrors() const { return _state->errors.hasErrors(); }
-
-	// ── task 完成回调 ──
 
 	using TaskCompleteCallback = std::function<void(const TaskId&)>;
 
-	/// @brief  设置 task 完成回调（每次 submit 前设置；_terminate 末尾触发）
+	/// @brief 设置 task 完成回调（_terminate 末尾触发）。
 	void setTaskCompleteCallback(TaskCompleteCallback cb) { _engine->setTaskCompleteCallback(std::move(cb)); }
 
-	// ── 信号系统 ──
-
-	/// @brief  写入图级信号值（广播，所有 task 生效）。
+	/// @brief 写入图级信号值（广播）。
 	void setSignal(const std::string& name, bool value) { _state->signals->set(name, value); }
 
-	/// @brief  写入 task 级信号值（仅对指定 taskId 生效，覆盖同名的广播信号）。
+	/// @brief 写入 task 级信号值（覆盖同名广播信号）。
 	void setSignal(const std::string& name, const TaskId& taskId, bool value) { _state->signals->set(name, taskId, value); }
 
-	/// @brief  读取全局信号值。
+	/// @brief 读取全局信号值。
 	bool getSignal(const std::string& name) const { return _state->signals->get(name); }
 
-	/// @brief  读取信号值（task 级优先 → 全局回退）。
+	/// @brief 读取信号值（task 级优先 → 全局回退）。
 	bool getSignal(const std::string& name, const TaskId& taskId) const { return _state->signals->get(name, taskId); }
 
-	/// @brief  获取信号仓库指针，供 Node::bindSignal 使用。
+	/// @brief 获取信号仓库指针。
 	std::shared_ptr<SignalStore> signalStore() { return _state->signals; }
 
 private:
-	/// @brief  惰性冻结：首次运行期调用时把构建面编译为不可变快照。
-	/// @return 冻结快照（幂等：已冻结时直接返回现有快照）
-	/// @note   快路径经发布协议无锁 acquire 读（未发布返回 nullptr）；
-	///         首次编译由 _freezeMutex 串行化，compile 仅在首个
-	///         submit/feedInput 时执行一次；attachGraph 先完成闸表等派生
-	///         状态、再一次性发布——并发读者只能观察到"尚未发布"或
-	///         "完整初始化"两种状态。
+	/// @brief 惰性冻结：首次运行期调用时编译为快照（快路径无锁读；首次编译由 _freezeMutex 串行化）。
 	std::shared_ptr<const CompiledGraph> _ensureFrozen() const {
 		if (auto snap = _state->snapshot())
 			return snap;
@@ -346,7 +204,7 @@ private:
 		return _state->snapshot();
 	}
 
-	/// @brief  构建期守卫：冻结后调用构建 API 抛 GraphException(Frozen)
+	/// @brief 构建期守卫：冻结后调用构建 API 抛 Frozen。
 	void _ensureNotFrozen(const char* api) const {
 		if (_state->snapshot())
 			throw GraphException(GraphException::ErrorType::Frozen, api,
@@ -355,40 +213,33 @@ private:
 								 );
 	}
 
-	/// @brief  拓扑访问（源图视角）：冻结后读快照，构建期读 builder
+	/// @brief 拓扑访问：冻结后读快照，构建期读 builder。
 	const GraphStore& _topology() const {
 		if (auto snap = _state->snapshot())
 			return snap->store();
 		return _builder->store();
 	}
 
-	/// @brief  输入绑定视图（值副本）：冻结后读 GraphSignature，构建期读 builder
+	/// @brief 输入绑定视图：冻结后读签名，构建期读 builder。
 	std::vector<InputBinding> _inputBindingsView() const {
 		if (auto snap = _state->snapshot())
 			return snap->signature().inputs;
 		return _builder->inputBindings();
 	}
 
-	/// @brief  输出绑定视图：冻结后读 GraphSignature（无锁），构建期读 builder
+	/// @brief 输出绑定视图：冻结后读签名，构建期读 builder。
 	const std::vector<OutputBinding>& _outputBindingsView() const {
 		if (auto snap = _state->snapshot())
 			return snap->signature().outputs;
 		return _builder->outputBindings();
 	}
 
-	// ── 内部组件 ──
-	// 图状态（graph/output/signals/errors）聚合为共享的 GraphRuntimeState：
-	// 飞行任务经 TaskGate/任务 lambda 持有同一 shared_ptr，图组件的
-	// 存活期由引用计数保证，不再依赖成员声明顺序约定。
-	// _builder 为构建期唯一可变面（compile 时拓扑所有权移交快照）；
-	// _scheduler 共享句柄与 _engine 随图生命周期：engine 最后声明 →
-	// 最先析构（自排水完成后无在飞任务引用图组件），调度器引用随之
-	// 释放（池本身跨图共享，不随单图析构关停）。
+	// engine 最后声明 → 最先析构：自排水完成后才释放图组件引用。
 	std::shared_ptr<GraphRuntimeState> _state;
 	std::shared_ptr<ResourceScheduler> _scheduler;
 	std::unique_ptr<GraphBuilder> _builder = std::make_unique<GraphBuilder>();
 	std::unique_ptr<ExecutionEngine> _engine;
-	mutable std::mutex _freezeMutex; ///< 惰性冻结串行化（快照填充一次性）
+	mutable std::mutex _freezeMutex;
 };
 
 } // namespace DC

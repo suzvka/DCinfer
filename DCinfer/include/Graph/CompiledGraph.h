@@ -11,18 +11,13 @@
 
 namespace DC {
 
-/// @brief 运行时视图：lowering 后参与调度的节点/边集合。
-///
-/// 与源图的关系：节点指针借用源图（源图存活期由快照保证），
-/// 边为 lowering 改写后的直连边。执行引擎只遍历本视图——
-/// 被擦除的退化连接器（Broadcast(1) wire）不再参与就绪扫描、
-/// 调度、传播与耗尽检查。
+/// @brief 运行时视图：lowering 后参与调度的节点/边集合（执行引擎只遍历本视图）。
 class GraphRuntimeView {
 public:
-	std::unordered_map<std::string, const Node*> nodes; ///< 参与调度的节点表（借用指针）
-	std::vector<GraphStore::Edge> edges;          ///< lowering 后的运行时边
+	std::unordered_map<std::string, const Node*> nodes;
+	std::vector<GraphStore::Edge> edges;
 
-	/// @brief  按名查找节点（借用指针；不存在返回 nullptr）
+	/// @brief 按名查找节点（借用指针；不存在返回 nullptr）。
 	const Node* node(const std::string& name) const {
 		auto it = nodes.find(name);
 		return it != nodes.end() ? it->second : nullptr;
@@ -33,43 +28,22 @@ public:
 
 /// @brief 冻结后的不可变图快照（Build → Freeze → Execute 中的 Freeze 产物）。
 ///
-/// 由 GraphBuilder::compile() 一次性产出，确立核心不变量：
-///
-/// > 图在执行期间不可变。
-///
-/// - 拓扑（节点/边）与图级签名（输入/输出绑定）自此不可增删改——
-///   增删改 API 仅存在于构建期的 GraphBuilder，且由三级封闭强制执行：
-///   构建面（GraphBuilder 互斥锁 + Frozen 守卫）、拓扑面（GraphStore 封印）、
-///   节点面（Node 冻结门）——冻结前泄漏的引用亦无法修改快照持有的对象；
-/// - 执行引擎与飞行任务经本快照读取拓扑与签名
-///   （GraphRuntimeState::snapshot() 发布协议读取）；
-/// - 保留源图视角：图序列化、nodeCount/edges 等内省均反映源图；
-///   运行时视图（runtimeView）为 lowering 后形态。
-
+/// 拓扑与图级签名自此不可增删改——构建面（Frozen 守卫）、拓扑面（GraphStore
+/// 封印）、节点面（Node 冻结门）三级封闭。源图视角保留（序列化/内省反映源图），
+/// 执行引擎经 runtimeView 读取 lowering 后形态。
 class CompiledGraph {
 public:
-	/// @brief  冻结的源图拓扑。
-	///
-	/// 返回 const：结构不可变，节点 task 级状态已归 task 执行域
-	/// （GraphRuntimeState::exec）——运行期不再经 Node 写入任何状态，
-	/// 拓扑增删改（addNode/connect/...）在冻结后无公开入口，属不可达 API。
+	/// @brief 冻结的源图拓扑（结构与节点状态均不可经此修改）。
 	const GraphStore& store() const { return *_store; }
 
-	/// @brief  图级签名（不可变；执行期签名读取无锁——寻址坐标固定，无别名解析）
+	/// @brief 图级签名（不可变；执行期读取无锁）。
 	const GraphSignature& signature() const { return _signature; }
 
-	// ── 运行时视图（lowering 后；执行引擎的调度/传播/清理面）──
-
-	/// @brief  运行时视图（Broadcast(1) wire 已擦除，入边改写为直连）
+	/// @brief 运行时视图（Broadcast(1) wire 已擦除，入边改写为直连）。
 	const GraphRuntimeView& runtimeView() const { return _runtimeView; }
 
-	/// @brief  运行时节点数（源图 nodeCount − 被擦除连接器数）
 	size_t runtimeNodeCount() const { return _runtimeView.nodeCount(); }
-
-	/// @brief  运行时边数（源图 edgeCount − 被擦除连接器数）
 	size_t runtimeEdgeCount() const { return _runtimeView.edgeCount(); }
-
-	/// @brief  lowering 统计（被擦除的退化连接器数量）
 	const GraphLoweringStats& loweringStats() const { return _loweringStats; }
 
 private:
@@ -79,9 +53,9 @@ private:
 		: _store(std::move(store)), _signature(std::move(signature)),
 		  _runtimeView(std::move(view)), _loweringStats(stats) {}
 
-	std::shared_ptr<GraphStore> _store; ///< 冻结拓扑（所有权随快照移交）
+	std::shared_ptr<GraphStore> _store;
 	GraphSignature _signature;
-	GraphRuntimeView _runtimeView;      ///< lowering 后的运行时视图
+	GraphRuntimeView _runtimeView;
 	GraphLoweringStats _loweringStats;
 };
 

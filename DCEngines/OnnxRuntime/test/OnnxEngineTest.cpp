@@ -1,22 +1,7 @@
-// OnnxEngineTest - ONNX Runtime 引擎适配器集成测试
-//
-// 测试流程：
-//   1. 在运行时生成一个小型 Add 模型字节流（X + Y → Z, float32 [1,4]）
-//   2. 注册 OnnxRuntime 引擎
-//   3. 通过 EngineRegistry::createNode 从模型路径创建节点（自动推导 Schema）
-//   4. 构建单节点推理图，注入数据，提交执行
-//   5. 校验输出数值与形状
-//
-// 覆盖点：
-//   - registerOnnxEngine 注册流程
-//   - 模型加载 + 端口 Schema 自动推导
-//   - RunFn 中 DC::Tensor → Ort::Value → DC::Tensor 的往返转换
-//   - InferGraph 异步调度下的引擎节点执行
-//
-// 设计说明：测试模型不依赖 onnx/protobuf 库生成，而是直接内嵌手工编码的
-// 最小 ONNX protobuf 字节流（ONNX 文件格式即 protobuf 序列化）。
-// 这避免了 onnxruntime.dll 内嵌的 ONNX 描述符与外部 onnx 静态库重复注册
-// 导致的 protobuf "File already exists in database" 崩溃。
+// OnnxEngineTest - ONNX Runtime 引擎适配器集成测试。
+// 测试模型为手工编码的最小 ONNX protobuf 字节流（不依赖 onnx/protobuf 库）：
+// 避免 onnxruntime.dll 内嵌描述符与外部 onnx 静态库重复注册导致
+// protobuf "File already exists in database" 崩溃。
 
 #include "TestHarness.h"
 #include "Tensor.hpp"
@@ -34,7 +19,6 @@
 
 namespace {
 
-// ── 手写 protobuf varint 编码 ──
 void encodeVarint(std::vector<std::byte>& out, uint64_t value) {
 	while (value >= 0x80) {
 		out.push_back(static_cast<std::byte>((value & 0x7F) | 0x80));
@@ -89,7 +73,7 @@ std::vector<std::byte> encodeTensorType(int32_t elemType, std::initializer_list<
 	return tt;
 }
 
-// TypeProto { tensor_type = 1 }（oneof value，字段号 1）
+// TypeProto { tensor_type = 1 }（oneof，字段号 1）
 std::vector<std::byte> encodeTypeProto(int32_t elemType, std::initializer_list<int64_t> dims) {
 	std::vector<std::byte> tp;
 	encodeLengthDelimited(tp, 1, encodeTensorType(elemType, dims));
@@ -129,24 +113,23 @@ std::vector<std::byte> encodeOpsetImport(const std::string& domain, int64_t vers
 
 // ── 生成 ONNX 模型字节流：Z = X + Y（opset 13），元素类型与形状参数化 ──
 // ModelProto 字段：ir_version=1, graph=7, opset_import=8
-// GraphProto 字段：node=1, name=2, input=11, output=12
-// TensorProto_DataType_FLOAT = 1, FLOAT16 = 10
+// GraphProto 字段：node=1, name=2, input=11, output=12；TensorProto 类型：FLOAT=1, FLOAT16=10
 std::vector<std::byte> buildAddModelBytes(int elemType, std::initializer_list<int64_t> dims) {
 	std::vector<std::byte> graph;
-	encodeLengthDelimited(graph, 11, encodeValueInfo("X", elemType, dims)); // GraphProto.input
-	encodeLengthDelimited(graph, 11, encodeValueInfo("Y", elemType, dims)); // GraphProto.input
-	encodeLengthDelimited(graph, 1, encodeNode("add0", "Add", {"X", "Y"}, {"Z"})); // GraphProto.node
-	encodeLengthDelimited(graph, 12, encodeValueInfo("Z", elemType, dims)); // GraphProto.output
-	encodeString(graph, 2, "dcinfer_test_add");                        // GraphProto.name
+	encodeLengthDelimited(graph, 11, encodeValueInfo("X", elemType, dims));
+	encodeLengthDelimited(graph, 11, encodeValueInfo("Y", elemType, dims));
+	encodeLengthDelimited(graph, 1, encodeNode("add0", "Add", {"X", "Y"}, {"Z"}));
+	encodeLengthDelimited(graph, 12, encodeValueInfo("Z", elemType, dims));
+	encodeString(graph, 2, "dcinfer_test_add");
 
 	std::vector<std::byte> model;
-	encodeVarintField(model, 1, 8);                          // ir_version = 8
-	encodeLengthDelimited(model, 8, encodeOpsetImport("", 13)); // opset_import
-	encodeLengthDelimited(model, 7, graph);                  // graph
+	encodeVarintField(model, 1, 8);
+	encodeLengthDelimited(model, 8, encodeOpsetImport("", 13));
+	encodeLengthDelimited(model, 7, graph);
 	return model;
 }
 
-// 将字节流写入临时文件（Session 创建时 ORT 会自行校验模型合法性）
+// 将字节流写入临时文件（ORT 在 Session 创建时自行校验模型合法性）
 std::string generateAddModel(const std::string& fileName, int elemType,
 							 std::initializer_list<int64_t> dims) {
 	auto bytes = buildAddModelBytes(elemType, dims);
@@ -162,7 +145,6 @@ std::string generateAddModel(const std::string& fileName, int elemType,
 	return path.string();
 }
 
-// ── 构造 float32 [1,4] 张量 ──
 DC::Tensor makeFloatTensor(const float (&values)[4]) {
 	DC::Tensor::DataBlock block(sizeof(values));
 	std::memcpy(block.data(), values, sizeof(values));
@@ -192,19 +174,16 @@ int fail(const std::string& msg) {
 
 int main() {
 	try {
-		// ── 1. 生成测试模型 ──
 		auto modelPath = generateAddModel("dcinfer_test_add.onnx", 1, {1, 4});
 		if (modelPath.empty())
 			return fail("model generation failed");
 		std::cout << "Test model: " << modelPath << std::endl;
 
-		// ── 2. 注册 OnnxRuntime 引擎 ──
 		DC::Onnx::registerOnnxEngine();
 		auto& reg = DC::EngineRegistry::instance();
 		if (!reg.hasEngine("OnnxRuntime"))
 			return fail("OnnxRuntime engine not registered");
 
-		// ── 3. 从模型路径创建节点（自动推导 Schema）──
 		auto node = reg.createNode("OnnxRuntime", "onnx_add", modelPath);
 		if (!node)
 			return fail("createNode returned null");
@@ -224,8 +203,7 @@ int main() {
 			return fail("input port type should be Float");
 		std::cout << "Schema derivation OK: X[1,4] + Y[1,4] -> Z" << std::endl;
 
-		// ── 4. 构建推理图并执行 ──
-		// 使用 TestHarness：task 完成回调在输出清理前触发，能安全取到结果
+		// TestHarness：task 完成回调在输出清理前触发，能安全取到结果
 		DC::TestHarness harness;
 		harness.addNode(std::move(node));
 		harness.bindOutput("Z", "onnx_add", "Z");
@@ -250,7 +228,6 @@ int main() {
 		if (!harness.hasOutput("task1", "onnx_add", "Z"))
 			return fail("no output captured at onnx_add.Z");
 
-		// ── 5. 校验输出 ──
 		auto result = harness.getOutputTensor("task1", "onnx_add", "Z");
 		auto data = result.data<float>();
 		if (data.size() != 4)
@@ -269,18 +246,15 @@ int main() {
 
 		std::cout << "[PASS] OnnxEngineTest: X + Y = Z verified via ONNX Runtime" << std::endl;
 
-		// ── 6. TensorConverter 契约直测 ──
+		// TensorConverter 契约直测
 		{
 			const auto* desc = reg.find("OnnxRuntime");
 			if (!desc || !desc->converter.toNative || !desc->converter.toDC)
 				return fail("OnnxRuntime descriptor converter not configured");
 
-			// DC::Tensor → Ort::Value（外部内存视图，零拷贝）
 			const float src[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-			// 注意：Ort::Value 是外部内存零拷贝视图，源 Tensor 必须具名存活
-			// 至本块结束。此前将 makeFloatTensor(src) 临时对象直接传入，
-			// 完整表达式结束后 Tensor 已析构，后续 GetTensorData 读取悬垂
-			// 指针（UB），导致 "toNative data mismatch"。
+			// 注意：Ort::Value 是外部内存零拷贝视图，源 Tensor 必须具名存活至
+			// 使用结束（临时对象析构后 GetTensorData 读到悬垂指针）。
 			DC::Tensor srcTensor = makeFloatTensor(src);
 			auto native = desc->converter.toNative(srcTensor);
 			auto* ortVal = native.as<Ort::Value>();
@@ -312,11 +286,9 @@ int main() {
 		}
 		std::cout << "[PASS] converter round-trip: DC::Tensor <-> Ort::Value" << std::endl;
 
-		// ── 7. FP16 模型：挂 Float 族（typeSize=2）+ 推理；BF16 仍降级 Void ──
-		// CPU EP 对 fp16/bf16 的 Add 内核支持因 ORT 构建而异（x64-windows
-		// 动态可执行，x64-linux 静态缺失）：内核缺失时 Session 构造期即抛
-		//（内核分配在初始化阶段，createNode 阶段暴露）——createNode 失败、
-		// 推理失败、推理成功都是合法路径，分别验证各自结果。
+		// FP16 模型：挂 Float 族（typeSize=2）+ 推理；BF16 仍降级 Void。
+		// CPU EP 的 fp16/bf16 内核支持因 ORT 构建而异：内核缺失在 Session 构造期抛
+		//（createNode 暴露）——createNode 失败、推理失败、成功都是合法路径。
 		{
 			auto fp16Path = generateAddModel("dcinfer_test_add_fp16.onnx", 10, {1, 4});
 			if (fp16Path.empty())
@@ -374,15 +346,14 @@ int main() {
 					}
 				}
 			} catch (const std::exception& e) {
-				// Session 构造期内核缺失（如 x64-linux 静态构建）：引擎归一化后上抛
+				// Session 构造期内核缺失（x64-linux 静态构建）：引擎归一化后上抛
 				std::cout << "  fp16 createNode rejected: " << e.what() << std::endl;
 				if (std::string(e.what()).find("implementation") == std::string::npos)
 					return fail(std::string("FP16 createNode failure should be missing-kernel: ") + e.what());
 			}
 			std::filesystem::remove(fp16Path);
 
-			// BF16：与 FP16 同为 2 字节，反向映射歧义，显式降级 Void——
-			// CPU EP 无 BF16 Add 内核时 Session 构造期即失败（合法路径）
+			// BF16 与 FP16 同为 2 字节、反向映射歧义：显式降级 Void；无内核时构造期失败（合法路径）
 			auto bf16Path = generateAddModel("dcinfer_test_add_bf16.onnx", 16, {1, 4});
 			if (bf16Path.empty())
 				return fail("BF16 model generation failed");
@@ -404,7 +375,7 @@ int main() {
 		}
 		std::cout << "[PASS] FP16 model: Float family (typeSize=2), inference or missing-kernel path verified; BF16 still Void" << std::endl;
 
-		// ── 8. 动态 shape 模型（dim=-1）：推导保留 -1 且实际执行通过 ──
+		// 动态 shape 模型（dim=-1）：推导保留 -1 且执行通过
 		{
 			auto dynPath = generateAddModel("dcinfer_test_add_dyn.onnx", 1, {-1, 4});
 			if (dynPath.empty())
@@ -440,7 +411,6 @@ int main() {
 		}
 		std::cout << "[PASS] dynamic-shape model: -1 dim preserved, execution OK" << std::endl;
 
-		// 清理：释放引擎实例与临时模型
 		reg.releaseAllEngines();
 		std::filesystem::remove(modelPath);
 		return 0;

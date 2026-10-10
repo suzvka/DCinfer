@@ -13,7 +13,7 @@
 
 namespace DC::Onnx {
 
-// Windows 下 Ort::Session 仅接受 wchar_t* 路径；其他平台 ORTCHAR_T 即 char
+// Windows 下 Ort::Session 仅接受 wchar_t*；其他平台 ORTCHAR_T 即 char
 static std::basic_string<ORTCHAR_T> toNativePath(const std::string& path) {
 #ifdef _WIN32
 	return std::filesystem::path(path).wstring();
@@ -22,16 +22,11 @@ static std::basic_string<ORTCHAR_T> toNativePath(const std::string& path) {
 #endif
 }
 
-// ════════════════════════════════════════════
-// ONNX 数据类型 → DC::Tensor::TensorType 映射
-// ════════════════════════════════════════════
-
 static Tensor::TensorType onnxTypeToTensorType(ONNXTensorElementDataType type) {
 	switch (type) {
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:   return Tensor::TensorType::Float;
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:  return Tensor::TensorType::Float;
-	// FP16 挂 Float 族（typeSize=2）：数据黑盒传递，DC 侧不解释数值，
-	// 反向映射 Float+2 → FLOAT16（见 tensorTypeToOnnxType）
+	// FP16 挂 Float 族（typeSize=2），数据黑盒传递；反向映射见 tensorTypeToOnnxType
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return Tensor::TensorType::Float;
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
@@ -43,9 +38,8 @@ static Tensor::TensorType onnxTypeToTensorType(ONNXTensorElementDataType type) {
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:  return Tensor::TensorType::Uint;
 	case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:    return Tensor::TensorType::Bool;
 	default:
-		// BFLOAT16/STRING/UNDEFINED 等：DC 类型系统无对应族。BFLOAT16 与 FLOAT16
-		// 同为 2 字节，挂 Float 族会使反向映射歧义，故保持显式降级并告警，
-		// 避免静默错误（下游经端口类型 Void + typeSize 感知）
+		// 无对应族的类型（BFLOAT16/STRING 等）：显式降级为 Void 并告警，避免静默错误
+		// （BFLOAT16 与 FLOAT16 同为 2 字节，挂 Float 会使反向映射歧义）
 		std::cerr << "[OnnxRuntime] warning: ONNX element type " << static_cast<int>(type)
 				  << " has no DC::TensorType mapping; port mapped to Void" << std::endl;
 		return Tensor::TensorType::Void;
@@ -71,8 +65,7 @@ static size_t onnxTypeSize(ONNXTensorElementDataType type) {
 	}
 }
 
-// DC::Tensor 类型（类型族 + 元素字节数）→ ONNX 元素类型
-// 返回 true 表示映射成功
+// DC::Tensor（类型族 + 字节数）→ ONNX 元素类型；true 表示映射成功
 static bool tensorTypeToOnnxType(Tensor::TensorType type, size_t typeSize,
 								 ONNXTensorElementDataType& out) {
 	switch (type) {
@@ -101,10 +94,6 @@ static bool tensorTypeToOnnxType(Tensor::TensorType type, size_t typeSize,
 	}
 }
 
-// ════════════════════════════════════════════
-// 从 Ort::Session 推导输入/输出端口 Schema
-// ════════════════════════════════════════════
-
 static std::vector<Node::Port> getPortsFromSession(const Ort::Session& session, bool isInput) {
 	std::vector<Node::Port> ports;
 
@@ -114,13 +103,11 @@ static std::vector<Node::Port> getPortsFromSession(const Ort::Session& session, 
 	for (size_t i = 0; i < count; ++i) {
 		Ort::AllocatorWithDefaultOptions allocator;
 
-		// 获取端口名称
 		auto namePtr = isInput
 			? session.GetInputNameAllocated(i, allocator)
 			: session.GetOutputNameAllocated(i, allocator);
 		std::string name(namePtr.get());
 
-		// 获取类型和形状信息
 		auto typeInfo = isInput
 			? session.GetInputTypeInfo(i)
 			: session.GetOutputTypeInfo(i);
@@ -128,14 +115,13 @@ static std::vector<Node::Port> getPortsFromSession(const Ort::Session& session, 
 		auto elementType = tensorInfo.GetElementType();
 		auto onnxShape = tensorInfo.GetShape();
 
-		// 构造 Node::Port
 		Node::Port port;
 		port.name = std::move(name);
 		port.type = onnxTypeToTensorType(elementType);
 		port.typeSize = onnxTypeSize(elementType);
 		port.required = true;
 
-		// ONNX shape 中的 -1 表示动态维度，直接保留（DC::Tensor::Shape 支持 -1）
+		// ONNX -1 动态维直接保留（DC::Tensor::Shape 支持 -1）
 		port.shape = Tensor::Shape(onnxShape.begin(), onnxShape.end());
 
 		ports.push_back(std::move(port));
@@ -144,17 +130,12 @@ static std::vector<Node::Port> getPortsFromSession(const Ort::Session& session, 
 	return ports;
 }
 
-// ════════════════════════════════════════════
-// TensorConverter 契约：DC::Tensor ↔ Ort::Value
-// ════════════════════════════════════════════
-
-// DC::Tensor → Value(Ort::Value)：外部内存视图（零拷贝）。
-// 返回的 Value 与输入 tensor 共享数据区，调用方必须保证 tensor 在
-// Ort::Value 使用期间存活（RunFn 内满足：tensor 由 ctx 的 Value 持有）。
+// DC::Tensor → Value(Ort::Value)：零拷贝外部内存视图；调用方必须保证
+// tensor 在 Ort::Value 使用期间存活（RunFn 内由 ctx 的 Value 保证）。
 static Value onnxToNative(const Tensor& dc) {
 	ONNXTensorElementDataType onnxType{};
 	if (!tensorTypeToOnnxType(dc.type(), dc.typeSize(), onnxType))
-		return {}; // 无法映射 → 空 Value，由 RunFn 上报 InvalidInput
+		return {}; // 无法映射 → 空 Value，RunFn 上报 InvalidInput
 
 	auto memInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 	auto shape = dc.shape();
@@ -165,11 +146,11 @@ static Value onnxToNative(const Tensor& dc) {
 		shape.data(),
 		shape.size(),
 		onnxType));
-	// 仅析构 Ort::Value 外壳，不触碰 tensor 数据区（其所有权仍属调用方）
+	// 仅析构外壳，不触碰 tensor 数据区（所有权属调用方）
 	return Value(ortVal, [](Ort::Value* v) { delete v; });
 }
 
-// Ort::Value* → DC::Tensor（深拷贝：device 侧数据不可长期引用时安全）
+// Ort::Value* → DC::Tensor（深拷贝：device 侧数据不可长期引用）
 static Tensor onnxToDC(const void* native) {
 	auto* ortVal = static_cast<const Ort::Value*>(native);
 	if (!ortVal)
@@ -191,10 +172,6 @@ static Tensor onnxToDC(const void* native) {
 	return Tensor(onnxTypeToTensorType(elementType), typeSize, shape, std::move(block));
 }
 
-// ════════════════════════════════════════════
-// 推理执行 RunFn
-// ════════════════════════════════════════════
-
 static Node::RunFn onnxRunFn() {
 	return [](Node::RunContext& ctx) -> Node::Result {
 		auto* engine = ctx.engine();
@@ -207,7 +184,7 @@ static Node::RunFn onnxRunFn() {
 			return ctx.failure(Node::Status::ExecutionFailed,
 							   "OnnxRuntime: TensorConverter not configured on engine");
 
-		// ── 1. 收集输入：DC::Tensor → Ort::Value（经 converter，零拷贝外部内存视图）──
+		// 收集输入：DC::Tensor → Ort::Value（经 converter，零拷贝视图）
 		const auto& schema = ctx.schema();
 		std::vector<const char*> inputNames;
 		std::vector<Ort::Value> inputValues;
@@ -228,19 +205,16 @@ static Node::RunFn onnxRunFn() {
 									   + "' type not supported by converter");
 
 			inputNames.push_back(port.name.c_str());
-			// Ort::Value 内部已持有外部内存指针（tensor 数据），move 仅转移外壳，
-			// 数据区在 Run 期间由 ctx 的 Value 保证存活
+			// move 仅转移外壳；数据区在 Run 期间由 ctx 的 Value 保证存活
 			inputValues.push_back(std::move(*ortVal));
 		}
 
-		// ── 2. 收集输出名称 ──
 		std::vector<const char*> outputNames;
 		outputNames.reserve(schema.outputs.size());
 		for (const auto& port : schema.outputs) {
 			outputNames.push_back(port.name.c_str());
 		}
 
-		// ── 3. 执行推理 ──
 		std::vector<Ort::Value> outputs;
 		try {
 			outputs = session.Run(
@@ -256,14 +230,14 @@ static Node::RunFn onnxRunFn() {
 							   std::string("OnnxRuntime inference failed: ") + e.what());
 		}
 
-		// ── 4. 输出数量校验：缺失输出必须显式失败 ──
+		// 缺失输出必须显式失败
 		if (outputs.size() < schema.outputs.size()) {
 			return ctx.failure(Node::Status::ExecutionFailed,
 							   "OnnxRuntime: expected " + std::to_string(schema.outputs.size())
 								   + " outputs, got " + std::to_string(outputs.size()));
 		}
 
-		// ── 5. 收集输出：Ort::Value → DC::Tensor（经 converter 深拷贝）──
+		// 收集输出：Ort::Value → DC::Tensor（经 converter 深拷贝）
 		for (size_t i = 0; i < schema.outputs.size(); ++i) {
 			Tensor t = converter->toDC(&outputs[i]);
 			ctx.output(schema.outputs[i].name, Value(std::make_unique<Tensor>(std::move(t))));
@@ -273,35 +247,26 @@ static Node::RunFn onnxRunFn() {
 	};
 }
 
-// ════════════════════════════════════════════
-// 引擎注册入口
-// ════════════════════════════════════════════
-
 void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 	EngineDescriptor desc;
 	desc.engineType = "OnnxRuntime";
 
-	// ── TensorConverter：DC::Tensor ↔ Ort::Value ──
 	desc.converter = {onnxToNative, onnxToDC};
 
-	// ── createEngineCore：引擎级初始化（缓存键 = engineType，每类型恰好一次）──
-	// 共享 Ort::Env：日志级别与名称固定；全部 Session 经 loadModel 绑定此 Env。
+	// createEngineCore：共享 Ort::Env（缓存键 = engineType，每类型恰好一次）
 	desc.createEngineCore = []() -> EngineCore {
 		return EngineCore(std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "DCinfer"));
 	};
 
-	// ── loadModel：从模型路径加载 Session（缓存键 = engineType:modelPath，每组合恰好一次）──
-	// 实例由 Registry 缓存复用（同一模型只加载一次）；
-	// Env 来自引擎核心（Session 必须绑定 Env 且不超出其生命周期——
-	// 实例共享持有核心句柄，由框架保证）
+	// loadModel：加载 Session（缓存键 = engineType:modelPath，每组合一次）；Env 来自
+	// 引擎核心（Session 不得超出 Env 生命周期，实例共享持有核心句柄由框架保证）
 	desc.loadModel = [opts](const EngineCore& core, const std::string& modelPath) -> EngineInstance {
 		auto& env = *static_cast<Ort::Env*>(const_cast<void*>(core.get()));
 
 		Ort::SessionOptions sessionOpts;
 		sessionOpts.SetIntraOpNumThreads(opts.intraOpThreads); // 与 DCinfer 图级并行模型一致
 
-		// ── 编译期默认 EP：由构建选项 DCINFER_ORT_EP 决定（用户零代码启用）──
-		// 先于 sessionCustomizer 追加，确保默认 EP 在 ORT EP 列表中优先
+		// 编译期默认 EP（构建选项 DCINFER_ORT_EP 决定）：先于 sessionCustomizer 追加以保证优先
 #ifdef DCINFER_ORT_ENABLE_CUDA
 		OrtCUDAProviderOptions cudaOpts{};
 		sessionOpts.AppendExecutionProvider_CUDA(cudaOpts);
@@ -316,22 +281,20 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 #endif
 
 		if (opts.sessionCustomizer)
-			opts.sessionCustomizer(&sessionOpts); // 追加额外 EP 或调整 SessionOptions
+			opts.sessionCustomizer(&sessionOpts);
 
 		std::shared_ptr<Ort::Session> session;
 		try {
 			session = std::make_shared<Ort::Session>(env, toNativePath(modelPath).c_str(), sessionOpts);
 		} catch (const Ort::Exception& e) {
-			// 适配器封装契约：宿主不包含 onnxruntime 头，引擎期异常统一转
-			// std::runtime_error 上抛（模型损坏/内核缺失/EP 不可用等）；
-			// 无内核模型的 Session 构造期即抛（内核分配在初始化阶段）
+			// 适配器封装契约：宿主不含 onnxruntime 头，引擎期异常统一转
+			// std::runtime_error 上抛（模型损坏/内核缺失/EP 不可用等）
 			throw std::runtime_error(std::string("OnnxRuntime: failed to load model '")
 												 + modelPath + "': " + e.what());
 		}
 		return EngineInstance(std::move(session));
 	};
 
-	// ── getInputPorts/getOutputPorts: 从引擎实例推导端口 Schema ──
 	desc.getInputPorts = [](const EngineInstance& inst) -> std::vector<Node::Port> {
 		auto* session = static_cast<Ort::Session*>(const_cast<void*>(inst.get()));
 		if (!session)
@@ -346,9 +309,8 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 		return getPortsFromSession(*session, false);
 	};
 
-	// ── factory: 使用框架推导的 Schema 构造节点并绑定引擎实例 ──
-	// createNode(engineType, name, modelPath) 路径下 engineInstance 为
-	// 框架创建并缓存的共享句柄，节点绑定后引擎存活期覆盖节点存活期
+	// factory：用框架推导的 Schema 构造节点并绑定引擎实例；engineInstance 为
+	// 框架缓存的共享句柄，引擎存活期覆盖节点存活期
 	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>(
 			"OnnxRuntime", p.nodeName, p.schema, onnxRunFn(),
@@ -360,7 +322,7 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 		return node;
 	};
 
-	// ── 执行相位协议：同步引擎——仅 no-op synchronize，其余留空（逻辑内联 RunFn）──
+	// 同步引擎：仅 no-op synchronize（其余相位留空，逻辑内联 RunFn）
 	desc.phases.synchronize = [](void* /*engine*/) {
 		// no-op: Ort::Session::Run() blocks until completion
 	};

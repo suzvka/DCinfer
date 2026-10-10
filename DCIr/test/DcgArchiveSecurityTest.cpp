@@ -1,16 +1,6 @@
-// DcgArchive 路径安全与完整性 回归测试（发布前审查 F01 + 归档健壮性 + v0.5.2 IR-03/04/05）
-//
-// 覆盖：
-//   - isSafeArchiveRelPath：空/内嵌 NUL/绝对路径/盘符/UNC/父目录跳转拒绝，正常相对路径放行；
-//     IR-03：Windows 保留设备名 / ADS 冒号 / 尾点尾空格拒绝
-//   - isSafeArchiveEntryName（P2-12）：与目录无关的纯词法校验（写入侧复用）
-//   - addModelFile 写入侧（P2-12）：不安全条目名在写入期拒绝，拒绝路径零副作用
-//   - extractOne 端到端：../ 条目拒绝且无文件逃逸解包目录（经 minizip 底层构造，
-//     写入侧 API 已拒此类条目，端到端用例验证读取侧防线独立成立）
-//   - 符号链接祖先目录拒绝（无 symlink 权限的环境自动跳过）
-//   - 截断归档明确报错；高压缩比（zip bomb 形态）条目按预算拒绝
-//   - IR-04/05：解包条目数聚合预算、归档全局条目数上限、graph.json 专用体积预算
-//   - 正常归档读取不被安全校验误伤（graph.json 往返 + 模型解压内容比对）
+// DcgArchive 路径安全与完整性回归测试。
+// 覆盖：路径逃逸/符号链接/Windows 罪名字形拒绝；截断/zip bomb/条目数与体积预算；
+// 正常归档读写不被安全校验误伤（graph.json 往返 + 模型解压内容比对）。
 #include <algorithm>
 #include <vector>
 #include <chrono>
@@ -79,8 +69,7 @@ std::string readFile(const std::filesystem::path& path) {
 	return content;
 }
 
-/// 经 minizip 底层 API 写入任意条目名（绕过 DcgArchive 写入侧校验）：
-/// 仅供读取侧防线的端到端验证（DcgArchive::addModelFile 已拒绝不安全条目名）。
+/// 经 minizip 底层 API 写入任意条目名，绕过写入侧校验——仅供读取侧防线验证。
 void writeRawEntry(const std::filesystem::path& dcgPath, const std::string& entryName,
 				   const std::string& content) {
 	zipFile z = ::zipOpen64(dcgPath.string().c_str(), APPEND_STATUS_CREATE);
@@ -102,10 +91,6 @@ void writeRawEntry(const std::filesystem::path& dcgPath, const std::string& entr
 
 } // namespace
 
-// ════════════════════════════════════════════
-// 路径校验单元（跨平台一致规则）
-// ════════════════════════════════════════════
-
 static void testSafePathValidator() {
 	TEST("path guard: reject traversal/absolute/drive/UNC; accept safe relative") {
 		const auto base = std::filesystem::temp_directory_path() / "dcg_guard_base";
@@ -126,7 +111,6 @@ static void testSafePathValidator() {
 		CHECK(DC::Ir::detail::isSafeArchiveRelPath("models/resnet.onnx", base, &reason), "nested relative must be accepted");
 		CHECK(DC::Ir::detail::isSafeArchiveRelPath("models/./x.bin", base, &reason), "dot component must be accepted");
 
-		// IR-03：Windows 罪名字形（保留设备名 / ADS 冒号 / 尾点尾空格）
 		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/CON", base, &reason), "CON device name must be rejected");
 		CHECK(!DC::Ir::detail::isSafeArchiveRelPath("models/con.txt", base, &reason),
 			  "case-insensitive device name with extension must be rejected");
@@ -144,7 +128,7 @@ static void testSafePathValidator() {
 }
 
 static void testAddModelFileRejectsUnsafeEntryName() {
-	TEST("addModelFile: unsafe entry names rejected at write side (P2-12)") {
+	TEST("addModelFile: unsafe entry names rejected at write side") {
 		const auto workDir = makeWorkDir("writesafe");
 		const auto dcgPath = workDir / "writesafe.dcg";
 		writePayload(workDir / "payload.bin", "payload");
@@ -168,7 +152,6 @@ static void testAddModelFileRejectsUnsafeEntryName() {
 		expectRejected("models/CON", "device-name entry must be rejected at write side");
 		expectRejected("models/a:ads", "ADS colon entry must be rejected at write side");
 
-		// 拒绝路径零副作用：归档保持可用，安全名照常写入
 		w->addModelFile("models/ok.bin", workDir / "payload.bin");
 		w->finalize();
 		auto r = DcgArchive::openRead(dcgPath);
@@ -182,10 +165,6 @@ static void testAddModelFileRejectsUnsafeEntryName() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 端到端：../ 条目拒绝且无逃逸写入
-// ════════════════════════════════════════════
-
 static void testExtractOneRejectsTraversal() {
 	TEST("extractOne: traversal entry rejected, no file escapes extraction dir") {
 		const auto workDir = makeWorkDir("traversal");
@@ -195,8 +174,7 @@ static void testExtractOneRejectsTraversal() {
 		const auto escapedPath = std::filesystem::temp_directory_path() / escapedName;
 
 		writePayload(workDir / "payload.bin", "review-only marker");
-		// 写入侧 API 已拒绝不安全条目名（testAddModelFileRejectsUnsafeEntryName）；
-		// 端到端防线经 minizip 底层构造恶意归档独立验证（读取侧不信任写入方）
+		// 经 minizip 底层构造恶意归档：读取侧防线独立成立（不信任写入方）。
 		writeRawEntry(dcgPath, "../" + escapedName, "review-only marker");
 
 		auto r = DcgArchive::openRead(dcgPath);
@@ -215,10 +193,6 @@ static void testExtractOneRejectsTraversal() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 符号链接祖先目录拒绝（环境无权限时跳过）
-// ════════════════════════════════════════════
 
 static void testSymlinkAncestorRejected() {
 	TEST("extractOne: symlinked ancestor directory is rejected") {
@@ -271,10 +245,6 @@ static void testSymlinkAncestorRejected() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 完整性/预算：截断与高压缩比拒绝
-// ════════════════════════════════════════════
 
 static void testTruncatedArchiveRejected() {
 	TEST("truncated archive must be rejected with a clear error") {
@@ -335,10 +305,6 @@ static void testCompressionRatioBombRejected() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 不误伤：正常归档读取/解压照常
-// ════════════════════════════════════════════
-
 static void testNormalRoundTripStillWorks() {
 	TEST("normal archive (graph.json + models/x) reads/extracts intact") {
 		const auto workDir = makeWorkDir("roundtrip");
@@ -365,12 +331,8 @@ static void testNormalRoundTripStillWorks() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// IR-04/05：聚合预算（条目数 / 全局条目 / graph.json 体积）
-// ════════════════════════════════════════════
-
 static void testExtractEntryCountBudgetRejected() {
-	TEST("IR-04: extract entry-count budget rejects excessive extraction") {
+	TEST("extract entry-count budget rejects excessive extraction") {
 		const auto workDir = makeWorkDir("entrycount");
 		const auto dcgPath = workDir / "entrycount.dcg";
 
@@ -402,7 +364,7 @@ static void testExtractEntryCountBudgetRejected() {
 }
 
 static void testArchiveGlobalEntryBudgetRejected() {
-	TEST("IR-04: archive with too many entries is rejected on open") {
+	TEST("archive with too many entries is rejected on open") {
 		const auto workDir = makeWorkDir("globalentries");
 		const auto dcgPath = workDir / "globalentries.dcg";
 
@@ -432,7 +394,7 @@ static void testArchiveGlobalEntryBudgetRejected() {
 }
 
 static void testGraphJsonSizeBudgetRejected() {
-	TEST("IR-05: graph.json above the dedicated size budget is rejected") {
+	TEST("graph.json above the dedicated size budget is rejected") {
 		const auto workDir = makeWorkDir("bigjson");
 		const auto dcgPath = workDir / "bigjson.dcg";
 
@@ -461,7 +423,7 @@ static void testGraphJsonSizeBudgetRejected() {
 }
 
 static void testMultiChunkModelRoundTrip() {
-	TEST("IR-06: multi-chunk (streamed) model file round-trips intact") {
+	TEST("multi-chunk (streamed) model file round-trips intact") {
 		const auto workDir = makeWorkDir("multichunk");
 		const auto dcgPath = workDir / "multichunk.dcg";
 
@@ -490,10 +452,8 @@ static void testMultiChunkModelRoundTrip() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-
 static void testPrivateDirectoryAndExclusiveTarget() {
-	TEST("IR-2: private directory and exclusive extraction target") {
+	TEST("private directory and exclusive extraction target") {
 		const auto work = makeWorkDir("private");
 		writeRawEntry(work / "private.dcg", "model.bin", "payload");
 		auto archive = DcgArchive::openRead(work / "private.dcg");
@@ -534,7 +494,7 @@ static void testPrivateDirectoryAndExclusiveTarget() {
 }
 
 static void testBoundedJsonFile() {
-	TEST("IR-1: exact JSON boundary accepted; limit+1 rejected before DOM") {
+	TEST("exact JSON boundary accepted; limit+1 rejected before DOM") {
 		const auto work = makeWorkDir("jsonlimit");
 		const auto file = work / "graph.json";
 		const std::size_t limit = 32u * 1024 * 1024;

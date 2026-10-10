@@ -1,13 +1,7 @@
-// ServerAdapter 端到端测试（M-server 节点服务化）：真实 HTTP——本地监听端 + 本地出站
+// ServerAdapter 端到端测试：真实 HTTP，本地监听端 + 本地出站。
 //
-// 覆盖（DESIGN.md §3.6 / §6.1）：
-//   1. 语义一致性：远程驱动本地节点 == 本地执行（status + 输出值逐项比对）；
-//   2. 错误归一化：401（鉴权）/ 415（wire 级垃圾报文）/ 404 / 429（过载）
-//      → 对端经 normalizeHttpResponse 的归一化结果符合 §6.1 逆向映射表；
-//   3. 跨平台：POCO 单一实现（同 HttpTransportTest）；
-//   4. schema 违例一致性：类型不符输入分走「本地执行 / 远程驱动」两条路径，
-//      两者均拒绝该输入（远程归一化为 InvalidInput；本地在 ValidatorRegistry
-//      拒绝）。
+// 覆盖：语义一致性对拍（远程驱动 == 本地执行）；错误归一化（401/415/404/429）；
+// schema 违例一致性（本地 / 远程两条路径均拒绝）。
 
 #include "DCNet/DcNetHttp.h"
 #include "NodeExecutor.h"
@@ -67,7 +61,7 @@ static int g_failures = 0;
 using namespace DC;
 using namespace DC::Net;
 
-// ── 测试引擎：Float "data" → "result"（值翻倍），RunFn 可注入延迟（429 用例）──
+// 测试引擎：Float "data" → "result" 值翻倍；g_slowMs 注入延迟用于 429 用例。
 
 static std::atomic<int> g_slowMs{0};
 
@@ -126,8 +120,6 @@ static void ensureDoublerEngine() {
 	};
 	reg.registerEngine(ed);
 }
-
-// ── 工具 ──
 
 static NetEndpoint epFor(int port, std::string requestPath = "/infer") {
 	NetEndpoint ep;
@@ -200,8 +192,7 @@ static ServerHandle startServer(std::string authToken = {}, int maxInFlight = 8,
 	return {svc, svc->port()};
 }
 
-/// 裸连接辅助：只发半行请求头即静默——服务端 worker 阻塞在 readRequest，
-/// 该连接不计入在途请求（正是排水必须覆盖的阶段）
+/// 裸连接辅助：半行请求头后静默——worker 阻塞在 readRequest，不计入在途请求。
 static void openHalfOpenConnection(Poco::Net::StreamSocket& conn, int port) {
 	conn.connect(Poco::Net::SocketAddress("127.0.0.1", static_cast<Poco::UInt16>(port)));
 	const std::string partial = "POST /v1/infer HTTP/1.1\r\n";
@@ -221,8 +212,6 @@ static Node::Result runLocalDoubler(const std::string& taskId, std::unordered_ma
 		outputs = exec.collectOutputTensors(taskId);
 	return result;
 }
-
-// ── 语义一致性对拍：远程驱动 == 本地执行 ──
 
 TEST(paritySuccess) {
 	ensureDoublerEngine();
@@ -253,8 +242,7 @@ TEST(paritySuccess) {
 	srv.svc->stop();
 }
 
-// ── 鉴权闸门：无 token → 401 → RemoteAuth → InternalError ──
-//    （鉴权无本地对应物，不参与「远程 == 本地」对拍，见 DESIGN.md §6.1）
+// 鉴权闸门：无 token → 401 → RemoteAuth → InternalError（无本地对应物，不参与对拍）。
 
 TEST(authGate) {
 	ensureDoublerEngine();
@@ -270,7 +258,7 @@ TEST(authGate) {
 	CHECK(res.status == Node::Status::InternalError, "401 → InternalError");
 	CHECK_MSG_PREFIX(res.message, "remote:auth");
 
-	// 携带 token（transport 直连注入 Authorization 头）→ 成功
+	// 携带 token（直连注入 Authorization 头）→ 成功
 	HttpTransport t;
 	NetEndpoint ep = epFor(srv.port);
 	ep.authToken = "Bearer s3cret";
@@ -285,17 +273,17 @@ TEST(authGate) {
 	srv.svc->stop();
 }
 
-// ── wire 级垃圾报文：415 → RemoteMalformed → ExecutionFailed + dcnet 诊断（DESIGN.md §6.1）──
+// wire 级垃圾报文：415 → RemoteMalformed → ExecutionFailed + dcnet 诊断。
 
 TEST(malformedFrame) {
 	ensureDoublerEngine();
 	auto srv = startServer();
 	HttpTransport t;
 	t.connect(epFor(srv.port));
-	// 非 2xx 错误由 send() 返回（含状态行接收）；recv 仅读 2xx 响应体
+	// 非 2xx 错误由 send() 返回；recv 仅读 2xx 响应体
 	auto err = t.send("this is not json at all");
 	CHECK(!err.ok(), "malformed frame should fail");
-	CHECK(err.localStatus == Node::Status::ExecutionFailed, "415 → RemoteMalformed → ExecutionFailed（核心枚举通用）");
+	CHECK(err.localStatus == Node::Status::ExecutionFailed, "415 → RemoteMalformed → ExecutionFailed");
 	CHECK(err.diagnostic.code == static_cast<int>(DC::Net::NetErrorCategory::RemoteMalformed),
 		  "415 → dcnet 领域诊断保留原始分类");
 	CHECK_MSG_PREFIX(err.localMessage, "remote:malformed");
@@ -303,20 +291,14 @@ TEST(malformedFrame) {
 	srv.svc->stop();
 }
 
-// ── schema 违例一致性：类型违例输入在两条路径均被拒绝 ──
-//
-// 远程腿：报文可解析但类型不符本地形状规则 → 服务端输入边界校验（镜像出站
-// decodeResponse 职责）→ 400 → 对端 RemoteRejected → InvalidInput（DESIGN.md
-// §6.1）。
-// 本地腿：同一违例输入经节点管线在 ValidatorRegistry 拒绝（tryExecute 抛
-// NodeException，图级记录错误、任务失败）——「输入被拒」语义对齐；wire 面按
-// §6.1 统一为 InvalidInput（若本地改产 SchemaMismatch 状态，映射无需变更）。
+// schema 违例一致性：类型违例输入在两条路径均被拒绝。
+// 远程腿 → 400 → InvalidInput；本地腿 → ValidatorRegistry 拒绝（NodeException）。
 
 TEST(paritySchemaViolation) {
 	ensureDoublerEngine();
 	auto srv = startServer();
 
-	// ① 本地执行：Data 文本张量注入 Float 端口 → 管线校验拒绝（异常）
+	// ① 本地执行：Data 张量注入 Float 端口 → 管线校验拒绝
 	{
 		auto node = EngineRegistry::instance().createNode(std::string(kEngineType), "local-p5",
 															  std::string(kModelRef));
@@ -333,18 +315,18 @@ TEST(paritySchemaViolation) {
 		CHECK(rejected, "local: violating input is rejected");
 	}
 
-	// ② 远程驱动：同一违例输入（text dtype 报文）→ 400 → InvalidInput
+	// ② 远程驱动：同一违例输入 → 400 → InvalidInput
 	HttpTransport t;
 	t.connect(epFor(srv.port));
 	auto remoteErr = t.send(textPayload("hi"));
 	t.close();
 	CHECK(!remoteErr.ok(), "remote: violating input rejected");
-	CHECK(remoteErr.localStatus == Node::Status::InvalidInput, "remote: 400 → InvalidInput（DESIGN.md §6.1 schema 违例）");
+	CHECK(remoteErr.localStatus == Node::Status::InvalidInput, "remote: 400 → InvalidInput");
 	CHECK_MSG_PREFIX(remoteErr.localMessage, "remote:invalid_input");
 	srv.svc->stop();
 }
 
-// ── 过载限流：maxInFlight=1 + 引擎延迟 → 并发第二请求 429 ──
+// 过载限流：maxInFlight=1 + 引擎延迟 → 并发第二请求 429。
 
 TEST(rateLimited) {
 	ensureDoublerEngine();
@@ -363,7 +345,7 @@ TEST(rateLimited) {
 
 	HttpTransport b;
 	b.connect(epFor(srv.port));
-	auto errB = b.send(floatPayload({2.0f})); // 请求已完整读入 → 在途闸门 → 429
+	auto errB = b.send(floatPayload({2.0f})); // 请求完整读入 → 在途闸门 → 429
 	b.close();
 	ta.join();
 	g_slowMs = 0;
@@ -374,7 +356,7 @@ TEST(rateLimited) {
 	srv.svc->stop();
 }
 
-// ── 未知路径：404 → RemoteRejected → InvalidInput（remote:not_found）──
+// 未知路径：404 → RemoteRejected → InvalidInput。
 
 TEST(unknownPath404) {
 	ensureDoublerEngine();
@@ -389,7 +371,7 @@ TEST(unknownPath404) {
 	srv.svc->stop();
 }
 
-// ── 生命周期：stop → 健康镜像翻转；重复 stop 安全 ──
+// 生命周期：stop → 健康镜像翻转；重复 stop 安全。
 
 TEST(lifecycle) {
 	ensureDoublerEngine();
@@ -400,7 +382,7 @@ TEST(lifecycle) {
 	srv.svc->stop(); // 重复调用安全
 }
 
-// ── 配置期出口（ADR-7）：未知 engineType → registerDcNetServerAdapter 抛 NodeException ──
+// 配置期出口：未知 engineType → registerDcNetServerAdapter 抛 NodeException。
 
 TEST(configErrorsThrow) {
 	DcNetServerAdapterDesc desc;
@@ -416,10 +398,8 @@ TEST(configErrorsThrow) {
 	CHECK(threw, "unknown engineType → NodeException at config period");
 }
 
-// ── P0 回归：半开连接（请求未读完、不计在途）期间的 stop() 必须等 worker 退净 ──
-//   排水若只看 _inFlight：stop() 立即返回、监听器析构，分离 worker 醒来后
-//   访问已析构成员（UAF）。排水以线程存活计数为准，并在 grace 到期强制关闭在册连接。
-//   ASan/TSan 构建下本用例即内存安全强证明；Release 下验证排水语义与收尾关连。
+// 半开连接（请求未读完、不计在途）期间的 stop() 必须等 worker 退净：
+// 排水以线程存活计数为准，grace 到期强制关闭在册连接（否则分离 worker 醒来即 UAF）。
 
 TEST(stopDrainsHalfOpenConnection) {
 	ensureDoublerEngine();
@@ -436,7 +416,7 @@ TEST(stopDrainsHalfOpenConnection) {
 	CHECK(elapsed < std::chrono::seconds(3), "stop 在有限时间内完成排水（不挂死）");
 	CHECK(!srv.svc->alive(), "service not alive after stop");
 
-	// stop 返回即 worker 已退净并已关闭连接：对端读到 EOF/异常
+	// stop 返回即 worker 已退净：对端读到 EOF/异常
 	bool closedByServer = false;
 	try {
 		halfOpen.setReceiveTimeout(Poco::Timespan(0, 1000 * 1000));
@@ -458,10 +438,10 @@ TEST(stopDrainsHalfOpenConnection) {
 		refused = true;
 	}
 	CHECK(refused, "stop 后新连接被拒");
-	// 进程存活至此，进一步说明无 use-after-free（本文件末尾的汇总输出即证明）
+	// 进程存活至此 → 无 use-after-free
 }
 
-// ── 连接级闸门：超出 maxConnections 的连接在 accept 期即被拒（不起线程、不入在途）──
+// 连接级闸门：超出 maxConnections 的连接在 accept 期即被拒（不起线程）。
 
 TEST(connectionCapRejectsExcess) {
 	ensureDoublerEngine();
@@ -471,7 +451,7 @@ TEST(connectionCapRejectsExcess) {
 	openHalfOpenConnection(hog, srv.port);
 	std::this_thread::sleep_for(std::chrono::milliseconds(80));
 
-	// 第二个连接即使带着完整请求也在 accept 期被关（慢速/满载时不耗尽线程）
+	// 第二个连接即使带完整请求也在 accept 期被关
 	bool dropped = false;
 	try {
 		Poco::Net::StreamSocket extra;
@@ -492,9 +472,8 @@ TEST(connectionCapRejectsExcess) {
 	srv.svc->stop();
 }
 
-// ── P1 回归：两节点共享同一 transport（同端点）时交换串行且不串号 ──
-//   引擎实例按 engineType:modelPath 缓存复用，而执行闸在节点级——两线程并发进入
-//   同一 HttpTransport。修复前：_session/_response 无锁竞争，A 的 send 可接上 B 的 recv。
+// 两节点共享同一 transport（同端点）时交换串行且不串号：引擎实例按
+// engineType:modelPath 缓存复用，执行闸在节点级——两线程并发进入同一 HttpTransport。
 
 TEST(transportSerializesSharedEndpointExchanges) {
 	ensureDoublerEngine();
@@ -532,7 +511,7 @@ TEST(transportSerializesSharedEndpointExchanges) {
 	srv.svc->stop();
 }
 
-// ── bind 配置期全量校验（P1/P2-10）：非法配置 fail-fast，不再静默运行 ──
+// bind 配置期全量校验：非法配置 fail-fast。
 
 static bool bindRejected(const NetServerEndpoint& ep) {
 	auto l = makeHttpListener();
@@ -559,7 +538,7 @@ TEST(bindConfigValidation) {
 		CHECK(!threw, "loopback + no token (default dev form) must bind");
 		CHECK(l->port() > 0, "port 0 binds to a random port");
 	}
-	// 负 maxInFlight：转 size_t 后会绕过 429 限流 → bind 期拒绝
+	// 负 maxInFlight：转 size_t 会绕过 429 → bind 期拒绝
 	{
 		NetServerEndpoint ep;
 		ep.maxInFlight = -1;
@@ -581,7 +560,7 @@ TEST(bindConfigValidation) {
 		ep.port = 70000;
 		CHECK(bindRejected(ep), "port > 65535 must be rejected at bind");
 	}
-	// 空白 token：'Bearer ' 前缀剥后为空 → 认证绕过形态 → 拒绝
+	// 空白 token：'Bearer ' 剥前缀后为空 → 认证绕过 → 拒绝
 	{
 		NetServerEndpoint ep;
 		ep.authToken = "Bearer ";
@@ -592,7 +571,7 @@ TEST(bindConfigValidation) {
 		ep.authToken = "   ";
 		CHECK(bindRejected(ep), "all-whitespace authToken must be rejected");
 	}
-	// 对外监听强制认证：0.0.0.0 无 token → 拒绝；带合法 token → 成功
+	// 对外监听：0.0.0.0 无 token / 带 token 均拒绝（明文仅限回环）
 	{
 		NetServerEndpoint ep;
 		ep.listenHost = "0.0.0.0";
@@ -615,7 +594,7 @@ TEST(bindConfigValidation) {
 	}
 }
 
-// ── 畸形 Content-Length → 400（P2-10 严格解析）──
+// 畸形 Content-Length → 400。
 
 static void postRawExpectStatus(int port, const std::string& raw, int expected) {
 	Poco::Net::StreamSocket c;
@@ -639,18 +618,18 @@ TEST(malformedContentLengthRejected) {
 	auto l = makeHttpListener();
 	NetServerEndpoint ep;
 	ep.port = 0;
-	ep.requestPath = "/infer"; // expected = basePath(/v1) + requestPath
+	ep.requestPath = "/infer"; // 路径 = basePath + requestPath
 	l->bind(ep);
 	l->start([](const std::string&, const std::string&) {
 		return WireResponse{200, "{}"};
 	});
 	const int port = l->port();
 
-	// 负数：strtoull 时代回绕为巨大值（行为安全但语义错）→ 现在 400
+	// 负数 → 400（不再回绕为巨大值）
 	postRawExpectStatus(port, "POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: -5\r\n\r\n", 400);
-	// 部分数字："100abc" 时代解析为 100 → 现在 400
+	// 部分数字（"100abc"）→ 400
 	postRawExpectStatus(port, "POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: 100abc\r\n\r\n", 400);
-	// 重复 header：多值混淆走私向量 → 400
+	// 重复 header：走私向量 → 400
 	postRawExpectStatus(port,
 						"POST /v1/infer HTTP/1.1\r\nHost: t\r\nContent-Length: 0\r\nContent-Length: 999\r\n\r\n",
 						400);

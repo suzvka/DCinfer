@@ -1,10 +1,6 @@
-// HttpTransport + DCNet.Tensor 集成测试（MockHttpServer 假远端，真实 HTTP 传输）
-//
-// 覆盖（DESIGN.md §6）：
-//   - 传输层：成功 2xx / 404 / 500 / 连接拒绝 / 超时 → NetError 归一化
-//   - 端到端：DCNet.Tensor 节点（张量 JSON codec，数值）真实 HTTP 往返 + 张量还原
-//   - 端到端：DCNet.Tensor 节点（张量 JSON codec，Data 文本）真实 HTTP 往返 + 文本还原
-// 注：OpenAI chat 端到端见 DCEngines/OpenAI（OpenAiEngineTest）。
+// HttpTransport + DCNet.Tensor 集成测试（MockHttpServer 假远端，真实 HTTP 传输）。
+// 覆盖：传输层归一化（2xx / 404 / 500 / 连接拒绝）；张量 codec 端到端往返（数值 / 文本）。
+// OpenAI chat 端到端见 DCEngines/OpenAI（OpenAiEngineTest）。
 
 #include "DCNet/DcNetHttp.h"
 #include "NodeExecutor.h"
@@ -57,8 +53,6 @@ static std::atomic<int> g_failures{0};
 using namespace DC;
 using namespace DC::Net;
 
-// ── 工具 ──
-
 static DC::Net::NetEndpoint epFor(int port, std::string requestPath = {}) {
 	DC::Net::NetEndpoint ep;
 	ep.host = "127.0.0.1";
@@ -84,8 +78,6 @@ static Tensor makeTextTensor(const std::string& s) {
 		std::memcpy(block.data(), s.data(), s.size());
 	return Tensor(Tensor::TensorType::Data, 1, {static_cast<int64_t>(s.size())}, std::move(block));
 }
-
-// ── 测试 ──
 
 TEST(successRoundtrip) {
 	MockHttpServer server;
@@ -149,7 +141,6 @@ TEST(status500Normalized) {
 }
 
 TEST(connectionRefusedNormalized) {
-	// 取一个已关闭端口：绑定后立即关闭
 	int deadPort = -1;
 	{
 		Poco::Net::ServerSocket s;
@@ -167,8 +158,7 @@ TEST(connectionRefusedNormalized) {
 	CHECK(err.retryable, "unreachable retryable");
 	CHECK(err.localStatus == Node::Status::ExecutionFailed, "refused → ExecutionFailed");
 #ifdef _WIN32
-	// POCO/Windows：WSAPoll 不上报 connect 失败，带超时探测下拒绝连接表现为
-	// Timeout（仍为可重试 ExecutionFailed）；POSIX 报 ConnectionRefused → unreachable。
+	// POCO/Windows：WSAPoll 不上报 connect 失败，拒绝连接表现为 Timeout（POSIX 报 unreachable）。
 	const bool unreachableOrTimeout = err.localMessage.rfind("net:unreachable", 0) == 0 ||
 									 err.localMessage.rfind("net:timeout", 0) == 0;
 	CHECK(unreachableOrTimeout, "refused → unreachable|timeout");
@@ -178,15 +168,14 @@ TEST(connectionRefusedNormalized) {
 	t.close();
 }
 
-// 注：POCO 传输级超时（connect/send/receive 独立设置）已覆盖响应头等待；
-// Timeout 分类/映射已由 NetErrorTest 纯单测覆盖，此处不设服务端延迟超时用例。
+// Timeout 分类映射由 NetErrorTest 覆盖，此处不设服务端延迟超时用例。
 
-// ── 3xx：不自动跟随重定向，按非 2xx 归一化（文档-实现一致）──
+// 3xx：不自动跟随重定向，按非 2xx 归一化。
 
 TEST(status302Normalized) {
 	MockHttpServer server;
 	server.start([](const std::string&, const std::string&, int& status) {
-		status = 302; // 无 Location 自动跟随：按文档语义归一化为错误
+		status = 302;
 		return std::string("redirect body");
 	});
 	HttpTransport t;
@@ -198,17 +187,17 @@ TEST(status302Normalized) {
 	t.close();
 }
 
-// ── 响应体上限：成功体超限报错；非 2xx 错误体仅诊断允许截断 ──
+// 响应体上限：成功体超限报错；非 2xx 错误体仅诊断、允许截断。
 
 TEST(responseBodyLimitEnforced) {
 	MockHttpServer server;
 	server.start([](const std::string&, const std::string&, int& status) {
 		status = 200;
-		return std::string("AAAAAAAAAAAAAAAA"); // 16 字节
+		return std::string("AAAAAAAAAAAAAAAA");
 	});
 	HttpTransport t;
 	auto ep = epFor(server.port(), "/infer");
-	ep.maxResponseBody = 8; // 人为压低上限
+	ep.maxResponseBody = 8;
 	CHECK(t.connect(ep).ok(), "connect");
 	CHECK(t.send("x").ok(), "send ok (2xx)");
 	Payload resp;
@@ -221,7 +210,7 @@ TEST(errorBodyTruncated) {
 	MockHttpServer server;
 	server.start([](const std::string&, const std::string&, int& status) {
 		status = 500;
-		return std::string(4096, 'x'); // 4KB 非 JSON 错误体
+		return std::string(4096, 'x');
 	});
 	HttpTransport t;
 	auto ep = epFor(server.port(), "/infer");
@@ -234,10 +223,9 @@ TEST(errorBodyTruncated) {
 	t.close();
 }
 
-// ── close 与慢 recv 竞速：强收中断读而非悬垂/挂死（副本保活 + abort）──
+// close 与慢 recv 竞速：强收中断读而非悬垂/挂死（副本保活 + abort）。
 
-// 慢 body 测试服务器（仅本用例）：先发响应头，剩余 body 延迟发送——
-// 构造“读持续超过 close 的 5s 强收窗口”的竞速场景
+// 慢 body 服务器：先发响应头，剩余 body 延迟发送，使读跨越 close 的 5s 强收窗口。
 namespace {
 class SlowBodyServer {
 public:
@@ -251,8 +239,7 @@ public:
 		}
 		_thread = std::thread([this] {
 			try {
-				// 连接 1 = connect() 的就绪探测 socket（连接后立即关闭，读即 EOF）；
-				// 连接 2 = 真实交换。对两者统一读请求头，探测连接读到 EOF 后跳过。
+				// 连接 1 是 connect() 的就绪探测（读到 EOF 即跳过），连接 2 才是真实交换。
 				Poco::Net::StreamSocket c;
 				for (int i = 0; i < 2; ++i) {
 					try {
@@ -269,19 +256,17 @@ public:
 							break;
 					}
 					if (req.find("\r\n\r\n") != std::string::npos)
-						break; // 真实请求：进入慢响应
-					// 探测连接（req 空）：丢弃并接受下一个连接
+						break;
 				}
 				const std::string head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
 								 "Content-Length: 16\r\nConnection: close\r\n\r\n";
 				c.sendBytes(head.data(), static_cast<int>(head.size()));
-				c.sendBytes("AAAA", 4); // 先给 4 字节
-				std::this_thread::sleep_for(std::chrono::milliseconds(8000)); // 剩余 12 字节延迟 8s
+				c.sendBytes("AAAA", 4);
+				std::this_thread::sleep_for(std::chrono::milliseconds(8000));
 				c.sendBytes("AAAAAAAAAAAA", 12);
 				c.close();
 			} catch (...) {
-				// 线程函数内异常不得逃逸（std::terminate）——对端 abort 后
-				// 剩余 sendBytes 可能抛 ConnectionReset 等，吞掉即可
+				// 对端 abort 后 sendBytes 可能抛 ConnectionReset 等：线程内异常不得逃逸。
 			}
 		});
 		return _port;
@@ -308,15 +293,15 @@ TEST(closeRacingSlowRecv) {
 	CHECK(server.start() > 0, "slow-body server should start");
 	HttpTransport t;
 	auto ep = epFor(server.port(), "/slow");
-	ep.requestTimeout = std::chrono::milliseconds(15000); // 覆盖慢 body 窗口
+	ep.requestTimeout = std::chrono::milliseconds(15000);
 	CHECK(t.connect(ep).ok(), "connect");
 	CHECK(t.send("x").ok(), "send ok; response header received, body pending");
 
-	// 另一线程 close：等交换收尾 5s 超时 → 强收 abort（读方副本保活 session）
+	// 另一线程 close：等交换收尾 5s 超时后强收 abort（读方副本保活 session）。
 	std::thread closer([&] { t.close(); });
 	Payload resp;
 	const auto t0 = std::chrono::steady_clock::now();
-	const auto err = t.recv(resp); // 阻塞读 body → 被 abort 中断 → 错误返回
+	const auto err = t.recv(resp);
 	const auto elapsed = std::chrono::steady_clock::now() - t0;
 	closer.join();
 	server.stop();
@@ -324,10 +309,10 @@ TEST(closeRacingSlowRecv) {
 	CHECK(elapsed < std::chrono::seconds(7),
 		  "abort must interrupt the read well before the server's remaining 8s delay");
 	CHECK(resp.size() <= 16, "no garbage beyond declared body length");
-	t.close(); // 幂等收尾（进程不崩溃即核心断言）
+	t.close(); // 幂等收尾
 }
 
-// ── 端到端：DCNet.Tensor 节点 + 张量 JSON codec（真实 HTTP 往返）──
+// 端到端：DCNet.Tensor 节点 + 张量 JSON codec（真实 HTTP 往返）。
 
 TEST(endToEndTensorOverHttp) {
 	MockHttpServer server;
@@ -336,7 +321,6 @@ TEST(endToEndTensorOverHttp) {
 			status = 404;
 			return std::string(R"({"error":"not found"})");
 		}
-		// 解码请求张量，验证浮点值，原样回显（模拟远端推理）
 		const auto j = nlohmann::json::parse(body);
 		CHECK(j["dtype"] == "float32", "server sees float32 dtype");
 		const std::string bytes = DC::Net::detail::base64Decode(j["data"].get<std::string>());
@@ -376,7 +360,7 @@ TEST(endToEndTensorOverHttp) {
 	CHECK(vals.size() == 2 && vals[0] == 1.0f && vals[1] == 2.0f, "decoded tensor values");
 }
 
-// ── 端到端：DCNet.Tensor 节点 + Data 文本 codec（真实 HTTP 往返）──
+// 端到端：DCNet.Tensor 节点 + Data 文本 codec（真实 HTTP 往返）。
 
 TEST(endToEndTextOverHttp) {
 	MockHttpServer server;
@@ -385,20 +369,19 @@ TEST(endToEndTextOverHttp) {
 			status = 404;
 			return std::string(R"({"error":"not found"})");
 		}
-		// 解码请求文本，验证 UTF-8 直传，原样回显（模拟远端推理）
 		const auto j = nlohmann::json::parse(body);
 		CHECK(j["dtype"] == "text", "server sees text dtype");
 		CHECK(j["data"] == "hello", "server sees utf-8 text (not base64)");
 		status = 200;
 		nlohmann::json r;
 		r["dtype"] = "text";
-		r["shape"] = std::vector<int64_t>{8}; // "hi there" 长度
+		r["shape"] = std::vector<int64_t>{8};
 		r["data"] = "hi there";
 		return r.dump();
 	});
 
 	auto& reg = EngineRegistry::instance();
-	// 与 tensor 测试同进程：显式区分 engineType，避免注册表"保留首次"冲突
+	// 与 tensor 测试同进程：区分 engineType 避开注册表"保留首次"冲突
 	registerDcNetHttp(reg, makeTextJsonCodec(), {}, "DCNet.Text");
 
 	auto node = reg.createNode("DCNet.Text", "textNode",
@@ -419,10 +402,8 @@ TEST(endToEndTextOverHttp) {
 		  "decoded text content");
 }
 
-// 空文本响应端到端：服务器返回 shape=[0] 空载荷帧（远端空字符串响应的
-// wire 形态），解码侧与 TensorData metadata-only 构造都必须接受。
-// 输入端仍用非空文本——输入端口要求稠密缓存/稀疏视图（既有 valid 语义），
-// metadata-only 空载荷仅在输出/响应端合法。
+// 空文本响应端到端：服务器返回 shape=[0] 空载荷帧，解码侧与 TensorData
+// metadata-only 构造都必须接受；输入端仍用非空文本（输入端口要求稠密缓存，空载荷仅输出端合法）。
 TEST(emptyTextOverHttp) {
 	MockHttpServer server;
 	server.start([&](const std::string& path, const std::string& body, int& status) {
@@ -436,13 +417,12 @@ TEST(emptyTextOverHttp) {
 		status = 200;
 		nlohmann::json r;
 		r["dtype"] = "text";
-		r["shape"] = std::vector<int64_t>{0}; // 空响应文本
+		r["shape"] = std::vector<int64_t>{0};
 		r["data"] = "";
 		return r.dump();
 	});
 
 	auto& reg = EngineRegistry::instance();
-	// 独立 engineType：注册表"保留首次"，与 endToEndTextOverHttp 的 DCNet.Text 区分
 	registerDcNetHttp(reg, makeTextJsonCodec(), {}, "DCNet.Text.Empty");
 
 	auto node = reg.createNode("DCNet.Text.Empty", "emptyTextNode",
@@ -461,8 +441,7 @@ TEST(emptyTextOverHttp) {
 }
 
 TEST(headerInjectionRejectedAtConnect) {
-	// P1：headers/authToken/contentType 中的 CR/LF/控制字符在 connect（配置期）
-	// 拒绝，不发起任何网络 I/O——防请求序列化时报文行注入
+	// 注入防护：headers/authToken/contentType 中的控制字符在 connect 配置期拒绝，不发网络 I/O。
 	HttpTransport t;
 	auto ep = epFor(1, "/");
 	ep.headers = {"X-Evil: val\r\nX-Injected: 1"};
@@ -478,15 +457,14 @@ TEST(headerInjectionRejectedAtConnect) {
 	ep3.contentType = "application/json\n";
 	CHECK(!t.connect(ep3).ok(), "contentType containing LF must be rejected at connect");
 
-	// 合法 header 照常接受（含值内 tab 折叠）
+	// 合法 header 照常接受（含值内 tab）
 	auto ep4 = epFor(1, "/");
 	ep4.headers = {"X-Trace: abc\t123"};
 	CHECK(t.connect(ep4).ok() || !t.alive(), "tab is allowed in header values");
 }
 
 TEST(largeResponseIntegrity) {
-	// P2-2：大响应在 TCP 发送窗口受限时必然多次 sendBytes——respond 循环
-	// 补发后客户端收到的字节数必须与 Content-Length 一致，内容逐字节一致
+	// 大响应经多次 sendBytes 补发：字节数与 Content-Length 一致，内容逐字节一致。
 	static const std::string payload = [] {
 		std::string p;
 		p.reserve(4u << 20);

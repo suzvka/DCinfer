@@ -13,14 +13,11 @@ createSwitchNode(std::string name,
     if (candidates.empty())
         throw std::invalid_argument("createSwitchNode: '" + name + "' has no candidates");
 
-    // 共享原子索引：初始指向第 0 个候选
     auto sharedIndex = std::make_shared<std::atomic<size_t>>(0);
     SwitchHandle handle{sharedIndex};
 
-    // 将候选列表移入 lambda 捕获（生命周期由 Node::RunFn 闭包持有）
     auto ownedCandidates = std::make_shared<std::vector<SwitchCandidate>>(std::move(candidates));
 
-    // 构造 RunFn：读索引 → preAdapt → run → postAdapt
     Node::RunFn fn = [sharedIndex, ownedCandidates](Node::RunContext& ctx) -> Node::Result {
         size_t idx = sharedIndex->load(std::memory_order_acquire);
         if (idx >= ownedCandidates->size()) {
@@ -31,14 +28,11 @@ createSwitchNode(std::string name,
 
         const auto& candidate = (*ownedCandidates)[idx];
 
-        // 输入整流
         if (candidate.preAdapt)
             candidate.preAdapt(ctx);
 
-        // 执行候选计算
         auto result = candidate.run(ctx);
 
-        // 输出整流（仅在成功时执行）
         if (result.ok() && candidate.postAdapt)
             candidate.postAdapt(ctx);
 

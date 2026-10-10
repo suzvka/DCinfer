@@ -1,7 +1,6 @@
 #pragma once
 
-// 极简 HTTP/1.1 测试服务（POCO）：DCNet 传输测试及 DCEngines 协议适配器
-// 测试共用的 Mock 远端（经 DCNet::DCNet 传递包含）。跨平台（Poco::Net）。
+// 极简 HTTP/1.1 Mock 远端（POCO）：DCNet 传输测试与 DCEngines 适配器测试共用。
 // 单线程顺序处理；POST 请求体 → handler(path, body) → 响应体。
 
 #include <Poco/Net/ServerSocket.h>
@@ -18,13 +17,13 @@
 
 class MockHttpServer {
 public:
-	/// path: 请求路径（如 /v1/infer）；返回响应体，经 status 输出 HTTP 状态码。
+	/// 返回响应体；经 status 输出 HTTP 状态码。
 	using Handler = std::function<std::string(const std::string& path, const std::string& body, int& status)>;
 
 	MockHttpServer() = default;
 	~MockHttpServer() { stop(); }
 
-	/// 绑定 127.0.0.1:0（随机端口）并启动监听线程；返回实际端口，失败返回 -1。
+	/// 绑定 127.0.0.1 随机端口并启动监听线程；失败返回 -1。
 	int start(Handler handler) {
 		try {
 			_socket.bind(Poco::Net::SocketAddress("127.0.0.1", 0), false);
@@ -38,12 +37,11 @@ public:
 		return _port;
 	}
 
-	/// 停止监听并等待处理线程退出。
 	void stop() {
 		_stop = true;
 		if (_thread.joinable()) {
 			try {
-				_socket.close(); // 中断 accept（轮询循环在 50ms 内感知 _stop）
+				_socket.close(); // 中断 accept 轮询
 			} catch (...) {
 			}
 			_thread.join();
@@ -52,8 +50,7 @@ public:
 
 	int port() const { return _port; }
 
-	/// 最近一次请求的原始头部（\r\n 分隔；测试断言 Authorization 等鉴权头用）。
-	/// 单线程顺序处理 + tryExecute 同步等待，读取时机天然在响应返回后。
+	/// 最近一次请求的原始头部（\r\n 分隔）；响应返回后读取。
 	std::string lastRequestHeaders() const {
 		std::lock_guard lk(_hdrMutex);
 		return _lastHeaders;
@@ -64,14 +61,14 @@ private:
 		for (;;) {
 			if (_stop)
 				break;
-			// 轮询而非阻塞 accept：stop 时 close+join 跨平台安全（POSIX close 不唤醒阻塞 accept）
+			// 轮询而非阻塞 accept：POSIX close 不唤醒阻塞 accept
 			if (!_socket.poll(Poco::Timespan(0, 50 * 1000), Poco::Net::Socket::SELECT_READ))
 				continue;
 			Poco::Net::StreamSocket c;
 			try {
 				c = _socket.acceptConnection();
 			} catch (...) {
-				break; // socket 已关闭（stop）
+				break;
 			}
 			serve(c, handler);
 		}
@@ -82,7 +79,6 @@ private:
 	}
 
 	void serve(Poco::Net::StreamSocket& c, Handler& handler) {
-		// 读取请求（头部 + body）
 		std::string req;
 		char buf[4096];
 		int n;
@@ -92,7 +88,6 @@ private:
 				break;
 		}
 
-		// 请求行 → path
 		std::string path;
 		{
 			const size_t eol = req.find("\r\n");
@@ -105,7 +100,6 @@ private:
 			}
 		}
 
-		// Content-Length → body
 		size_t bodyLen = 0;
 		{
 			const size_t pos = req.find("Content-Length:");
@@ -130,7 +124,7 @@ private:
 		try {
 			respBody = handler(path, body, status);
 		} catch (const std::exception& e) {
-			// handler 异常不得逃逸出服务线程（否则 std::terminate 杀死整个进程）
+			// handler 异常不得逃逸出服务线程（否则进程终止）
 			status = 500;
 			respBody = std::string(R"({"error":{"code":"server_error","message":")") + e.what() + "\"}";
 		}
@@ -140,8 +134,7 @@ private:
 			"Content-Type: application/json\r\n"
 			"Content-Length: " + std::to_string(respBody.size()) + "\r\n"
 			"Connection: close\r\n\r\n" + respBody;
-		// 循环补发（P2-2）：与 HttpListener::respond 同一修复——单次
-		// sendBytes 允许短写，不补齐会使测试基础设施自身产生截断假象
+		// 循环补发：单次 sendBytes 允许短写，不补齐会制造截断假象
 		try {
 			std::size_t sent = 0;
 			while (sent < resp.size()) {

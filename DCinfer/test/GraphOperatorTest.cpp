@@ -1,10 +1,4 @@
-// GraphOperator 组合算子集成测试
-//
-//   组合语义：把一整张 InferGraph 包装成普通 Node（构造 → makeNode → addNode），
-//   覆盖：基本往返 / 分支子图 / 三层嵌套 / 环 + TTL 截断 / 链式复用 /
-//   Schema 推导（端口名 = 绑定 alias）/ 构造校验（fail-fast）/ 构造即冻结 /
-//   父取消解围（协作式取消跨组合边界保留）/ 同一子图多节点并发（旧
-//   DuplicateTask 限制解除）/ 共享所有权生命周期 / 内层诊断转发。
+// GraphOperator 组合算子集成测试：子图包装为 Node 的完整组合语义
 #include <chrono>
 #include <cmath>
 #include <iostream>
@@ -37,8 +31,6 @@ static int failures = 0;
 #define END_TEST()                                                                                                     \
 	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
-
-// ── 辅助 ──
 
 static Tensor floatTensor(float value) {
 	auto t = Tensor::Create<float>();
@@ -85,10 +77,6 @@ static Node::RunFn addRunFn() {
 	};
 }
 
-// ════════════════════════════════════════════
-// 1. 基本往返：add → identity 子图嵌入父图
-// ════════════════════════════════════════════
-
 static void testBasicEmbedding() {
 	TEST("basic embedding: subgraph(add→identity) composed as a node in parent") {
 		auto sub = std::make_shared<InferGraph>();
@@ -99,7 +87,7 @@ static void testBasicEmbedding() {
 		sub->bindInput("b", "sub_add", "b");
 		sub->bindOutput("y", "sub_id", "y");
 
-		GraphOperator op(sub); // 构造即冻结子图
+		GraphOperator op(sub);
 
 		InferGraph parent;
 		parent.addNode(std::make_unique<Node>("Builtin", "source", identitySchema(), identityRunFn()));
@@ -127,10 +115,6 @@ static void testBasicEmbedding() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 2. 分支子图：identity → Broadcast(2)，仅绑定一个输出
-// ════════════════════════════════════════════
-
 static void testBranchSubgraph() {
 	TEST("branch subgraph: identity → broadcast → single bound output") {
 		auto sub = std::make_shared<InferGraph>();
@@ -148,7 +132,7 @@ static void testBranchSubgraph() {
 		sub->connect("sub_bc", "out_1", "sub_b", "x");
 
 		sub->bindInput("x", "sub_src", "x");
-		sub->bindOutput("y", "sub_a", "y"); // 只收集一个输出验证广播数据流
+		sub->bindOutput("y", "sub_a", "y");
 
 		GraphOperator op(sub);
 
@@ -170,20 +154,14 @@ static void testBranchSubgraph() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 3. 三层嵌套：LevelC ⊂ LevelB ⊂ LevelA
-// ════════════════════════════════════════════
-
 static void testThreeLevelNesting() {
 	TEST("three-level nesting: composed node inside composed node") {
-		// 最内层 C：identity
 		auto graphC = std::make_shared<InferGraph>();
 		graphC->addNode(std::make_unique<Node>("Builtin", "c_id", identitySchema(), identityRunFn()));
 		graphC->bindInput("x", "c_id", "x");
 		graphC->bindOutput("y", "c_id", "y");
 		GraphOperator opC(graphC);
 
-		// 中间层 B：LevelC → identity
 		auto graphB = std::make_shared<InferGraph>();
 		graphB->addNode(opC.makeNode("LevelC"));
 		graphB->addNode(std::make_unique<Node>("Builtin", "b_id", identitySchema(), identityRunFn()));
@@ -192,7 +170,6 @@ static void testThreeLevelNesting() {
 		graphB->bindOutput("y", "b_id", "y");
 		GraphOperator opB(graphB);
 
-		// 最外层 A：LevelB → identity
 		auto graphA = std::make_shared<InferGraph>();
 		graphA->addNode(opB.makeNode("LevelB"));
 		graphA->addNode(std::make_unique<Node>("Builtin", "a_id", identitySchema(), identityRunFn()));
@@ -219,15 +196,10 @@ static void testThreeLevelNesting() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 4. 子图内环 + TTL 截断（Options.maxHops 传递到子图提交）
-// ════════════════════════════════════════════
-
 static void testLoopTTLBounded() {
 	TEST("subgraph loop: TTL (Options.maxHops) bounds iterations, no hang") {
 		auto sub = std::make_shared<InferGraph>();
 
-		// 自增节点（反馈环用）
 		Node::Schema incSchema;
 		incSchema.inputs = {Node::Port::in<float>("x")};
 		incSchema.outputs = {Node::Port::out<float>("y")};
@@ -240,16 +212,15 @@ static void testLoopTTLBounded() {
 		};
 
 		sub->addNode(std::make_unique<Node>("Builtin", "loop", incSchema, incRunFn));
-		sub->addNode(std::make_unique<Node>("Builtin", "out", identitySchema(), identityRunFn())); // 分支叶承接绑定
-		// 显式分支（输出取数端口不变量：绑定不得挂在环边上）：
-		// 分支 1 loop.y → out（直通叶，终端，绑定挂此）；分支 2 loop.y → loop.x（自反馈环）
+		sub->addNode(std::make_unique<Node>("Builtin", "out", identitySchema(), identityRunFn()));
+		// 绑定不得挂在环边上：分支叶承接绑定，环边只作反馈
 		sub->connect("loop", "y", "out", "x");
-		sub->connect("loop", "y", "loop", "x"); // 同源口二次 connect 自动扩容扇出
+		sub->connect("loop", "y", "loop", "x");
 		sub->bindInput("x", "loop", "x");
 		sub->bindOutput("y", "out", "y");
 
 		GraphOperator::Options opts;
-		opts.maxHops = 3; // 很小的跳数限制：子图内很快终止
+		opts.maxHops = 3;
 		GraphOperator op(sub, opts);
 
 		InferGraph parent;
@@ -269,10 +240,6 @@ static void testLoopTTLBounded() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 5. 链式复用：两个独立组合节点在同一父任务并行
-// ════════════════════════════════════════════
 
 static void testChainedSubgraphs() {
 	TEST("chained subgraphs: two independent composed nodes in one parent") {
@@ -296,7 +263,6 @@ static void testChainedSubgraphs() {
 		parent.addNode(op1.makeNode("Adder1"));
 		parent.addNode(op2.makeNode("Adder2"));
 
-		// src1 扇出到 Adder1.a 与 Adder2.a
 		auto bc1Node = std::make_unique<Node>("Connector.Broadcast", "bc1", Connector::broadcastSchema(2),
 											  Connector::broadcastRunFn(), ResourceClass::System);
 		bc1Node->setConnector(true);
@@ -305,7 +271,6 @@ static void testChainedSubgraphs() {
 		parent.connect("bc1", "out_0", "Adder1", "a");
 		parent.connect("bc1", "out_1", "Adder2", "a");
 
-		// src2 扇出到 Adder1.b 与 Adder2.b
 		auto bc2Node = std::make_unique<Node>("Connector.Broadcast", "bc2", Connector::broadcastSchema(2),
 											  Connector::broadcastRunFn(), ResourceClass::System);
 		bc2Node->setConnector(true);
@@ -328,10 +293,6 @@ static void testChainedSubgraphs() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 6. Schema 推导：端口名 = 绑定 alias（alias ≠ 目标端口名）
-// ════════════════════════════════════════════
-
 static void testSchemaDerivation() {
 	TEST("schema derivation: port name = binding alias; type/size/required copied") {
 		auto sub = std::make_shared<InferGraph>();
@@ -339,9 +300,9 @@ static void testSchemaDerivation() {
 		sub->addNode(std::make_unique<Node>("Builtin", "sub_id", identitySchema(), identityRunFn()));
 		sub->connect("sub_add", "s", "sub_id", "x");
 
-		sub->bindInput("left", "sub_add", "a");   // alias ≠ 目标端口名 "a"
-		sub->bindInput("right", "sub_add", "b");  // alias ≠ 目标端口名 "b"
-		sub->bindOutput("sum", "sub_id", "y");    // alias ≠ 目标端口名 "y"
+		sub->bindInput("left", "sub_add", "a");
+		sub->bindInput("right", "sub_add", "b");
+		sub->bindOutput("sum", "sub_id", "y");
 
 		GraphOperator op(sub);
 		auto node = op.makeNode("Calc");
@@ -359,7 +320,6 @@ static void testSchemaDerivation() {
 		CHECK(schema.outputs.size() == 1 && schema.outputs[0].name == "sum",
 			  "output port name must be the binding alias");
 
-		// 端到端：按 alias 寻址喂入/取出
 		InferGraph parent;
 		parent.addNode(std::move(node));
 		parent.feedInput("t1", "Calc", "left", floatValue(2.0f));
@@ -372,10 +332,6 @@ static void testSchemaDerivation() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 7. 空接口拒绝（fail-fast）
-// ════════════════════════════════════════════
 
 static void testEmptyInterfaceRejected() {
 	TEST("no-interface graph is rejected at construction") {
@@ -393,10 +349,6 @@ static void testEmptyInterfaceRejected() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 8. 构造即冻结：Schema 定型后子图不可再改
-// ════════════════════════════════════════════
 
 static void testEagerFreezeOnConstruction() {
 	TEST("subgraph is frozen at construction; composed node still runs") {
@@ -426,52 +378,40 @@ static void testEagerFreezeOnConstruction() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 9. 父取消解围：内层信号阻塞不再永久占住执行槽位（协作式取消跨组合边界）
-// ════════════════════════════════════════════
-
 static void testParentCancelUnwindsBlockedSubgraph() {
 	TEST("cancel(parent) unwinds blocked composed node and frees the compute slot") {
-		// 专属 1/1/1 调度器（sub 与 parent 共享）：保持"唯一 Compute 槽位被占"断言语义——
-		// 父 block（Compute）等待期间占槽、q（Compute）排队；子图节点属 Operator 类，类间隔离。
+		// 专属 1/1/1 调度器：父 block 占唯一 Compute 槽位，q 排队；子图节点属 Operator 类，类间隔离
 		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 1, 1});
-		// 子图：n → m（m 绑定信号，未置位 → 默认阻塞）→ 声明输出 m.y。
 		auto sub = std::make_shared<InferGraph>(sched);
 		sub->addNode(std::make_unique<Node>("test", "n", identitySchema(), identityRunFn()));
 		auto m = std::make_unique<Node>("test", "m", identitySchema(), identityRunFn());
-		m->bindSignal(sub->signalStore(), "gate"); // 绑定后未置位 → 默认阻断
+		m->bindSignal(sub->signalStore(), "gate");
 		sub->addNode(std::move(m));
 		sub->connect("n", "y", "m", "x");
 		sub->bindInput("x", "n", "x");
 		sub->bindOutput("y", "m", "y");
 
 		GraphOperator op(sub);
-		auto blockNode = op.makeNode("sub", ResourceClass::Compute); // 复刻旧导出节点的资源类占位
+		auto blockNode = op.makeNode("sub", ResourceClass::Compute);
 
-		// 父图：共享专属 1/1/1 调度器——挂起的父任务独占唯一 Compute 槽位
 		InferGraph parent(sched);
 		parent.addNode(std::move(blockNode));
-		// 独立直通节点 q（显式 Compute）：验证解围后槽位恢复可用
 		parent.addNode(std::make_unique<Node>("test", "q", identitySchema(), identityRunFn(),
 											  ResourceClass::Compute));
 		parent.bindInput("x", "sub", "x");
 		parent.bindOutput("y", "sub", "y");
 
-		// p1：经组合节点（内部信号阻塞 → RunFn 挂起，占住 Compute 槽位）
 		parent.feedInput("p1", "sub", "x", floatValue(1.0f));
 		parent.submit("p1", "sub", "y", 1);
 
-		// p2：经独立节点 q（Compute）——排在 p1 之后等待槽位释放
 		parent.feedInput("p2", "q", "x", floatValue(2.0f));
 		parent.submit("p2", "q", "y", 1);
 
-		// 挂起确认：p1 因内部阻塞无法完成；p2 因唯一 Compute 槽位被占而排队
 		CHECK(parent.waitForResult("p1", 400ms).status == TaskStatus::Running,
 			  "composed task blocked by inner signal must stay Running");
 		CHECK(parent.waitForResult("p2", 200ms).status == TaskStatus::Running,
 			  "queued compute task must not run while the slot is held");
 
-		// 宿主解围：cancel(p1) → RunFn 轮询感知 → 取消子图任务 → 返回 → 槽位释放
 		CHECK(parent.cancel("p1"), "cancel on active task should be accepted");
 		CHECK(parent.waitForResult("p1", 2s).status == TaskStatus::Cancelled,
 			  "cancelled parent must reach Cancelled state");
@@ -483,10 +423,6 @@ static void testParentCancelUnwindsBlockedSubgraph() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 10. 同一子图多节点并发（旧 DuplicateTask 限制解除）
-// ════════════════════════════════════════════
 
 static void testSharedSubgraphConcurrentNodes() {
 	TEST("one subgraph shared by two composed nodes in the same parent task") {
@@ -501,7 +437,6 @@ static void testSharedSubgraphConcurrentNodes() {
 		parent.addNode(op.makeNode("BlockA"));
 		parent.addNode(op.makeNode("BlockB"));
 
-		// 同一父任务内两个组合节点并发驱动同一子图（子任务 ID 命名空间独立）
 		parent.feedInput("t1", "BlockA", "x", floatValue(1.5f));
 		parent.feedInput("t1", "BlockB", "x", floatValue(2.5f));
 		parent.submit("t1", {{"BlockA", "y"}, {"BlockB", "y"}});
@@ -513,7 +448,6 @@ static void testSharedSubgraphConcurrentNodes() {
 		CHECK(std::abs(parent.takeOutputTensor("t1", "BlockB", "y").item<float>() - 2.5f) < 1e-6f,
 			  "BlockB value must not be cross-contaminated");
 
-		// 跨任务复用：新父任务再次驱动同一组合节点
 		parent.feedInput("t2", "BlockA", "x", floatValue(9.0f));
 		parent.submit("t2", "BlockA", "y", 1);
 		const auto res2 = parent.waitForResult("t2", 5s);
@@ -523,10 +457,6 @@ static void testSharedSubgraphConcurrentNodes() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 11. 共享所有权：GraphOperator 先析构，节点仍可执行
-// ════════════════════════════════════════════
 
 static void testOperatorDestroyedNodeStillRuns() {
 	TEST("node keeps working after GraphOperator is destroyed (shared ownership)") {
@@ -538,7 +468,7 @@ static void testOperatorDestroyedNodeStillRuns() {
 			sub->bindOutput("y", "n", "y");
 			GraphOperator op(sub);
 			keep = op.makeNode("Persist");
-		} // GraphOperator 与局部 shared_ptr 均析构；子图由节点捕获的共享句柄维持存活
+		}
 
 		InferGraph parent;
 		parent.addNode(std::move(keep));
@@ -551,10 +481,6 @@ static void testOperatorDestroyedNodeStillRuns() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 12. 内层失败诊断转发
-// ════════════════════════════════════════════
 
 static void testInnerFailureDiagnosticsForwarded() {
 	TEST("inner node failure is forwarded with context to the parent task") {
@@ -588,13 +514,8 @@ static void testInnerFailureDiagnosticsForwarded() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 13. 构造校验：非法输入 fail-fast（NodeNotFound / PortNotFound / Other）
-// ════════════════════════════════════════════
-
 static void testConstructorValidation() {
 	TEST("constructor rejects null graph / missing node / missing port / connector / bad poll") {
-		// ① null graph
 		{
 			bool ok = false;
 			try {
@@ -606,7 +527,6 @@ static void testConstructorValidation() {
 			CHECK(ok, "null graph must be rejected");
 		}
 
-		// ② 绑定引用的节点不存在
 		{
 			auto sub = std::make_shared<InferGraph>();
 			sub->addNode(std::make_unique<Node>("test", "n", identitySchema(), identityRunFn()));
@@ -622,7 +542,6 @@ static void testConstructorValidation() {
 			CHECK(ok, "binding to missing node must be rejected with NodeNotFound");
 		}
 
-		// ③ 绑定引用的端口不存在
 		{
 			auto sub = std::make_shared<InferGraph>();
 			sub->addNode(std::make_unique<Node>("test", "n", identitySchema(), identityRunFn()));
@@ -638,7 +557,6 @@ static void testConstructorValidation() {
 			CHECK(ok, "binding to missing port must be rejected with PortNotFound");
 		}
 
-		// ④ 绑定目标为连接器
 		{
 			auto sub = std::make_shared<InferGraph>();
 			auto bcNode = std::make_unique<Node>("Connector.Broadcast", "wire", Connector::broadcastSchema(2),
@@ -656,7 +574,6 @@ static void testConstructorValidation() {
 			CHECK(ok, "connector binding target must be rejected");
 		}
 
-		// ⑤ pollInterval <= 0
 		{
 			auto sub = std::make_shared<InferGraph>();
 			sub->addNode(std::make_unique<Node>("test", "n", identitySchema(), identityRunFn()));
@@ -677,10 +594,6 @@ static void testConstructorValidation() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 14. #6 修复回归：绑定输出缺失 → 显式失败（携带缺失端口信息）
-// ════════════════════════════════════════════
-
 static void testMissingBoundOutputFailFast() {
 	TEST("missing bound output after subgraph success -> explicit failure with port info (#6)") {
 		auto sub = std::make_shared<InferGraph>();
@@ -688,16 +601,13 @@ static void testMissingBoundOutputFailFast() {
 		sub->bindInput("x", "n", "x");
 		sub->bindOutput("y", "n", "y");
 
-		// 子图完成回调消费掉绑定输出：声明满足但产物不再可取（收尾时数据
-		// 已在 OutputZone，回调先于父节点取数执行）。修复前步骤⑤静默跳过 →
-		// 父节点以"无输出"判败（根因被掩盖）；修复后显式失败并携带端口信息。
+		// 完成回调消费掉绑定输出：声明满足但产物不可取时必须显式失败
 		std::atomic<bool> consumed{false};
 		sub->setTaskCompleteCallback([&](const std::string& tid) {
 			try {
 				sub->takeOutput(tid, "n", "y");
 				consumed.store(true);
 			} catch (...) {
-				// 消费失败不阻断回调
 			}
 		});
 
@@ -722,15 +632,8 @@ static void testMissingBoundOutputFailFast() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 15. 默认预算开箱安全：进程默认预算下父子嵌套可运行
-//     回归守护：等待型组合节点默认归 System 类（与子图业务节点默认的
-//     Operator 类分离），且 System 默认预算为 4（连接器与嵌套等待链深度
-//     均占用同类槽位）。若亲和默认 Operator：父节点占满 Operator 槽位后
-//     子图任务排队同一池永不执行；若亲和 System 而预算仍 1：子图内
-//     连接器与嵌套链同类自锁——两者均已作为回归用例覆盖
-// ════════════════════════════════════════════
-
+// 等待型组合节点默认归 System 类（默认预算 4）：与子图 Operator 类隔离，
+// 避免父节点占满 Operator 槽位后子图同池排队自锁
 static void testDefaultBudgetNesting() {
 	TEST("default budget: parent-subgraph nesting runs out of the box") {
 		auto sub = std::make_shared<InferGraph>();
@@ -738,7 +641,7 @@ static void testDefaultBudgetNesting() {
 		sub->bindInput("x", "sub_id", "x");
 		sub->bindOutput("y", "sub_id", "y");
 
-		GraphOperator op(sub); // makeNode 默认亲和 System（开箱安全的关键）
+		GraphOperator op(sub);
 
 		InferGraph parent;
 		parent.addNode(std::make_unique<Node>("Builtin", "source", identitySchema(), identityRunFn()));
@@ -757,20 +660,15 @@ static void testDefaultBudgetNesting() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-
 int main() {
 	try {
-		// 默认预算开箱安全回归：必须最先运行——使用进程默认实例（1/1/1），
-		// 早于下方 configureInstance 放宽预算
+		// 必须最先运行：使用进程默认预算 1/1/1，早于下方放宽配置
 		testDefaultBudgetNesting();
 
-		// 组合算子等待型节点在等待期间占住资源类槽位（进程级共享预算）：显式
-		// 指定亲和的嵌套等待链需要同类预算覆盖全部并发等待节点——本测试放宽
-		// 为 1/8/8（System 槽位需同时覆盖：branch 用例的父图连接器 + 等待
-		// 节点 + 子图内连接器 ≈ 3，三层嵌套的等待链 ≈ 2）；
-		// configureInstance 仅在实例首次创建前有效（检查返回值）。
-		ResourceScheduler::resetInstance(); // 回归用例已创建默认实例：重置后重新预配置
+		// 等待型节点在等待期间占住资源类槽位：嵌套等待链需同类预算覆盖全部
+		// 并发等待节点，本测试放宽为 1/8/8；configureInstance 仅在实例首次
+		// 创建前有效（检查返回值）。
+		ResourceScheduler::resetInstance(); // 回归用例已创建默认实例，重置后才可重新预配置
 		if (!ResourceScheduler::configureInstance(SchedulerConfig{1, 8, 8})) {
 			std::cerr << "FAIL: ResourceScheduler::configureInstance rejected (instance pre-created)" << std::endl;
 			return 1;

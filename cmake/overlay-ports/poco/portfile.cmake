@@ -59,9 +59,7 @@ vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
         cpp-parser              ENABLE_CPPPARSER
 )
 
-# POCO_ENABLE_NETSSL_WIN: 
-# Use the unreleased NetSSL_Win module instead of (OpenSSL) NetSSL.
-# This is a variable which can be set in the triplet file.
+# POCO_ENABLE_NETSSL_WIN：由 triplet 设置，用 NetSSL_Win 替换 OpenSSL NetSSL
 if(POCO_ENABLE_NETSSL_WIN)
     string(REPLACE "ENABLE_NETSSL" "ENABLE_NETSSL_WIN" FEATURE_OPTIONS "${FEATURE_OPTIONS}")
     list(APPEND FEATURE_OPTIONS "-DENABLE_NETSSL:BOOL=OFF")

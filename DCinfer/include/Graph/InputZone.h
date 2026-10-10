@@ -6,39 +6,28 @@
 
 namespace DC {
 
-/// @brief 输入绑定（序列化用）
 struct InputBinding {
 	std::string nodeName;
 	std::string portName;
-	std::string alias;  ///< 公共别名（必填；序列化/内省元数据，不参与运行时寻址）
+	std::string alias;
 };
 
-/// @brief InputZone：图级输入端口声明区（纯结构，无 task 级状态）
-///
-/// 语义：
-/// - bind() 标记 node:port 为图级输入口（签名元数据；运行时注入仍按坐标寻址）
-/// - 与输出绑定（GraphSignature）对称，构成图的完整外部签名
-/// - 不存储数据，数据注入仍通过 feedInput 透传给节点
-///
-/// 所有公开方法线程安全（内部 mutex）。
+/// @brief InputZone：图级输入端口声明区（纯结构，无 task 级状态；公开方法线程安全）。
 class InputZone {
 public:
-	/// @brief  标记 node:port 为图级输入口
-	/// @param  alias  公共别名（必填；构成图级签名）
+	/// @brief 标记 node:port 为图级输入口（alias 必填，构成图级签名）。
 	void bind(const std::string& nodeName, const std::string& portName,
 			  const std::string& alias);
 
-	/// @brief  获取所有输入绑定（值副本，保留插入顺序）
+	/// @brief 获取所有输入绑定（值副本，插入顺序）。
 	std::vector<InputBinding> bindings() const;
 
 private:
 	mutable std::mutex _mutex;
-	std::vector<InputBinding> _bindingsList; // 保持插入顺序，序列化用
+	std::vector<InputBinding> _bindingsList;
 };
 
-// ════════════════════════════════════════════
 // 内联实现
-// ════════════════════════════════════════════
 
 inline void InputZone::bind(const std::string& nodeName,
 							const std::string& portName,
@@ -49,7 +38,7 @@ inline void InputZone::bind(const std::string& nodeName,
 
 inline std::vector<InputBinding> InputZone::bindings() const {
 	std::lock_guard lk(_mutex);
-	return _bindingsList; // 副本返回（#8-4）：锁外持有的引用在并发 bind 时失效
+	return _bindingsList;
 }
 
 } // namespace DC

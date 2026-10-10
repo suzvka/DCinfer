@@ -40,9 +40,7 @@ static int failures = 0;
 	();                                                   \
 	std::cout << "PASSED" << std::endl
 
-// ── 辅助 ──
-
-/// @brief stderr 捕获器（RAII）：构造后 std::cerr 输出进入 oss，析构时恢复
+/// @brief stderr 捕获器（RAII）
 struct CerrCapture {
 	std::ostringstream oss;
 	std::streambuf* old;
@@ -51,9 +49,8 @@ struct CerrCapture {
 	std::string str() const { return oss.str(); }
 };
 
-/// @brief 构造 Void 端口（FP16 等未知元素类型：无 C++ 类型载体，
-///        NodePort::in/out 工厂不适用；MSVC 对嵌套 braced-init-list +
-///        隐式整型转换解析不稳，故保留显式构造辅助）
+/// @brief 构造 Void 端口（FP16 等无 C++ 类型载体，NodePort 工厂不适用；
+///        MSVC 对嵌套 braced-init-list 解析不稳，保留显式构造）
 static Node::Port voidPort(std::string name, size_t typeSize, Tensor::Shape shape = {}) {
 	Node::Port p;
 	p.name = std::move(name);
@@ -63,18 +60,13 @@ static Node::Port voidPort(std::string name, size_t typeSize, Tensor::Shape shap
 	return p;
 }
 
-/// @brief 测试引擎调用计数（验证“编译期零引擎调用”）：
-///        g_coreInitCalls = createEngineCore（引擎级初始化）调用次数；
-///        g_modelLoadCalls = loadModel（模型级加载）调用次数
+/// @brief 测试引擎调用计数（验证“编译期零引擎调用”）
 static std::atomic<int> g_coreInitCalls{0};
 static std::atomic<int> g_modelLoadCalls{0};
 
-/// @brief 注册可配置测试引擎（EngineRegistry 为全局单例，类型名必须唯一）
-/// @param createSuccess     loadModel 是否成功（false → 返回空实例）
-/// @param withPortHooks     是否注册实例端口推导钩子（验证延迟物化不触发推导）
-/// @param checkFileExists   loadModel 前检查模型文件是否存在
-/// @param throwOnCreate     loadModel 抛异常（模拟真实 ORT 加载失败行为，
-///                          见 OnnxEngine.cpp：模型不可加载时抛 std::runtime_error）
+/// @brief 注册可配置测试引擎（EngineRegistry 全局单例，类型名必须唯一）
+/// @param withPortHooks     注册实例端口推导钩子（验证延迟物化不触发推导）
+/// @param throwOnCreate     loadModel 抛异常（模拟 ORT 加载失败行为）
 static void registerTestEngine(const std::string& type, bool createSuccess,
 							   bool withPortHooks, bool checkFileExists,
 							   bool throwOnCreate = false) {
@@ -92,7 +84,7 @@ static void registerTestEngine(const std::string& type, bool createSuccess,
 	};
 	desc.createEngineCore = []() -> EngineCore {
 		++g_coreInitCalls;
-		return EngineCore(std::make_shared<int>(7)); // 引擎级占位对象（Env 语义）
+		return EngineCore(std::make_shared<int>(7));
 	};
 	desc.loadModel = [createSuccess, checkFileExists, throwOnCreate](
 						 const EngineCore&, const std::string& modelPath) -> EngineInstance {
@@ -160,10 +152,6 @@ static Value makeFloatTensor(float value) {
 	return Value(std::move(t));
 }
 
-// ════════════════════════════════════════════
-// 测试用例
-// ════════════════════════════════════════════
-
 void testCompileStringBasic() {
 	TEST("compileString - two nodes with wire edge") {
 		const char* json = R"({
@@ -198,7 +186,6 @@ void testCompileStringBasic() {
 })";
 		InferGraph graph; GraphCompiler::compileString(graph, json);
 
-		// 应有 2 个业务节点 + 1 个 __wire 连接器 = 3 节点
 		CHECK(graph.nodeCount() == 3, "should have 3 nodes (add1, id1, __wire_0)");
 		CHECK(graph.edgeCount() == 2, "should have 2 edges");
 		CHECK(graph.outputBindings().size() == 1, "should have 1 output binding");
@@ -253,8 +240,7 @@ void testCompileStringBroadcast() {
 })";
 		InferGraph graph; GraphCompiler::compileString(graph, json);
 
-		// 3 业务节点 + 1 broadcast 连接器 + 3 根包裹导线（重建经 connect 自动插入，
-		// 序列化折叠后不可见，lowering 擦除后运行时视图不变）= 7
+		// 3 业务 + 1 broadcast + 3 包裹导线（connect 自动插入，序列化折叠、lowering 擦除）
 		CHECK(graph.nodeCount() == 7, "should have 7 nodes (3 biz + 1 bc + 3 wrapping wires)");
 		CHECK(graph.edgeCount() == 6, "should have 6 edges (3 connects × 2 edges each)");
 		CHECK(graph.outputBindings().size() == 2, "should have 2 output bindings");
@@ -322,7 +308,6 @@ void testCompileStringRoutingRejected() {
 
 void testRoundTrip() {
 	TEST("round-trip - serialize then compile") {
-		// 构建图
 		TestHarness harness;
 		harness.addNode(std::make_unique<Node>("ONNX", "test1", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "test2", identitySchema(), identityRunFn()));
@@ -330,26 +315,22 @@ void testRoundTrip() {
 		harness.bindOutput("y", "test2", "y");
 		harness.node("test1")->setModelPath("models/test.onnx");
 
-		// 序列化
 		std::string tmpFile = "test_roundtrip.json";
 		GraphCompiler::serialize(harness.graph(), tmpFile);
 
-		// 反序列化（Builtin 节点不带 RunFn，仅验证结构）
+		// Builtin 节点不带 RunFn：仅验证结构
 		InferGraph graph2; GraphCompiler::compileFile(graph2, tmpFile);
 
-		// 验证节点数：2 业务节点 + 1 导线 = 3
 		CHECK(graph2.nodeCount() == 3, "roundtrip: should have 3 nodes");
 		CHECK(graph2.node("test1") != nullptr, "roundtrip: test1 should exist");
 		CHECK(graph2.node("test2") != nullptr, "roundtrip: test2 should exist");
 		CHECK(graph2.edgeCount() == 2, "roundtrip: should have 2 edges");
 		CHECK(graph2.outputBindings().size() == 1, "roundtrip: should have 1 output binding");
 
-		// modelPath 原样透传
 		auto* n1 = graph2.node("test1");
 		CHECK(n1 != nullptr, "roundtrip: test1 not null");
 		CHECK(n1->modelPath() == "models/test.onnx", "roundtrip: modelPath must be preserved verbatim");
 
-		// 清理
 		std::remove(tmpFile.c_str());
 	}
 	END_TEST();
@@ -357,13 +338,13 @@ void testRoundTrip() {
 
 void testExpandedFanOutRoundTrip() {
 	TEST("round-trip - auto-expanded fan-out: broadcast edges and re-serialization stability") {
-		// 构建：同一输出口两次 connect → 导线自动扩容为广播扇出
+		// 同一输出口两次 connect：导线自动扩容为广播扇出
 		TestHarness harness;
 		harness.addNode(std::make_unique<Node>("Builtin", "src", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "b", identitySchema(), identityRunFn()));
 		harness.addNode(std::make_unique<Node>("Builtin", "c", identitySchema(), identityRunFn()));
 		harness.connect("src", "y", "b", "x");
-		harness.connect("src", "y", "c", "x"); // 自动扩容
+		harness.connect("src", "y", "c", "x");
 		harness.bindOutput("y1", "b", "y");
 		harness.bindOutput("y2", "c", "y");
 		CHECK(harness.graph().nodeCount() == 4, "source: 3 biz + 1 expanded wire");
@@ -371,7 +352,7 @@ void testExpandedFanOutRoundTrip() {
 		const std::string f1 = "test_expanded_fanout_1.json";
 		GraphCompiler::serialize(harness.graph(), f1);
 
-		// 1) IR1：两条同源 mode=broadcast 逻辑边（连接器折叠）
+		// 两条同源 mode=broadcast 逻辑边（连接器折叠）
 		{
 			std::ifstream ifs(f1, std::ios::binary);
 			std::ostringstream oss;
@@ -384,13 +365,13 @@ void testExpandedFanOutRoundTrip() {
 			}
 		}
 
-		// 2) 读回：重建为显式 Broadcast + 包裹导线（3 biz + 1 bc + 3 wires = 7）
+		// 读回：重建为显式 Broadcast + 包裹导线
 		InferGraph graph2;
 		GraphCompiler::compileFile(graph2, f1);
 		CHECK(graph2.nodeCount() == 7, "rebuild: 3 biz + 1 bc + 3 wrapping wires");
 		CHECK(graph2.edgeCount() == 6, "rebuild: 6 edges");
 
-		// 3) 二次导出：穿透连接器链折叠，逻辑等价（round-trip 闭环）
+		// 二次导出：穿透连接器链折叠，round-trip 闭环
 		const std::string f2 = "test_expanded_fanout_2.json";
 		GraphCompiler::serialize(graph2, f2);
 		{
@@ -421,7 +402,6 @@ void testSerializeToJsonString() {
 		std::string tmpFile = "test_serialize.json";
 		GraphCompiler::serialize(harness.graph(), tmpFile);
 
-		// 编译回来
 		InferGraph graph2; GraphCompiler::compileFile(graph2, tmpFile);
 		CHECK(graph2.nodeCount() == 1, "should have 1 node");
 		CHECK(graph2.node("n1") != nullptr, "n1 should exist");
@@ -454,10 +434,6 @@ void testModelPathHandling() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
-// 异常 / 边界路径测试
-// ════════════════════════════════════════════
 
 void testInvalidJsonThrows() {
 	TEST("invalid JSON throws GraphException") {
@@ -511,8 +487,7 @@ void testEdgeToMissingNode() {
   ],
   "outputBindings": []
 })";
-		// IR-07：连接失败必须 fail-fast（stderr 告警 + 图残缺继续属静默错误），
-		// 反序列化 fail-fast，不产生孤儿连接器
+		// 连接失败必须 fail-fast：stderr 告警 + 图残缺继续属静默错误
 		bool rejected = false;
 		try {
 			InferGraph graph;
@@ -548,14 +523,12 @@ void testUnregisteredType() {
 		auto* n = graph.node("custom1");
 		CHECK(n != nullptr, "custom1 should exist");
 		CHECK(n->type() == "UnknownEngineV2", "type should be preserved");
-		// RunFn 为空，这是个骨架节点
 	}
 	END_TEST();
 }
 
 void testDcgRoundTrip() {
 	TEST("dcg round-trip — serialize then compile .dcg") {
-		// 创建一个临时 model 文件
 		std::string modelContent = "mock-model-data-12345";
 		std::string modelFile = "test_dcg_model.bin";
 		{
@@ -563,40 +536,33 @@ void testDcgRoundTrip() {
 			ofs.write(modelContent.data(), static_cast<std::streamsize>(modelContent.size()));
 		}
 
-		// 构建图（节点有 modelPath）
 		TestHarness harness;
 		auto n1 = std::make_unique<Node>("ONNX", "dcg_n1", identitySchema(), identityRunFn());
-		n1->setModelPath(modelFile); // 指向刚才创建的临时文件
+		n1->setModelPath(modelFile);
 		harness.addNode(std::move(n1));
 		harness.addNode(std::make_unique<Node>("Builtin", "dcg_n2", identitySchema(), identityRunFn()));
 		harness.connect("dcg_n1", "y", "dcg_n2", "x");
 		harness.bindOutput("y", "dcg_n2", "y");
 
-		// 序列化为 .dcg
 		std::string dcgFile = "test_dcg_roundtrip.dcg";
 		GraphCompiler::serialize(harness.graph(), dcgFile);
 
-		// 验证 .dcg 文件存在且大于 0
 		CHECK(std::filesystem::exists(dcgFile), "dcg file should exist");
 		CHECK(std::filesystem::file_size(dcgFile) > 0, "dcg file should not be empty");
 
-		// 反序列化
 		InferGraph graph2; GraphCompiler::compileFile(graph2, dcgFile);
 
-		// 验证图结构
 		CHECK(graph2.nodeCount() >= 2, "dcg roundtrip: should have at least 2 nodes");
 		CHECK(graph2.node("dcg_n1") != nullptr, "dcg roundtrip: dcg_n1 should exist");
 		CHECK(graph2.node("dcg_n2") != nullptr, "dcg roundtrip: dcg_n2 should exist");
 		CHECK(graph2.edgeCount() >= 1, "dcg roundtrip: should have edges");
 		CHECK(graph2.outputBindings().size() == 1, "dcg roundtrip: should have 1 output binding");
 
-		// modelPath 原样透传（归档内相对路径，不拼接临时目录）
 		auto* node1 = graph2.node("dcg_n1");
 		CHECK(node1 != nullptr, "dcg roundtrip: dcg_n1 not null");
 		CHECK(node1->modelPath() == "models/test_dcg_model.bin",
 			"dcg roundtrip: modelPath must stay archive-relative verbatim");
 
-		// 清理
 		std::remove(dcgFile.c_str());
 		std::remove(modelFile.c_str());
 	}
@@ -614,7 +580,6 @@ void testDcgSerializeNoModels() {
 
 		CHECK(std::filesystem::exists(dcgFile), "dcg file should exist");
 
-		// 反序列化
 		InferGraph graph2; GraphCompiler::compileFile(graph2, dcgFile);
 		CHECK(graph2.nodeCount() == 1, "dcg nomodel: should have 1 node");
 		CHECK(graph2.node("n1") != nullptr, "dcg nomodel: n1 should exist");
@@ -624,14 +589,9 @@ void testDcgSerializeNoModels() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// 引擎注册接口统一后的语义适配测试
-// ════════════════════════════════════════════
-
 void testDynamicShapeRoundTrip() {
 	TEST("round-trip - dynamic dim (-1) stable in JSON and back") {
-		// Node::Port::shape 为 vector<int64_t>，动态维度以 -1 表示
-		// （与 ONNX 语义一致），序列化/反序列化应 int64_t 直通
+		// 动态维度以 -1 表示（ONNX 语义）：序列化/反序列化应 int64_t 直通
 		constexpr int64_t kDyn = -1;
 
 		TestHarness harness;
@@ -644,7 +604,7 @@ void testDynamicShapeRoundTrip() {
 		std::string tmpFile = "test_dynshape.json";
 		GraphCompiler::serialize(harness.graph(), tmpFile);
 
-		// 1) JSON 中动态维度必须编码为 -1
+		// JSON 中动态维度编码为 -1
 		{
 			std::ifstream ifs(tmpFile, std::ios::binary);
 			std::ostringstream oss; oss << ifs.rdbuf();
@@ -657,7 +617,7 @@ void testDynamicShapeRoundTrip() {
 			CHECK(outShape[1].get<int64_t>() == -1, "output dynamic dim should be -1 in JSON");
 		}
 
-		// 2) 编译回来：JSON -1 解码为内存 -1（int64_t 直通，不经过 size_t 中间转换）
+		// 编译回来：-1 经 int64_t 直通解码（不经过 size_t）
 		InferGraph graph2; GraphCompiler::compileFile(graph2, tmpFile);
 		auto* n = graph2.node("dyn1");
 		CHECK(n != nullptr, "dyn1 should exist");
@@ -667,10 +627,8 @@ void testDynamicShapeRoundTrip() {
 		CHECK(inShape[1] == 224, "static dim preserved");
 		const auto& outShape = n->schema().outputs[0].shape;
 		CHECK(outShape[1] == kDyn, "output dynamic dim decoded as -1");
-		// 注：int64_t 的 -1 与 0xFFFFFFFFFFFFFFFF 位模式相同（64 位平台），
-		// 该断言验证语义等价即可（== kDyn），无需也不能区分二者位模式；
-		// 修复价值在于消除对 size_t 宽度的依赖（32 位平台 -1 会被截断为
-		// 0xFFFFFFFF 而非 -1，roundtrip 将损坏）。
+		// 注：-1 与全 1 位模式在 64 位平台相同，断言只验证语义等价；
+		// 消除 size_t 依赖的意义在 32 位平台：-1 会被截断，roundtrip 损坏。
 
 		std::remove(tmpFile.c_str());
 	}
@@ -679,8 +637,7 @@ void testDynamicShapeRoundTrip() {
 
 void testVoidPortRoundTrip() {
 	TEST("round-trip - Void port type (unknown element types)") {
-		// FP16 等未知元素类型经 ONNX 适配器推导为 Void；
-		// typeToString(Void) = "Void"、stringToType 兜底返回 Void，可稳定 roundtrip
+		// FP16 等未知元素类型推导为 Void；stringToType 兜底返回 Void，可稳定 roundtrip
 		constexpr int64_t kDyn = -1;
 
 		TestHarness harness;
@@ -733,19 +690,16 @@ void testEngineNodeMaterialization() {
 		InferGraph graph; GraphCompiler::compileString(graph, json);
 		auto* n = graph.node("eng1");
 		CHECK(n != nullptr, "engine node should be materialized");
-		// 声明 schema 保留：不触发实例推导（引擎端口钩子产出 in/out，声明为 declaredIn/Out）
+		// 声明 schema 保留：不触发实例推导（钩子产出 in/out，声明为 declaredIn/Out）
 		CHECK(n->schema().inputs.size() == 1 && n->schema().inputs[0].name == "declaredIn",
 			"JSON declared schema must be preserved (no instance derivation)");
 		CHECK(n->schema().outputs.size() == 1 && n->schema().outputs[0].name == "declaredOut",
 			"JSON declared output schema must be preserved");
-		// 工厂提供的引擎 RunFn 已注入：可执行物化节点（非骨架）
 		CHECK(static_cast<bool>(n->runFn()), "factory-provided RunFn must be present");
-		// modelPath 原样透传
 		CHECK(n->modelPath() == "models/m.onnx", "modelPath must be passed through verbatim");
 		CHECK(n->tag() == "t1", "tag preserved");
 		CHECK(cap.str().find("empty declared schema") == std::string::npos,
 			"no empty-schema warning for non-empty declaration");
-		// 编译期零引擎调用：createEngineCore / loadModel 从未被调用
 		CHECK(g_coreInitCalls == 0, "createEngineCore must not be invoked at compile time");
 		CHECK(g_modelLoadCalls == 0, "loadModel must not be invoked at compile time");
 	}
@@ -791,8 +745,7 @@ void testEngineNodeNoModelPath() {
 
 void testCompileNeverInvokesCreateEngine() {
 	TEST("compile never invokes createEngineCore / loadModel — URL modelPath (issue scenario)") {
-		// URL modelPath 不可加载：编译期一旦触发加载，真实 ORT 引擎会抛异常并
-		// 中断整个编译——加载必须完全推迟到宿主绑定/执行期。
+		// URL modelPath 不可加载：真实 ORT 触发加载会抛异常中断编译，加载须推迟到执行期
 		g_coreInitCalls = 0;
 		g_modelLoadCalls = 0;
 		registerTestEngine("ThrowOnLoadEngine", true, true, false, /*throwOnCreate=*/true);
@@ -892,19 +845,14 @@ void testDcgCompileDefersModelResolution() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// IR-01：共享模型文件的多节点 .dcg 序列化
-// ════════════════════════════════════════════
-
 void testSharedModelDcgRoundTrip() {
-	TEST("IR-01: two nodes sharing one model file round-trip through .dcg") {
+	TEST("two nodes sharing one model file round-trip through .dcg") {
 		std::string modelFile = "test_shared_model.bin";
 		{
 			std::ofstream ofs(modelFile, std::ios::binary);
 			ofs.write("shared-weights-payload", 21);
 		}
 
-		// 两个节点引用同一模型文件（共享权重场景）
 		TestHarness harness;
 		auto na = std::make_unique<Node>("ONNX", "shared_a", identitySchema(), identityRunFn());
 		na->setModelPath(modelFile);
@@ -916,7 +864,7 @@ void testSharedModelDcgRoundTrip() {
 		std::string dcgFile = "test_shared_model.dcg";
 		GraphCompiler::serialize(harness.graph(), dcgFile);
 
-		// 反序列化必须成功（重复条目二次改名覆盖记录 → 首节点引用悬空、编译必然失败）
+		// 共享模型未去重会使首节点引用悬空：反序列化必须成功
 		InferGraph graph2;
 		GraphCompiler::compileFile(graph2, dcgFile);
 		auto* a = graph2.node("shared_a");
@@ -932,16 +880,12 @@ void testSharedModelDcgRoundTrip() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// IR-02：.dcg 反序列化安全不变量
-// ════════════════════════════════════════════
-
 void testDcgObjectShapedNodesRejected() {
-	TEST("IR-02: object-shaped 'nodes' in .dcg is rejected") {
+	TEST("object-shaped 'nodes' in .dcg is rejected") {
 		std::string dcgFile = "test_object_nodes.dcg";
 		{
 			auto w = DC::Ir::DcgArchive::openWrite(dcgFile);
-			// 对象形状 nodes：曾整体绕过 modelPath 校验与解压
+			// 对象形状 nodes 必须被拒绝（buildGraph 对其静默迭代）
 			w->writeGraphJson(R"({"version":"1.0","nodes":{"a":{"name":"a","type":"Builtin","affinity":"Compute","inputs":[],"outputs":[]}},"edges":[],"outputBindings":[]})");
 			w->finalize();
 		}
@@ -961,10 +905,9 @@ void testDcgObjectShapedNodesRejected() {
 }
 
 void testDcgModelPathPassThrough() {
-	TEST("IR-02': .dcg modelPath passed through verbatim at compile (landing防御 at extractOne)") {
-		// 编译期不落盘→不做路径校验，modelPath 为不透明字符串原样保留。
-		// 实际落盘防御（越界/ADS/符号链接/预算）由 DcgArchive::extractOne 承担
-		// （DcgArchiveSecurityTest 覆盖），宿主在绑定期/执行期消费时仍受保护。
+	TEST(".dcg modelPath passed through verbatim at compile") {
+		// 编译期不落盘、不做路径校验（modelPath 为不透明字符串）；落盘防御由
+		// DcgArchive::extractOne 承担（DcgArchiveSecurityTest 覆盖）。
 		auto makeDcg = [](const std::string& dcgFile, const std::string& mp) {
 			auto w = DC::Ir::DcgArchive::openWrite(dcgFile);
 			std::string json = R"({"version":"1.0","nodes":[{"name":"n1","type":"Builtin","affinity":"Compute","modelPath":")"
@@ -973,7 +916,7 @@ void testDcgModelPathPassThrough() {
 			w->finalize();
 		};
 
-		// 引号/反斜杠不落入 JSON 语法：用正斜杠形式覆盖原有用例
+		// 用正斜杠形式覆盖（引号/反斜杠不落入 JSON 语法）
 		const std::string cases[] = {"../evil.onnx", "/tmp/evil.onnx", "C:/tmp/evil.onnx"};
 		constexpr size_t kCaseCount = 3;
 		for (size_t i = 0; i < kCaseCount; ++i) {
@@ -990,12 +933,8 @@ void testDcgModelPathPassThrough() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// IR-07/08：fail-fast 与 typeSize 校验
-// ════════════════════════════════════════════
-
 void testInvalidEdgeFailFast() {
-	TEST("IR-07: invalid edge port fails the compile (no orphan connector)") {
+	TEST("invalid edge port fails the compile (no orphan connector)") {
 		const char* json = R"({
   "version": "1.0",
   "nodes": [
@@ -1023,7 +962,7 @@ void testInvalidEdgeFailFast() {
 }
 
 void testTypeSizeNegativeRejected() {
-	TEST("IR-08: negative port typeSize is rejected at compile time") {
+	TEST("negative port typeSize is rejected at compile time") {
 		const char* json = R"({
   "version": "1.0",
   "nodes": [
@@ -1057,14 +996,12 @@ int main() {
 		testExpandedFanOutRoundTrip();
 		testSerializeToJsonString();
 		testModelPathHandling();
-		// 异常/边界路径
 		testInvalidJsonThrows();
 		testEmptyGraph();
 		testEdgeToMissingNode();
 		testUnregisteredType();
 		testDcgRoundTrip();
 		testDcgSerializeNoModels();
-		// 引擎注册接口统一后的语义适配（延迟物化：编译期零加载）
 		testDynamicShapeRoundTrip();
 		testVoidPortRoundTrip();
 		testEngineNodeMaterialization();
@@ -1072,7 +1009,6 @@ int main() {
 		testCompileNeverInvokesCreateEngine();
 		testEngineDeclaredSchemaEmptyWarns();
 		testDcgCompileDefersModelResolution();
-		// v0.5.2 修复项回归（IR-01/02/07/08）
 		testSharedModelDcgRoundTrip();
 		testDcgObjectShapedNodesRejected();
 		testDcgModelPathPassThrough();

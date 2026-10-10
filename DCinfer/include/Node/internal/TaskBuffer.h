@@ -13,13 +13,10 @@
 
 namespace DC {
 
-class Node; // 前向声明
-struct NodeSchema; // 前向声明（定义见 Node.h）
+class Node;
+struct NodeSchema; // 定义见 Node.h
 
-/// @brief 线程安全的 task 级 I/O 缓冲区管理器。
-///
-/// 提供线程安全的 setInput / takeOutput / isReady / 生命周期管理。
-/// 所有需要 Schema 信息的操作通过参数传入，避免头文件循环依赖。
+/// @brief 线程安全的 task 级 I/O 缓冲区管理器（Schema 经参数传入，避免头文件循环依赖）。
 class TaskBuffer {
 public:
 	using TaskId = std::string;
@@ -27,90 +24,61 @@ public:
 
 	TaskBuffer() = default;
 
-	// ── 输入 ──
-
-	/// @brief  单端口写入（Value），仅写入缓冲，不触发执行。
-	/// @throws NodeException(PortNotFound) 若端口名不存在于 Schema 中。
+	/// @brief 单端口写入（仅写缓冲，不触发执行）；端口名未声明抛 PortNotFound。
 	void setInput(const TaskId& taskId, const std::string& portName, Value data,
 				  const NodeSchema& schema);
 
-	/// @brief  单端口写入 + 就绪判定（单一临界区，消除多上游双触发）。
-	/// @details 写入与"所有必需输入已就绪"判定在同一 unique_lock 内完成并
-	///          返回结论——多上游并发传播到同一多输入节点时，仅"最后写入者"
-	///          观察到 ready=true，即由唯一提交者触发执行；不存在 setInput
-	///          与 isReady 分离导致的重复提交窗口。
+	/// @brief 单端口写入 + 就绪判定（同一临界区：多上游并发时仅"最后写入者"观察到就绪，无重复提交窗口）。
 	/// @return 写入后该 task 的全部必需输入是否已就绪
-	/// @throws NodeException(PortNotFound) 若端口名不存在于 Schema 中。
 	bool setInputAndCheckReady(const TaskId& taskId, const std::string& portName, Value data,
 						   const NodeSchema& schema);
 
-	/// @brief  批量写入，预校验所有端口名。
+	/// @brief 批量写入（预校验所有端口名）。
 	void setInputBatch(const TaskId& taskId,
 					   std::unordered_map<std::string, TaskData> inputs,
 					   const NodeSchema& schema);
 
-	// ── 就绪判断 ──
-
-	/// @brief  查询指定任务是否所有必需输入已就绪（含默认值）。
+	/// @brief 所有必需输入是否已就绪（含默认值）。
 	bool isReady(const TaskId& taskId, const NodeSchema& schema) const;
 
-	// ── 输出 ──
-
-	/// @brief  查询指定任务是否已产出指定输出端口的数据。
+	/// @brief 是否已产出指定输出端口的数据。
 	bool hasOutput(const TaskId& taskId, const std::string& name) const;
 
-	/// @brief  消费式取出输出数据（调用后缓冲区该槽位清空，不可重复读取）。
-	/// @throws NodeException(TaskNotFound) 若任务不存在。
-	/// @throws NodeException(OutputNotProduced) 若输出端口为空。
+	/// @brief 消费式取出输出（取出即清空）；任务不存在抛 TaskNotFound，端口为空抛 OutputNotProduced。
 	Value takeOutput(const TaskId& taskId, const std::string& name);
 
-	/// @brief  消费式取出输出数据（一次加锁完成「检查 + 取数」）。
-	///         与 hasOutput + takeOutput 两步序列不同：检查与取数在同一临界区，
-	///         并发取数时后到者得到 nullopt，不存在 OutputNotProduced 抛出窗口
-	///         （check-then-act 竞态根治，#3）。
-	/// @return 消费出的数据；任务不存在或输出端口为空返回 nullopt（不抛异常）
+	/// @brief 消费式取出输出（检查+取数同一临界区，无 check-then-act 竞态）。
+	/// @return 任务不存在或端口为空返回 nullopt（不抛异常）
 	std::optional<Value> tryTakeOutput(const TaskId& taskId, const std::string& name);
 
-	/// @brief  批量消费所有输出。
 	std::unordered_map<std::string, TaskData> collectOutputs(const TaskId& taskId);
 
-	// ── 生命周期 ──
-
-	/// @brief  查询指定 task 是否存在（输入或输出缓冲区非空）。
 	bool hasTask(const TaskId& taskId) const;
-
-	/// @brief  清除指定 task 的所有 IO 缓冲区。
 	void clearTask(const TaskId& taskId);
-
-	/// @brief  当前活跃任务数量。
 	size_t taskCount() const;
 
-	// ── 批量传输（供 ExecutionPipeline 使用）──
-
-	/// @brief  将 task 输入缓冲区数据 move 到工作槽位（含默认值回退）。
-	///         调用前持有锁，操作完成后重置缓冲区槽位。
+	/// @brief 将输入缓冲 move 到工作槽位（含默认值回退）。
 	void drainInputsTo(const TaskId& taskId, class SlotWorkspace& workspace,
 					   const NodeSchema& schema);
 
-	/// @brief  将工作槽位数据收集到 task 输出缓冲区。
-	///         确保输出缓冲区条目存在，从工作槽位 take Value 填入。
+	/// @brief 将工作槽位数据收集到输出缓冲区。
 	void fillOutputsFrom(const TaskId& taskId, class SlotWorkspace& workspace,
 						 const NodeSchema& schema);
 
-	/// @brief  验证指定 task 的所有必需输出端口已产生（在 fillOutputsFrom 之后调用）。
+	/// @brief 验证所有必需输出端口已产生（fillOutputsFrom 之后调用）。
 	bool validateOutputs(const TaskId& taskId, const NodeSchema& schema) const;
 
-	/// @brief  仅擦除指定 task 的输入缓冲区（输出保留供调用方拉取）。
+	/// @brief 仅擦除输入缓冲区（输出保留）。
 	void eraseInputs(const TaskId& taskId);
 
 private:
 	using TaskBufferEntry = std::unordered_map<std::string, std::optional<TaskData>>;
 	using TaskBufferMap = std::unordered_map<TaskId, TaskBufferEntry>;
 
-	/// @brief  惰性创建任务的输入缓冲区条目（内部使用，调用前须持锁）。
+	/// @brief 惰性创建任务的输入缓冲条目；调用方须持锁。
 	void _ensureTaskExists(const TaskId& taskId, const NodeSchema& schema);
 
-	/// @brief  就绪判定核心（调用方须持有 _mutex；读/写锁均可）
+	/// @brief 就绪判定核心；调用方须持锁。
 	bool _isReadyLocked(const TaskId& taskId, const NodeSchema& schema) const;
 
 	mutable std::shared_mutex _mutex;

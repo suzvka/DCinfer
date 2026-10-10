@@ -1,4 +1,4 @@
-# Release workflow（P2-14）：v* tag 触发完整验证 + 发布物 + 供应链证明。
+# Release workflow：v* tag 触发完整验证 + 发布物 + 供应链证明。
 #
 # 产出：
 #   - Linux/Windows 安装树包（tar.gz / zip）
@@ -36,9 +36,9 @@ jobs:
           set -euo pipefail
           tag_sha="$(git rev-parse 'HEAD^{commit}')"
           test "$tag_sha" = "$GITHUB_SHA"
-          # Fail-closed：整条 ci.yml（含全部 job）必须在该 SHA 的 master/main
-          # push 上成功——查询 workflow 本身而非调用方指定的 check 名，新增
-          # job 自动纳入门禁；API 不可达/无 run/未完成/失败/取消一律拒绝。
+          # Fail-closed：整条 ci.yml 必须在该 SHA 的 master/main push 上成功；
+          # 查询 workflow 本身而非 check 名，新增 job 自动纳入门禁；API
+          # 不可达/无 run/未完成/失败/取消一律拒绝。
           result="$(gh api \
             "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$tag_sha&event=push&per_page=100" \
             --jq '[.workflow_runs[]
@@ -60,8 +60,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-      id-token: write # attest-build-provenance 经 OIDC 向 Sigstore 集群签名
-      attestations: write # 签名后经 attestations REST API 持久化到仓库
+      id-token: write # attest-build-provenance 需要 OIDC 签名
+      attestations: write # 持久化 attestation 到仓库
     strategy:
       fail-fast: false
       matrix:
@@ -150,9 +150,9 @@ jobs:
           test -f install-prefix/include/Ir/GraphCompiler.h
           test -f install-prefix/lib/cmake/DCinfer/DCinferConfig.cmake
           test -f install-prefix/lib/cmake/DCIr/DCIrConfig.cmake
-          # 边界断言针对引擎适配器实现（DCEngine 包目标 / onnx·openai 适配器产物）。
-          # 核心公开头 EngineRegistry.h / ExecutionEngine.h 名字含 Engine 属合法 SDK 内容，
-          # 不能用 '*engine*' 宽匹配（曾在 v0.7.3 首跑误报）。
+          # 边界断言针对引擎适配器产物；核心公开头 EngineRegistry.h /
+          # ExecutionEngine.h 名字含 Engine 属合法 SDK 内容，不能用
+          # '*engine*' 宽匹配。
           if find install-prefix -iname 'DCEngine*' -o -iname '*onnx*' -o -iname '*openai*' | grep -q .; then
             echo 'SDK install tree contains an engine adapter artifact' >&2
             exit 1
@@ -167,7 +167,7 @@ jobs:
           cmake --build build/install-smoke --config Release
           if [ "${RUNNER_OS}" = "Windows" ]; then build/install-smoke/install_smoke.exe; else build/install-smoke/install_smoke; fi
 
-      # SBOM：明确扫描最终 SDK 安装树（必须在打包移动目录前执行）
+      # SBOM 扫描最终 SDK 安装树，必须在打包移动目录前执行
       - name: Generate SDK install-tree SBOM
         if: runner.os == 'Linux'
         uses: anchore/sbom-action@6b31fa7e2d592e47d95d2a5e0520a7352d47ead5
@@ -190,9 +190,8 @@ jobs:
           cmake --build build/sdk-release-second --config Release
           ctest --test-dir build/sdk-release-second -C Release --output-on-failure --timeout 120 --no-tests=error
           cmake --install build/sdk-release-second --prefix "$PWD/install-prefix-second"
-          # 记录两份安装树的逐文件 SHA256 清单差异（证据随产物归档）。差异
-          # 不阻断发布——静态库的编译期嵌入差异（时间戳/路径等）为已知现象；
-          # 本步骤如实记录每一处差异，不宣称二进制可重现。
+          # 记录两份安装树的逐文件 SHA256 差异（证据随产物归档）；差异不阻断
+          # 发布，如实记录每一处，不宣称二进制可重现。
           obs="reproducibility-${RUNNER_OS,,}"
           ( cd install-prefix && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$obs.sha256.a"
           ( cd install-prefix-second && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum ) > "$obs.sha256.b"
@@ -201,8 +200,8 @@ jobs:
           else
             echo "Documented differences recorded in $obs.diff"
           fi
-          # GitHub Release API 拒绝 0 字节资产（size must be >= 1）：两份安装树
-          # 完全一致时 diff 为空，写入说明行保证资产可上传（语义：无差异）。
+          # GitHub Release API 拒绝 0 字节资产：diff 为空时写入说明行保证资产
+          # 可上传（语义：无差异）。
           if [ ! -s "$obs.diff" ]; then
             echo "no differences: both clean builds produced identical install trees" > "$obs.diff"
           fi
@@ -213,7 +212,6 @@ jobs:
           set -euo pipefail
           NAME="dcinfer-${{ steps.meta.outputs.version }}-${RUNNER_OS,,}-x64"
           mv install-prefix "$NAME"
-          # 工具链与输入记录（随包分发）
           {
             echo "name: $NAME"
             echo "source_date_epoch: $SOURCE_DATE_EPOCH"
@@ -223,9 +221,8 @@ jobs:
             if [ "$RUNNER_OS" = "Linux" ]; then g++-13 --version | head -n 1; fi
           } > "$NAME/build-metadata.txt"
           # 规范化归档：条目排序 + 固定 mtime/owner（tar）或统一 mtime（zip），
-          # gzip 不写时间戳。Same install tree packed twice must match — this
-          # validates packaging, NOT two clean compiled SDKs (compiler/PDB/path
-          # drift remains external).
+          # gzip 不写时间戳。Same tree packed twice must match — validates
+          # packaging, not two clean compiled SDKs.
           if [ "$RUNNER_OS" = "Linux" ]; then
             pack() { tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner -cf - "$NAME" | gzip -n -9 > "$1"; }
             pack "$NAME.tar.gz"
@@ -244,7 +241,7 @@ jobs:
             rm -f verify.zip
           fi
 
-      # Build provenance（SLSA v1 attestation）：绑定本 run 与产物
+      # Build provenance（SLSA v1）：绑定本 run 与产物
       - name: Attest build provenance
         uses: actions/attest-build-provenance@9d57eef8c06cd9d6b433effeeb7a6a77b3ff94ad
         with:

@@ -1,6 +1,4 @@
-// 张量 JSON codec：DCNet v1 线上格式（DESIGN.md §4 内置数据格式）
-//   数值：{"dtype":"float32","shape":[1,1,28,28],"data":"<base64>"}
-//   文本：{"dtype":"text","shape":[N],"data":"<utf-8>"}
+// 张量 JSON codec：v1 线上格式（数值 base64 / 文本 UTF-8 直传）。
 
 #include "DCNet/NetCodec_Tensor.h"
 #include "DCNet/NetError.h"
@@ -29,7 +27,7 @@ namespace {
 constexpr std::size_t kMaxTensorRank = 64;
 constexpr std::size_t kMaxTensorBytes = std::size_t{1} << 30; // 1 GiB
 
-// dtype 字符串 ↔ Tensor 类型映射（数值 base64；Data 文本 UTF-8 直传）
+// dtype 字符串 ↔ Tensor 类型映射
 std::string dtypeToString(Tensor::TensorType type, size_t typeSize) {
 	switch (type) {
 	case Tensor::TensorType::Float:
@@ -98,8 +96,7 @@ Tensor decodeTensor(const nlohmann::json& j) {
 		if (!dim.is_number_integer())
 			throw std::runtime_error("tensor codec: shape dimensions must be integers");
 		const auto d = dim.get<std::int64_t>();
-		// 负数拒绝（无符号转换回绕）；零维允许——0 元素张量是空载荷的合法
-		// 线级表示（空文本直传），与 TensorData metadata-only 语义对齐。
+		// 负数拒绝（无符号转换回绕）；零维允许——0 元素张量为合法空载荷表示
 		if (d < 0)
 			throw std::runtime_error("tensor codec: shape dimensions must be non-negative");
 		const auto ud = static_cast<std::size_t>(d);
@@ -137,16 +134,13 @@ Tensor decodeTensor(const nlohmann::json& j) {
 	return Tensor(type, typeSize, std::move(shape), std::move(block));
 }
 
-/// 解远端响应帧：解析/dtype/字段异常统一改抛 DcCodecRemoteError（契约：NetCodec.h
-/// “decode 结构异常 → DcCodecRemoteError”，与 OpenAI codec 一致）——由标准 RunFn
-/// 映射为 ExecutionFailed + dcnet 领域诊断（RemoteMalformed），不再漏到通用
-/// std::exception 分支而丢诊断码。本地端口写入（ctx.output）不在此处，以免把
-/// 本地形状/端口异常误分类为远端报文异常。
+/// 远端响应帧解码：解析 / dtype / 字段异常统一转抛 DcCodecRemoteError
+/// （映射为 RemoteMalformed 诊断）；本地端口写入不在此处，避免形状异常误分类。
 Tensor decodeRemoteTensorFrame(const Payload& payload, const char* context) {
 	try {
 		return decodeTensor(nlohmann::json::parse(payload));
 	} catch (const DcCodecRemoteError&) {
-		throw; // 已是契约类型：不二次包装
+		throw; // 契约类型，不二次包装
 	} catch (const std::exception& e) {
 		throw DcCodecRemoteError(std::string(context) + e.what());
 	}
@@ -154,7 +148,7 @@ Tensor decodeRemoteTensorFrame(const Payload& payload, const char* context) {
 
 } // namespace
 
-/// 数值张量端口（in "data" Float → out "result" Float）
+/// 数值张量端口
 class TensorJsonCodec : public DcNetCodec {
 public:
 	Node::Schema schema() const override {
@@ -180,7 +174,7 @@ public:
 	}
 };
 
-/// Data 文本端口（in "text" Data → out "result" Data）
+/// Data 文本端口
 class TextJsonCodec : public DcNetCodec {
 public:
 	Node::Schema schema() const override {
@@ -214,17 +208,15 @@ std::shared_ptr<DcNetCodec> makeTextJsonCodec() {
 	return std::make_shared<TextJsonCodec>();
 }
 
-// ── 服务端镜像 codec（M-server；DESIGN.md §3.6）──
-
-/// 单张量进出的服务端 codec：与出站 tensor/text codec 共用同一 v1 报文格式。
+/// 服务端镜像 codec：单张量进出，与出站 codec 共用同一 v1 报文格式。
 class TensorJsonServerCodec final : public DcNetServerCodec {
 public:
 	TensorJsonServerCodec(std::string inputPort, std::string outputPort)
 		: _inputPort(std::move(inputPort)), _outputPort(std::move(outputPort)) {}
 
 	std::unordered_map<std::string, Tensor> decodeRequest(const Payload& request) override {
-		const auto j = nlohmann::json::parse(request); // 解析失败 → 异常 → 监听器 415
-		return {{_inputPort, decodeTensor(j)}};        // 未知 dtype → 异常 → 415
+		const auto j = nlohmann::json::parse(request); // 解析失败 → 监听器 415
+		return {{_inputPort, decodeTensor(j)}};        // 未知 dtype → 415
 	}
 
 	Payload encodeResponse(const std::unordered_map<std::string, Tensor>& outputs) override {

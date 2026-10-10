@@ -57,7 +57,6 @@ void TensorSlot::resolveDefaultIfNeeded(const SlotMap& peers) {
 }
 
 const Tensor& TensorSlot::view() const {
-	// 优先返回运行时数据
 	if (auto* t = peek<Tensor>()) {
 		return *t;
 	}
@@ -98,7 +97,6 @@ void TensorSlot::abort(ErrorType errorType, const std::string& message) const {
 	throw TensorException(errorType, source, message);
 }
 
-// ── Config ──
 TensorSlot::Config& TensorSlot::Config::setPosition(Position p) {
 	position = p;
 	return *this;

@@ -12,17 +12,13 @@
 
 namespace DC {
 
-/// @brief 推理框架的核心张量对象，作为输入/输出数据的统一载体。
-/// 提供类型安全的创建、索引访问、形状变换和数据序列化能力。
-///
-/// 序列化/形状/视图能力的入口见 data()/loadData()/expand()/crop() 与 View/ConstView。
-///
+/// @brief 推理框架的核心张量对象：输入/输出数据的统一载体（创建、索引、形状变换、数据读写）。
 class Tensor {
 public:
-	using TensorType = TensorMeta::TensorType; ///< 张量逻辑类型枚举（Float/Int/Uint/Bool/Char/Data/Void）。
-	using ErrorType = TensorException::ErrorType; ///< 错误类型枚举。
-	using DataBlock = TensorData::DataBlock; ///< 原始字节块，即 std::vector<std::byte>。
-	using Shape = std::vector<int64_t>; ///< 形状向量，支持负索引表示。
+	using TensorType = TensorMeta::TensorType;
+	using ErrorType = TensorException::ErrorType;
+	using DataBlock = TensorData::DataBlock;
+	using Shape = std::vector<int64_t>;
 
 	virtual ~Tensor() = default;
 	class View;
@@ -31,178 +27,95 @@ public:
 	/// @brief 默认构造一个 Void 类型的空张量。
 	Tensor();
 
-	/// @brief 指定类型、元素大小、形状和可选初始数据构造张量。
-	/// @param type 张量逻辑类型。
-	/// @param typeSize 单元素字节数（0 则自动推导）。
-	/// @param shape 初始形状（空向量表示标量）。
-	/// @param data 可选的初始稠密字节数据（移动语义）。
+	/// @brief 构造张量（typeSize=0 时自动推导；空 shape 表示标量）。
 	Tensor(const TensorType& type, size_t typeSize = 0, const Shape& shape = {}, DataBlock&& data = {});
 
-	/// @brief 工厂方法：从 C++ 类型 T 推导逻辑类型和元素大小创建张量。
-	/// @tparam T 元素类型（如 float、int32_t），必须已在类型映射中注册。
-	/// @param shape 初始形状（空向量表示标量）。
-	/// @param data 可选的初始稠密字节数据（移动语义）。
-	/// @return 构造完成的 Tensor 对象。
-	/// @code
-	/// auto t = Tensor::Create<float>({2, 3}, std::move(bytes));
-	/// auto s = Tensor::Create<int32_t>(); // 标量
-	/// @endcode
+	/// @brief 工厂方法：从 C++ 类型 T 推导逻辑类型与元素大小。
 	template <typename T>
 	static Tensor Create(const Shape& shape = {}, DataBlock&& data = {});
 
-	/// @brief 设置张量名称（用于日志和错误定位）。
-	/// @return 自身引用，支持链式调用。
+	/// @brief 设置张量名称（日志/错误定位用）。
 	Tensor& setName(const std::string& name);
 
-	/// @brief 索引访问（非 const）：返回可写 View 代理对象，支持链式索引和数据读写。
-	/// @param index 维度索引，支持负数（从末尾倒序）。
-	/// @return 可写 View 代理对象。
+	/// @brief 索引访问（非 const）：返回可写 View 代理（负索引从末尾倒序）。
 	View operator[](int64_t index);
 
-	/// @brief 索引访问（const）：返回只读 ConstView 代理对象，仅支持链式索引与读取；
-	///        不提供任何写入口，编译期禁止通过 const 张量修改数据。
-	/// @param index 维度索引，支持负数（从末尾倒序）。
-	/// @return 只读 ConstView 代理对象。
+	/// @brief 索引访问（const）：返回只读 ConstView，编译期禁止修改。
 	ConstView operator[](int64_t index) const;
 
-	/// @brief 获取当前张量的顶层视图（空路径）。
+	/// @brief 获取顶层视图（空路径）。
 	View view();
 
-	/// @brief 将张量作为标量读取。要求张量为 0-D 标量。
-	/// @tparam T 期望的 C++ 类型，其 sizeof(T) 必须等于 typeSize()。
-	/// @return 标量值的副本。
+	/// @brief 以标量读取（要求 0-D 标量）。
 	template <typename T>
 	T item() const;
 
-	/// @brief 拷贝构造：深拷贝元数据和内部数据。
 	Tensor(const Tensor& other);
 
-	/// @brief 移动构造：接管 other 的资源，other 变为可析构的空状态。
 	Tensor(Tensor&& other) noexcept;
 
-	/// @brief 拷贝赋值：深拷贝元数据和内部数据。
 	Tensor& operator=(const Tensor& other);
 
-	/// @brief 移动赋值：接管 other 的资源，other 变为可析构的空状态。
 	Tensor& operator=(Tensor&& other) noexcept;
 
-	/// @brief 标量赋值：无索引直接赋值时，将当前张量设置为 0-D 标量。
-	/// @tparam T 要写入的标量类型。sizeof(T) 必须等于 typeSize()。
-	/// @param value 要写入的标量值。
-	/// @return 自身引用。
-	/// @throws TensorException(TypeMismatch) 若类型大小不匹配。
-	/// @code
-	/// Tensor s = Tensor::Create<float>();
-	/// s = 3.14f;  // 设置标量值为 3.14
-	/// @endcode
+	/// @brief 标量赋值：将当前张量设置为 0-D 标量；sizeof(T) 不匹配抛 TypeMismatch。
 	template <typename T>
 	Tensor& operator=(const T& value);
 
-	/// @brief 用指定的值填充整个张量的所有元素。
-	/// @tparam T 填充值的类型。
-	/// @param value 要填充的值。
-	/// @return 自身引用。
-	/// @throws TensorException(TypeMismatch) 若类型大小不匹配。
-	/// @code
-	/// auto t = Tensor::Create<int32_t>({2, 2});
-	/// t.fill<int32_t>(7);  // 所有元素变为 7
-	/// @endcode
+	/// @brief 用指定值填充整个张量；sizeof(T) 不匹配抛 TypeMismatch。
 	template <typename T>
 	Tensor& fill(const T& value);
 
-	/// @brief 获取张量的逻辑类型标签。
 	TensorType type() const;
 
-	/// @brief 获取单元素字节数。
 	size_t typeSize() const;
 
-	/// @brief 获取当前张量的动态形状（CurrentShape）。
-	/// @details 根据当前实际数据的维度信息计算形状；与 RuleShape 可能不同。
+	/// @brief 获取当前动态形状（由实际数据维度计算；与 RuleShape 可能不同）。
 	Shape shape() const;
 
-	/// @brief 以类型 T 的只读视图访问底层稠密数据。
-	/// @tparam T 期望的元素类型。sizeof(T) 必须是 typeSize() 的约数。
-	/// @return 包含稠密连续数据的只读 span。若无数据则返回空 span。
-	/// @throws std::invalid_argument 若类型大小不匹配。
-	/// @note 若当前为稀疏视图模式，会自动触发稠密缓存构建。
-	/// @code
-	/// auto t = Tensor::Create<float>({2, 3});
-	/// // ... 填充数据 ...
-	/// auto span = t.data<float>();
-	/// for (float v : span) { ... }
-	/// @endcode
+	/// @brief 以类型 T 的只读视图访问底层稠密数据（稀疏模式自动物化缓存）。
 	template <typename T>
 	std::span<const T> data() const;
 
-	/// @brief 以原始字节的只读视图访问底层数据。
-	/// @return 包含稠密连续字节的只读 span。
+	/// @brief 以原始字节只读视图访问底层数据。
 	std::span<const std::byte> bytes() const;
 
-	/// @brief 直接加载外部稠密数据，避免逐块登记的开销。
-	/// @param data 要移动进来的原始字节块。
-	/// @param shape 对应的元素形状。
-	/// @return 自身引用。
-	/// @note 适用于推理输出等已是稠密数据的场景。
+	/// @brief 直接加载外部稠密数据（避免逐块登记开销）。
 	Tensor& loadData(DataBlock&& data, const Shape& shape);
 
-	/// @brief 将张量扩展至目标形状，新增区域用 fillData 填充。
-	/// @tparam T 填充数据类型。
-	/// @param targetShape 目标形状（每维必须 >= 当前维度大小）。
-	/// @param fillData 新增区域的填充值（默认 T{}）。
-	/// @return 自身引用。
-	/// @throws std::invalid_argument 若 targetShape 的任一维小于当前维。
-	/// @note 已有数据保持不变，仅对缺失的块写入填充值。
+	/// @brief 扩展至目标形状（每维 >= 当前）；已有数据不变，新增区域填 fillData。
 	template <typename T>
 	Tensor& expand(const Shape& targetShape, const T& fillData = T());
 
-	/// @brief 将张量裁剪至目标形状（沿每维截取前缀）。
-	/// @param targetShape 目标形状（每维必须 <= 当前维度大小）。
-	/// @return 自身引用。
-	/// @throws std::invalid_argument 若 targetShape 的任一维大于当前维或秩不匹配。
-	/// @note 裁剪会重新调整稠密缓存大小，丢弃超出部分的数据。
+	/// @brief 裁剪至目标形状（沿每维截取前缀；每维 <= 当前，秩须一致）。
 	Tensor& crop(const Shape& targetShape);
 
-	/// @brief 消费式取出内部缓存数据（移动所有权后内部缓存清空）。
-	/// @details 数据以原始字节堆视作重解释源：按调用方指定的 T 逐字节重解释，
-	///          不进行任何类型/大小校验——重解释安全由实现保证（容量按 T 精确重算）。
-	/// @tparam T 期望的元素类型（须可平凡复制）。
-	/// @return 数据副本（std::vector<T>）；元素数 = ceil(总字节数 / sizeof(T))，
-	///         全部字节进入结果，末元素不足部分零填充；无数据时返回空 vector。
-	/// @note 取出后缓存被清空，hasCache() 将返回 false。
+	/// @brief 消费式取出内部缓存（取出后清空；字节按 T 重解释，末元素零填充）。
 	template <typename T>
 	std::vector<T> getData();
 
-	/// @brief 查询是否为 0-D 标量张量。
 	bool isScalar() const {
 		return _data.isScalar();
 	}
 
-	/// @brief 查询是否已初始化且无数据内容。
 	bool empty() const {
 		return _data.empty();
 	}
 
-	/// @brief 查询是否包含有效数据（至少具备稀疏视图或稠密缓存之一）。
 	bool valid() const {
 		return _data.valid();
 	}
 
-	/// @brief 查询稠密缓存是否已构建。
 	bool hasCache() const {
 		return _data.hasCache();
 	}
 
-	// ── 冻结（共享发布）──
-
-	/// @brief 冻结：预物化稠密缓存并置冻结位（发布到共享网络前的一次性固化）。
-	/// @details 冻结后：一切写路径（write/fill/expand/crop/loadData/set 等）
-	///          抛 TensorException(Frozen)；只读访问不再触发任何惰性物化；
-	///          拷贝/克隆产出非冻结的可变副本。用于多消费者只读共享前的固化。
+	/// @brief 冻结：预物化稠密缓存并置冻结位；冻结后写路径抛 TensorException(Frozen)，只读不再触发惰性物化。
 	void freeze() {
 		_data.freeze();
 	}
 
-	/// @brief 是否已冻结（发布到共享网络后只读）。
+	/// @brief 是否已冻结。
 	bool isFrozen() const {
 		return _data.isFrozen();
 	}
@@ -217,89 +130,60 @@ private:
 
 	std::optional<ErrorType> checkSingleElementView(const Shape& path, const Shape& shape) const;
 
-	// 向指定路径写数据块 (会在错误时抛出 via abort)
 	template <typename T>
 	void write(const Shape& path, const std::vector<T>& data);
 
-	// 向指定路径写标量（路径可指向一个元素或一个单元素子视图，支持广播）(会在错误时抛出)
+	/// @brief 写标量（支持广播到单元素子视图）；错误经 abort 抛出。
 	template <typename T>
 	void write(const Shape& path, const T& data);
 
-	// 从指定路径读取数据块并按 typeSize 解释为 T 元素的只读 span。路径语义同上。
 	template <typename T>
 	std::span<const T> read(const Shape& path) const;
 
-	// 读取标量，路径可指向一个元素或一个单元素子视图（支持广播）。在错误时抛出异常。
+	/// @brief 读标量（支持单元素子视图广播）；错误经 abort 抛出。
 	template <typename T>
 	T readScalar(const Shape& path) const;
 
-	// 接管数据与元信息（move 语义）
 	void moveFrom(Tensor&& other) noexcept;
 
 	TensorData::Shape indexShape(const Shape& shape, bool isRead) const;
 
-	// 异常中止
 	void abort(ErrorType errorType = ErrorType::Other, const std::string& message = "") const;
 };
 
-/// @brief 张量索引视图代理，支持链式索引和多维数据的读写。
-///
-/// View 是 [Tensor::operator[]](#) 的返回类型，通过链式调用累积索引路径，
-/// 最终通过赋值或读取操作将数据写入张量或从张量读取。
-/// 支持负索引（-1 表示最后一维）。
-///
-/// @par 典型用法
-/// @code
-/// t[0] = std::vector<float>{1.0f, 2.0f, 3.0f};  // 整行写入
-/// t[1][2].set(99.0f);                              // 单元素写入
-/// float v = t[1][2].readScalar<float>();            // 单元素读取
-/// auto row = t[0].read<float>();                    // 整行读取
-/// @endcode
+/// @brief 张量索引视图代理：链式索引累积路径，赋值/读取时落到张量（-1 表示最后一维）。
 class Tensor::View {
 public:
-	/// @brief 从可变张量构造视图。
 	View(Shape&& shape, Tensor& top) : _shape(std::move(shape)), _top(top) {}
 
-	/// @brief 继续索引下一维，返回新的 View 节点以支持链式/分叉调用。
-	/// @param index 维度索引，支持负数（从末尾倒序）。
-	/// @return 新 View；与源视图共享前缀、互不影响，可从同一视图多次分叉。
+	/// @brief 继续索引下一维（返回新 View，可与源视图分叉使用）。
 	View operator[](int64_t index) const {
 		Shape next = _shape;
 		next.push_back(index);
 		return View(std::move(next), _top);
 	}
 
-	/// @brief 通过 View 向张量写入值（等价于 set(value)）。
-	/// @tparam T 要写入的数据类型。
-	/// @param value 要写入的值。
-	/// @return 顶层张量引用。
+	/// @brief 写入值（等价于 set）。
 	template <typename T>
 	Tensor& operator=(const T& value) {
 		set(value);
 		return _top;
 	}
 
-	/// @brief 通过 View 向张量写入值。
-	/// @tparam T 要写入的数据类型。
-	/// @param value 要写入的值（标量或向量）。
-	/// @return 顶层张量引用。
+	/// @brief 写入值（标量或向量）。
 	template <typename T>
 	Tensor& set(const T& value) {
 		_top.write(_shape, value);
 		return _top;
 	}
 
-	/// @brief 从 View 读取标量值。
-	/// @tparam T 期望的 C++ 类型。
-	/// @return 标量值的副本。
+	/// @brief 读取标量值。
 	template <typename T>
 	T readScalar() const {
 		return _top.readScalar<T>(_shape);
 	}
 
-	/// @brief 从 View 读取数据块（行或子张量）的只读 span。
-	/// @tparam T 期望的元素类型。
-	/// @return 数据的只读 span。
+	/// @brief 读取数据块（行/子张量）的只读 span。
 	template <typename T>
 	std::span<const T> read() const {
 		return _top.read<T>(_shape);
@@ -309,42 +193,25 @@ public:
 	Tensor& _top;
 };
 
-/// @brief 张量只读索引视图代理：const Tensor 的 operator[] 返回类型。
-///
-/// 仅支持链式索引与只读访问（read / readScalar），不提供 set / operator=
-/// 等任何写入口——const 张量经此路径在编译期无法被修改。
-///
-/// @par 典型用法
-/// @code
-/// const auto& ct = t;
-/// auto row = ct[0].read<float>();          // 整行读取
-/// float v = ct[1][2].readScalar<float>();  // 单元素读取
-/// @endcode
+/// @brief 张量只读索引视图代理：仅支持链式索引与读取，无任何写入口。
 class Tensor::ConstView {
 public:
-	/// @brief 从常量张量构造只读视图。
 	ConstView(Shape&& shape, const Tensor& top) : _shape(std::move(shape)), _top(top) {}
 
-	/// @brief 继续索引下一维，返回新的 ConstView 节点以支持链式/分叉调用。
-	/// @param index 维度索引，支持负数（从末尾倒序）。
-	/// @return 新 ConstView；与源视图共享前缀、互不影响，可从同一视图多次分叉。
+	/// @brief 继续索引下一维。
 	ConstView operator[](int64_t index) const {
 		Shape next = _shape;
 		next.push_back(index);
 		return ConstView(std::move(next), _top);
 	}
 
-	/// @brief 从 View 读取标量值。
-	/// @tparam T 期望的 C++ 类型。
-	/// @return 标量值的副本。
+	/// @brief 读取标量值。
 	template <typename T>
 	T readScalar() const {
 		return _top.readScalar<T>(_shape);
 	}
 
-	/// @brief 从 View 读取数据块（行或子张量）的只读 span。
-	/// @tparam T 期望的元素类型。
-	/// @return 数据的只读 span。
+	/// @brief 读取数据块（行/子张量）的只读 span。
 	template <typename T>
 	std::span<const T> read() const {
 		return _top.read<T>(_shape);
@@ -364,7 +231,7 @@ Tensor Tensor::Create(const Shape& shape, DataBlock&& data) {
 
 template <typename T>
 T Tensor::item() const {
-	return _data.readElement<T>({}); // 通过空路径访问标量数据
+	return _data.readElement<T>({});
 }
 
 template <typename T>
@@ -373,19 +240,17 @@ Tensor& Tensor::operator=(const T& value) {
 		abort(*err, "type mismatch in scalar assignment");
 	}
 
-	// 如果不存在缓存，优先使用密集写入快速路径安全地创建0维标量。
+	// 优先复用稠密缓存写入路径；无缓存则直接装入标量字节。
 	DataBlock bytes(_meta.typeSize);
 	std::fill(bytes.begin(), bytes.end(), std::byte(0));
 	std::memcpy(bytes.data(), &value, std::min(sizeof(T), _meta.typeSize));
 	if (_data.hasCache()) {
-		// write into existing dense cache
 		if (!_data.writeCacheElement({}, value)) {
 			abort(ErrorType::Other, "failed to write scalar into dense cache");
 		}
 		_data.setScalar(true);
 		return *this;
 	}
-	// 没有稠密缓存：设置稠密字节以表示标量（创建稠密通过模式）
 	_data.loadData({}, _meta.typeSize, std::move(bytes));
 	_data.setScalar(true);
 	return *this;
@@ -469,26 +334,22 @@ std::span<const T> Tensor::read(const Shape& path) const {
 // 标量读写
 template <typename T>
 T Tensor::readScalar(const Shape& path) const {
-	// dataShape is TensorData::Shape (vector<size_t>)
 	auto dataShape = _data.getCurrentShape();
 	if (auto err = checkTypeMatch(sizeof(T)))
 		abort(*err, "type mismatch in scalar read");
 	if (auto err = checkPathValid(path, dataShape))
 		abort(*err, "invalid path in scalar read");
 
-	// 如果路径长度等于秩，则读取单个元素
 	if (path.size() == dataShape.size()) {
-		auto full = indexShape(path, true); // convert/validate
+		auto full = indexShape(path, true);
 		return _data.readElement<T>(full);
 	}
 
-	// 路径短于秩：确保剩余维度乘积为1
-	// 将 dataShape 转换为 Tensor::Shape 以进行单元素检查
+	// 路径短于秩：校验剩余维度乘积为 1（单元素视图）
 	Shape asTensorShape(dataShape.begin(), dataShape.end());
 	if (auto err = checkSingleElementView(path, asTensorShape))
 		abort(*err, "not a scalar view");
 
-	// 构建完整路径，末尾填充零
 	Shape fullPath = path;
 	fullPath.insert(fullPath.end(), dataShape.size() - path.size(), 0);
 	auto full = indexShape(fullPath, true);
@@ -500,9 +361,7 @@ std::vector<T> Tensor::getData() {
 	static_assert(std::is_trivially_copyable_v<T>, "Tensor::getData requires trivially copyable type");
 	auto data = _data.getData();
 	const size_t bytes = data.size();
-	// 字节堆按 T 重解释：元素数 = ceil(总字节 / sizeof(T))——全部字节进入结果
-	// （末元素不足部分由 vector 值初始化零填充）；容量与拷贝均以 sizeof(T) 为
-	// 基准，typeSize() 不参与计算（无除零、无"分配/拷贝基准不一致"的越界）。
+	// 元素数 = ceil(总字节 / sizeof(T))；全部字节进入结果，末元素零填充。
 	std::vector<T> result((bytes + sizeof(T) - 1) / sizeof(T));
 	if (bytes > 0)
 		std::memcpy(result.data(), data.data(), bytes);

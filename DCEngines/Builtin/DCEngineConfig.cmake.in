@@ -1,11 +1,8 @@
 # DCEngineConfig.cmake.in - Builtin CPU 引擎包配置模板
-#
-# 生成：configure_package_config_file()（见 DCEngines/Builtin/CMakeLists.txt）
-# 提供：DCEngine::Builtin 目标（零外部推理框架依赖，仅依赖 DCinfer 核心包）。
+# 由 configure_package_config_file() 生成；提供 DCEngine::Builtin 目标。
 
 @PACKAGE_INIT@
 
-# find_package 版本匹配与消费方可见的版本变量
 set(DCEngine_VERSION "@DCINFER_PKG_VERSION@")
 
 include(CMakeFindDependencyMacro)

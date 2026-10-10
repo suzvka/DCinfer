@@ -16,8 +16,6 @@ NodeExecutor::NodeExecutor(const Node& node)
 
 NodeExecutor::~NodeExecutor() = default;
 
-// ── task 级输入 ──
-
 void NodeExecutor::setInput(const TaskId& taskId, const std::string& portName, Value data) {
 	_impl->exec.buffer.setInput(taskId, portName, std::move(data), _node->schema());
 }
@@ -25,8 +23,6 @@ void NodeExecutor::setInput(const TaskId& taskId, const std::string& portName, V
 void NodeExecutor::setInput(const TaskId& taskId, std::unordered_map<std::string, Value> inputs) {
 	_impl->exec.buffer.setInputBatch(taskId, std::move(inputs), _node->schema());
 }
-
-// ── task 级输出 ──
 
 bool NodeExecutor::isReady(const TaskId& taskId) const {
 	return _node->isReady(taskId, _impl->exec.buffer);
@@ -38,7 +34,7 @@ bool NodeExecutor::hasOutput(const TaskId& taskId, const std::string& name) cons
 
 Value NodeExecutor::takeOutput(const TaskId& taskId, const std::string& name) {
 	Value v = _impl->exec.buffer.takeOutput(taskId, name);
-	// 发布残留载荷（广播共享/冻结）：产出独立可变副本，保证 take 即得可变所有权
+	// 共享/冻结载荷需先克隆，保证 take 即得可变所有权
 	if (v.isPublished())
 		return v.cloneOwned();
 	return v;
@@ -47,8 +43,6 @@ Value NodeExecutor::takeOutput(const TaskId& taskId, const std::string& name) {
 std::unordered_map<std::string, Value> NodeExecutor::collectOutputs(const TaskId& taskId) {
 	return _impl->exec.buffer.collectOutputs(taskId);
 }
-
-// ── task 生命周期 ──
 
 bool NodeExecutor::hasTask(const TaskId& taskId) const {
 	return _impl->exec.buffer.hasTask(taskId);
@@ -62,15 +56,9 @@ size_t NodeExecutor::taskCount() const {
 	return _impl->exec.buffer.taskCount();
 }
 
-// ── 执行 ──
-
 NodeResult NodeExecutor::tryExecute(const TaskId& taskId) {
 	return ExecutionPipeline::execute(taskId, *_node, _impl->exec, _impl->gate);
 }
-
-// ════════════════════════════════════════════
-// Tensor 便捷接口
-// ════════════════════════════════════════════
 
 void NodeExecutor::setInput(const TaskId& taskId, const std::string& portName, Tensor data) {
 	setInput(taskId, portName, Value(std::make_unique<Tensor>(std::move(data))));
@@ -93,7 +81,7 @@ Tensor NodeExecutor::takeOutputTensor(const TaskId& taskId, const std::string& n
 							"output '" + name + "' is not a DC::Tensor (innerType=" +
 								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
 	}
-	// takeOutput 已保证独占可变（共享时已克隆），直接转移载荷
+	// takeOutput 已保证独占可变，可直接转移载荷
 	return std::move(*t);
 }
 
@@ -104,8 +92,7 @@ std::unordered_map<std::string, Tensor> NodeExecutor::collectOutputTensors(const
 	for (auto& [name, nt] : outputs) {
 		auto* t = nt.as<Tensor>();
 		if (t) {
-			// 发布残留载荷（广播共享/冻结）：深拷贝产出独立可变副本
-			// （move 会破坏其他持有者或冻结载荷的只读契约）
+			// 共享/冻结载荷须深拷贝：move 会破坏其他持有者或冻结载荷的只读契约
 			if (nt.isPublished())
 				result.emplace(name, Tensor(*t));
 			else

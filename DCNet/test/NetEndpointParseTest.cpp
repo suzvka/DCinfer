@@ -1,10 +1,5 @@
-// NetEndpoint::parse 严格校验 回归测试（P1：协议降级与端口静默接受）
-//
-// 覆盖：
-//   - 大小写不敏感 scheme：HTTPS:// 识别为 TLS、FTP:// 等未知 scheme 拒绝
-//   - 端口严格解析：非法（abc）/ 负数（-1）/ 超范围（99999）/ 空串 → 拒绝；
-//     合法端口、无端口（默认 0，经 Poco::URI 回退协议默认端口）→ 接受
-//   - 无 scheme 简写（host[:port][/path]）兼容不变
+// NetEndpoint::parse 严格校验回归测试：scheme 大小写 / 未知 scheme 拒绝 /
+// 端口严格解析 / 无 scheme 简写兼容。
 #include "DCNet/NetEndpoint.h"
 #include "NodeException.h"
 
@@ -31,7 +26,7 @@ static int g_failures = 0;
 		} catch (const DC::NodeException&) {                                                                           \
 			thrown = true;                                                                                             \
 		} catch (...) {                                                                                                \
-			thrown = true; /* 错误类型不符同样视为失败 */                                                              \
+			thrown = true;                                                              \
 		}                                                                                                              \
 		if (!thrown) {                                                                                                 \
 			++g_failures;                                                                                              \
@@ -94,8 +89,7 @@ static void testNoSchemeShorthandUnchanged() {
 		CHECK(ep.basePath == "/path", "shorthand explicit path");
 	}
 	{
-		// P1 更正结论：port=0 → endpoint() 不附加端口 → 下游 Poco::URI 返回
-		// 已知协议的默认端口；这不是缺陷而是兼容行为
+		// port=0 → 不附加端口；下游 Poco::URI 回退协议默认端口（兼容行为）
 		auto ep = NetEndpoint::parse("http://example.com");
 		CHECK(ep.port == 0 && !ep.useTls, "scheme without port defaults to protocol default port");
 		CHECK(ep.endpoint() == "http://example.com/v1", "endpoint composition unchanged");

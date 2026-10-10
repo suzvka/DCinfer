@@ -12,14 +12,12 @@
 
 namespace DC {
 
-using TaskId = std::string; ///< 与 Node::TaskId / ExecutionEngine::TaskId 同义（task 标识）
+using TaskId = std::string; ///< 与 Node::TaskId 同义
 
-/// @brief 一次 task 的执行态：按节点名惰性容纳 NodeExecState。
-///
-/// 未被 feedInput/传播触及的节点不产生条目。
+/// @brief 一次 task 的执行态：按节点名惰性容纳 NodeExecState（未触及的节点无条目）。
 class TaskExecutionState {
 public:
-	/// @brief  取指定节点的执行态，不存在则按 schema 构建（线程安全）
+	/// @brief 取指定节点的执行态，不存在则按 schema 构建（线程安全）。
 	NodeExecState& ensure(const std::string& nodeName, const NodeSchema& schema) {
 		std::lock_guard lk(_mutex);
 		auto& slot = _nodes[nodeName];
@@ -28,14 +26,14 @@ public:
 		return *slot;
 	}
 
-	/// @brief  查找指定节点的执行态（不创建）；不存在返回 nullptr
+	/// @brief 查找指定节点的执行态（不创建）；不存在返回 nullptr。
 	NodeExecState* find(const std::string& nodeName) {
 		std::lock_guard lk(_mutex);
 		auto it = _nodes.find(nodeName);
 		return it != _nodes.end() ? it->second.get() : nullptr;
 	}
 
-	/// @brief  返回已创建执行态的节点名列表（已注入 input/传播触及的节点）
+	/// @brief 已创建执行态的节点名列表（已注入 input 或传播触及）。
 	std::vector<std::string> nodeNames() {
 		std::lock_guard lk(_mutex);
 		std::vector<std::string> names;
@@ -47,29 +45,24 @@ public:
 
 private:
 	std::mutex _mutex;
-	/// unique_ptr 保证 NodeExecState 地址稳定（TaskBuffer 内含不可移动的
-	/// shared_mutex），并允许惰性构建
+	// unique_ptr：NodeExecState 不可移动（内含 shared_mutex），需地址稳定。
 	std::unordered_map<std::string, std::unique_ptr<NodeExecState>> _nodes;
 };
 
 /// @brief 图级 task 执行域：task → TaskExecutionState + 节点执行闸表。
 ///
-/// 生命周期与 GraphRuntimeState 一致（飞行任务经共享句柄保活）。
-/// - 闸表在惰性冻结事务（attachGraph）中按源图节点集合一次性预建，
-///   且在快照发布（GraphRuntimeState::_frozen release 置位）之前完成——
-///   并发读者只能观察到"尚未发布"或"闸表完整就绪"两种状态；
-///   此后结构不可变（与 CompiledGraph 同为冻结产物），运行期只翻标志位；
-/// - task 态条目按需惰性创建，终止/复用时整体清除。
+/// 闸表在 attachGraph 冻结事务中按源图节点集合预建（发布前完成，此后结构不可变，
+/// 运行期只翻标志位）；task 态条目按需惰性创建，终止/复用时整体清除。
 class TaskExecutionDomain {
 public:
-	/// @brief  冻结时调用：按源图节点集合预建每节点执行闸（一次性，单线程）
+	/// @brief 冻结时调用：按源图节点集合预建每节点执行闸（一次性，单线程）。
 	void attachGraph(const GraphStore& store) {
 		for (const auto& [name, nodePtr] : store.nodes())
 			_gates[name] = std::make_unique<NodeExecutionGate>();
 	}
 
-	/// @brief  节点执行闸（attachGraph 后结构不可变，并发只读安全）
-	/// @throws NodeException(InternalError) 节点名不在冻结集合（不变量破坏）
+	/// @brief 节点执行闸（attachGraph 后结构不可变，并发只读安全）。
+	/// @throws NodeException(InternalError) 节点名不在冻结集合
 	NodeExecutionGate& gateFor(const std::string& nodeName) const {
 		auto it = _gates.find(nodeName);
 		if (it == _gates.end()) {
@@ -80,11 +73,8 @@ public:
 		return *it->second;
 	}
 
-	/// @brief  取指定 task 的执行态，不存在则创建（线程安全）。
-	///
-	/// 返回 shared_ptr 而非裸引用：终止清理（clearTaskState）可能与在飞
-	/// 节点 lambda 并发——lambda 持有的副本保证其引用的执行态在流水线
-	/// 结束前不被销毁（与“取消不中断在飞执行”的协作式语义一致）。
+	/// @brief 取指定 task 的执行态，不存在则创建。
+	/// 返回 shared_ptr：终止清理与在飞 lambda 并发时，lambda 的副本保证执行态存活到流水线结束。
 	std::shared_ptr<TaskExecutionState> taskState(const TaskId& taskId) {
 		std::lock_guard lk(_mutex);
 		auto& slot = _tasks[taskId];
@@ -93,23 +83,21 @@ public:
 		return slot;
 	}
 
-	/// @brief  查找指定 task 的执行态（不创建）；不存在返回 nullptr
+	/// @brief 查找指定 task 的执行态（不创建）；不存在返回 nullptr。
 	std::shared_ptr<TaskExecutionState> findTaskState(const TaskId& taskId) {
 		std::lock_guard lk(_mutex);
 		auto it = _tasks.find(taskId);
 		return it != _tasks.end() ? it->second : nullptr;
 	}
 
-	/// @brief  清除指定 task 的全部节点执行态
+	/// @brief 清除指定 task 的全部节点执行态。
 	void clearTaskState(const TaskId& taskId) {
 		std::lock_guard lk(_mutex);
 		_tasks.erase(taskId);
 	}
 
 private:
-	std::mutex _mutex; ///< 保护 _tasks 的结构变更（闸表 attach 后只读，无需此锁）
-	/// shared_ptr：_terminate 清理仅从表中摘除；在飞 lambda 的副本
-	/// 保证其引用的执行态存活到流水线结束
+	std::mutex _mutex; ///< 保护 _tasks 结构变更（_gates attach 后只读）
 	std::unordered_map<TaskId, std::shared_ptr<TaskExecutionState>> _tasks;
 	std::unordered_map<std::string, std::unique_ptr<NodeExecutionGate>> _gates;
 };

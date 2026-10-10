@@ -11,60 +11,54 @@
 
 namespace DC {
 
-/// @brief 诊断级别：区分错误、警告与信息性记录。
+/// @brief 诊断级别。
 enum class DiagnosticLevel {
-	Info,    ///< 正常操作事件（如 task 正常完成）
-	Warning, ///< 可疑状态（如声明未满足、信号阻塞导致数据滞留）
-	Error    ///< 执行失败（如节点异常、超时）
+	Info,    ///< 正常操作事件
+	Warning, ///< 可疑状态
+	Error    ///< 执行失败
 };
 
-/// @brief 单条 task 级诊断记录，包含节点名、来源和详细信息
+/// @brief 单条 task 级诊断记录。
 struct TaskError {
-	DiagnosticLevel level = DiagnosticLevel::Error; ///< 诊断级别（默认 Error）
-	std::string nodeName;  ///< 发生错误的节点名
-	std::string source;    ///< 异常来源（如 "InferGraph::_propagateFrom"）
-	std::string message;   ///< 错误详情
-	/// @brief 领域结构化诊断（可为空）：产生错误的子系统的细分分类，
-	///        语义由 Diagnostic::domain 定义；核心状态枚举不承载领域分类
+	DiagnosticLevel level = DiagnosticLevel::Error;
+	std::string nodeName;
+	std::string source;
+	std::string message;
+	/// @brief 领域结构化诊断（可为空；语义由 Diagnostic::domain 定义）。
 	std::optional<Diagnostic> diagnostic;
 };
 
-/// @brief 线程安全的 task 级错误收集器。
-///
-/// 从 InferGraph 提取的独立组件，负责记录和查询执行过程中的错误信息。
-/// 所有公开方法线程安全（内部 mutex）。
+/// @brief 线程安全的 task 级错误收集器（所有公开方法持内部 mutex）。
 class ErrorTracker {
 public:
 	using TaskId = std::string;
 
-	/// @brief  记录一条 task 级错误（Error 级别，线程安全）
+	/// @brief 记录一条 task 级错误。
 	void recordError(const TaskId& taskId, std::string nodeName, std::string source, std::string message);
 
-	/// @brief  记录一条 task 级错误并附带领域诊断（线程安全）
-	/// @note   diagnostic 为可空：仅当失败节点上报了结构化诊断时非空
+	/// @brief 记录一条 task 级错误并附带领域诊断。
 	void recordError(const TaskId& taskId, std::string nodeName, std::string source, std::string message,
 					 std::optional<Diagnostic> diagnostic);
 
-	/// @brief  记录一条 task 级警告（Warning 级别，线程安全）
+	/// @brief 记录一条 task 级警告。
 	void recordWarning(const TaskId& taskId, std::string nodeName, std::string source, std::string message);
 
-	/// @brief  记录一条 task 级信息（Info 级别，线程安全）
+	/// @brief 记录一条 task 级信息。
 	void recordInfo(const TaskId& taskId, std::string nodeName, std::string source, std::string message);
 
-	/// @brief  查询指定 task 的所有诊断记录
-	/// @return 按发生顺序排列的记录列表；若无记录则返回空向量
+	/// @brief 查询指定 task 的所有诊断记录（按发生顺序）。
 	std::vector<TaskError> taskErrors(const TaskId& taskId) const;
 
-	/// @brief  清除所有 task 级错误记录（通常在重新 submit 前调用）
+	/// @brief 清除所有 task 级错误记录。
 	void clearErrors();
 
-	/// @brief  清除指定 task 的诊断记录（同 taskId 复用/释放时调用，防止上一轮残留）
+	/// @brief 清除指定 task 的诊断记录（复用/释放时防止上一轮残留）。
 	void clearTask(const TaskId& taskId) {
 		std::lock_guard lk(_mutex);
 		_taskErrors.erase(taskId);
 	}
 
-	/// @brief  是否有任何 task 发生过错误
+	/// @brief 是否有任何 task 发生过错误。
 	bool hasErrors() const;
 
 private:
@@ -72,9 +66,7 @@ private:
 	std::unordered_map<TaskId, std::vector<TaskError>> _taskErrors;
 };
 
-// ════════════════════════════════════════════
 // 内联实现
-// ════════════════════════════════════════════
 
 inline void ErrorTracker::recordError(const TaskId& taskId, std::string nodeName, std::string source,
 									  std::string message) {

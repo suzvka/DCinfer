@@ -7,25 +7,18 @@ namespace DC {
 
 class SignalStore;
 
-/// @brief 信号阻塞门：节点信号判断逻辑的独立封装。
-///
-/// 与数据图正交解耦，任意时刻可读写。
-/// 未绑定时 isBlocked() 永远返回 false。
+/// @brief 信号阻塞门：节点信号判断逻辑的独立封装（未绑定时 isBlocked() 恒 false）。
 class SignalGate {
 public:
 	SignalGate() = default;
 
-	/// @brief  绑定图级信号到此节点。
-	/// @param store 信号仓库指针（共享所有权）。
-	/// @param name  信号名。
+	/// @brief 绑定信号存储与信号名。
 	void bind(std::shared_ptr<SignalStore> store, std::string name);
 
-	/// @brief  查询节点是否被信号阻塞（只查全局信号）。
-	///         signal==false → 阻塞（true）；signal==true 或未绑定 → 不阻塞（false）。
+	/// @brief 是否被信号阻塞（只查全局信号；false 值 = 阻塞）。
 	bool isBlocked() const;
 
-	/// @brief  查询节点是否被信号阻塞（带 taskId，task 级信号优先）。
-	///         查找顺序：task 级信号 → 全局信号 → 默认值(false)。
+	/// @brief 是否被信号阻塞（task 级优先 → 全局 → false）。
 	bool isBlocked(const std::string& taskId) const;
 
 private:

@@ -3,10 +3,6 @@
 
 namespace DC {
 
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-// Tensor implementation
-//>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
 Tensor::Tensor() {
 	TensorMeta::ensureTypeMap();
 	_meta.type = TensorType::Void;
@@ -31,12 +27,12 @@ Tensor& Tensor::setName(const std::string& name) {
 }
 
 Tensor::View Tensor::operator[](int64_t index) {
-	Shape path = {index}; // Handle empty shape case
+	Shape path = {index};
 	return View(std::move(path), *this);
 }
 
 Tensor::ConstView Tensor::operator[](int64_t index) const {
-	Shape path = {index}; // Handle empty shape case
+	Shape path = {index};
 	return ConstView(std::move(path), *this);
 }
 
@@ -73,7 +69,7 @@ size_t Tensor::typeSize() const {
 }
 
 std::span<const std::byte> Tensor::bytes() const {
-	// Provide a reliable byte view: build dense cache if needed
+	// 返回可靠字节视图：需要时构建稠密 cache
 	return _data.data();
 }
 
@@ -133,7 +129,7 @@ void Tensor::moveFrom(Tensor&& other) noexcept {
 std::vector<size_t> Tensor::indexShape(const Shape& shape, bool isRead) const {
 	auto dataShape = _data.getCurrentShape();
 
-	// For reads we must not request more dimensions than exist.
+	// 读路径不得请求多于数据的维度
 	if (shape.size() > dataShape.size() && isRead) {
 		abort(ErrorType::InvalidPath, "index path has more dimensions than tensor shape");
 	}

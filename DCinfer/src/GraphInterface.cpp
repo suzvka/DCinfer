@@ -10,7 +10,7 @@ namespace DC {
 
 namespace {
 
-/// @brief 别名列表描述（供错误消息列出全部可用别名）
+/// @brief 别名列表描述，供错误消息列出可用别名
 template <typename Bindings>
 std::string describeAliases(const Bindings& bindings) {
 	if (bindings.empty())
@@ -26,20 +26,16 @@ std::string describeAliases(const Bindings& bindings) {
 
 } // namespace
 
-// ════════════════════════════════════════════
-// 图公开接口：工厂与构造
-// ════════════════════════════════════════════
-
 GraphInterface InferGraph::interface() {
-	freeze(); // 取接口即定型：别名 → 坐标一次性解析以冻结签名为准
+	freeze(); // 取接口即定型：别名以冻结签名一次性解析
 	return GraphInterface(*this, inputBindings(), outputBindings());
 }
 
 GraphInterface::GraphInterface(InferGraph& graph, std::vector<InputBinding> inputs,
 							   std::vector<OutputBinding> outputs)
 	: _graph(&graph), _inputs(std::move(inputs)), _outputs(std::move(outputs)) {
-	// 坐标校验（fail-fast）：绑定必须指向存在的节点与方向正确的端口
-	const InferGraph& g = graph; // 冻结后只读访问（非 const node() 是构建期 API）
+	// 坐标校验：绑定须指向存在的节点与方向正确的端口
+	const InferGraph& g = graph; // 冻结后只读访问：非 const node() 是构建期 API
 	for (const auto& b : _inputs) {
 		const Node* n = g.node(b.nodeName);
 		if (!n)
@@ -104,10 +100,6 @@ GraphInterface::Task GraphInterface::createTask() & {
 	return Task(*this, "iface-task-" + std::to_string(n));
 }
 
-// ════════════════════════════════════════════
-// 任务句柄：生命周期与别名转发
-// ════════════════════════════════════════════
-
 GraphInterface::Task::Task(GraphInterface& iface, std::string taskId)
 	: _iface(&iface), _taskId(std::move(taskId)) {}
 
@@ -135,22 +127,19 @@ void GraphInterface::Task::_releaseOnDestroy() noexcept {
 	if (!_iface)
 		return;
 	// 析构路径资源回收（弃置即取消）：
-	//   终态   → 立即释放（状态表条目 / 结果 / 诊断）；
-	//   在飞   → 先请求协作式取消（不中断在飞节点），再经 detachTask 回收兜底
-	//            （已终态立即释放；取消竞态窗口内由终态收尾自动回收）；
-	//   未提交 → 立即释放 feed 输入（discardUnsubmitted）。
+	// 终态立即释放；在飞先协作式取消再经 detachTask 回收兜底；未提交释放 feed 输入。
 	try {
 		const TaskStatus st = _iface->_graph->taskStatus(_taskId);
 		if (st == TaskStatus::Succeeded || st == TaskStatus::Failed || st == TaskStatus::Cancelled) {
 			_iface->_graph->releaseTask(_taskId);
 		} else if (_submitted) {
-			_iface->_graph->cancel(_taskId);     // 弃置即取消（协作式；竞态下返回 false，由回收兜底）
-			_iface->_graph->detachTask(_taskId); // 终态→立即释放；仍在飞→终态收尾自动回收
+			_iface->_graph->cancel(_taskId);     // 弃置即取消；竞态下返回 false 由回收兜底
+			_iface->_graph->detachTask(_taskId); // 终态立即释放；在飞由收尾自动回收
 		} else {
 			_iface->_graph->discardUnsubmitted(_taskId);
 		}
 	} catch (...) {
-		// noexcept 析构：清理失败（极端异常路径）不向外传播
+		// noexcept 析构：清理失败不外传
 	}
 }
 
@@ -166,15 +155,13 @@ GraphInterface::Task& GraphInterface::Task::feed(const std::string& alias, Tenso
 	return *this;
 }
 
-// ── 执行：同步与异步同级（全部转发 InferGraph 运行期 API）──
-
 void GraphInterface::Task::submit() {
 	_iface->_graph->submitBound(_taskId, InferGraph::kDefaultMaxHops);
-	_submitted = true; // 提交成功后置位（抛异常保持 false：该任务于析构时按未提交路径回收）
+	_submitted = true; // 仅提交成功后置位；异常时保持 false，析构按未提交路径回收
 }
 
 TaskResult GraphInterface::Task::run() {
-	return run(std::chrono::milliseconds(0)); // 0 = 无限等待（引擎约定）
+	return run(std::chrono::milliseconds(0)); // 0 = 无限等待
 }
 
 TaskResult GraphInterface::Task::run(std::chrono::milliseconds timeout) {

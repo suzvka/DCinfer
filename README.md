@@ -314,7 +314,7 @@ parent.addNode(op.makeNode("Block"));           // 生成普通 Node 嵌入父�
 - 节点 type 为 `"Builtin"`：DCIr 序列化往返仅保留结构（Schema 骨架），
   与注册算子同等待遇。
 
-## DCNet 安全部署边界（NET-1..NET-10）
+## DCNet 安全部署边界
 
 - 内置 HTTP 监听器**不提供服务端 TLS/mTLS，也不支持 chunked 请求体**；仅接受
   Content-Length 定长请求，每个请求应答后关闭连接。Transfer-Encoding、重复头与
@@ -336,7 +336,7 @@ parent.addNode(op.makeNode("Block"));           // 生成普通 Node 嵌入父�
 
 详细契约参见 [DCNet 设计文档](DCNet/DESIGN.md)。
 
-## 宿主服务背压（CORE-3）
+## 宿主服务背压
 
 核心 `ThreadPool::submit` 队列按设计不设上限，不能把无限网络输入直接变成待执行任务。
 宿主应在分配请求载荷、创建任务或 `feedInput` 前做有界、非阻塞准入；额度用尽立即回复 429/503，

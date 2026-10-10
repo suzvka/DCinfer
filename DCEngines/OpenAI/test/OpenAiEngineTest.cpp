@@ -1,9 +1,5 @@
-// DCEngine_OpenAI 集成测试（MockHttpServer 假远端，真实 HTTP 传输）
-//
-// 覆盖：
-//   - 端到端：OpenAI 节点（chat codec）走 /chat/completions 往返
-//     （prompt/system/params → response；model / stream / messages 断言）
-//   - 失败路径：远端 500 → NetError 归一化（ExecutionFailed / remote:server_error）
+// DCEngine_OpenAI 集成测试（MockHttpServer 假远端，真实 HTTP 传输）。
+// 覆盖：chat 端到端（/chat/completions 往返）；失败路径（500 归一化）。
 
 #include "DCEngine/OpenAiEngine.h"
 #include "NodeExecutor.h"
@@ -46,16 +42,12 @@ static std::atomic<int> g_failures{0};
 
 using namespace DC;
 
-// ── 工具 ──
-
 static Tensor makeTextTensor(const std::string& s) {
 	Tensor::DataBlock block(s.size());
 	if (!s.empty())
 		std::memcpy(block.data(), s.data(), s.size());
 	return Tensor(Tensor::TensorType::Data, 1, {static_cast<int64_t>(s.size())}, std::move(block));
 }
-
-// ── 测试 ──
 
 TEST(chatRoundtrip) {
 	MockHttpServer server;
@@ -108,7 +100,7 @@ TEST(remoteServerErrorNormalized) {
 	});
 
 	auto& reg = EngineRegistry::instance();
-	// 同进程已注册 "OpenAI"（chatRoundtrip，保留首次）：此处沿用，不影响本用例
+	// "OpenAI" 已被 chatRoundtrip 注册（保留首次）：此处沿用
 	DC::OpenAI::registerOpenAiEngine(reg, {});
 
 	auto node = reg.createNode("OpenAI", "errNode",
@@ -123,7 +115,6 @@ TEST(remoteServerErrorNormalized) {
 	CHECK_MSG_PREFIX(result.message, "remote:server_error");
 }
 
-// ── 鉴权：Bearer Token 注入 Authorization 头（P0：云 API 接入）──
 TEST(bearerTokenInjected) {
 	MockHttpServer server;
 	server.start([&](const std::string& path, const std::string&, int& status) {
@@ -136,7 +127,7 @@ TEST(bearerTokenInjected) {
 	});
 
 	auto& reg = EngineRegistry::instance();
-	// 注册保留首次：鉴权变体用独立 engineType，避免与 chatRoundtrip 的 "OpenAI" 冲突
+	// 保留首次：鉴权变体用独立 engineType 避开 "OpenAI"
 	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m", .engineType = "OpenAI.Auth", .authToken = "sk-test-123", .allowInsecureCredentials = true});
 
 	auto node = reg.createNode("OpenAI.Auth", "authNode",
@@ -148,7 +139,7 @@ TEST(bearerTokenInjected) {
 	CHECK(result.ok(), "request with bearer token should succeed");
 	CHECK(server.lastRequestHeaders().find("Authorization: Bearer sk-test-123") != std::string::npos,
 		  "Authorization: Bearer <token> should be injected");
-	// 敏感信息不回显：失败/错误路径均不包含 token（此处仅验证正常路径头注入）
+	// 敏感信息不回显：此处仅验证正常路径头注入
 }
 
 TEST(invalidParamsRejected) {
@@ -171,7 +162,7 @@ TEST(invalidParamsRejected) {
 	CHECK(result.status == Node::Status::InvalidInput, "invalid params → InvalidInput");
 }
 
-// ── 响应结构异常不再被吞掉：缺 content / 非 JSON → ExecutionFailed + dcnet 诊断 ──
+// 响应结构异常：缺 content / 非 JSON → ExecutionFailed + dcnet 诊断
 TEST(malformedResponseRejected) {
 	MockHttpServer server;
 	server.start([&](const std::string&, const std::string&, int& status) {
@@ -191,8 +182,7 @@ TEST(malformedResponseRejected) {
 	CHECK(result.diagnostic.has_value(), "non-JSON → 附带领域诊断");
 	CHECK(result.diagnostic->domain == "dcnet", "诊断 domain=dcnet");
 
-	// 缺 choices[0].message.content（协议漂移）→ ExecutionFailed（dcnet 诊断 code=RemoteMalformed），
-	// 而非空字符串成功
+	// 缺 choices[0].message.content（协议漂移）→ ExecutionFailed，而非空字符串成功
 	MockHttpServer server2;
 	server2.start([&](const std::string&, const std::string&, int& status) {
 		status = 200;
@@ -209,7 +199,7 @@ TEST(malformedResponseRejected) {
 		  "missing content → dcnet 领域诊断");
 }
 
-// ── 合法空内容与字段缺失严格区分：content="" 成功返回 ──
+// 合法空内容与字段缺失严格区分：content="" 成功返回
 TEST(emptyContentSucceeds) {
 	MockHttpServer server;
 	server.start([&](const std::string&, const std::string&, int& status) {
@@ -229,13 +219,13 @@ TEST(emptyContentSucceeds) {
 	CHECK(out.bytes().empty(), "response should be empty string");
 }
 
-// ── maxRetries：传输级失败退避重试（500 一次 → 成功）──
+// maxRetries：传输级失败退避重试（500 一次后成功）
 TEST(transportRetryOnServerError) {
 	MockHttpServer server;
 	std::atomic<int> calls{0};
 	server.start([&](const std::string&, const std::string&, int& status) {
 		if (calls.fetch_add(1) == 0) {
-			status = 500; // 第一次失败（可重试）
+			status = 500;
 			return std::string(R"({"error":{"code":"server_error","message":"boom"}})");
 		}
 		status = 200;
@@ -243,7 +233,7 @@ TEST(transportRetryOnServerError) {
 	});
 
 	auto& reg = EngineRegistry::instance();
-	// 注册保留首次：重试变体用独立 engineType，确保 maxRetries 生效
+	// 保留首次：重试变体用独立 engineType 确保 maxRetries 生效
 	DC::OpenAI::registerOpenAiEngine(reg, {.model = "m", .engineType = "OpenAI.Retry", .maxRetries = 1});
 	auto node = reg.createNode("OpenAI.Retry", "retryNode",
 							   std::string("http://127.0.0.1:" + std::to_string(server.port()) + "/v1"));

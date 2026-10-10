@@ -43,8 +43,6 @@ static int failures = 0;
 	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
 
-// ── 辅助函数 ──
-
 static Value makeFloatTensor(float value) {
 	auto t = std::make_unique<Tensor>(TensorType::Float, sizeof(float));
 	*t = value;
@@ -57,8 +55,6 @@ static Value makeIntTensor(int value) {
 	return Value(std::move(t));
 }
 
-// ── 广播连接器测试 ──
-
 void testBroadcastBasic() {
 	TEST("broadcast 1→3 copies to all outputs") {
 		auto schema = Connector::broadcastSchema(3);
@@ -70,12 +66,10 @@ void testBroadcastBasic() {
 		exec.setInput("t1", "in", makeFloatTensor(42.0f));
 		exec.tryExecute("t1");
 
-		// 验证所有三个输出口都有数据
 		CHECK(exec.hasOutput("t1", "out_0"), "out_0 should have data");
 		CHECK(exec.hasOutput("t1", "out_1"), "out_1 should have data");
 		CHECK(exec.hasOutput("t1", "out_2"), "out_2 should have data");
 
-		// 验证数据正确性
 		auto t0 = exec.takeOutputTensor("t1", "out_0");
 		CHECK(std::abs(t0.item<float>() - 42.0f) < 1e-6f, "out_0 value mismatch");
 
@@ -124,8 +118,6 @@ void testBroadcastNotReady() {
 	END_TEST();
 }
 
-// ── 重入保护测试 ──
-
 void testReentrancy() {
 	TEST("broadcast rejects reentrant execution") {
 		auto schema = Connector::broadcastSchema(2);
@@ -134,13 +126,11 @@ void testReentrancy() {
 		auto node = std::make_unique<Node>("Connector.Broadcast", "bc_re", schema, runFn);
 		NodeExecutor exec(*node);
 
-		// 注入两个不同 task 的数据
 		exec.setInput("t1", "in", makeFloatTensor(1.0f));
 		exec.setInput("t2", "in", makeFloatTensor(2.0f));
 
-		// 第一个执行成功
 		exec.tryExecute("t1");
-		// 第二个也应该能执行（t1 已完成，锁已释放）
+		// t1 完成后锁已释放，t2 应可执行
 		exec.tryExecute("t2");
 
 		exec.clearTask("t1");

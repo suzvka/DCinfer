@@ -1,7 +1,7 @@
 #pragma once
 
 #include "GraphStore.h"
-#include "OutputZone.h"  // OutputBinding
+#include "OutputZone.h"
 #include "CompiledGraph.h"
 #include "GraphException.h"
 
@@ -12,22 +12,11 @@
 
 namespace DC {
 
-/// @brief 图构建器：Build → Freeze → Execute 生命周期中的唯一构建面。
+/// @brief 图构建器：构建期的唯一可写面（addNode/connect/bindInput/bindOutput）。
 ///
-/// 承接拓扑构建 API（addNode/connect/bindInput/bindOutput...）与构建期的
-/// 输出绑定累积。compile() 产出不可变
-/// CompiledGraph 快照并移交拓扑所有权：冻结后所有构建 API 抛
-/// GraphException(Frozen)——"执行期可变拓扑"从数据竞争隐患变为确定性错误。
-///
-/// 线程模型：全部公开方法以内部互斥锁串行化（构建 API 与 compile 互斥）——
-/// 构图与冻结并发时，每个构建操作要么先于编译完成（纳入快照），要么在
-/// 冻结后确定抛 Frozen，不存在"检查通过后被冻结插入"的 TOCTOU 窗口。
-/// compile() 内部先封印（GraphStore::seal + 逐节点 _sealForExecution）
-/// 再只读遍历，保证快照构建阶段与运行期对源图零写入。
-///
-/// 与 InferGraph 的关系：InferGraph 是执行 Facade，内部持有一个
-/// GraphBuilder；构建方法经冻结检查后转发，执行方法走冻结快照。
-/// 拓扑演进 = 重新构建 GraphBuilder → compile 产生新快照。
+/// compile() 产出不可变 CompiledGraph 快照并移交拓扑所有权；冻结后所有构建 API
+/// 抛 GraphException(Frozen)。全部公开方法以内部互斥锁串行化（构图与冻结互斥，
+/// 无 TOCTOU 窗口）。拓扑演进 = 重建 GraphBuilder 并重新 compile。
 class GraphBuilder {
 public:
 	using Edge = GraphStore::Edge;
@@ -40,119 +29,83 @@ public:
 
 	// ── 图构建（冻结前可用）──
 
-	/// @brief  添加节点（转移所有权），返回引用供后续接线引用
-	/// @throws GraphException(DuplicateNode) 若节点名为空或重名
+	/// @brief 添加节点（转移所有权）；空名或重名抛 DuplicateNode。
 	Node& addNode(std::unique_ptr<Node> node);
 
-	/// @brief  端口级接线（默认方式）：上游输出口 → 下游输入口，
-	///         自动插入广播连接器（Broadcast Connector, N=1）
-	/// @throws GraphException(NodeNotFound/PortNotFound) 若节点或端口不存在
-	/// @throws GraphException(DuplicateEdge) 若该输出端口已有出边
-	///         （1:N 分发必须显式创建 Connector.Broadcast(N)，禁止二次 connect）
-	/// @return 指向自动创建的广播连接器的引用
+	/// @brief 端口级接线：自动插入广播连接器（N=1）；同源口再次 connect 扩容扇出。
 	Node& connect(const std::string& srcNode, const std::string& srcPort,
 				  const std::string& dstNode, const std::string& dstPort);
 
-	/// @brief  标记输入：该节点的该端口为图级输入口
-	/// @param  alias  公共别名（必填；须在全部输入绑定中唯一；不参与运行时寻址）
-	/// @throws GraphException(InvalidBinding) 别名为空
-	/// @throws GraphException(DuplicateBinding) 别名重复
+	/// @brief 标记图级输入口（alias 必填且唯一；不参与运行时寻址）。
 	void bindInput(const std::string& nodeName, const std::string& portName,
 				   const std::string& alias);
 
-	/// @brief  标记输出：该节点的该端口产出进入输出区
-	/// @param  alias  公共别名（必填；须在全部输出绑定中唯一；不参与运行时寻址）
-	/// @throws GraphException(InvalidBinding) 别名为空
-	/// @throws GraphException(DuplicateBinding) 别名重复
-	/// @throws GraphException(NonTerminalPort) 绑定端口有出边（compile 期拒绝）——
-	///         取数（OutputZone 搬运）与出边传播共享同一消费槽，非终端绑定
-	///         会截断下游数据流（下游饿死/任务挂起）。中间结果既要对外可见
-	///         又要继续参与下游时显式插入分支：经直通节点承接绑定，绑定挂
-	///         分支叶子（同源口再次 connect 自动扩容扇出）
-	/// @note   重复绑定同一 node:port 为无操作
+	/// @brief 标记图级输出绑定（alias 必填且唯一；重复绑定同一 node:port 为无操作）。
+	/// @throws GraphException(NonTerminalPort) 端口有出边（取数与出边传播共享消费槽）。
 	void bindOutput(const std::string& nodeName, const std::string& portName,
 					const std::string& alias);
 
-	// ── 构建期内省（源图视角：冻结前读构建面；compile 后读快照，前后一致）──
-
-	/// @brief  拓扑只读访问（compile 后返回快照持有的源图）
+	/// @brief 拓扑只读访问（compile 后读快照）。
 	const GraphStore& store() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store() : *_store;
 	}
 
-	/// @brief  获取节点指针（可写指针，构建期专用）
-	/// @throws GraphException(Frozen) 若图已冻结（冻结后经快照只读访问）
+	/// @brief 获取节点可写指针（构建期专用；冻结后抛 Frozen）。
 	Node* node(const std::string& name) {
 		std::lock_guard lk(_mutex);
 		_ensureMutableLocked();
 		return _store->node(name);
 	}
 
-	/// @brief  获取节点指针（只读）
+	/// @brief 获取节点指针（只读）。
 	const Node* node(const std::string& name) const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().node(name) : _store->node(name);
 	}
 
-	/// @brief  节点数量
 	size_t nodeCount() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().nodeCount() : _store->nodeCount();
 	}
 
-	/// @brief  边数量
 	size_t edgeCount() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().edgeCount() : _store->edgeCount();
 	}
 
-	/// @brief  获取所有节点名的列表
 	std::vector<std::string> nodeNames() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().nodeNames() : _store->nodeNames();
 	}
 
-	/// @brief  获取所有边（值副本）：内部容器引用永不外泄——并发构图修改
-	/// （如 connect 扩容 push_back）可能使引用悬空，按值返回隔离此风险
+	/// @brief 获取所有边（值副本；隔离并发构图导致的引用悬空）。
 	std::vector<Edge> edges() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().edges() : _store->edges();
 	}
 
-	/// @brief  获取所有输入绑定（值副本）
 	std::vector<InputBinding> inputBindings() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->store().inputBindings() : _store->inputBindings();
 	}
 
-	/// @brief  获取所有输出绑定的只读引用
 	const std::vector<OutputBinding>& outputBindings() const {
 		std::lock_guard lk(_mutex);
 		return _snapshot ? _snapshot->signature().outputs : _outputBindings;
 	}
 
-	// ── 冻结 ──
-
-	/// @brief  编译构建面为不可变快照（幂等：重复调用返回同一快照）。
-	///
-	/// 构建 GraphSignature（输入/输出绑定快照）→ 拓扑所有权移交快照。
-	/// 此后所有构建 API 抛 GraphException(Frozen)。
+	/// @brief 编译为不可变快照（幂等；此后构建 API 抛 Frozen）。
 	std::shared_ptr<const CompiledGraph> compile();
 
 private:
-	/// @brief  构建守卫：冻结后调用构建 API 抛 GraphException(Frozen)
-	///         （调用方须持有 _mutex）
+	/// @brief 构建守卫；调用方须持有 _mutex。
 	void _ensureMutableLocked() const;
 
-	/// @brief  输出取数端口不变量校验（compile 期、封印前调用：失败可修正重试）：
-	///         绑定端口必须是终端端口（无出边）——取数与边搬运共享同一
-	///         消费槽，非终端绑定会截断下游数据流（声明侧保持完成条件
-	///         语义不变，不受此约束）
+	/// @brief 输出绑定不变量校验（compile 期，封印前）：绑定端口必须无出边。
 	/// @throws GraphException(NonTerminalPort)
 	void _validateOutputBindings() const;
 
-	/// @brief  别名校验（别名是绑定的必填公共名）：拒绝空别名与重复别名
 	template <typename Bindings>
 	static void _ensureAliasValid(const std::string& alias, const Bindings& bindings,
 								   const char* api) {
@@ -166,10 +119,10 @@ private:
 	}
 
 	std::unique_ptr<GraphStore> _store = std::make_unique<GraphStore>();
-	std::vector<OutputBinding> _outputBindings;     ///< 输出绑定（构建期累积；compile 时进签名）
-	std::shared_ptr<const CompiledGraph> _snapshot; ///< compile 产物（幂等返回）
+	std::vector<OutputBinding> _outputBindings;
+	std::shared_ptr<const CompiledGraph> _snapshot;
 
-	// 构建面串行化：全部公开方法持锁；compile 与构建 API 互斥（详见类注释）
+	// 构建面串行化：全部公开方法持锁。
 	mutable std::mutex _mutex;
 };
 

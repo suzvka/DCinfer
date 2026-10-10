@@ -6,20 +6,20 @@
 
 namespace DC::Net {
 
-/// @brief 网络错误分类（核心统一维护的归一化分类，DESIGN.md §3.3 / §6）。
+/// 归一化错误分类。
 enum class NetErrorCategory {
-	None,               ///< 无错误（成功）
-	Timeout,            ///< 超时（可重试）
-	Unreachable,        ///< 连接拒绝 / DNS / 重置 / TLS（可重试）
-	RemoteRejected,     ///< 远端拒绝请求（4xx 输入类问题，不可重试）
-	RemoteAuth,         ///< 鉴权失败（401/403，配置类问题）
-	RemoteRateLimited,  ///< 远端限流（429，可重试）
-	RemoteServer,       ///< 远端故障（5xx，可重试）
-	RemoteMalformed,    ///< 远端报文不可解析
-	Other,              ///< 其他未分类
+	None,
+	Timeout,
+	Unreachable,
+	RemoteRejected,
+	RemoteAuth,
+	RemoteRateLimited,
+	RemoteServer,
+	RemoteMalformed,
+	Other,
 };
 
-/// @brief 传输层错误原语（transport 填入，核心映射为 NetErrorCategory）。
+/// 传输层错误原语（transport 填入，核心映射为 NetErrorCategory）。
 enum class NetTransportError {
 	None,
 	Timeout,
@@ -30,60 +30,43 @@ enum class NetTransportError {
 	Other,
 };
 
-/// @brief 归一化中间结构 + 本地标准报错出口。
-///
-/// 图级语义（localStatus / localMessage）由核心统一计算（finalize），
-/// 适配器只负责填 category / code / retryable / remoteDetail——
-/// 归一化原则：只做"翻译"，不做"发明"（DESIGN.md §3.3）。
+/// 归一化中间结构：适配器填 category / code / retryable / remoteDetail；
+/// localStatus / localMessage 由 finalize 统一计算。
 struct NetError {
 	NetErrorCategory category = NetErrorCategory::None;
-	std::string code;            ///< 对方原始错误码（如 "invalid_api_key"）
-	bool retryable = false;      ///< 超时 / 5xx / 429 → true
-	std::string remoteDetail;    ///< 对方原始报文摘要（保留回溯现场）
-	Node::Status localStatus = Node::Status::Ok;   ///< 归一化出口（图级语义，核心枚举保持通用）
+	std::string code;
+	bool retryable = false;
+	std::string remoteDetail;
+	Node::Status localStatus = Node::Status::Ok;
 	std::string localMessage;    ///< 形如 "net:timeout - <detail>"
-	Diagnostic diagnostic;       ///< 领域诊断（DC::Diagnostic）：domain="dcnet"，code=NetErrorCategory 原值
+	Diagnostic diagnostic;       ///< domain="dcnet"，code=NetErrorCategory 原值
 
 	bool ok() const noexcept { return category == NetErrorCategory::None; }
 };
 
-// ── 归一化入口（纯函数，无 I/O，可单测）──
-
-/// @brief 传输层错误归一化。
-/// @param err    transport 填入的传输错误原语
-/// @param detail 附加细节（errno 字符串、报文摘要等）
+/// 传输层错误归一化；detail 附加 errno 字符串 / 报文摘要等。
 NetError normalizeTransportError(NetTransportError err, std::string detail = {});
 
-/// @brief HTTP 非 2xx 状态码归一化（2xx 由调用方先行判定成功）。
+/// HTTP 非 2xx 状态码归一化（2xx 由调用方先行判定）。
 NetError normalizeHttpStatus(int status, std::string body = {});
 
-/// @brief 远端错误报文归一化。
-/// 支持 OpenAI 风格 {"error":{code,message}} / {"error":"..."} / {"detail":"..."}；
-/// 已知 code 精确映射（如 invalid_api_key → Auth），未知 code 按 fallback 兜底。
-/// @param fallback 报文解析不出已知 code 时使用的类别
+/// 远端错误报文归一化：支持 OpenAI 风格 {"error":{code,message}} 等；
+/// 已知 code 精确映射，未知按 fallback 兜底。
 NetError normalizeRemoteBody(const std::string& body,
 							 NetErrorCategory fallback = NetErrorCategory::RemoteRejected);
 
-/// @brief 组合入口：HTTP 状态 + 报文 → 归一化结果。
-/// 先解析报文中的已知 code（优先于状态码），再按状态码兜底。
+/// HTTP 状态 + 报文组合归一化：报文中的已知 code 优先于状态码。
 NetError normalizeHttpResponse(int status, const std::string& body);
 
-/// @brief 由已填 category/code/retryable/remoteDetail 计算 localStatus/localMessage。
-/// 核心统一出口；上述入口函数内部均已调用。
+/// 由已填字段计算 localStatus / localMessage；上述入口内部均已调用。
 NetError finalize(NetError e);
 
-// ── 入站 wire 逆向映射（M-server；DESIGN.md §6.1）──
-
-/// @brief 服务端 wire 应答状态：本地执行结果状态 → HTTP 状态码。
-/// 核心统一维护（ADR-4），使对端 normalizeHttpResponse 归一化结果等于本地
-/// status（语义一致性）。已知解析限度：非鉴权 InternalError 无忠实 wire
-/// 表示，按「本地执行失败 → 5xx」应答（对端归一化为 ExecutionFailed）。
-/// 鉴权 401/403、过载 429、wire 级垃圾报文 415 不经本映射——它们无本地
-/// 对应物，由监听/装配层直接应答（DESIGN.md §6.1）。
+/// 本地执行结果状态 → wire HTTP 状态码，保证对端归一化结果与本地 status 一致。
+/// 非鉴权 InternalError 无忠实 wire 表示，按 5xx 应答；401/403/429/415
+/// 不经本映射，由监听/装配层直接应答。
 int wireHttpStatusFor(Node::Status status);
 
-/// @brief 服务端 wire 应答错误体 code（诊断细化）。
-/// 未知 code 不影响对端归类（按状态码兜底），仅细化消息前缀 remote:<code>。
+/// 服务端 wire 应答错误体 code（诊断细化）；未知 code 仅使对端消息带 remote:<code> 前缀。
 const char* wireCodeFor(Node::Status status);
 
 } // namespace DC::Net

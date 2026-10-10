@@ -1,11 +1,4 @@
-// 执行并发回归测试（发布前审查 H-1/H-2 修复的确定性用例）
-//
-//   H-1 多输入双触发：两上游并发传播到同一汇聚节点——写入与就绪判定原子化后，
-//       节点恰执行一次、无 Error 级诊断、任务 Succeeded
-//   H-1 节点闸竞争：两任务竞争同一节点执行租约——败者经重投排队执行，
-//       不再被 Reentrant 误判为任务失败（伪失败回归）
-//   H-2 失败闭环：完成回调连续抛出致非 NodeException 逃逸流水线——
-//       统一记录 Error 诊断并收束 Failed，任务不再永久 Running
+// 执行并发回归测试：多输入双触发 / 节点闸竞争 / 非 NodeException 逃逸闭环
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -40,8 +33,6 @@ static int failures = 0;
 #define END_TEST()                                                                                                     \
 	();                                                                                                                \
 	std::cout << "PASSED" << std::endl
-
-// ── 辅助 ──
 
 static Tensor floatTensor(float value) {
 	auto t = Tensor::Create<float>();
@@ -86,13 +77,9 @@ static bool hasErrorLevel(const std::vector<TaskError>& errors) {
 	return false;
 }
 
-// ════════════════════════════════════════════
-// H-1：多输入节点并发双触发 —— 恰执行一次
-// ════════════════════════════════════════════
-
 static void testConcurrentFanInTriggersOnce() {
 	TEST("H-1: concurrent fan-in triggers join node exactly once (atomic ready)") {
-		// 双线程 Operator 资源类：两上游分支真正并发完成并同时向汇聚节点传播（进程级调度器注入）
+		// 双 Operator 槽位：两上游真正并发传播到汇聚节点
 		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 2, 1});
 		InferGraph g(sched);
 
@@ -101,7 +88,7 @@ static void testConcurrentFanInTriggersOnce() {
 		auto u1InF = u1In.get_future();
 		auto u2InF = u2In.get_future();
 
-		// 两上游在 RunFn 内互相等待对方进入——最大化"同拍传播"的概率
+		// 两上游互相等待对方进入，最大化同拍传播概率
 		g.addNode(std::make_unique<Node>("test", "u1", passSchema(),
 			[&](Node::RunContext& ctx) -> Node::Result {
 				u1In.set_value();
@@ -123,7 +110,6 @@ static void testConcurrentFanInTriggersOnce() {
 				return ctx.success();
 			}));
 
-		// 汇聚节点：两输入齐 → 执行（计数执行次数，验证无重复触发）
 		Node::Schema joinSchema;
 		joinSchema.inputs = {Node::Port::in<float>("p1"), Node::Port::in<float>("p2")};
 		joinSchema.outputs = {Node::Port::out<float>("z")};
@@ -156,10 +142,6 @@ static void testConcurrentFanInTriggersOnce() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// H-1：共享图节点闸竞争 —— 败者重投不判死
-// ════════════════════════════════════════════
-
 static void testSharedGraphNodeContention() {
 	TEST("H-1: two tasks contending on the same node both complete via retry") {
 		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 2, 1});
@@ -172,7 +154,7 @@ static void testSharedGraphNodeContention() {
 
 		g.addNode(std::make_unique<Node>("test", "n", passSchema(),
 			[&](Node::RunContext& ctx) -> Node::Result {
-				// 首次执行阻塞：持闸期间另一任务对该节点的提交必然遭拒（Reentrant）
+				// 首次执行阻塞：持闸期间另一任务提交遭 Reentrant 拒绝
 				if (runs.fetch_add(1) == 0) {
 					firstEntered.set_value();
 					releaseFirstF.wait();
@@ -184,17 +166,15 @@ static void testSharedGraphNodeContention() {
 				return ctx.success();
 			}));
 
-		// ta：占住节点执行租约（首执行阻塞中）
 		g.feedInput("ta", "n", "x", floatValue(1.0f));
 		g.submit("ta", "n", "y");
 		firstEnteredF.wait();
 
-		// tb：并发提交同一节点 → 闸忙 → 登记重投（不再记录 Error 判死）
 		g.feedInput("tb", "n", "x", floatValue(2.0f));
 		g.submit("tb", "n", "y");
-		std::this_thread::sleep_for(100ms); // 让 tb 的提交经历"闸忙 → 登记"
+		std::this_thread::sleep_for(100ms);
 
-		releaseFirst.set_value(); // 放行 ta → 闸释放 → tb 重投执行
+		releaseFirst.set_value();
 
 		const auto ra = g.waitForResult("ta", 3s);
 		CHECK(ra.status == TaskStatus::Succeeded, "first task should succeed");
@@ -210,18 +190,12 @@ static void testSharedGraphNodeContention() {
 	END_TEST();
 }
 
-// ════════════════════════════════════════════
-// H-2：非 NodeException 逃逸 —— 失败闭环不中断
-// ════════════════════════════════════════════
-
 static void testNonNodeExceptionClosure() {
 	TEST("H-2: escaping non-NodeException -> Failed with diagnostic (no permanent Running)") {
 		InferGraph g;
 
 		auto n = std::make_unique<Node>("test", "n", passSchema(), passRunFn());
-		// 完成回调总是抛出：回归守护 P1“完成回调至多一次”——回调自身抛出后，
-		// catch 路径的重试通知必须为 no-op（修复前同一回调被调用两次，
-		// 第二次抛出的异常覆盖首次错误语义逃逸流水线）。
+		// 完成回调抛出后，catch 路径的重试通知必须为 no-op（回调至多一次）
 		std::atomic<int> callbackCalls{0};
 		n->setCompletionCallback([&](const Node::TaskId&, const Node::Result&) {
 			++callbackCalls;
@@ -244,8 +218,6 @@ static void testNonNodeExceptionClosure() {
 	}
 	END_TEST();
 }
-
-// ════════════════════════════════════════════
 
 int main() {
 	try {

@@ -17,7 +17,6 @@ SlotWorkspace::SlotWorkspace(const NodeSchema& schema) {
 		_outputSlots.emplace(port.name, TensorSlot(port.name, port.type, port.typeSize, port.shape, cfg));
 	}
 
-	// 为 shapeAnchor 端口安装懒求值 DefaultProvider
 	for (const auto& port : schema.inputs) {
 		if (port.shapeAnchor.has_value()) {
 			auto& slot = _inputSlots.at(port.name);
@@ -36,8 +35,6 @@ SlotWorkspace::SlotWorkspace(const NodeSchema& schema) {
 		}
 	}
 }
-
-// ── RunContext 委托接口 ──
 
 const Value& SlotWorkspace::peekInput(const std::string& name) const {
 	auto it = _inputSlots.find(name);
@@ -81,8 +78,6 @@ const Value* SlotWorkspace::peekOutputRaw(const std::string& name) const {
 		return nullptr;
 	return it->second.peek<Value>();
 }
-
-// ── 清空 ──
 
 void SlotWorkspace::clearOutputs() {
 	for (auto& [name, slot] : _outputSlots) {

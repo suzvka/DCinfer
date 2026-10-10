@@ -18,8 +18,7 @@
 namespace DC {
 
 namespace {
-	// Intrusive TLS stack: no allocation; nested calls to different engines retain
-	// every active identity rather than hiding the outer engine behind the inner.
+	// 侵入式 TLS 栈：零分配；嵌套调用仍可枚举所有活动引擎身份。
 	struct EngineScope {
 		const ExecutionEngine* engine;
 		EngineScope* previous;
@@ -36,50 +35,28 @@ namespace {
 }
 
 
-// ════════════════════════════════════════════
-// TaskGate 析构
-// ════════════════════════════════════════════
-
 ExecutionEngine::TaskGate::~TaskGate() {
-	// 纯资源回收（无副作用）：轮次生命周期由 shared_ptr 驱动。
-	// 引用归零只发生在两类场景——① 终态收尾（_terminate）完成后表引用
-	// 移除且无在飞 lambda / 等待者；② 引擎析构时轮次表整体移出
-	// （自排水已完成，无在飞消费者）。
-	// 两类场景均无需（也不应）再触发耗尽检测：前者终态已发布，后者
-	// 引擎已无并发生产者。
+	// 纯资源回收：引用归零只发生在终态收尾完成或引擎析构之后；
+	// 两类场景均无需触发耗尽检测。
 }
-
-// ════════════════════════════════════════════
-// 排水票据
-// ════════════════════════════════════════════
 
 struct ExecutionEngine::DrainTicket {
 	ExecutionEngine* engine = nullptr;
-	// 登记配对标志：仅当对应的 _pendingRuns +1 已在排水锁内完成后置位。
-	// make_shared 在临界区外进行——分配失败时票据尚未 arm，析构零副作用，
-	// 不产生"已 +1 却无票据回收"的计数泄漏；未登记路径（引擎析构中拒派发）
-	// 同样不递减。
+	// 登记配对标志：仅当对应的 _pendingRuns +1 已在排水锁内完成后置位；
+	// 未登记路径析构不递减，不产生计数泄漏。
 	bool armed = false;
 
 	~DrainTicket() {
 		if (!armed)
 			return;
-		// 票据回收：lambda 执行完成（worker 线程）与被池弃置（调度器 shutdown
-		// 清队析构 function，在 shutdown 调用者线程）的公共必经点——无论
-		// 哪条路径，持有本票据的 lambda 已不可能再回访引擎。
-		// 锁内递减：递减与 notify 原子于排水锁——析构者只可能在持锁复查谓词
-		// 时观察到 0（wait_for 期间锁已释放），此刻本票据的全部引擎访问已完成。
-		// 先减后锁的旧写法存在生命周期窗口：归零与拿锁之间析构者可越过第③步
-		// 走完整析构（含成员销毁），worker 再触碰已销毁的 _drainMutex/_drainCv。
+		// 票据回收：lambda 完成或被池弃置的公共必经点，此后不可能再回访引擎。
+		// 递减必须在排水锁内：归零与加锁之间若存在窗口，析构者可先行销毁
+		// _drainMutex/_drainCv，worker 触碰即 UAF（先减后锁的旧写法即此缺陷）。
 		std::lock_guard lk(engine->_drainMutex);
 		if (engine->_pendingRuns.fetch_sub(1, std::memory_order_acq_rel) == 1)
 			engine->_drainCv.notify_all();
 	}
 };
-
-// ════════════════════════════════════════════
-// 构造 / 析构
-// ════════════════════════════════════════════
 
 ExecutionEngine::ExecutionEngine(std::shared_ptr<ResourceScheduler> scheduler)
 	: _scheduler(std::move(scheduler)) {
@@ -89,40 +66,28 @@ ExecutionEngine::ExecutionEngine(std::shared_ptr<ResourceScheduler> scheduler)
 
 ExecutionEngine::~ExecutionEngine() {
 	if (EngineScope::contains(this)) {
-		// fail-fast 诊断必须可靠送达：宿主可将 stderr 重定向到文件（freopen），
-		// glibc 下重定向后的流可能为全缓冲，随后 _Exit 不经 flush 会丢掉诊断
-		// 文本——显式 flush 兜底（unbuffered 时为空操作）。
+		// stderr 重定向后可能全缓冲，崩溃路径不经 flush 会丢诊断；显式 flush 兜底。
 		std::fputs("ExecutionEngine: prohibited reentrant destruction from own node/API/callback; retain external ownership\n", stderr);
 		std::fflush(stderr);
 		std::terminate();
 	}
-	// 自排水（共享调度器下不能靠“关闭自己的池”来 join 在飞任务）：
-	//
-	// ① 停止新派发：派发登记（_shuttingDown 检查 + _pendingRuns +1）在
-	//    _drainMutex 内原子完成——置位后不再产生新登记，排水不漏计数。
+	// 自排水：共享调度器下不能靠关闭自己的池来 join 在飞任务。
+	// ① 停止新派发：登记在 _drainMutex 内原子完成，置位后不再产生新登记。
 	{
 		std::lock_guard lk(_drainMutex);
 		_shuttingDown = true;
 	}
 
-	// ② 标记全部轮次终止：队列中已排队的任务 lambda 执行时经 terminated
-	//    早退（不消费输入、不回访引擎状态），近似旧“池 shutdown 丢弃队列
-	//    任务”的语义。
+	// ② 标记全部轮次终止：排队 lambda 经 terminated 早退，不消费输入。
 	{
 		std::lock_guard lk(_roundsMutex);
 		for (auto& entry : _rounds)
 			entry.second->terminated.store(true, std::memory_order_release);
 	}
 
-	// ③ 等待全部已登记任务 lambda 回收：执行中的任务跑完后由票据回收
-	//    （RunDone 完成全部引擎回访 → lambda 体退出 → function 析构）；
-	//    被调度器 shutdown 弃置的排队任务在清队时析构 function——票据同样
-	//    回收。归零即无任何 lambda 可再回访引擎。调度器关停窗口亦安全：
-	//    shutdown 先弃置排队票据、再 join 在飞任务（票据回收先于其返回），
-	//    本等待必然终止，无需逃逸判定（P0：原逃逸条件 isStopped() 取的
-	//    是关停标志而非 join 完成点，窗口内析构引擎会与在飞回访竞态）。
-	//    wait_for 周期复查仅作防御性兜底（弃置路径持池锁等排水锁的慢
-	//    唤醒场景）。
+	// ③ 等待全部已登记 lambda 回收：执行完或清队弃置均经票据归零；
+	//    shutdown 先弃置排队票据再 join 在飞任务，本等待必然终止，
+	//    wait_for 周期复查仅作防御兜底。
 	{
 		std::unique_lock lk(_drainMutex);
 		while (_pendingRuns.load(std::memory_order_acquire) != 0) {
@@ -130,7 +95,7 @@ ExecutionEngine::~ExecutionEngine() {
 		}
 	}
 
-	// ④ 移出轮次表（锁外释放）：析构中的轮次对象不再触发任何引擎回访。
+	// ④ 锁外释放轮次表：析构中的轮次不再触发引擎回访。
 	decltype(_rounds) leftover;
 	{
 		std::lock_guard lk(_roundsMutex);
@@ -139,30 +104,17 @@ ExecutionEngine::~ExecutionEngine() {
 	leftover.clear();
 }
 
-// ════════════════════════════════════════════
-// 节点执行派发
-// ════════════════════════════════════════════
-
 void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeName,
 									 std::shared_ptr<TaskGate> round, uint32_t remainingHops) {
-	// 调度点检查：本轮已终止（取消/复用替换/收束）则不再提交新执行
+	// 调度点检查：本轮已终止则不再提交新执行
 	if (round->terminated.load(std::memory_order_acquire))
 		return;
 
-	// 在飞计数 +1：submit 入口扫描与传播下游提交统一经本函数促发。
-	// 派发可能被拒（调度器已关闭）或因内存压力抛异常（入队/lambda 构造）——
-	// 统一按失败语义回滚计数并收尾（#7）：否则在飞计数泄漏使
-	// _exhaustedCheck 永不触发，任务无限 Running 绕过 maxHops 与宿主护栏。
-	//
-	// 排水登记：_shuttingDown 检查与 _pendingRuns +1 在 _drainMutex 内
-	// 原子完成（引擎析构自排水的不漏计数前提——置位后不再有新登记，
-	// 排水等待的归零观察即覆盖全部已派发任务）。
-	// 排水票据先于登记构造（临界区外：make_shared 分配失败时零副作用，
-	// 不产生"已 +1 却无票据回收"的计数泄漏）；登记成功才 arm——未登记
-	// 路径（析构中拒派发）票据析构不递减。票据随 lambda 转移（拷贝捕获，
-	// 外层引用在本函数结束时释放），lambda 执行完成或被池弃置时 function
-	// 析构 → 票据回收计数；派发被拒时外层引用析构即回收——shared 引用
-	// 计数归零唯一，恰好一次递减，无需各失败路径手动回滚。
+	// 在飞计数 +1：派发失败或抛异常时按失败语义回滚收尾，否则计数泄漏
+	// 使耗尽检测永不触发。
+	// 排水登记：_shuttingDown 检查与 _pendingRuns +1 在 _drainMutex 内原子完成。
+	// 票据先构造后登记（分配失败零副作用），登记成功才 arm，随 lambda 移交，
+	// 析构恰好一次递减。
 	auto ticket = std::make_shared<DrainTicket>();
 	ticket->engine = this;
 	{
@@ -177,12 +129,9 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 	try {
 		dispatched = _scheduler->submit(node->affinity(),
 									 [this, node, nodeName, round, remainingHops, ticket] {
-		EngineScope active{this}; // before RunDone: outlives its destructor
-		// 在飞计数收尾（RAII）：任何退出路径均经本析构递减；归零且本轮
-		// 未终止时由最后完成的 lambda 触发耗尽检测。排水计数由票据独立
-		// 回收（function 析构晚于 lambda 体，故全部引擎回访——
-		// _exhaustedCheck → _terminate/传播——先于票据递减：析构等待归零
-		// 即保证无残留回访）。
+		EngineScope active{this}; // 先于 RunDone 声明：done 析构触发耗尽检测时作用域仍有效
+		// 在飞计数收尾（RAII）：归零且本轮未终止时触发耗尽检测；
+		// 票据递减晚于全部引擎回访，析构等待归零即保证无残留回访。
 		struct RunDone {
 			std::shared_ptr<TaskGate> round;
 			ExecutionEngine* engine;
@@ -195,7 +144,7 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 			}
 		} done{round, this};
 
-		// 排队期间本轮已被取消/收束 → 旧轮次禁止执行（不入流水线、不消费输入）
+		// 排队期间本轮已终止则禁止执行：不入流水线、不消费输入
 		if (round->terminated.load(std::memory_order_acquire))
 			return;
 
@@ -203,9 +152,7 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 		const TaskId& taskId = round->taskId;
 		auto& errors = state->errors;
 		NodeResult result;
-		// 执行态取自本轮轮次（submit 时捕获，lambda 持副本）：同 ID 复用后
-		// 旧轮次 lambda 只写旧执行态，不再按 taskId 重新寻址消费新一轮输入。
-		// 节点本身只读（const），可变状态全部在轮次执行域。
+		// 执行态取自轮次副本：复用后旧轮次 lambda 只写旧执行态，不消费新一轮输入
 		auto execState = round->execState;
 		try {
 			auto& exec = execState->ensure(nodeName, node->schema());
@@ -215,18 +162,15 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 		} catch (const NodeException& e) {
 			switch (e.getErrorType()) {
 			case NodeException::ErrorType::Reentrant:
-				// 节点正忙（另一任务/另一提交持有执行租约）：登记重投——
-				// 闸释放时自动重放本提交，节点上的并发任务排队执行，
-				// "节点正忙"不再记为 Error 判死任务（H-1）。重投入口天然经
-				// round->terminated 检查丢弃已终止轮次。
+				// 节点正忙：登记重投，闸释放时自动重放，不再判死任务；
+				// 重投入口经 terminated 检查丢弃已终止轮次。
 				state->exec->gateFor(nodeName).enqueueRetry(
 					round.get(), [this, node, nodeName, round, remainingHops] {
 						_submitNodeRun(node, nodeName, round, remainingHops);
 					});
 				return;
 			case NodeException::ErrorType::NotReady:
-				// 就绪竞态（重复提交已由原子就绪路径消除，此处仅剩边缘场景）：
-				// 降级为 Warning，跳过本次提交，不判死任务（H-1）。
+				// 就绪竞态降级为 Warning：跳过本次提交，不判死任务
 				errors.recordWarning(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
 									 "NotReady race in tryExecute (duplicate trigger skipped): "
 										 + std::string(e.what()));
@@ -237,9 +181,7 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 				return;
 			}
 		} catch (const std::exception& e) {
-			// 非 NodeException（引擎钩子/缓冲层抛出）此前穿过调度层逃逸到池 worker
-			// （仅 stderr），任务因无诊断而永久挂起——现统一记录 Error 诊断，
-			// 由耗尽检测收束为 Failed（H-2 失败闭环）。
+			// 统一记录 Error 诊断，由耗尽检测收束为 Failed（失败闭环）
 			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
 							   "non-NodeException escaped node execution: " + std::string(e.what()));
 			return;
@@ -249,19 +191,16 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 			return;
 		}
 
-		// 本轮已终止（取消/同 ID 复用竞态）→ 丢弃本轮结果，不传播。
-		// 轮次级检查而非 taskId 级：复用后旧轮次的 lambda 不得污染新轮次。
+		// 本轮已终止则丢弃结果不传播；轮次级检查保证旧轮 lambda 不污染新轮
 		if (round->terminated.load(std::memory_order_acquire))
 			return;
 
-		// 完成判定与失败闭环（F05）：节点自报失败（含必需输出缺失
-		// 归一化的 InternalError）必须优先于输出存在性——失败结果不得因
-		// 产生过部分输出而被当作成功传播。失败记录完整诊断后跳过传播；
-		// 仅成功且产出至少一个输出时继续传播（部分输出场景允许）。
+		// 自报失败优先于输出存在性：失败不得因产生过部分输出而被成功传播；
+		// 仅成功且至少一个输出时继续传播。
 		if (!result.ok()) {
 			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
 							   "Node execution failed: " + result.message, result.diagnostic);
-			return; // 失败不传播
+			return;
 		}
 		bool hasAnyOutput = false;
 		{
@@ -278,18 +217,17 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 		if (!hasAnyOutput) {
 			errors.recordError(taskId, nodeName, "ExecutionEngine::_submitNodeRun",
 							   "Node execution produced no outputs: " + result.message, result.diagnostic);
-			return; // 无输出不传播
+			return;
 		}
 
-		// 节点执行成功 → 就地传播输出到下游（池线程内，与调度点同上下文）
+		// 执行成功：池线程内就地传播输出到下游
 		_propagateFrom(nodeName, round, remainingHops);
 		});
 	} catch (...) {
-		// 派发中分配失败（lambda/std::function 构造）：按拒绝处理
+		// 分配失败按拒绝处理
 	}
 	if (!dispatched) {
-		// 派发被拒（调度器已关闭或入队失败）：回滚在飞计数 + 诊断 + 触发
-		// 耗尽检测（归零语义与 RunDone 一致 → 因 Error 诊断收尾为 Failed）
+		// 派发被拒：回滚计数 + 诊断 + 触发耗尽检测，经 Error 诊断收尾为 Failed
 		auto& errors = round->state->errors;
 		errors.recordError(round->taskId, nodeName, "ExecutionEngine::_submitNodeRun",
 						   "task dispatch rejected (scheduler stopped or memory pressure)");
@@ -297,36 +235,27 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 			&& !round->terminated.load(std::memory_order_acquire)) {
 			_exhaustedCheck(round);
 		}
-		// 排水计数由票据回收（ticket 于本函数结束时析构——晚于上方全部
-		// 回访，维持“回访先于排水递减”不变量）
+		// 排水计数由票据回收：晚于上方全部回访，维持回访先于递减的不变量
 	}
 }
-
-// ════════════════════════════════════════════
-// 异步提交：事件驱动的数据传播
-// ════════════════════════════════════════════
 
 void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 							 const std::shared_ptr<GraphRuntimeState>& state,
 							 std::vector<OutputDeclaration> declarations) {
 	EngineScope active{this};
-	// 快照经发布协议读取（acquire）：进入本函数前 facade 已 _ensureFrozen，
-	// 本地句柄同时把快照存活期钉在本次调用内（state 亦持有）
+	// 快照经发布协议读取（acquire）；本地句柄钉住存活期
 	auto snap = state->snapshot();
 	auto& graph = snap->runtimeView();
 
-	// 校验：必须声明输出（声明随提交事务传入，由下方临界区原子写入）
+	// 必须声明输出；声明随提交事务在下方临界区原子写入
 	if (declarations.empty()) {
 		throw GraphException(GraphException::ErrorType::NoDeclaration, "ExecutionEngine::submit",
 							 "no output declarations for task '" + taskId
 								 + "'; pass declarations via InferGraph::submit(...) / submitBound(...) first");
 	}
 
-	// 提交期拓扑守卫（F10：先于任何状态登记——失败不留 Running 残留，可重试）：
-	// 声明目标必须从"已注入输入的节点 ∪ 输入绑定节点"纯拓扑可达。忽略信号——
-	// 信号阻断属合法运行期状态，由宿主 wait+cancel 解围；构图/断链等确定性
-	// 错误才在提交期立即暴露。检查不依赖轮次表/门控，可在登记前完成。
-	// 目标集取自本次提交参数（声明写入移入下方事务，与登记同临界区）。
+	// 提交期拓扑守卫，先于任何状态登记：声明目标须从已注入输入的节点 ∪
+	// 输入绑定节点纯拓扑可达；信号阻断属合法运行期状态，不参与判定。
 	std::vector<std::string> starts;
 	if (auto taskExec = state->exec->findTaskState(taskId))
 		starts = taskExec->nodeNames(); // 已注入输入的节点
@@ -334,8 +263,7 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 		starts.push_back(b.nodeName);
 	std::unordered_set<std::string> targets;
 	for (const auto& d : declarations) {
-		// 声明坐标校验（#8-13）：拼错的节点/端口名在提交期即暴露——
-		// 否则声明永远无法满足，任务悬置至宿主护栏且无任何诊断
+		// 声明坐标校验：拼错名称在提交期即暴露，否则任务悬置且无诊断
 		auto* declared = graph.node(d.nodeName);
 		if (!declared)
 			throw GraphException(GraphException::ErrorType::NodeNotFound, "ExecutionEngine::submit",
@@ -354,23 +282,16 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 							 "node (cycle/break in graph construction)");
 	}
 
-	// 构建本轮轮次（TaskGate 自包含终态/结果可读/等待协议与本轮执行态）。
-	// 执行态自此捕获：后续调度 lambda、传播链与终止清理全部经本对象寻址，
-	// 不再按可复用 taskId 重新查表。
+	// 构建本轮轮次（含终态/等待协议）；执行态自此捕获，后续调度与清理
+	// 全部经本对象寻址，不再按可复用 taskId 查表。
 	auto round = std::make_shared<TaskGate>();
 	round->engine = this;
 	round->state = state; // 与图对象共享图运行时状态（在飞任务保活）
 	round->taskId = taskId;
 
-	// ── 提交事务（单临界区，H-3/H-5）──
-	// 复用准入检查、声明清理与写入、执行态捕获、轮次登记原子完成：
-	// - 并发同 ID 提交：恰一方通过检查并完成登记，败者抛 DuplicateTask 且
-	//   零副作用（不再出现"先清声明、后拒提交"的破坏窗口）；
-	// - 复用准入 = "终态已发布 + 清理完成（resultsReady）"：收尾窗口内
-	//   （回调/结果抢救/clearTaskState 仍在执行）的 ID 一律拒绝——旧轮
-	//   清理不可能再触碰新一轮的声明/累加/结果/执行态；
-	// - 执行态捕获置于准入之后：复用时必为全新对象（旧轮 clearTaskState
-	//   已将其摘除），不存在新旧轮共享执行态的跨轮污染。
+	// 提交事务（单临界区）：准入检查、声明写入、执行态捕获、轮次登记原子完成。
+	// 复用准入须终态已发布且清理完成，收尾窗口内一律拒绝；执行态捕获置于准入
+	// 之后，不与旧轮共享；并发同 ID 提交恰一方成功。
 	{
 		std::lock_guard lk(_roundsMutex);
 		auto it = _rounds.find(taskId);
@@ -382,21 +303,21 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 										 + "' is still running or finalizing; duplicate submit rejected");
 		}
 		round->execState = state->exec->taskState(taskId);
-		state->errors.clearTask(taskId); // 上一轮诊断不残留（影响 taskStatus 归一化）
-		state->output.clearTask(taskId); // 复用同 ID：清掉上一轮声明/累加/结果
+		state->errors.clearTask(taskId); // 上一轮诊断不残留
+		state->output.clearTask(taskId); // 清掉上一轮声明/累加/结果
 		state->output.declare(taskId, std::move(declarations));
-		_rounds[taskId] = round; // 登记（替换旧轮；旧轮由在飞 lambda 保活至收尾）
+		_rounds[taskId] = round; // 替换旧轮；旧轮由在飞 lambda 保活
 	}
-	// 节点执行态无需在此清理：所有终态必经 _terminate（唯一清理点）。
+	// 节点执行态无需在此清理：所有终态必经 _terminate。
 
-	// 扫描全图（运行时视图），对所有已就绪的节点提交执行任务（执行完成后再传播下游）。
-	// 就绪查询仅针对本轮执行态条目（feedInput 时创建）：无条目 = 无暂存输入 = 未就绪
+	// 扫描全图提交所有已就绪节点；就绪查询仅针对本轮执行态条目，
+	// 无条目即未就绪（条目由 feedInput 创建）。
 	for (const auto& [nodeName, nodePtr] : graph.nodes) {
 		auto* ns = round->execState ? round->execState->find(nodeName) : nullptr;
 		if (!ns || !nodePtr->isReady(taskId, ns->buffer))
 			continue;
 
-		// 入口节点：执行 + 完成后就地传播（_submitNodeRun 内部处理）
+		// 入口节点：执行 + 完成后就地传播
 		_submitNodeRun(nodePtr, nodeName, round, maxHops);
 	}
 }
@@ -405,37 +326,30 @@ bool ExecutionEngine::tryWriteTaskState(const TaskId& taskId, const std::functio
 	EngineScope active{this};
 	auto round = _findRound(taskId);
 	if (!round) {
-		// 无轮次（从未提交 / 已释放）：不存在并发收尾，直接写入
+		// 无轮次则无并发收尾，直接写入
 		writeOp();
 		return true;
 	}
-	// 与 _terminate 的结果抢救段（clearTaskState）同一互斥（#8-12）：
-	// 收尾窗口内拒绝写入，非收尾窗口内写入不可能被收尾摘除
+	// 与 _terminate 抢救段同一互斥：收尾窗口拒绝写入，其余窗口写入不会被摘除
 	std::lock_guard lk(round->m);
 	if (round->terminalStatus != TaskStatus::Running && !round->resultsReady)
-		return false; // 收尾窗口：终态已发布、结果可读未发布，拒绝
+		return false; // 收尾窗口：终态已发布、结果可读未发布
 	writeOp();
 	return true;
 }
-
-// ════════════════════════════════════════════
-// 事件驱动数据传播核心
-// ════════════════════════════════════════════
 
 void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskGate> round,
 									 uint32_t remainingHops) {
 	auto& state = round->state;
 	const TaskId& taskId = round->taskId;
-	// 快照经发布协议读取（acquire）；本地句柄钉住存活期，池线程不再
-	// 无同步读取共享成员
+	// 快照经发布协议读取（acquire）；本地句柄钉住存活期，池线程不再读共享成员
 	auto snap = state->snapshot();
 	auto& graph = snap->runtimeView();
 	auto& output = state->output;
 	auto& errors = state->errors;
-	// 调用前提：节点已由 _submitNodeRun 执行成功（失败路径已记录错误并跳过传播），
-	// 输出已写入 TaskBuffer 输出槽位，本函数在池线程内就地执行。
+	// 调用前提：节点已执行成功、输出已入 TaskBuffer 槽位；池线程内就地执行。
 
-	// [检查点 0] TTL 耗尽：主动终止 task（不依赖 _exhaustedCheck）
+	// [检查点 0] TTL 耗尽：主动终止任务，不依赖 _exhaustedCheck
 	if (remainingHops == 0) {
 		std::string reason = "propagation hops exhausted (TTL=0) at node '" + nodeName
 							 + "': cycle or excessively deep graph detected";
@@ -446,8 +360,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 		return;
 	}
 
-	// [检查点 1] 入口：若本轮任务已终止（取消/同 ID 复用竞态），直接返回。
-	// 轮次级检查而非 taskId 级：复用后旧轮次 lambda 不得继续传播。
+	// [检查点 1] 本轮已终止则直接返回；轮次级检查保证旧轮 lambda 不继续传播
 	if (round->terminated.load(std::memory_order_acquire)) {
 		return;
 	}
@@ -456,17 +369,16 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 	if (!src)
 		return;
 
-	// 本轮执行态（submit 时捕获；调用前提：本节点已执行成功，条目必已存在）
+	// 本轮执行态：submit 时捕获；节点已执行成功，条目必已存在
 	const auto& execState = round->execState;
 	NodeExecState* srcNs = execState ? execState->find(nodeName) : nullptr;
 
-	// [检查点 2] 节点完成 → 三步流水线：打卡 → OutputZone 搬运 → 边搬运
-	//
-	// 第一步：打卡 — 所有产出端口统一累加计数，不论目的地
+	// [检查点 2] 三步流水线：打卡 → OutputZone 搬运 → 边搬运
+	// 第一步：打卡，所有产出端口统一累加计数
 	for (const auto& outPort : src->schema().outputs) {
 		if (!srcNs || !srcNs->buffer.hasOutput(taskId, outPort.name))
 			continue;
-		// 终止复查：打卡写入前再确认本轮未被终止（取消可能在检查点 1 之后触发）
+		// 打卡写入前复查终止标记（取消可能在检查点 1 之后触发）
 		if (round->terminated.load(std::memory_order_acquire))
 			return;
 		if (output.accumulateAndCheck(nodeName, outPort.name, taskId)) {
@@ -476,17 +388,15 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 		}
 	}
 
-	// 第二步：OutputZone 目的地搬运 — OutputZone 绑定端口消费后自然空
+	// 第二步：OutputZone 搬运；绑定端口消费后自然空
 	for (const auto& outPort : src->schema().outputs) {
 		if (!srcNs)
 			continue;
 		if (snap->signature().isOutputBound(nodeName, outPort.name)) {
-			// [检查点 2] 终止复查：OutputZone 写入前再确认本轮未被终止
-			// （取消/复用可能在检查点 1 与打卡复查之后触发）
+			// OutputZone 写入前复查终止标记
 			if (round->terminated.load(std::memory_order_acquire))
 				return;
-			// 一次加锁完成检查+取数（#3）：与 _terminate 抢救并发时后到者
-			// 得 nullopt 跳过，不再抛 OutputNotProduced 穿透池线程
+			// 一次加锁完成检查+取数：与抢救并发时后到者得 nullopt，不抛异常
 			auto data = srcNs->buffer.tryTakeOutput(taskId, outPort.name);
 			if (!data)
 				continue;
@@ -495,8 +405,7 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 		}
 	}
 
-	// 第三步：边目的地搬运 — 已在第二步消费的端口 hasOutput=false，自动跳过
-	// （运行时视图：Broadcast(1) wire 已被 lowering 擦除，边为改写后的直连边）
+	// 第三步：边搬运；已消费端口自动跳过，运行时视图为改写后的直连边
 	for (const auto& edge : graph.edges) {
 		if (edge.srcNode != nodeName)
 			continue;
@@ -504,43 +413,38 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 		if (!srcNs || !srcNs->buffer.hasOutput(taskId, edge.srcPort))
 			continue;
 
-		// 阻塞检查：下游节点被信号阻塞时跳过此边，不消费上游输出
-		// 数据留在上游 task 缓冲中等待其他出边消费或自然背压释放
+		// 下游被信号阻塞则跳过此边，不消费上游输出；数据留在缓冲等待其他出边
 		auto* dst = graph.node(edge.dstNode);
 		if (!dst)
 			continue;
 		if (dst->isBlocked(taskId)) {
-			// 记录被跳过的节点，供 _diagnoseAbnormal 在异常终止时报告
+			// 记录被跳过的节点，供 _diagnoseAbnormal 报告
 			std::lock_guard lk(_blockedSkipsMutex);
 			_blockedSkips[taskId].insert(edge.dstNode);
 			continue;
 		}
 
-		// 一次加锁完成检查+取数（#3）：前置 hasOutput 仅为快速过滤，
-		// 与 _terminate 抢救并发时后到者得 nullopt 跳过，不再抛异常穿透池线程
+		// 一次加锁完成检查+取数：前置 hasOutput 仅为快速过滤，后到者得 nullopt
 		auto dataOpt = srcNs->buffer.tryTakeOutput(taskId, edge.srcPort);
 		if (!dataOpt)
 			continue;
 		Value data = std::move(*dataOpt);
 
-		// [检查点 3] 写入下游前再确认一次本轮未被终止（轮次级，同 ID 复用安全）
+		// [检查点 3] 写入下游前复查终止标记
 		if (round->terminated.load(std::memory_order_acquire))
 			return;
 
-		// 下游执行态：经本轮执行态惰性创建（写入缓冲，不触发执行）。
-		// execState 由轮次持有，存活至本轮传播结束
+		// 下游执行态经本轮执行态惰性创建；存活至本轮传播结束
 		NodeExecState* dstNs = nullptr;
 		bool ready = false;
 		try {
 			dstNs = &execState->ensure(edge.dstNode, dst->schema());
 			if (dst->hasReadyOverride()) {
-				// 就绪语义由覆盖方定义（无法与写入合并判定）：保留 setInput +
-				// isReady 分离路径，残余竞态归 override 实现方。
+				// 覆盖路径保留 setInput + isReady 分离，残余竞态归 override 实现方
 				dstNs->buffer.setInput(taskId, edge.dstPort, std::move(data), dst->schema());
 				ready = dst->isReady(taskId, dstNs->buffer);
 			} else {
-				// 原子路径（H-1）：写入与就绪判定同临界区——多上游并发传播时
-				// 仅"最后写入者"观察到就绪并返回 true，双触发自根上消除。
+				// 原子路径：写入与就绪判定同临界区，仅最后写入者观察到就绪，双触发消除
 				ready = dstNs->buffer.setInputAndCheckReady(taskId, edge.dstPort,
 															std::move(data), dst->schema());
 			}
@@ -551,20 +455,12 @@ void ExecutionEngine::_propagateFrom(std::string nodeName, std::shared_ptr<TaskG
 			continue;
 		}
 
-		// 下游就绪 → 提交执行 + 完成后继续传播（数据冒泡）
+		// 下游就绪：提交执行，完成后继续传播
 		if (ready) {
 			_submitNodeRun(dst, edge.dstNode, round, remainingHops - 1);
 		}
 	}
 }
-
-// ════════════════════════════════════════════
-// 终止辅助
-// ════════════════════════════════════════════
-
-// ════════════════════════════════════════════
-// 轮次辅助
-// ════════════════════════════════════════════
 
 std::shared_ptr<ExecutionEngine::TaskGate> ExecutionEngine::_findRound(const TaskId& taskId) const {
 	std::lock_guard lk(_roundsMutex);
@@ -574,8 +470,7 @@ std::shared_ptr<ExecutionEngine::TaskGate> ExecutionEngine::_findRound(const Tas
 
 void ExecutionEngine::_finalizeDetached(const std::shared_ptr<TaskGate>& round) {
 	const TaskId& taskId = round->taskId;
-	// 身份校验：表内仍是本轮时移除并清理（已被显式 release 或新一轮替换则不动——
-	// 新一轮的声明/结果由其自身 submit 流程清理）
+	// 身份校验：表内仍是本轮才移除清理；已被 release 或新一轮替换则不动
 	bool owned = false;
 	{
 		std::lock_guard lk(_roundsMutex);
@@ -598,11 +493,9 @@ void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskSta
 	auto& output = state->output;
 	auto& signals = *state->signals;
 
-	// 防止重复终止（幂等）：仅 Running → 终态迁移一次有效。
-	// 此处仅发布终态；"结果可读"由收尾守卫在 notify 前统一发布。
-	// 终态迁移成功即置 terminated 标记（#2）：确立「已收尾 ⇒ 已终止」不变
-	// 量——迟到的僵尸重试与在飞传播经 terminated 检查全部丢弃，不再触碰
-	// 已完成/已复用轮次（cancel、TTL 判死、打卡满足路径共用此唯一迁移点）。
+	// 幂等：仅 Running → 终态迁移一次有效；迁移成功即置 terminated 标记。
+	// 确立「已收尾 ⇒ 已终止」不变量：迟到重试与在飞传播经 terminated 检查全部丢弃。
+	// 此处仅发布终态，结果可读由收尾守卫统一发布；cancel/TTL/打卡共用此迁移点。
 	{
 		std::lock_guard lk(round->m);
 		if (round->terminalStatus != TaskStatus::Running)
@@ -611,9 +504,7 @@ void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskSta
 		round->terminated.store(true, std::memory_order_release);
 	}
 
-	// 收尾守卫（RAII，F07）：任何后续步骤异常不得跳过"结果可读发布 + 唤醒
-	// 等待者"与弃置回收——终止事务必须完整（回调异常已在下方隔离，此处
-	// 防御其余异常路径）。
+	// 收尾守卫（RAII）：任何步骤异常不得跳过结果可读发布、唤醒与弃置回收。
 	struct FinishGuard {
 		std::shared_ptr<TaskGate> round;
 		ExecutionEngine* engine;
@@ -631,9 +522,8 @@ void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskSta
 		}
 	} finish{round, this};
 
-	// ① 触发 task 完成回调（数据仍在，回调可安全读取并捕获输出）
-	//    锁内拷贝、锁外调用；用户回调异常在此隔离（记录 Warning 后继续——
-	//    回调失败不影响终态判定、结果发布与资源回收，终止事务不被中断）。
+	// ① 触发完成回调（数据仍在，可安全读取）；锁内拷贝、锁外调用，
+	//    回调异常隔离为 Warning，不影响终态判定与资源回收。
 	TaskCompleteCallback cb;
 	{
 		std::lock_guard lk(_cbMutex);
@@ -651,28 +541,19 @@ void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskSta
 		}
 	}
 
-	// ② 清理该 task 的所有 task 级信号（防止泄漏）
+	// ② 清理 task 级信号，防止泄漏
 	signals.clearTask(taskId);
 
-	// ③ 清理信号阻塞追踪记录
+	// ③ 清理阻塞追踪记录
 	{
 		std::lock_guard lk(_blockedSkipsMutex);
 		_blockedSkips.erase(taskId);
 	}
 
-	// ④ 抢救结果 + 清理 task 执行态：
-	//    终止路径在打卡满足后直接返回，声明端口的数据仍留在 task 缓冲。
-	//    先把这些未及搬运的数据转移到 OutputZone（保证 wait → takeOutput 可取，
-	//    含取消/失败路径的部分结果），再从域表清除本轮的节点执行态
-	//    （在飞 lambda 经 round->execState 保活至流水线结束）。
-	//    回调在①已先行触发，其消费过的端口已消费，取数自然返回空。
-	//
-	//    锁协议（#3/#8-12）：本段在 round->m 内执行——与 feedInput 的
-	//    tryWriteTaskState 同一互斥：收尾窗口内的输入注入被明确拒绝，不再出现
-	//    "检查通过后写入随即被 clearTaskState 摘除"的静默丢失；取数经
-	//    tryTakeOutput 一次加锁完成检查+取数，与传播线程并发时后到者得
-	//    nullopt 而非抛 OutputNotProduced（异常不再从 _terminate 逃逸）；
-	//    clearTaskState 经作用域守卫保证必然执行（抢救中任何异常不跳过清理）。
+	// ④ 抢救结果 + 清理执行态：数据先转移至 OutputZone 再从域表清除
+	//    （在飞 lambda 经 round->execState 保活）；clearTaskState 经守卫必然执行。
+	//    锁协议：本段在 round->m 内，与 feedInput 写入同互斥；取数经
+	//    tryTakeOutput 后到者得 nullopt，异常不从 _terminate 逃逸。
 	{
 		std::lock_guard lk(round->m);
 		struct ClearGuard {
@@ -696,39 +577,30 @@ void ExecutionEngine::_terminate(const std::shared_ptr<TaskGate>& round, TaskSta
 		}
 	}
 
-	// ⑤⑥ 由 finish 守卫发布"结果可读"并唤醒全部等待者：
-	//    wait 谓词（终态 + resultsReady）与两个发布点绑定同一把轮次锁
-	//    （round->m 单锁协议），不存在"已终止但通知丢失"的窗口。
+	// ⑤⑥ 由 finish 守卫发布结果可读并唤醒等待者：wait 谓词与两个发布点
+	// 绑定同一把轮次锁，不存在已终止但通知丢失的窗口。
 }
-
-// ════════════════════════════════════════════
-// 耗尽检测：在飞 lambda 归零触发（TaskGate 析构仅作引擎析构兜底）
-// ════════════════════════════════════════════
 
 void ExecutionEngine::_exhaustedCheck(const std::shared_ptr<TaskGate>& round) {
 	auto& state = round->state;
 	const TaskId& taskId = round->taskId;
 	auto& output = state->output;
-	// 已终止则跳过
 	{
 		std::lock_guard lk(round->m);
 		if (round->terminalStatus != TaskStatus::Running)
 			return;
 	}
 
-	// 检查声明是否已满足
 	bool allMet = output.checkAllSatisfied(taskId);
 
 	if (allMet) {
-		// 声明已满足 → 正常终止（守护路径，主路径在 OutputZone::accumulateAndCheck 中处理）
+		// 声明已满足：正常终止；主路径在 OutputZone::accumulateAndCheck
 		_terminate(round);
 		return;
 	}
 
-	// 声明未满足：传播链已耗尽。区分两类结局——
-	// ① 存在 Error 级诊断（节点自报失败）：实现方拥有时间/失败解释权，
-	//    任务终止为 Failed（节点失败闭环）。
-	// ② 仅有 Warning 或无诊断（如信号阻塞停滞）：保持挂起，宿主 wait(t)+cancel 解围。
+	// 声明未满足且传播链已耗尽：存在 Error 诊断则终止为 Failed；
+	// 仅 Warning 或无诊断则保持挂起，由宿主 wait+cancel 解围。
 	auto errors = state->errors.taskErrors(taskId);
 	bool hasError = false;
 	for (const auto& e : errors) {
@@ -745,13 +617,9 @@ void ExecutionEngine::_exhaustedCheck(const std::shared_ptr<TaskGate>& round) {
 		return;
 	}
 
-	// 无 Error：不主动终止，保持挂起，宿主护栏接管
+	// 不主动终止：保持挂起，宿主护栏接管
 	_diagnoseAbnormal(round, "propagation chain exhausted with unsatisfied output declarations");
 }
-
-// ════════════════════════════════════════════
-// 运行时诊断
-// ════════════════════════════════════════════
 
 void ExecutionEngine::_diagnoseAbnormal(const std::shared_ptr<TaskGate>& round,
 										const std::string& reason) {
@@ -771,13 +639,13 @@ void ExecutionEngine::_diagnoseAbnormal(const std::shared_ptr<TaskGate>& round,
 								 + ", got " + std::to_string(u.current) + "); reason: " + reason);
 	}
 
-	// ② 报告传播过程中因信号阻塞而被跳过的节点
+	// ② 报告因信号阻塞被跳过的节点
 	std::unordered_set<std::string> blocked;
 	{
 		std::lock_guard lk(_blockedSkipsMutex);
 		auto it = _blockedSkips.find(taskId);
 		if (it != _blockedSkips.end())
-			blocked = it->second; // 拷贝，不 move（_terminate 负责清理）
+			blocked = it->second; // 拷贝，不 move：清理归 _terminate
 	}
 	for (const auto& nodeName : blocked) {
 		errors.recordWarning(taskId, nodeName, "ExecutionEngine::_diagnoseAbnormal",
@@ -785,7 +653,7 @@ void ExecutionEngine::_diagnoseAbnormal(const std::shared_ptr<TaskGate>& round,
 							 "data may have been prevented from reaching declared outputs");
 	}
 
-	// ③ 报告从未被到达的声明输出节点（本轮无执行态条目）
+	// ③ 报告从未被到达的声明输出节点：本轮无执行态条目
 	for (const auto& u : unsatisfied) {
 		auto* node = graph.node(u.decl.nodeName);
 		auto* ns = round->execState ? round->execState->find(u.decl.nodeName) : nullptr;
@@ -797,20 +665,13 @@ void ExecutionEngine::_diagnoseAbnormal(const std::shared_ptr<TaskGate>& round,
 	}
 }
 
-// ════════════════════════════════════════════
-// 同步等待
-// ════════════════════════════════════════════
-
 bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeout) {
-	// 未知 taskId（从未提交或已释放）不可终止，立即返回 false——
-	// 无限等待模式下防误拼写 taskId 挂死；有限等待同样如实立即失败。
+	// 未知 taskId（从未提交或已释放）不可终止，立即返回 false，防拼写错误挂死
 	auto round = _findRound(taskId);
 	if (!round)
 		return false;
-	// timeout <= 0 视为无限等待（宿主护栏：只放弃等待，不作为执行超时语义）。
-	// 单锁等待协议（F06）：谓词绑定"终态 + 结果可读"，与两个发布点
-	// （_terminate 的终态迁移与收尾守卫的 resultsReady）绑定同一把
-	// round->m——生产者更新状态后 notify，等待者不可能睡过通知。
+	// timeout <= 0 视为无限等待（宿主护栏：只放弃等待，非执行超时语义）。
+	// 单锁等待协议：谓词绑定终态 + 结果可读，与两个发布点同持 round->m，不会睡过通知。
 	std::unique_lock lk(round->m);
 	auto ready = [&round] {
 		return round->terminalStatus != TaskStatus::Running && round->resultsReady;
@@ -821,10 +682,6 @@ bool ExecutionEngine::wait(const TaskId& taskId, std::chrono::milliseconds timeo
 	}
 	return round->cv.wait_for(lk, timeout, ready);
 }
-
-// ════════════════════════════════════════════
-// task 状态与取消
-// ════════════════════════════════════════════
 
 TaskStatus ExecutionEngine::status(const TaskId& taskId) const {
 	auto round = _findRound(taskId);
@@ -846,15 +703,15 @@ bool ExecutionEngine::cancel(const TaskId& taskId) {
 	EngineScope active{this};
 	auto round = _findRound(taskId);
 	if (!round)
-		return false; // 未知或已释放（幂等）
+		return false; // 未知或已释放
 	if (round->terminated.exchange(true, std::memory_order_acq_rel))
 		return false; // 已被正常路径终止
 	{
 		std::lock_guard lk(round->m);
 		if (round->terminalStatus != TaskStatus::Running)
-			return false; // 正常路径已收束（终态已发布，迁移幂等）
+			return false; // 正常路径已收束，迁移幂等
 	}
-	// 传播链在下个检查点停止；缓冲与信号由 _terminate 照常清理
+	// 传播链在下个检查点停止；缓冲与信号由 _terminate 清理
 	_terminate(round, TaskStatus::Cancelled);
 	return true;
 }
@@ -863,29 +720,29 @@ bool ExecutionEngine::releaseTask(const TaskId& taskId) {
 	std::lock_guard lk(_roundsMutex);
 	auto it = _rounds.find(taskId);
 	if (it == _rounds.end())
-		return false; // 未知（从未提交或已释放）：无释放资格
+		return false; // 从未提交或已释放
 	{
 		std::lock_guard lk2(it->second->m);
 		if (it->second->terminalStatus == TaskStatus::Running || !it->second->resultsReady)
-			return false; // 活动任务或收尾中（清理未完成）：不可释放
+			return false; // 活动任务或收尾中：不可释放
 	}
-	_rounds.erase(it); // 终态轮次移除；在飞 lambda 经 shared_ptr 副本保活，不受影响
+	_rounds.erase(it); // 在飞 lambda 经 shared_ptr 副本保活
 	return true;
 }
 
 void ExecutionEngine::detachTask(const TaskId& taskId) {
 	auto round = _findRound(taskId);
 	if (!round)
-		return; // 未知：无托管对象（feed 输入由上层 discardUnsubmitted 清理）
+		return; // 未知：无托管对象；输入由上层 discardUnsubmitted 清理
 	{
 		std::lock_guard lk(round->m);
 		if (round->terminalStatus == TaskStatus::Running || !round->resultsReady) {
-			// 在飞或收尾中：登记完成后自动回收（不取消任务，保留在飞/收尾语义）
+			// 在飞或收尾中：登记自动回收，不取消任务
 			round->autoRelease = true;
 			return;
 		}
 	}
-	// 已终止且收尾完成：立即等价释放（身份校验防误清新一轮复用后的状态）
+	// 已终止且收尾完成：立即释放；身份校验防误清新一轮状态
 	bool owned = false;
 	{
 		std::lock_guard lk(_roundsMutex);

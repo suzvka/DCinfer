@@ -6,10 +6,6 @@
 
 namespace DC {
 
-// ════════════════════════════════════════════
-// 查找
-// ════════════════════════════════════════════
-
 Node* GraphStore::node(const std::string& name) {
 	auto it = _nodes.find(name);
 	return it != _nodes.end() ? it->second.get() : nullptr;
@@ -19,10 +15,6 @@ const Node* GraphStore::node(const std::string& name) const {
 	auto it = _nodes.find(name);
 	return it != _nodes.end() ? it->second.get() : nullptr;
 }
-
-// ════════════════════════════════════════════
-// 图构建（全部持锁 + 封印检查：冻结后抛 GraphException(Frozen)）
-// ════════════════════════════════════════════
 
 void GraphStore::seal() {
 	std::lock_guard lk(_mutex);
@@ -46,9 +38,7 @@ Node& GraphStore::_addNodeImpl(std::unique_ptr<Node> node) {
 		throw GraphException(GraphException::ErrorType::DuplicateNode, "GraphStore::addNode",
 							 "node name is empty");
 
-	// Schema 入口校验（双保险，P1）：Node 构造已拒绝非法 schema，此处
-	// 防御绕过常规构造路径的入口，保持图存储不变量（端口唯一性/默认值/
-	// 元素宽度声明自洽）
+	// 入口防御：常规构造已拒绝非法 schema，此处防御绕过构造路径的输入。
 	if (!node->schema().valid())
 		throw GraphException(GraphException::ErrorType::Other, "GraphStore::addNode",
 							 "invalid schema on node '" + node->name() + "'");
@@ -76,13 +66,12 @@ void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPo
 		throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphStore::connectRaw",
 							 "destination node '" + dstNode + "' not found");
 
-	// 约束：至少有一端是连接器（两个业务节点禁止直连，必须通过 Connector 中转）
+	// 两个业务节点禁止直连，至少一端必须是连接器。
 	if (!src->isConnector() && !dst->isConnector())
 		throw GraphException(GraphException::ErrorType::DirectConnect, "GraphStore::connectRaw",
 							 "direct connect between non-connector nodes '" + srcNode + "' and '" + dstNode
 								 + "' is forbidden. Use connect() instead.");
 
-	// 验证端口存在
 	if (!src->schema().findOutput(srcPort))
 		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connectRaw",
 							 "output port '" + srcPort + "' not found on node '" + srcNode + "'");
@@ -93,15 +82,7 @@ void GraphStore::connectRaw(const std::string& srcNode, const std::string& srcPo
 	_edges.push_back({srcNode, srcPort, dstNode, dstPort});
 }
 
-// ════════════════════════════════════════════
-// connect：自动插入广播连接器（1→1，零拷贝 move 直通）
-// ════════════════════════════════════════════
-// 同源口二次 connect（CORE-01 演进）：传播期按边逐个消费式取数——同一
-// 输出端口的出边只能有一条实际搬运数据。首次 connect 创建 1:1 wire；
-// 二次 connect 对既有导线原地扩容（多分一份，等效自动 Broadcast(N)），
-// 其他拓扑（connectRaw 构造等）构图期 fail-fast。旧语义（每次创建独立
-// 1:1 wire → 两条同源直连边 → 首边取走后第二条静默跳过，下游饿死/
-// 任务永久挂起）不再存在。详见下方实现与 InferGraph::connect 文档。
+// connect：自动插入 1:1 广播导线；同源口二次 connect 原地扩容该导线，等效 Broadcast(N)。
 
 Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort,
 					   const std::string& dstNode, const std::string& dstPort) {
@@ -122,9 +103,7 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 		throw GraphException(GraphException::ErrorType::PortNotFound, "GraphStore::connect",
 							 "input port '" + dstPort + "' not found on node '" + dstNode + "'");
 
-	// 同目标端口已有入边 → 构图期 fail-fast：同口多驱动在传播期静默覆盖
-	// （仅最后写入者生效，多上游数据仅存其一）。多上游汇聚必须使用不同
-	// 输入口（等齐合并节点）。
+	// 同口多驱动会在传播期静默覆盖，构图期 fail-fast；多上游汇聚须用不同输入口。
 	for (const auto& e : _edges) {
 		if (e.dstNode == dstNode && e.dstPort == dstPort) {
 			throw GraphException(GraphException::ErrorType::DuplicateEdge, "GraphStore::connect",
@@ -134,10 +113,7 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 		}
 	}
 
-	// 同源端口已有出边 → 二态：
-	//  - 既有连接由广播导线承载（自动导线 / 显式 Broadcast 的 in 接线）→ 原地
-	//    扩容（多分一份）并接上新下游：增加连接即扩扇出，无需手写 Broadcast(N)；
-	//  - 其他拓扑（connectRaw 构造等）→ 构图期 fail-fast。
+	// 同源已有出边：广播导线承载则原地扩容接新下游；其他拓扑构图期 fail-fast。
 	for (const auto& e : _edges) {
 		if (e.srcNode == srcNode && e.srcPort == srcPort) {
 			const std::string wireName = e.dstNode; // 先复制：push_back 会使 e 失效
@@ -149,7 +125,7 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 										 + "' already has an outgoing edge; 1:N fan-out requires an explicit "
 										   "Connector.Broadcast(N) (see README)");
 			}
-			// 扩容：追加输出口 + 新下游边（既有下游保持原口序）
+			// 追加输出口与新下游边；既有下游保持原口序
 			const size_t n = wire->schema().outputs.size();
 			const std::string outPort = "out_" + std::to_string(n);
 			wire->appendOutputPort({outPort, Node::TensorType::Void, 0, {}});
@@ -158,16 +134,14 @@ Node& GraphStore::connect(const std::string& srcNode, const std::string& srcPort
 		}
 	}
 
-	// 自动创建广播连接器（1 下游 → 零拷贝 move 直通，等效导线）
+	// 自动创建广播连接器：1 下游时零拷贝直通
 	auto wireName = "__wire_" + std::to_string(_nextWireId.fetch_add(1));
 	auto wireNode = std::make_unique<Node>("Connector.Broadcast", wireName, Connector::broadcastSchema(1),
 										   Connector::broadcastRunFn(), ResourceClass::System);
 	wireNode->setConnector(true);
 	auto& wireRef = _addNodeImpl(std::move(wireNode));
 
-	// 上游 → 广播
 	_edges.push_back({srcNode, srcPort, wireName, "in"});
-	// 广播(out_0) → 下游
 	_edges.push_back({wireName, "out_0", dstNode, dstPort});
 
 	return wireRef;
@@ -180,12 +154,8 @@ void GraphStore::bindInput(const std::string& nodeName, const std::string& portN
 	_inputZone.bind(nodeName, portName, alias);
 }
 
-// ════════════════════════════════════════════
-// 查询
-// ════════════════════════════════════════════
-
 std::vector<std::string> GraphStore::nodeNames() const {
-	std::lock_guard lk(_mutex); // 与同类查询 API 一致持锁（#8-3）：无锁遍历并发修改即 UB
+	std::lock_guard lk(_mutex); // 无锁遍历并发修改即 UB
 	std::vector<std::string> names;
 	names.reserve(_nodes.size());
 	for (const auto& [name, nodePtr] : _nodes) {

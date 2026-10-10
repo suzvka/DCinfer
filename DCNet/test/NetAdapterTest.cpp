@@ -1,5 +1,4 @@
-// DCNet 适配器契约测试（M1）：FakeTransport + EchoCodec 走完整
-// EngineRegistry → createNode → setInput → tryExecute 路径，不依赖真实远端。
+// DCNet 适配器契约测试：FakeTransport + EchoCodec 走完整注册—执行路径，不依赖真实远端。
 
 #include "DCNet/NetAdapter.h"
 #include "NodeExecutor.h"
@@ -48,8 +47,6 @@ static int g_failures = 0;
 using namespace DC;
 using namespace DC::Net;
 
-// ── 文本张量辅助（TensorType::Data 约定，DESIGN.md §3.4）──
-
 static Tensor makeTextTensor(const std::string& s) {
 	Tensor::DataBlock block(s.size());
 	if (!s.empty())
@@ -69,15 +66,13 @@ static Tensor makeFloatTensor(const std::vector<float>& vals) {
 	return Tensor(Tensor::TensorType::Float, sizeof(float), {static_cast<int64_t>(vals.size())}, std::move(block));
 }
 
-/// 真实 tensor codec 的本地形状规则（data → result）
+/// 真实 tensor codec 的本地形状规则
 static Node::Schema makeTensorSchema() {
 	Node::Schema s;
 	s.inputs = {NodePort::in<float>("data")};
 	s.outputs = {NodePort::out<float>("result")};
 	return s;
 }
-
-// ── EchoCodec：request 端口 → 报文；报文 → response 端口 ──
 
 struct EchoCodec : DcNetCodec {
 	Payload encodeRequest(const Node::RunContext& ctx) override {
@@ -91,16 +86,15 @@ struct EchoCodec : DcNetCodec {
 	}
 };
 
-// ── FakeTransport：行为可配置，不触网；按 endpoint 登记，测试可取回 ──
-
+// FakeTransport：行为可配置；按 endpoint 登记，测试可取回。
 struct FakeTransport : DcNetTransport, std::enable_shared_from_this<FakeTransport> {
 	static inline int instances = 0;
-	/// endpoint() → 实例（connect 时登记；引擎实例缓存使同一端点复用同一 transport）
+	/// endpoint → 实例（connect 时登记；同一端点复用同一 transport）
 	static inline std::unordered_map<std::string, std::shared_ptr<FakeTransport>> byEndpoint;
 
-	NetError connectResult;   // None = 成功
-	NetError sendResult;      // None = 成功
-	NetError recvResult;      // None = 成功
+	NetError connectResult;
+	NetError sendResult;
+	NetError recvResult;
 	Payload sentPayload;
 	Payload response;
 	NetEndpoint lastEndpoint;
@@ -127,8 +121,6 @@ struct FakeTransport : DcNetTransport, std::enable_shared_from_this<FakeTranspor
 	void close() override {}
 };
 
-// ── 共享注册表 ──
-
 static EngineRegistry& g_reg = EngineRegistry::instance();
 
 static Node::Schema makeSchema() {
@@ -151,13 +143,11 @@ static void registerFakeAdapter(const std::string& engineType, std::shared_ptr<F
 	registerDcNetAdapter(g_reg, std::move(desc));
 }
 
-// createNode 重载歧义规避：显式 std::string 第三参（避免字符串字面量匹配 const void* 重载）
+// 显式 std::string 第三参：避免字符串字面量匹配 const void* 重载
 static std::unique_ptr<Node> makeNetNode(const std::string& engineType, const std::string& name,
 										 const std::string& endpoint) {
 	return g_reg.createNode(engineType, name, endpoint);
 }
-
-// ── 测试 ──
 
 TEST(endpointParse) {
 	auto ep = NetEndpoint::parse("http://192.168.1.10:8080/v1");
@@ -261,7 +251,7 @@ TEST(recvFailureNormalized) {
 	auto node = makeNetNode("Test.Net", "n4", "http://127.0.0.1:8080/v1");
 	CHECK(node != nullptr, "node should be created");
 	auto t = FakeTransport::byEndpoint["http://127.0.0.1:8080/v1"];
-	t->sendResult = {};  // 重置（sendFailure 测试可能已污染共享实例）
+	t->sendResult = {};  // 重置（共享实例可能被前一测试污染）
 	t->recvResult = normalizeHttpResponse(503, R"({"error":{"code":"server_error","message":"down"}})");
 
 	NodeExecutor exec(*node);
@@ -276,7 +266,7 @@ TEST(remoteRejectedMapsToInvalidInput) {
 	auto node = makeNetNode("Test.Net", "n5", "http://127.0.0.1:8080/v1");
 	CHECK(node != nullptr, "node should be created");
 	auto t = FakeTransport::byEndpoint["http://127.0.0.1:8080/v1"];
-	t->sendResult = {};  // 重置（sendFailure 测试可能已污染共享实例）
+	t->sendResult = {};  // 重置（共享实例可能被前一测试污染）
 	t->recvResult = normalizeHttpStatus(400, R"({"error":"bad request"})");
 
 	NodeExecutor exec(*node);
@@ -287,10 +277,8 @@ TEST(remoteRejectedMapsToInvalidInput) {
 	CHECK_MSG_PREFIX(result.message, "remote:invalid_request");
 }
 
-// ── codec 契约回归：远端响应结构异常必须升为 DcCodecRemoteError 派生的分类 ──
-//   修复前：tensor/text codec 直接漏出 nlohmann::parse_error / std::runtime_error，
-//   落入标准 RunFn 的通用 std::exception 分支 → InternalError 且丢 dcnet 诊断码，
-//   与 OpenAI codec 行为不一致。契约见 NetCodec.h：decode 结构异常 → DcCodecRemoteError。
+// codec 契约回归：远端响应结构异常必须升为 DcCodecRemoteError（不得漏入通用
+// std::exception 分支而丢诊断码）。
 
 TEST(malformedRemoteResponseMapsToRemoteMalformed) {
 	auto fake = std::make_shared<FakeTransport>();
@@ -298,7 +286,7 @@ TEST(malformedRemoteResponseMapsToRemoteMalformed) {
 	desc.engineType = "Test.NetTensor";
 	desc.schema = makeTensorSchema();
 	desc.transportFactory = [fake]() -> std::shared_ptr<DcNetTransport> { return fake; };
-	desc.codec = makeTensorJsonCodec(); // 真实 tensor codec（非 EchoCodec）
+	desc.codec = makeTensorJsonCodec(); // 真实 tensor codec
 	registerDcNetAdapter(g_reg, std::move(desc));
 
 	auto node = makeNetNode("Test.NetTensor", "m1", "http://127.0.0.1:9100/v1");
@@ -309,9 +297,9 @@ TEST(malformedRemoteResponseMapsToRemoteMalformed) {
 	exec.setInput("m1", "data", makeFloatTensor({1.0f, 2.0f}));
 	auto result = exec.tryExecute("m1");
 	CHECK(!result.ok(), "垃圾远端响应 → 运行失败");
-	CHECK(result.status == Node::Status::ExecutionFailed, "结构异常 → ExecutionFailed（不再是 InternalError）");
+	CHECK(result.status == Node::Status::ExecutionFailed, "结构异常 → ExecutionFailed");
 	CHECK_MSG_PREFIX(result.message, "DCNet: malformed remote response");
-	CHECK(result.diagnostic.has_value(), "必须携带领域诊断（调用方可按码分类/重试决策）");
+	CHECK(result.diagnostic.has_value(), "必须携带领域诊断");
 	if (result.diagnostic.has_value()) {
 		CHECK(result.diagnostic->domain == "dcnet", "诊断域为 dcnet");
 		CHECK(result.diagnostic->code == static_cast<int>(NetErrorCategory::RemoteMalformed),

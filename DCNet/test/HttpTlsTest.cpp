@@ -1,26 +1,15 @@
-// HttpTransport TLS 显式校验 回归测试（P1：HTTPS 不再依赖宿主全局 SSLManager 配置）
+// HttpTransport TLS 显式校验回归测试。
 //
-// 语义前提：connect() 契约为「TCP 就绪探测 + 配置报错点」，TLS 握手延迟到首次
-// send 时发生——所有证书校验断言必须在 send/recv 层验证，而非 connect 层
-//（connect 层只能断言 TCP 可达性；曾因在 connect 层断言 TLS 拒绝产生假阳性）。
+// 语义前提：connect() 仅做 TCP 就绪探测，TLS 握手延迟到首次 send——所有证书
+// 校验断言必须在 send/recv 层验证（在 connect 层断言会产生假阳性）。
 //
-// 覆盖：
-//   - 默认兜底上下文：宿主未初始化 SSLManager 时框架兜底 VERIFY_STRICT，
-//     不受信任的自签证书 → send 时握手失败 → Unreachable 家族
-//   - 宿主自定义信任锚：initializeClient 注入信任自签 CA 的上下文 →
-//     hostname 匹配（localhost）→ 正常 TLS 交换
-//   - hostname 校验被强制：信任证书但 host=127.0.0.1（证书仅含 SAN=localhost）
-//     → send 时握手失败 → Unreachable 家族
+// 覆盖：默认兜底上下文拒绝不受信自签证书；宿主注入信任锚后正常交换；
+// hostname 校验强制生效（SAN=localhost 对 127.0.0.1 拒绝）。
 //
-// 服务端基础设施注记（均曾为真实缺陷）：
-//   - 监听 [::]:0（Linux 默认双栈）：host="localhost" 在 Ubuntu 可能解析为
-//     ::1（IPv6 优先），仅绑 127.0.0.1 时拒连 → 拒连被误判为拒证书（假阳性）
-//   - acceptConnection() 抛异常（裸 TCP probe / 握手失败）不可退出服务循环：
-//     单线程服务器被 probe 杀死后，后续用例误报
-//   - caLocation 必须传文件路径：OpenSSL 目录模式要求 hash 命名，普通文件名
-//     找不到 → 信任锚静默无效
-// Windows uses native SChannel with a short-lived self-signed CA/server certificate.
-// Trust is scoped to Context::addTrustedCert (memory only), never the system ROOT store.
+// 服务端基础设施注记（均曾为真实缺陷）：监听 [::]:0 的双栈解析（Ubuntu 上
+// localhost 可能走 ::1）、accept 异常不得退出服务循环、caLocation 必须为文件
+// 路径（OpenSSL 目录模式需 hash 命名）。
+// Windows uses native SChannel; trust stays in Context::addTrustedCert (memory only).
 
 #include "DCNet/NetEndpoint.h"
 #include "DCNet/NetError.h"
@@ -67,7 +56,7 @@ static int g_failures = 0;
 
 using namespace DC::Net;
 
-// ── 自签证书（CN=localhost, SAN=DNS:localhost）与私钥（测试专用，无敏感值）──
+// 自签证书（CN=localhost, SAN=DNS:localhost）与私钥：测试专用。
 static const char* kCertPem = R"PEM(-----BEGIN CERTIFICATE-----
 MIIDITCCAgmgAwIBAgIUSWFZRMI7usIfWbvcjKu+OEVtg3AwDQYJKoZIhvcNAQEL
 BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDkzMDEwMzk1M1oYDzIxMjYw
@@ -127,9 +116,8 @@ void writePemFile(const std::filesystem::path& path, const char* pem) {
 }
 
 #if defined(_WIN32)
-// Observe POCO's verification event without changing its decision. Transport
-// errors intentionally redact diagnostics, so public error text is not evidence
-// that a rejection came from certificates rather than a reset or refused TCP.
+// Observe POCO's verification event without changing its decision: transport errors
+// intentionally redact diagnostics, so public text cannot prove a certificate rejection.
 class VerificationObserver {
 public:
 	VerificationObserver() {
@@ -150,9 +138,8 @@ private:
 	}
 };
 
-// POCO's PFX loader persists private keys (it does not use PKCS12_NO_PERSIST_KEY).
-// Record the imported container and delete only that fixture-owned key after the
-// server/context have released it. Certificates and trust stores stay in memory.
+// POCO's PFX loader persists private keys (no PKCS12_NO_PERSIST_KEY): record and
+// delete only that fixture-owned key after release; certificates/trusts stay in memory.
 class NativeTlsFixture {
 public:
 	NativeTlsFixture() {
@@ -281,7 +268,7 @@ private:
 };
 #endif
 
-/// 单连接 HTTPS mock 服务：SecureServerSocket + 简单回显（POST body → JSON）。
+/// 单连接 HTTPS mock 服务：SecureServerSocket + 回显（POST body → JSON）。
 class MockHttpsServer {
 public:
 	bool start() {
@@ -342,9 +329,8 @@ private:
 					continue;
 				c = _socket->acceptConnection();
 			} catch (...) {
-				// 主动关闭（stop）→ 退出；客户端侧握手失败/裸 TCP probe（
-				// connect 就绪探测先连接后立即关闭）→ 服务循环必须存活，
-				// 否则单线程服务器被 probe 杀死，后续用例全部误报
+				// stop 主动关闭 → 退出；客户端握手失败 / 裸 TCP probe（connect
+				// 探测先连后关）→ 循环必须存活，否则服务器被 probe 杀死、用例误报
 				if (_stop)
 					break;
 				continue;
@@ -366,8 +352,7 @@ private:
 				const size_t headerEnd = req.find("\r\n\r\n");
 				if (headerEnd == std::string::npos)
 					continue;
-				// 按 Content-Length 读全请求体（TLS 分段下 body 可能与 headers
-				// 不同 record 到达，读到 header 即回包会回显缺字）
+				// 按 Content-Length 读全请求体：TLS 分段下 body 可能晚于 header 到达
 				std::size_t cl = 0;
 				if (auto pos = req.find("Content-Length:"); pos != std::string::npos) {
 					cl = static_cast<std::size_t>(
@@ -421,10 +406,8 @@ int runTests() {
 
 	const std::string localhostEp = "https://localhost:" + std::to_string(server.port()) + "/v1";
 
-	// ── Test 1: 默认兜底上下文拒绝不受信证书 ──
-	// Windows POCO can itself supply a rejecting VERIFY_RELAXED default;
-	// this test intentionally asserts security behavior, not the mode enum.
-	// 自签证书不在系统 CA：connect 仅 TCP 探测成功，send 触发握手拒绝。
+	// Test 1：默认兜底上下文拒绝不受信证书。自签证书不在系统 CA：connect 仅
+	// TCP 探测成功，send 触发握手拒绝（断言安全行为而非 mode 枚举）。
 	{
 		HttpTransport t;
 		auto ep = NetEndpoint::parse(localhostEp);
@@ -444,23 +427,19 @@ int runTests() {
 		}
 	}
 
-	// ── Test 2: 宿主自定义信任锚（信任自签 CA）→ hostname 匹配 → 成功 ──
+	// Test 2：宿主自定义信任锚（信任自签 CA）+ hostname 匹配 → 成功。
 	{
 #if defined(_WIN32)
-		// No system ROOT access, no verification bypass, no online revocation
-		// requirement for this deliberately offline, short-lived fixture.
-		// NetSSLWin VERIFY_RELAXED still validates both chain and hostname; it
-		// selects POCO's manual validation path, which consults addTrustedCert.
-		// VERIFY_STRICT lets SChannel reject unknown roots before POCO can use
-		// its process-local store (SecureSocketImpl::initCommon).
+		// VERIFY_RELAXED still checks chain and hostname but selects POCO's manual
+		// validation path consulting addTrustedCert (VERIFY_STRICT lets SChannel reject
+		// unknown roots first). No system ROOT, no bypass, no revocation checks.
 		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
 			Poco::Net::Context::TLS_CLIENT_USE, "", Poco::Net::Context::VERIFY_RELAXED,
 			Poco::Net::Context::OPT_USE_STRONG_CRYPTO));
 		ctx->addTrustedCert(server.certificate());
 #else
 		const auto dir = std::filesystem::temp_directory_path() / "dcnet_tls_test";
-		// caLocation 必须是文件路径：OpenSSL 目录模式要求 hash 命名链接，
-		// 普通文件名的证书在目录模式下静默不可见（信任锚无效）
+		// caLocation 必须传文件路径：OpenSSL 目录模式要求 hash 命名链接
 		Poco::Net::Context::Ptr ctx(new Poco::Net::Context(
 			Poco::Net::Context::CLIENT_USE, "", "", (dir / "cert.pem").string(),
 			Poco::Net::Context::VERIFY_STRICT, 9, false));
@@ -481,13 +460,11 @@ int runTests() {
 		}
 	}
 
-	// ── Test 3: hostname 校验被强制（信任证书但 host 与 SAN 不匹配）──
-	// 沿用 Test 2 注册的信任锚上下文（defaultClientContext）：证书受信，
-	// 但 host=127.0.0.1 与 SAN=DNS:localhost 不匹配 → send 时握手失败
+	// Test 3：hostname 校验被强制。沿用 Test 2 的信任锚上下文：证书受信，但
+	// host=127.0.0.1 与 SAN=DNS:localhost 不匹配 → send 时握手失败。
 	const auto bytesBeforeMismatch = server.receivedBytes();
 	{
 		HttpTransport t;
-		// 证书仅含 CN=localhost / SAN=DNS:localhost；host=127.0.0.1 → 校验失败
 		auto ep = NetEndpoint::parse("https://127.0.0.1:" + std::to_string(server.port()) + "/v1");
 		ep.connectTimeout = std::chrono::milliseconds(3000);
 		ep.requestTimeout = std::chrono::milliseconds(3000);
@@ -519,8 +496,7 @@ int main() {
 #if defined(_WIN32)
 	Poco::Net::SSLManager::instance().initializeClient(nullptr, nullptr, nullptr);
 #endif
-	// runTests has returned: all fixture keys, certificates and temp files have
-	// been cleaned up, so cleanup failures participate in the process result.
+	// runTests has returned: fixture cleanup failures participate in the process result.
 	std::printf("HttpTlsTest: %d checks, %d failures\n", g_checks, g_failures);
 	return result == 0 && g_failures == 0 ? 0 : 1;
 }

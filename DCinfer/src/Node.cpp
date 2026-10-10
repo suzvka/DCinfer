@@ -10,8 +10,6 @@
 
 namespace DC {
 
-// ── NodeSchema 方法实现 ──
-
 const NodePort* NodeSchema::find(const std::vector<NodePort>& ports, const std::string& name) {
 	for (const auto& port : ports) {
 		if (port.name == name)
@@ -69,14 +67,10 @@ bool NodeSchema::valid() const {
 	return true;
 }
 
-// ── 构造/析构 ──
-
 Node::Node(std::string type, std::string name, Schema schema, RunFn fn,
 		   ResourceClass affinity)
 	: _fn(std::move(fn)) {
-	// Schema 入口校验（P1）：重复端口名/typeSize=0 的非 Void 端口/默认值
-	// 类型与宽度不一致，在构造期即拒绝——缺陷前置暴露，而非流入运行时
-	// 后按错误元素宽度解释数据
+	// Schema 入口校验：非法 schema 在构造期即拒绝，缺陷前置暴露
 	if (!schema.valid())
 		throw NodeException(NodeException::ErrorType::SchemaError, "Node::Node",
 							"invalid node schema: duplicate port names, typeSize=0 on "
@@ -99,15 +93,11 @@ void Node::bindEngine(std::shared_ptr<EngineInstance> engineInstance, const Engi
 
 Node::~Node() = default;
 
-// ── 回调注册 ──
-
 void Node::setCompletionCallback(CompletionFn fn) {
 	std::lock_guard lk(_mutationMutex);
 	_ensureMutable("Node::setCompletionCallback");
 	_onComplete = std::move(fn);
 }
-
-// ── 信号绑定 ──
 
 void Node::bindSignal(std::shared_ptr<SignalStore> store, std::string name) {
 	std::lock_guard lk(_mutationMutex);
@@ -123,8 +113,6 @@ bool Node::isBlocked(const TaskId& taskId) const {
 	return _signal->isBlocked(taskId);
 }
 
-// ── 执行依赖访问器 / 调度接口 ──
-
 EngineAdapter& Node::engine() const {
 	return *_engine;
 }
@@ -134,8 +122,6 @@ bool Node::isReady(const TaskId& taskId, const TaskBuffer& buffer) const {
 		return _readyOverride(taskId);
 	return buffer.isReady(taskId, _meta.schema);
 }
-
-// ── RunContext 方法实现 ──
 
 const Value& Node::RunContext::peek(const std::string& name) const {
 	return _workspace.peekInput(name);

@@ -16,23 +16,12 @@ namespace DC {
 
 /// @brief 多线程场景化测试夹具：封装 InferGraph + 同步等待机制
 ///
-/// 使用方式：
-///   1. 构建图：addNode / connect
-///   2. 注入数据：feedInput
-///   3. 声明输出并异步提交：submit（输出声明已融入 submit 参数）
-///   4. 等待完成：awaitCompletion（由 _terminate 中的回调触发）
-///   5. 取结果：getOutputTensor（从回调捕获的缓存中读取）
-///
-/// 关键设计：task 完成回调在 _terminate 中、节点缓冲区 cleanup 前触发，
-/// 确保回调中能安全读取输出。TestHarness 在回调中捕获输出数据到本地缓存，
-/// 然后通知 awaitCompletion 返回。无需轮询。
+/// task 完成回调在 _terminate 中、节点缓冲区 cleanup 前触发并捕获输出，故无需轮询。
 class TestHarness {
 public:
 	using TaskId = InferGraph::TaskId;
 
 	TestHarness() = default;
-
-	// ── 图构建（透传）──
 
 	Node& addNode(std::unique_ptr<Node> node) {
 		return _graph.addNode(std::move(node));
@@ -47,8 +36,6 @@ public:
 		_graph.bindOutput(alias, nodeName, portName);
 	}
 
-	// ── 数据注入 ──
-
 	void feedInput(const TaskId& taskId, const std::string& nodeName, const std::string& portName, Value data) {
 		_graph.feedInput(taskId, nodeName, portName, std::move(data));
 	}
@@ -57,13 +44,9 @@ public:
 		_graph.feedInput(taskId, nodeName, portName, std::move(data));
 	}
 
-	// ── 异步提交 ──
-
-	/// @brief  单输出便捷提交：声明输出 + 异步启动
 	void submit(const TaskId& taskId, const std::string& nodeName, const std::string& portName,
 				size_t count = 1,
 				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
-		// 记录位置供回调捕获
 		{
 			std::lock_guard lk(_declMutex);
 			_declaredOutputs[taskId].emplace_back(nodeName, portName);
@@ -72,7 +55,6 @@ public:
 		_graph.submit(taskId, nodeName, portName, count, maxHops);
 	}
 
-	/// @brief  多输出提交：声明多个输出 + 异步启动
 	void submit(const TaskId& taskId, std::vector<OutputDeclaration> declarations,
 				uint32_t maxHops = InferGraph::kDefaultMaxHops) {
 		{
@@ -85,15 +67,9 @@ public:
 		_graph.submit(taskId, std::move(declarations), maxHops);
 	}
 
-	// ── 同步等待 ──
-
-	/// @brief  同步等待 task 终止（复用 InferGraph::waitForResult）
-	/// @return true 已终止（任意终态），false 超时
 	bool awaitCompletion(const TaskId& taskId, std::chrono::milliseconds timeout = std::chrono::milliseconds(5000)) {
 		return _graph.waitForResult(taskId, timeout).status != TaskStatus::Running;
 	}
-
-	// ── 结果获取（从缓存读取）──
 
 	Tensor getOutputTensor(const TaskId& taskId, const std::string& nodeName, const std::string& portName) {
 		std::string key = nodeName + ":" + portName;
@@ -110,8 +86,6 @@ public:
 		auto taskIt = _capturedOutputs.find(taskId);
 		return taskIt != _capturedOutputs.end() && taskIt->second.contains(key);
 	}
-
-	// ── 查询 ──
 
 	Node* node(const std::string& name) {
 		return _graph.node(name);
@@ -141,17 +115,13 @@ public:
 		_graph.clearErrors();
 	}
 
-	/// @brief  获取底层 InferGraph 的只读引用（供序列化等场景遍历图结构）
 	const InferGraph& graph() const {
 		return _graph;
 	}
 
-	/// @brief  获取底层 InferGraph 的可写引用（信号设置等运行期操作）
 	InferGraph& graph() {
 		return _graph;
 	}
-
-	// ── 信号系统 ──
 
 	void setSignal(const std::string& name, bool value) {
 		_graph.setSignal(name, value);
@@ -174,7 +144,6 @@ public:
 	}
 
 private:
-	/// @brief  注册 task 完成回调：在 _terminate 触发时捕获输出到本地缓存
 	void _setupCallback() {
 		_graph.setTaskCompleteCallback([this](const TaskId& tid) {
 			std::lock_guard lk(_declMutex);
@@ -201,11 +170,9 @@ private:
 
 	InferGraph _graph;
 
-	// 声明输出位置记录（submit 时供回调使用）
 	std::unordered_map<TaskId, std::vector<std::pair<std::string, std::string>>> _declaredOutputs;
 	mutable std::mutex _declMutex;
 
-	// 回调中捕获的输出缓存：taskId → {"nodeName:portName" → Tensor}
 	std::unordered_map<TaskId, std::unordered_map<std::string, Tensor>> _capturedOutputs;
 
 

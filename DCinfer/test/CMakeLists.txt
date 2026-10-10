@@ -1,26 +1,19 @@
-# Auto-discover single-file tests in this directory and register them
-# Expects tests to be standalone .cpp files (one main per file)
+# Auto-discover standalone single-file tests (one main per file)
 
 cmake_minimum_required(VERSION 3.12)
 
-# This CMakeLists is included from the root; ensure DCinfer target exists
 if (NOT TARGET DCinfer::DCinfer)
     message(FATAL_ERROR "DCinfer::DCinfer target not found. Ensure parent adds DCinfer first.")
 endif()
 
-# Enable CTest support
 include(CTest)
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
 foreach(test_src IN LISTS TEST_SOURCES)
     get_filename_component(test_name ${test_src} NAME_WE)
-    # Each test source is expected to be a standalone test with its own main.
-    # Do not force-include a common test harness to avoid multiple main definitions.
     add_executable(${test_name} ${test_src})
     target_link_libraries(${test_name} PRIVATE DCinfer::DCinfer)
-    # Use generator expression to pass the full path to the built executable to CTest.
-    # This avoids issues where the build tool tries to execute the test by target name.
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
 endforeach()

@@ -16,30 +16,17 @@ namespace DC::Ir {
 
 namespace {
 
-// ── 图编译输入预算（P2-13）──
-/// JSON 输入总字节上限：不可信/异常来源的图定义在入口拒绝，防无界分配
-/// （nlohmann 解析内存与输入体积同量级）。.dcg 路径的解压侧已有逐条目
-/// 与聚合预算（DcgArchive），本常量补齐 graph.json 字符串层面的防线。
+/// JSON 输入总字节上限：入口拒绝异常图定义，防 nlohmann 解析内存放大
+/// （.dcg 路径解压侧已有预算，此处补齐 graph.json 字符串层防线）。
 constexpr std::size_t kMaxGraphJsonBytes = 32ull * 1024 * 1024;
-/// 节点数上限：图规模边界（buildGraph 为全部编译路径的必经点）。
+/// 节点数上限（buildGraph 为全部编译路径的必经点）。
 constexpr std::size_t kMaxGraphNodes = 4096;
 
 } // namespace
 
-// ════════════════════════════════════════════
-// 端口 shape 的类型与 -1 语义
-// ════════════════════════════════════════════
-// Node::Port::shape 的类型是 Tensor::Shape = std::vector<int64_t>
-// （DCinfer/include/Tensor/Tensor.hpp），本身即可表达 ONNX 动态维度 -1，
-// 序列化/反序列化直接以 int64_t 直通即可保证 roundtrip 稳定。
-// 注意：TensorData::Shape（TensorData.h）= std::vector<size_t> 无法表达
-// -1，若以含 -1 的 schema shape 构造实际 TensorData，维度会隐式转换为
-// size_t::max 且形状乘积溢出——这是核心库运行期数据路径的已知限制
-// （见 GraphCompiler.h 头注释），不在 DCIr 侧解决。
-
-// ════════════════════════════════════════════
-// 辅助：affinity 字符串转换
-// ════════════════════════════════════════════
+// Node::Port::shape = vector<int64_t>：-1 动态维直通即可保证 roundtrip 稳定。
+// TensorData::Shape = vector<size_t> 不能表达 -1：隐式转换翻成 size_t::max
+// 且形状乘积溢出。属核心库数据路径的已知限制（见 GraphCompiler.h），不在 DCIr 侧解决。
 
 static std::string affinityToString(ResourceClass a) {
 	switch (a) {
@@ -57,10 +44,6 @@ static ResourceClass stringToAffinity(const std::string& s) {
 	return ResourceClass::Operator;
 }
 
-// ════════════════════════════════════════════
-// 辅助：端口 ↔ JSON
-// ════════════════════════════════════════════
-
 nlohmann::json GraphCompiler::portToJson(const Node::Port& port) {
 	nlohmann::json j;
 	j["name"] = port.name;
@@ -68,7 +51,6 @@ nlohmann::json GraphCompiler::portToJson(const Node::Port& port) {
 	j["typeSize"] = static_cast<int64_t>(port.typeSize);
 	nlohmann::json shapeArr = nlohmann::json::array();
 	for (auto dim : port.shape) {
-		// Tensor::Shape = vector<int64_t>：动态维度 -1 原样写入 JSON，roundtrip 稳定
 		shapeArr.push_back(dim);
 	}
 	j["shape"] = std::move(shapeArr);
@@ -80,9 +62,7 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	Node::Port p;
 	p.name = j.at("name").get<std::string>();
 	p.type = TensorMeta::stringToType(j.at("tensorType").get<std::string>());
-	// typeSize 校验（IR-08）：负值经 static_cast<size_t> 会穿透为 SIZE_MAX，
-	// 直接被缓冲/张量路径当作巨额单元大小——显式拒绝；0 合法
-	// （Void + 0 = 不校验类型语义）。
+	// 负值经 static_cast<size_t> 会穿透为 SIZE_MAX：显式拒绝；0 合法（Void + 0）。
 	const int64_t typeSize = j.at("typeSize").get<int64_t>();
 	if (typeSize < 0 || typeSize > (1ll << 20)) {
 		throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::jsonToPort",
@@ -90,22 +70,15 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	}
 	p.typeSize = static_cast<size_t>(typeSize);
 	for (auto& dim : j.at("shape")) {
-		// 直接以 int64_t 保留（含 -1 动态维度）：禁止 static_cast<size_t> 等
-		// 有符号/无符号转换——JSON -1 会被转为巨大值，破坏 roundtrip 对称性。
+		// 禁止有符号/无符号转换：-1 会被转为巨大值，破坏 roundtrip 对称性。
 		p.shape.push_back(dim.get<int64_t>());
 	}
 	p.required = j.value("required", true);
 	return p;
 }
 
-// ════════════════════════════════════════════
-// 辅助：节点元信息（modelPath / tag）
-// ════════════════════════════════════════════
-
-/// @brief 将 JSON 中的 tag / modelPath 应用到已创建节点（Builtin / 引擎 / 骨架三分支共用）
-///        modelPath 为引擎自定义不透明信息：原样透传——不拼接、不校验、
-///        不做任何文件系统解释（相对路径/URL/模型标识符均原样保留），
-///        其消费语义（加载方式与时机）由引擎适配层决定。
+/// @brief 将 JSON 中的 tag / modelPath 应用到已创建节点（三分支共用）
+///        modelPath 为引擎自定义不透明信息，原样透传（不拼接/不校验/不做文件系统解释）。
 static void applyNodeMeta(DC::Node& node, const nlohmann::json& j) {
 	if (j.contains("modelPath")) {
 		node.setModelPath(j["modelPath"].get<std::string>());
@@ -115,17 +88,11 @@ static void applyNodeMeta(DC::Node& node, const nlohmann::json& j) {
 	}
 }
 
-// ════════════════════════════════════════════
-// 序列化辅助：折叠连接器，推断边 mode
-// ════════════════════════════════════════════
-
 nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 	nlohmann::json edgesArr = nlohmann::json::array();
 
-	// 索引：connector 名 → 其所有输出边
-	// edges() 返回值副本（P2-13 引用收窄）：connectorOut 存储元素指针，
-	// 必须先把快照钉在局部变量上延长生命周期至函数尾，否则 range-for
-	// 的临时容器在循环结束后析构，指针全部悬垂
+	// 索引：connector 名 → 其所有输出边。edges() 返回值为副本，快照必须
+	// 钉在局部变量上延长生命周期，否则 range-for 后元素指针悬垂。
 	const auto edgesSnapshot = graph.edges();
 	std::map<std::string, std::vector<const InferGraph::Edge*>, std::less<>> connectorOut;
 	for (const auto& e : edgesSnapshot) {
@@ -135,7 +102,6 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 		}
 	}
 
-	// 连接器是否承担多路分发（Broadcast 且出边数 > 1）
 	auto isFanOutConnector = [&](const std::string& name) {
 		auto* n = graph.node(name);
 		if (!n || !n->isConnector() || n->type().find("Broadcast") == std::string::npos) return false;
@@ -143,10 +109,8 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 		return it != connectorOut.end() && it->second.size() > 1;
 	};
 
-	// 遍历 processor 源边：若指向连接器，穿透连接器链（自动导线 / 显式
-	// Broadcast / 包裹导线的任意组合），展开为 processor → processor 逻辑边。
-	// 链上出现多路分发 Broadcast 时，展开出的每条逻辑边标 mode=broadcast
-	// （重建时还原为同一分发组）；纯 1:1 链折叠为无 mode 直连边。
+	// 遍历 processor 源边：指向连接器时穿透链，展开为 processor → processor 逻辑边；
+	// 链上有分发 Broadcast 则标 mode=broadcast（重建时还原分发组），1:1 链折叠为直连边。
 	for (auto& e : graph.edges()) {
 		auto* srcNode = graph.node(e.srcNode);
 		if (!srcNode || srcNode->isConnector()) continue;
@@ -154,7 +118,6 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 		if (!dstNode) continue;
 
 		if (!dstNode->isConnector()) {
-			// 两处理器直连（保守处理）
 			nlohmann::json edge;
 			edge["srcNode"] = e.srcNode;
 			edge["srcPort"] = e.srcPort;
@@ -166,9 +129,9 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 
 		// 连接器链穿透：迭代收集所有逻辑终点（非连接器节点）
 		struct WalkItem {
-			std::string nodeName; ///< 当前到达的节点
-			std::string portName; ///< 进入该节点的输入口
-			bool fanOutPath;      ///< 路径上已出现多路分发 Broadcast
+			std::string nodeName;
+			std::string portName;
+			bool fanOutPath;
 		};
 		std::vector<WalkItem> stack;
 		stack.push_back({e.dstNode, e.dstPort, isFanOutConnector(e.dstNode)});
@@ -183,7 +146,6 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 			if (!cur) continue;
 
 			if (!cur->isConnector()) {
-				// 逻辑终点：processor → processor
 				nlohmann::json edge;
 				edge["srcNode"] = e.srcNode;
 				edge["srcPort"] = e.srcPort;
@@ -196,9 +158,8 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 				continue;
 			}
 
-			// 中间连接器：继续穿透其所有出边
 			auto it = connectorOut.find(item.nodeName);
-			if (it == connectorOut.end()) continue; // 悬空连接器：无下游，丢弃
+			if (it == connectorOut.end()) continue;
 			for (auto* outE : it->second) {
 				stack.push_back({outE->dstNode, outE->dstPort,
 								 item.fanOutPath || isFanOutConnector(outE->srcNode)});
@@ -207,10 +168,6 @@ nlohmann::json GraphCompiler::edgesToJson(const InferGraph& graph) {
 	}
 	return edgesArr;
 }
-
-// ════════════════════════════════════════════
-// 序列化：InferGraph → JSON
-// ════════════════════════════════════════════
 
 nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	nlohmann::json root;
@@ -249,14 +206,13 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	}
 	root["nodes"] = std::move(nodesArr);
 
-	// 边：折叠连接器
 	root["edges"] = edgesToJson(graph);
 
-	// 输出绑定（alias 必填：签名元数据字段，不参与运行时寻址）
+	// 输出绑定：alias 为签名元数据，不参与运行时寻址
 	nlohmann::json bindingsArr = nlohmann::json::array();
 	for (auto& b : graph.outputBindings()) {
 		auto* boundNode = graph.node(b.nodeName);
-		if (boundNode && boundNode->isConnector()) continue; // 跳过连接器输出绑定
+		if (boundNode && boundNode->isConnector()) continue;
 		nlohmann::json jb;
 		jb["alias"] = b.alias;
 		jb["nodeName"] = b.nodeName;
@@ -265,7 +221,7 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	}
 	root["outputBindings"] = std::move(bindingsArr);
 
-	// 输入绑定（alias 必填：签名元数据字段，不参与运行时寻址）
+	// 输入绑定：alias 为签名元数据，不参与运行时寻址
 	nlohmann::json inputBindingsArr = nlohmann::json::array();
 	for (auto& b : graph.inputBindings()) {
 		auto* boundNode = graph.node(b.nodeName);
@@ -280,10 +236,6 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 
 	return root;
 }
-
-// ════════════════════════════════════════════
-// 反序列化辅助：按 mode 重建边
-// ════════════════════════════════════════════
 
 void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJson) {
 	if (!edgesJson.is_array()) return;
@@ -323,8 +275,7 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 		if (targets.empty()) continue;
 
 		if (key.mode == "routing") {
-			// Routing 连接器已随核心库移除（轮询属业务语义，应由上层自定义节点实现）：
-			// 旧版本序列化的图在此显式报错，而非静默降级为普通连线
+			// Routing 已移除（轮询属业务语义）：旧图显式报错而非静默降级。
 			throw DC::GraphException(DC::GraphException::ErrorType::Other,
 									 "GraphCompiler::rebuildEdges",
 									 "edge mode \"routing\" is no longer supported; express "
@@ -332,7 +283,6 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 		}
 
 		if (key.mode == "broadcast") {
-			// 创建 Broadcast(N) 连接器
 			size_t n = targets.size();
 			Node::Schema connSchema;
 			Node::RunFn connRunFn;
@@ -348,18 +298,14 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 			connNode->setConnector(true);
 			graph.addNode(std::move(connNode));
 
-			// src → conn.in；conn.out_i → dst_i（connect 自动包裹直通导线，
-			// 序列化折叠后不可见，round-trip 幂等不受影响）
-			// 连接失败不再容忍（IR-07）：孤儿连接器 / 残缺图属静默错误，
-			// GraphException（含节点/端口坐标）直接透传，反序列化 fail-fast。
+			// connect 自动包裹直通导线（序列化折叠后不可见，round-trip 幂等）；
+			// 连接失败直接透传 GraphException，反序列化 fail-fast。
 			graph.connect(key.srcNode, key.srcPort, connName, "in");
-			// conn.out_i → dst_i
 			for (size_t i = 0; i < targets.size(); ++i) {
 				graph.connect(connName, "out_" + std::to_string(i), targets[i].dstNode, targets[i].dstPort);
 			}
 		} else {
-			// 默认 1→1：用 connect() 自动插入导线连接器
-			// 连接失败直接 fail-fast（IR-07，同上）
+			// 默认 1→1：connect() 自动插入导线连接器；失败 fail-fast（同上）。
 			for (auto& tgt : targets) {
 				graph.connect(key.srcNode, key.srcPort, tgt.dstNode, tgt.dstPort);
 			}
@@ -367,13 +313,9 @@ void GraphCompiler::rebuildEdges(InferGraph& graph, const nlohmann::json& edgesJ
 	}
 }
 
-// ════════════════════════════════════════════
-// 反序列化：JSON → InferGraph
-// ════════════════════════════════════════════
-
 void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 
-	// 节点数预算（P2-13）：全部编译路径（json 字符串/.dcg）的必经点
+	// 节点数预算：json 字符串 / .dcg 两条路径都经此
 	if (root.contains("nodes") && root["nodes"].is_array()
 		&& root["nodes"].size() > kMaxGraphNodes) {
 		throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::buildGraph",
@@ -381,12 +323,10 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 								 + " > limit " + std::to_string(kMaxGraphNodes) + ")");
 	}
 
-	// 节点
 	for (auto& j : root.at("nodes")) {
 		std::string name = j.at("name").get<std::string>();
 		std::string type = j.at("type").get<std::string>();
 
-		// 解析 Schema
 		Node::Schema schema;
 		for (auto& p : j.at("inputs")) {
 			schema.inputs.push_back(jsonToPort(p));
@@ -398,7 +338,6 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 		auto& reg = EngineRegistry::instance();
 
 		if (type == "Builtin") {
-			// Builtin 节点：尝试从 Registry 查找已注册算子
 			// 反序列化时 RunFn 由上层注册，此处仅创建 Schema 骨架
 			auto node = std::make_unique<DC::Node>(
 				type, name, std::move(schema), nullptr,
@@ -406,15 +345,11 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 			applyNodeMeta(*node, j);
 			graph.addNode(std::move(node));
 		} else if (reg.hasEngine(type)) {
-			// 引擎节点：编译期只物化、不加载（见 GraphCompiler.h 头注释）。
-			// createLazyNode 以 JSON 声明 schema（不做实例推导）调用工厂构造节点；
-			// modelPath 原样透传，模型加载由引擎 loadModel 钩子在宿主
-			// 绑定期/执行期处理（getOrCreateEngine 先确保引擎核心、再加载模型
-			// + Node::bindEngine）。
+			// 引擎节点：编译期只物化不加载（见头注释）；createLazyNode 以 JSON
+			// 声明 schema 调工厂构造；模型加载在宿主绑定期经 loadModel 钩子完成。
 			auto node = reg.createLazyNode(type, name, schema);
 			if (!node) {
-				// 引擎已注册但未注册工厂：回退骨架（与未注册类型一致），
-				// 保留 JSON 声明 schema，保证图结构完整可序列化。
+				// 已注册但无工厂：回退骨架（同未注册类型），保留 JSON schema 保证可序列化。
 				std::cerr << "GraphCompiler: warning — engine node '" << name
 					<< "' (type '" << type << "') has no node factory, "
 					<< "creating skeleton (RunFn=nullptr); JSON schema preserved" << std::endl;
@@ -425,8 +360,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 				graph.addNode(std::move(skeleton));
 				continue;
 			}
-			// 声明 schema 空检查：接线与执行均以节点 schema 为锚，
-			// JSON 未声明任何端口时该节点不可接线，编译期给出警告。
+			// 空声明 schema：节点不可接线，编译期警告。
 			if (node->schema().inputs.empty() && node->schema().outputs.empty()) {
 				std::cerr << "GraphCompiler: warning — engine node '" << name
 					<< "' (type '" << type << "') has empty declared schema: "
@@ -435,7 +369,6 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 			applyNodeMeta(*node, j);
 			graph.addNode(std::move(node));
 		} else {
-			// 未注册类型：创建骨架节点（RunFn 留空）
 			std::cerr << "GraphCompiler: warning — unregistered engine type '" << type
 				<< "' for node '" << name << "', creating skeleton (RunFn=nullptr)" << std::endl;
 			auto node = std::make_unique<DC::Node>(
@@ -446,12 +379,11 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 		}
 	}
 
-	// 边
 	if (root.contains("edges")) {
 		rebuildEdges(graph, root["edges"]);
 	}
 
-	// 输出绑定（alias 缺省回退 nodeName.portName：唯一且兼容旧版本序列化文件）
+	// 输出绑定：alias 缺省回退 nodeName.portName（唯一且兼容旧版本文件）
 	if (root.contains("outputBindings")) {
 		for (auto& b : root["outputBindings"]) {
 			graph.bindOutput(
@@ -461,7 +393,7 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 		}
 	}
 
-	// 输入绑定（alias 缺省回退 nodeName.portName：唯一且兼容旧版本序列化文件）
+	// 输入绑定：alias 缺省回退 nodeName.portName（唯一且兼容旧版本文件）
 	if (root.contains("inputBindings")) {
 		for (auto& b : root["inputBindings"]) {
 			graph.bindInput(
@@ -473,22 +405,16 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 
 }
 
-// ════════════════════════════════════════════
-// 公开接口
-// ════════════════════════════════════════════
-
 void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 	std::filesystem::path p(path);
 	std::string ext = p.extension().string();
 
 	if (ext == ".dcg") {
-		// ── .dcg 反序列化：只读取 graph.json ──
-		// 模型文件不由编译期解压/加载：modelPath 为归档内相对路径字符串，
-		// 原样透传保留在节点上；资源就绪由宿主自行处理（DcgArchive::extractOne
-		// 提供含路径越界/符号链接/预算防御的安全解压，详见头注释）。
+		// .dcg：只读取 graph.json；模型解压/加载由宿主处理（DcgArchive::extractOne，
+		// 含路径越界/符号链接/预算防御）。
 		auto archive = DcgArchive::openRead(p);
 
-		// 1. 读取并解析 graph.json（大小预算（P2-13）：解析前拒超限输入）
+		// 读取 graph.json（解析前拒绝超限输入）
 		std::string json = archive->readGraphJson();
 		if (json.size() > kMaxGraphJsonBytes) {
 			throw GraphException(GraphException::ErrorType::Other,
@@ -506,22 +432,18 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 				std::string("JSON parse error in .dcg: ") + e.what());
 		}
 
-		// 2. nodes 形状校验：图描述 schema 约定 nodes 为数组（序列化侧亦如此）；
-		//    buildGraph 对 object 形状也能迭代（错误在深处才暴露），入口显式拒绝。
+		// nodes 形状校验：schema 约定为数组；buildGraph 对 object 也能迭代，入口显式拒绝。
 		if (root.contains("nodes") && !root["nodes"].is_array()) {
 			throw GraphException(GraphException::ErrorType::Other,
 				"GraphCompiler::compileFile",
 				"invalid .dcg graph.json: 'nodes' must be an array");
 		}
 
-		// 3. 构建图（archive 析构时自动清理空临时目录）
+		// 构建图（archive 析构自动清理空临时目录）
 		compileInternal(graph, root);
 		return;
 	}
 
-	// ── .json 反序列化 ──
-
-	// 读取文件内容
 	std::ifstream ifs(p, std::ios::binary);
 	if (!ifs.is_open()) {
 		throw GraphException(GraphException::ErrorType::Other,
@@ -552,7 +474,7 @@ void GraphCompiler::compileFile(InferGraph& graph, std::string_view path) {
 }
 
 void GraphCompiler::compileString(InferGraph& graph, std::string_view json) {
-	// 大小预算（P2-13）：不可信来源的图定义在解析前拒绝，防无界分配
+	// 大小预算：解析前拒绝超限输入，防无界分配
 	if (json.size() > kMaxGraphJsonBytes) {
 		throw GraphException(GraphException::ErrorType::Other, "GraphCompiler::compileString",
 							 "graph definition exceeds size limit (" + std::to_string(json.size()) + " > "
@@ -583,32 +505,28 @@ void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
 	std::string ext = p.extension().string();
 
 	if (ext == ".dcg") {
-		// ── .dcg 序列化 ──
 		auto json = graphToJson(graph);
 
-		// 收集所有模型文件：原 modelPath → archive 内路径
-		std::map<std::string, std::string> modelFiles; // original path → archive path
+		// 模型文件：原 modelPath → archive 内路径
+		std::map<std::string, std::string> modelFiles;
 		std::set<std::string> usedNames;
 
 		for (auto& j : json["nodes"]) {
 			if (!j.contains("modelPath")) continue;
 			std::string origPath = j["modelPath"].get<std::string>();
 
-			// 共享模型（IR-01）：同一磁盘文件被多个节点引用时复用已分配的
-			// archive 名——只入包一份、所有引用节点写回同一相对路径。
-			// （重复条目二次改名会覆盖 modelFiles 记录 → 首节点 graph.json
-			// 引用悬空、.dcg 编译必然失败）
+			// 同一磁盘文件被多节点引用：复用已分配的 archive 名，只入包一份；
+			// 二次改名会覆盖记录导致引用悬空。
 			if (auto it = modelFiles.find(origPath); it != modelFiles.end()) {
 				j["modelPath"] = it->second;
 				continue;
 			}
 
-			// 生成 archive 内唯一名称: models/<basename>
 			std::filesystem::path orig(origPath);
 			std::string baseName = orig.filename().string();
 			std::string archiveName = "models/" + baseName;
 
-			// 同名冲突（不同源路径同 basename）：加数字后缀
+			// 不同源路径同 basename：加数字后缀避让
 			int suffix = 1;
 			while (!usedNames.insert(archiveName).second) {
 				archiveName = "models/" + orig.stem().string() + "_" + std::to_string(suffix++)
@@ -616,11 +534,9 @@ void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
 			}
 
 			modelFiles[origPath] = archiveName;
-			// 将 modelPath 替换为相对路径
 			j["modelPath"] = archiveName;
 		}
 
-		// 写入 ZIP
 		auto archive = DcgArchive::openWrite(p);
 		archive->writeGraphJson(json.dump(2));
 
@@ -632,7 +548,6 @@ void GraphCompiler::serialize(const InferGraph& graph, std::string_view path) {
 		return;
 	}
 
-	// ── .json 序列化 ──
 	auto json = graphToJson(graph);
 	std::string out = json.dump(2);
 

@@ -1,6 +1,4 @@
 // LoweringTest：Broadcast(1) lowering 验收
-// 验证：1:1 wire 从运行时视图擦除（源图不变）；值/错误/取消传播语义不变；
-//       TTL 只统计运行时顶点；绑定防护与多出边防护。
 
 #include "InferGraph.h"
 #include "Connector.h"
@@ -34,8 +32,6 @@ static int g_failures = 0;
 			std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, msg);                                                  \
 		}                                                                                                              \
 	} while (0)
-
-// ── 测试节点 ──
 
 static Node::Schema idSchema() {
 	Node::Schema s;
@@ -84,7 +80,7 @@ static std::unique_ptr<Tensor> floatTensor(float v) {
 	return t;
 }
 
-// 手动构造 Broadcast 连接器（fanOut=1 为等效导线，可被 lowering 擦除）
+// fanOut=1 为等效导线，可被 lowering 擦除
 static std::unique_ptr<Node> makeWire(const std::string& name, size_t fanOut = 1) {
 	auto w = std::make_unique<Node>("Connector.Broadcast", name, Connector::broadcastSchema(fanOut),
 								 Connector::broadcastRunFn(), ResourceClass::System);
@@ -92,16 +88,13 @@ static std::unique_ptr<Node> makeWire(const std::string& name, size_t fanOut = 1
 	return w;
 }
 
-// ── 1. 自动 wire（Broadcast(1)）被擦除：源图不变、运行时视图收缩、值传播不变 ──
-
 static void test_autoWireErased() {
 	InferGraph graph;
 	graph.addNode(makeId("a"));
 	graph.addNode(makeId("b"));
-	graph.connect("a", "y", "b", "x"); // 自动插入 __wire_N（Broadcast(1)）
+	graph.connect("a", "y", "b", "x");
 	graph.bindOutput("out", "b", "y");
 
-	// 源图视角：3 节点（a、b、wire）2 边
 	CHECK(graph.nodeCount() == 3, "source view: 3 nodes (incl. wire)");
 	CHECK(graph.edgeCount() == 2, "source view: 2 edges");
 
@@ -109,18 +102,14 @@ static void test_autoWireErased() {
 	CHECK(snap->loweringStats().erasedConnectors == 1, "1 connector erased");
 	CHECK(snap->runtimeNodeCount() == 2, "runtime view: wire erased (2 nodes)");
 	CHECK(snap->runtimeEdgeCount() == 1, "runtime view: fused direct edge (1 edge)");
-	// 源图视角冻结后不变形
 	CHECK(graph.nodeCount() == 3, "source view unchanged after freeze");
 
-	// 值传播：move 语义经直连边不变
 	graph.feedInput("t1", "a", "x", floatTensor(7.0f));
 	graph.submit("t1", "b", "y");
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete through lowered edge");
 	auto r = graph.takeOutputTensor("t1", "b", "y");
 	CHECK(std::abs(r.item<float>() - 7.0f) < 1e-6f, "value should pass through unchanged");
 }
-
-// ── 2. Broadcast(N>1) 不擦除：1→2 广播保留连接器节点 ──
 
 static void test_broadcastN2NotErased() {
 	InferGraph graph;
@@ -141,7 +130,6 @@ static void test_broadcastN2NotErased() {
 	graph.bindOutput("oc", "c", "y");
 
 	auto snap = graph.freeze();
-	// 3 根直通包裹导线（connect 自动插入的 Broadcast(1)）被擦除；bc(N=2) 保留
 	CHECK(snap->loweringStats().erasedConnectors == 3, "wrapping wires erased, N>1 broadcast kept");
 	CHECK(snap->runtimeNodeCount() == 4, "runtime keeps the broadcast connector (4 nodes)");
 	CHECK(snap->runtimeEdgeCount() == 3, "fused a→bc + bc's two out-edges (3 edges)");
@@ -156,8 +144,7 @@ static void test_broadcastN2NotErased() {
 }
 
 static void test_ttlCountsRuntimeVertices() {
-	// 3 源节点链（a → wire → c）：旧语义需要 3 hops（c 完成后 pf 检查需要 >0），
-	// 新语义只需 2 hops（每业务节点完成后 1 次）。maxHops=2 成功即固化新语义。
+	// 新语义 TTL 只计运行时顶点：2 跳链 maxHops=2 成功（旧语义需 3）
 	InferGraph graph;
 	graph.addNode(makeId("a"));
 	graph.addNode(makeId("c"));
@@ -169,7 +156,6 @@ static void test_ttlCountsRuntimeVertices() {
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "maxHops=2 suffices for 2-runtime-vertex chain (wire consumes no TTL)");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Succeeded, "status Succeeded");
 
-	// 反向固化：maxHops=1 时 2 顶点链 TTL 不足 → Failed（hops exhausted）
 	InferGraph g2;
 	g2.addNode(makeId("a"));
 	g2.addNode(makeId("c"));
@@ -185,8 +171,6 @@ static void test_ttlCountsRuntimeVertices() {
 			ttlMsg = true;
 	CHECK(ttlMsg, "diagnostic reports hops exhausted");
 }
-
-// ── 4. 成环图：擦除后 hop 预算延长（方向安全），TTL 仍兜底 ──
 
 static void test_cycleTtlStillBounded() {
 	InferGraph graph;
@@ -214,9 +198,7 @@ static void test_cycleTtlStillBounded() {
 	CHECK(snap->runtimeNodeCount() == 2, "cycle runtime: 2 business nodes");
 	CHECK(graph.nodeCount() == 4, "source view keeps 4 nodes");
 
-	// maxHops=6：新语义下预算 6 → a 执行 ≥3 次（旧语义每业务 hop 耗 2，只能 2 次）。
-	// 声明真实存在节点 a 的端口但 count 极大（1000），6 跳内不可能满足——
-	// 避免首次环回即满足声明提前 Succeeded，由 TTL 兜底终止（本用例验证的就是 TTL 行为）。
+	// 声明 count=1000 避免首次环回即满足：6 跳内不可能达成，由 TTL 兜底终止
 	graph.feedInput("t1", "a", "x", floatTensor(0.0f));
 	graph.submit("t1", "a", "y", 1000, /*maxHops=*/6);
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "cycle should terminate by TTL");
@@ -224,13 +206,8 @@ static void test_cycleTtlStillBounded() {
 	CHECK(aRuns.load() >= 3, "TTL budget stretches after lowering (a runs >= 3 times)");
 }
 
-// ── 5. 绑定防护：wire 承担图级输入契约时不擦除；输出侧契约绑定受终端不变量约束 ──
-
 static void test_bindingProtectionKeepsWire() {
 	{
-		// 回归（输出取数端口不变量）：绑定自动导线的输出口（携带出边）被拒绝——
-		// 旧行为：绑定消费截走数据、下游静默跳过（c 永不执行）；现收束为显式错误。
-		// 中间结果需要对外可见时，显式插入直通分支承接绑定（见 InferGraphTest）。
 		InferGraph graph;
 		graph.addNode(makeId("a"));
 		graph.addNode(makeId("c"));
@@ -246,7 +223,6 @@ static void test_bindingProtectionKeepsWire() {
 		CHECK(rejected, "binding a wire output port (with out-edges) must be rejected at freeze");
 	}
 	{
-		// wire 的 in 被绑定为图级输入 → 保留（feedInput 直喂 wire）
 		InferGraph graph;
 		graph.addNode(makeId("a"));
 		graph.addNode(makeId("c"));
@@ -265,8 +241,6 @@ static void test_bindingProtectionKeepsWire() {
 		CHECK(std::abs(r.item<float>() - 4.0f) < 1e-6f, "value should reach downstream via wire");
 	}
 }
-
-// ── 6. 错误传播：上游失败 → 下游不执行（直连边路径语义不变）──
 
 static void test_errorPropagationThroughLoweredEdge() {
 	InferGraph graph;
@@ -288,8 +262,6 @@ static void test_errorPropagationThroughLoweredEdge() {
 	CHECK(!graph.hasOutput("t1", "down", "y"), "downstream must not produce output");
 }
 
-// ── 7. 链式 wire：wire→wire 链（组合反例）必须融合到最终保留节点 ──
-
 static void test_chainedWiresErased() {
 	InferGraph graph;
 	graph.addNode(makeId("a"));
@@ -297,8 +269,7 @@ static void test_chainedWiresErased() {
 	graph.addNode(makeWire("w1"));
 	graph.addNode(makeWire("w2"));
 
-	// a → w1 → w2 → b：connect 包裹后源图为连续 Broadcast(1) 链（每跳包裹一根
-	// 直通导线），逐链融合至首个保留节点 —— 不产生指向已擦除节点的悬空边
+	// 逐链融合至首个保留节点：不产生指向已擦除节点的悬空边
 	graph.connect("a", "y", "w1", "in");
 	graph.connect("w1", "out_0", "w2", "in");
 	graph.connect("w2", "out_0", "b", "x");
@@ -316,8 +287,6 @@ static void test_chainedWiresErased() {
 	CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "value should traverse the wire chain");
 }
 
-// ── 8. 链终止于保留连接器：w1 擦除后直连 Broadcast(2)，bc 保留 ──
-
 static void test_chainThroughKeptConnector() {
 	InferGraph graph;
 	graph.addNode(makeId("a"));
@@ -332,7 +301,6 @@ static void test_chainThroughKeptConnector() {
 	graph.connect("bc", "out_1", "c", "x");
 
 	auto snap = graph.freeze();
-	// w1 + 4 根包裹导线擦除；bc(N=2) 保留
 	CHECK(snap->loweringStats().erasedConnectors == 5, "w1 + wrapping wires erased (bc kept)");
 	CHECK(snap->runtimeNodeCount() == 4, "runtime keeps bc (4 nodes)");
 	CHECK(snap->runtimeEdgeCount() == 3, "fused a→bc + bc's two out-edges");
@@ -346,33 +314,27 @@ static void test_chainThroughKeptConnector() {
 	CHECK(std::abs(rc.item<float>() - 6.0f) < 1e-6f, "downstream 2 gets value through kept broadcast");
 }
 
-// ── 9. 纯 wire 环：融合边追踪不得挂起，环上融合边丢弃 ──
-//
-// connect() 无法构建裸环（对同一输入口的第二次 connect 会引入第二条入边，
-// 破坏“恰 1 入边”的擦除条件），故经 GraphStore::connectRaw 构建裸拓扑，
-// 直接验证 buildRuntimeView 的组合语义（回归：悬空边曾导致数据静默滞留）。
+// connect() 无法构建裸环（二次 connect 引入第二条入边），故经 connectRaw 构建裸拓扑
 static void test_wireOnlyCycleDropsFusedEdge() {
 	GraphStore store;
 	store.addNode(makeId("x"));
 	store.addNode(makeWire("w1"));
 	store.addNode(makeWire("w2"));
 
-	// x → w1 → w2 → w1：外部入边进入纯 wire 环
 	store.connectRaw("x", "y", "w1", "in");
 	store.connectRaw("w1", "out_0", "w2", "in");
 	store.connectRaw("w2", "out_0", "w1", "in");
 
-	GraphSignature signature; // 无绑定：无输入/输出防护场景
+	GraphSignature signature;
 	std::unordered_map<std::string, const Node*> runtimeNodes;
 	std::vector<GraphStore::Edge> runtimeEdges;
 	GraphLoweringStats stats;
-	buildRuntimeView(store, signature, runtimeNodes, runtimeEdges, stats); // 不得挂起
+	buildRuntimeView(store, signature, runtimeNodes, runtimeEdges, stats);
 
 	CHECK(stats.erasedConnectors == 2, "both cycle wires erased");
 	CHECK(runtimeNodes.size() == 1, "runtime view: only x");
 	CHECK(runtimeEdges.empty(), "fused edge into wire-only cycle is dropped");
 
-	// DirectConnect 守卫回归（connectRaw 拒绝业务节点直连）
 	bool directRejected = false;
 	try {
 		GraphStore gs;
@@ -385,29 +347,24 @@ static void test_wireOnlyCycleDropsFusedEdge() {
 	CHECK(directRejected, "direct connect between non-connectors should be rejected");
 }
 
-// ── 10. 升级扇出：同一输出口二次 connect 扩容的导线（N=2）保留，按 2 出边分发 ──
-
 static void test_expandedFanOutKept() {
 	InferGraph graph;
 	graph.addNode(makeId("a"));
 	graph.addNode(makeInc("b"));
 	graph.addNode(makeInc("c"));
-	graph.connect("a", "y", "b", "x"); // 自动导线 wire（Broadcast(1)）
-	graph.connect("a", "y", "c", "x"); // 原地扩容：wire 变 N=2，out_1 → c
+	graph.connect("a", "y", "b", "x");
+	graph.connect("a", "y", "c", "x");
 	graph.bindOutput("ob", "b", "y");
 	graph.bindOutput("oc", "c", "y");
 
-	// 源图视角：3 业务 + 1 扩容导线 = 4 节点、3 边
 	CHECK(graph.nodeCount() == 4, "source view: 3 biz + 1 expanded wire (4 nodes)");
 	CHECK(graph.edgeCount() == 3, "source view: 3 edges");
 
 	auto snap = graph.freeze();
-	// 扩容导线（N=2）承担分发职责，不擦除；图内无其他导线
 	CHECK(snap->loweringStats().erasedConnectors == 0, "expanded wire is kept (not erased)");
 	CHECK(snap->runtimeNodeCount() == 4, "runtime keeps the expanded wire (4 nodes)");
 	CHECK(snap->runtimeEdgeCount() == 3, "runtime: a→wire + 2 out-edges (3 edges)");
 
-	// 值分发：同一份数据到达两个分支
 	graph.feedInput("t1", "a", "x", floatTensor(10.0f));
 	graph.submit("t1", {{"b", "y"}, {"c", "y"}});
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "task should complete");
@@ -425,7 +382,6 @@ int main() {
 	test_bindingProtectionKeepsWire();
 	test_errorPropagationThroughLoweredEdge();
 
-	// 组合语义：链式 wire / 链终止于保留连接器 / 纯 wire 环 / 升级扇出
 	test_chainedWiresErased();
 	test_chainThroughKeptConnector();
 	test_wireOnlyCycleDropsFusedEdge();

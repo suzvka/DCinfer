@@ -12,7 +12,7 @@ void registerDcNetHttp(EngineRegistry& reg, std::shared_ptr<DcNetCodec> codec, N
 	DcNetAdapterDesc desc;
 	desc.engineType = std::move(engineType);
 	if (codec && schema.inputs.empty() && schema.outputs.empty())
-		schema = codec->schema(); // codec 自带本地形状规则
+		schema = codec->schema();
 	desc.schema = std::move(schema);
 	desc.codec = std::move(codec);
 	desc.transportFactory = [] { return std::make_shared<HttpTransport>(); };

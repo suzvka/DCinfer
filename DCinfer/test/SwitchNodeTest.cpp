@@ -1,10 +1,4 @@
-// switch_node_test.cpp - SwitchNode integration test
-//
-// Verifies:
-//   1. Basic switch: 3 candidates (mul 1/2/3), runtime select changes output
-//   2. Graph integration: SwitchNode in a src->switch->dst pipeline
-//   3. Out-of-range protection: active index beyond candidates returns error
-//   4. Node type identity: SwitchNode reports type='Switch'
+// SwitchNode integration test
 
 #include "SwitchNode.h"
 #include "NodeExecutor.h"
@@ -43,14 +37,12 @@ int g_failures = 0;
 		}                                                                      \
 	} while (0)
 
-// Helper: create a scalar float Value (for feedInput)
 DC::Value makeFloatTensor(float v) {
 	auto t = std::make_unique<DC::Tensor>(DC::Tensor::TensorType::Float, sizeof(float));
 	*t = v;
 	return DC::Value(std::move(t));
 }
 
-// Helper: make a RunFn that reads 'x', multiplies by factor, writes to 'y'
 DC::Node::RunFn makeMulRunFn(float factor) {
 	return [factor](DC::Node::RunContext& ctx) -> DC::Node::Result {
 		const auto& val = ctx.peek("x");
@@ -69,9 +61,6 @@ float readScalar(const DC::Tensor& t) {
 	return t.item<float>();
 }
 
-// ════════════════════════════════════════════
-// Test 1: Basic switch (3 candidates)
-// ════════════════════════════════════════════
 void testBasicSwitch() {
 	std::cout << "Test 1: Basic switch (mul1, mul2, mul3)" << std::endl;
 
@@ -92,7 +81,6 @@ void testBasicSwitch() {
 	graph.addNode(std::move(node));
 	graph.bindOutput("y", "sw", "y");
 
-	// cand 0 (mul1): 5.0 -> 5.0
 	std::optional<DC::Tensor> captured;
 	graph.setTaskCompleteCallback([&](const DC::InferGraph::TaskId& tid) {
 		if (graph.hasOutput(tid, "sw", "y")) {
@@ -108,7 +96,6 @@ void testBasicSwitch() {
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 5.0f) < 1e-5f, "mul1: 5*1=5");
 
-	// switch to cand 1 (mul2): 5.0 -> 10.0
 	handle.select(1);
 	CHECK(handle.current() == 1, "index is 1");
 	captured.reset();
@@ -118,7 +105,6 @@ void testBasicSwitch() {
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 10.0f) < 1e-5f, "mul2: 5*2=10");
 
-	// switch to cand 2 (mul3): 4.0 -> 12.0
 	handle.select(2);
 	captured.reset();
 	graph.feedInput("t3", "sw", "x", makeFloatTensor(4.0f));
@@ -130,9 +116,6 @@ void testBasicSwitch() {
 	REPORT();
 }
 
-// ════════════════════════════════════════════
-// Test 2: Graph integration (src -> switch -> dst)
-// ════════════════════════════════════════════
 void testGraphIntegration() {
 	std::cout << "Test 2: Graph pipeline (src -> switch -> dst)" << std::endl;
 
@@ -189,7 +172,6 @@ void testGraphIntegration() {
 		}
 	});
 
-	// mul5: 3.0 -> id(3) -> mul5(15) -> add1(16)
 	graph.feedInput("t1", "src", "x", makeFloatTensor(3.0f));
 	graph.submit("t1", "dst", "y");
 	CHECK(graph.waitForResult("t1", std::chrono::milliseconds(3000)).status != DC::TaskStatus::Running, "t1 complete");
@@ -197,7 +179,7 @@ void testGraphIntegration() {
 	if (captured)
 		CHECK(std::abs(readScalar(*captured) - 16.0f) < 1e-5f, "pipeline mul5: (3*5)+1=16");
 
-	// switch to mul7: 3.0 -> id(3) -> mul7(21) -> add1(22)
+	// switch to mul7
 	handle.select(1);
 	captured.reset();
 	graph.feedInput("t2", "src", "x", makeFloatTensor(3.0f));
@@ -209,9 +191,6 @@ void testGraphIntegration() {
 	REPORT();
 }
 
-// ════════════════════════════════════════════
-// Test 3: Out-of-range index (direct tryExecute check)
-// ════════════════════════════════════════════
 void testOutOfRange() {
 	std::cout << "Test 3: Out-of-range index produces error" << std::endl;
 
@@ -223,9 +202,8 @@ void testOutOfRange() {
 	};
 	auto [node, handle] = DC::createSwitchNode("sw_oob", std::move(schema), std::move(cands));
 
-	handle.select(99); // out of range
+	handle.select(99);
 
-	// Direct test: feed input and tryExecute without graph
 	DC::NodeExecutor exec(*node);
 	exec.setInput("t1", "x", makeFloatTensor(1.0f));
 	CHECK(exec.isReady("t1"), "node should be ready");
@@ -236,9 +214,6 @@ void testOutOfRange() {
 	REPORT();
 }
 
-// ════════════════════════════════════════════
-// Test 4: Node type identity
-// ════════════════════════════════════════════
 void testNodeType() {
 	std::cout << "Test 4: SwitchNode type='Switch'" << std::endl;
 

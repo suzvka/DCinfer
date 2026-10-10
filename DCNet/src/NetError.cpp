@@ -10,7 +10,7 @@ namespace DC::Net {
 
 namespace {
 
-/// HTTP 状态码 → 默认分类（报文解析不出已知 code 时的兜底）。
+/// HTTP 状态码 → 兜底分类。
 NetErrorCategory categoryForHttpStatus(int status) {
 	if (status == 400 || status == 422)
 		return NetErrorCategory::RemoteRejected;
@@ -27,7 +27,7 @@ NetErrorCategory categoryForHttpStatus(int status) {
 	return NetErrorCategory::RemoteMalformed;
 }
 
-/// 已知远端错误码 → 精确分类（OpenAI 兼容服务常用错误码）。
+/// OpenAI 兼容服务常用错误码 → 精确分类。
 const std::unordered_map<std::string, NetErrorCategory>& knownRemoteCodes() {
 	static const std::unordered_map<std::string, NetErrorCategory> k = {
 		{"invalid_api_key", NetErrorCategory::RemoteAuth},
@@ -107,15 +107,9 @@ NetError finalize(NetError e) {
 	return e;
 }
 
-// ── 入站 wire 逆向映射（M-server；DESIGN.md §6.1）──
-// 逆向表与 categoryForHttpStatus / finalize 正向表逐行对偶：
-//   Ok              → 200（2xx 直接成功）
-//   InvalidInput    → 400（RemoteRejected → InvalidInput）
-//   SchemaMismatch  → 422（预留行：本地当前不产出该值，对端归一化仍为
-//                     InvalidInput，与本地形状违例现行行为一致；本地改产后
-//                     按需扩表，DESIGN.md §6.1 备注）
-//   ExecutionFailed → 500（RemoteServer → ExecutionFailed）
-//   InternalError   → 500（解析限度：对端归一化为 ExecutionFailed）
+// 入站 wire 逆向表，与 categoryForHttpStatus / finalize 正向表对偶：
+//   Ok → 200；InvalidInput → 400；SchemaMismatch → 422（预留）；
+//   ExecutionFailed / InternalError → 500。
 int wireHttpStatusFor(Node::Status status) {
 	switch (status) {
 	case Node::Status::Ok:
@@ -172,7 +166,7 @@ NetError normalizeTransportError(NetTransportError err, std::string detail) {
 NetError normalizeHttpStatus(int status, std::string body) {
 	NetError e;
 	e.category = categoryForHttpStatus(status);
-	// 404 细化：remote:not_found（区别于 generic invalid_request）
+	// 404 细化：remote:not_found
 	if (status == 404)
 		e.code = "not_found";
 	if (e.category == NetErrorCategory::Timeout || e.category == NetErrorCategory::RemoteServer ||
@@ -226,7 +220,7 @@ NetError normalizeHttpResponse(int status, const std::string& body) {
 	if (!body.empty()) {
 		NetError e = normalizeRemoteBody(body, fallback);
 		if (e.category != NetErrorCategory::RemoteMalformed) {
-			// 报文可解析：已知 code 优先；无 code 时叠加状态码细化（如 404 → not_found）
+			// 报文可解析：已知 code 优先；无 code 时叠加状态码细化
 			if (e.code.empty() && status == 404)
 				e.code = "not_found";
 			return finalize(std::move(e));

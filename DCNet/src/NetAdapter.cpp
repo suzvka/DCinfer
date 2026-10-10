@@ -15,12 +15,8 @@ namespace {
 
 /// 标准 RunFn：encode → send → recv → decode；失败经 NetError 归一化出口上报。
 ///
-/// 编排细节：
-/// - encode 抛 DcCodecInputError → InvalidInput（调用方输入问题，不重试）
-/// - decode 抛 DcCodecRemoteError → ExecutionFailed + dcnet 领域诊断
-///   （code=NetErrorCategory::RemoteMalformed；远端结构异常，不重试）
-/// - send/recv 传输级失败按 ep.maxRetries 退避重试（100ms × 已试次数）；
-///   重试以 send+recv 整体为原子单元重放，幂等性由服务语义保证
+/// send/recv 传输级失败按 maxRetries 退避重试（100ms × 已试次数），以 send+recv
+/// 为原子单元重放（幂等性由服务语义保证）；encode / decode 异常不重试。
 Node::RunFn makeDefaultRunFn(std::shared_ptr<DcNetCodec> codec) {
 	return [codec = std::move(codec)](Node::RunContext& ctx) -> Node::Result {
 		auto* transport = static_cast<DcNetTransport*>(ctx.engine());
@@ -29,7 +25,6 @@ Node::RunFn makeDefaultRunFn(std::shared_ptr<DcNetCodec> codec) {
 		if (!codec)
 			return ctx.failure(Node::Status::InternalError, "DCNet: no codec configured");
 
-		// 1. 本地端口 → 对方请求报文（一次性；输入错误不重试）
 		Payload request;
 		try {
 			request = codec->encodeRequest(ctx);
@@ -41,7 +36,6 @@ Node::RunFn makeDefaultRunFn(std::shared_ptr<DcNetCodec> codec) {
 							   std::string("DCNet: encode failed: ") + e.what());
 		}
 
-		// 2+3. 发送 → 接收（传输级失败按 maxRetries 退避重试）
 		const int maxRetries = transport->endpoint().maxRetries;
 		NetError err;
 		Payload response;
@@ -56,7 +50,6 @@ Node::RunFn makeDefaultRunFn(std::shared_ptr<DcNetCodec> codec) {
 		if (!err.ok())
 			return ctx.failure(err.localStatus, err.localMessage, err.diagnostic);
 
-		// 4. 对方响应报文 → 本地端口（校验本地形状规则；结构异常不重试）
 		try {
 			codec->decodeResponse(response, ctx);
 		} catch (const DcCodecRemoteError& e) {
@@ -84,12 +77,8 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 	const Node::RunFn runFn = desc.runFn ? desc.runFn : makeDefaultRunFn(std::move(desc.codec));
 	const std::function<std::shared_ptr<DcNetTransport>()> transportFactory = std::move(desc.transportFactory);
 
-	// ── loadModel：modelPath 即远端端点 → 解析 + 覆盖 → 创建 transport → 连接 ──
-	// 注意：钩子在 single-flight 领导者线程锁外执行（不持有 registry 锁），
-	// 可安全反向调用 registry；同 key 并发调用只执行一次。
-	// 引擎级：DCNet 无引擎级共享资源——不注册 createEngineCore（框架合成
-	// 空核心），钩子忽略 core 参数。
-	// 覆盖项捕获为值：注册级配置固化（authToken 不参与日志/错误信息）。
+	// loadModel 钩子在 registry 锁外执行（single-flight），可反向调用 registry；
+	// 同 key 并发只执行一次。覆盖项按值捕获：注册级配置固化。
 	const std::string epAuthToken = desc.authToken;
 	const std::vector<std::string> epHeaders = desc.headers;
 	const auto epConnectTimeout = desc.connectTimeout;
@@ -108,7 +97,7 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 		NetEndpoint ep = NetEndpoint::parse(modelPath);
 		ep.allowInsecureCredentials = allowInsecureCredentials;
 		if (codec)
-			ep.requestPath = codec->requestPath(); // 协议子路径（如 /infer）注入端点
+			ep.requestPath = codec->requestPath();
 		if (!epAuthToken.empty())
 			ep.authToken = epAuthToken;
 		if (!epHeaders.empty())
@@ -126,11 +115,9 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 		return EngineInstance(std::move(transport));
 	};
 
-	// ── 端口推导：返回本地静态形状规则（不依赖远端）──
 	ed.getInputPorts = [localSchema](const EngineInstance&) { return localSchema.inputs; };
 	ed.getOutputPorts = [localSchema](const EngineInstance&) { return localSchema.outputs; };
 
-	// ── factory：构造节点（System 资源类）并绑定引擎实例 ──
 	ed.factory = [engineType, runFn](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>(engineType, p.nodeName, p.schema, runFn,
 										   ResourceClass::System);
@@ -139,8 +126,7 @@ void registerDcNetAdapter(EngineRegistry& reg, DcNetAdapterDesc desc) {
 		return node;
 	};
 
-	// ── 执行相位协议：HTTP 同步返回，逻辑内联 RunFn；执行相位全部留空 ──
-
+	// 执行相位协议：HTTP 同步返回，逻辑内联 RunFn，执行相位全部留空。
 	reg.registerEngine(ed);
 }
 

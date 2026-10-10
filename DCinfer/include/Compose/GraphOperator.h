@@ -18,67 +18,31 @@ namespace DC {
 
 /// @brief 组合算子：把一整张推理图（InferGraph）包装成普通 Node 的算子工厂。
 ///
-/// ── 定位：组合工具，非核心图语义 ──
-/// 仅使用公开 API（bindings / feedInput / submitBound / waitForResult /
-/// cancel / detachTask / taskId / isCancellationRequested），
-/// 不涉及任何 InferGraph 特判；宿主对"子图"的使用方式与自定义算子一致：
-/// 构造 → makeNode → addNode。若要真正复用一个逻辑块，推荐将其建模为
-/// 自定义算子（见 examples/03_custom_node）；本工具适用于"把现成图整体
-/// 嵌入父图"的场景。
+/// 仅使用公开 API，无核心图特判；宿主用法与自定义算子一致：构造 → makeNode → addNode。
+/// 构造时以 shared_ptr 接管子图所有权并立即 freeze 推导 Schema（端口名 = 绑定 alias，
+/// 其余属性如实拷贝目标端口）；导出节点经 RunFn 捕获同一共享句柄，生命周期引用计数闭合。
 ///
-/// ── 生命周期：引用计数闭合 ──
-/// 构造时以 shared_ptr 接管子图所有权；导出节点经 RunFn 捕获同一共享
-/// 句柄——"子图先于节点析构"不可表示，无需生命周期契约或哨兵检测。
+/// 子任务命名：每次执行以 "父任务ID|实例号|节点名" 命名（段内分隔符转义，拼接单射），
+/// 同一子图被多节点/多父图复用时互不冲突。
 ///
-/// ── 接口与 Schema：构造即定型 ──
-/// 构造时立即 freeze() 子图（幂等）并按绑定推导节点 Schema：
-/// - 端口名 = 绑定 alias（bindInput/bindOutput 已保证 alias 唯一，
-///   接口层命名碰撞不可表示）；
-/// - 类型/形状/required/默认值如实拷贝目标端口。
-/// 由此消灭"makeNode 后改绑定"的 schema 漂移窗口与懒冻结竞争。
+/// 执行语义：RunFn 内同步喂入 → 提交 → 分段等待子图任务，并周期性感知父任务取消
+/// （协作式解围）。等待期间占住一个执行槽位；默认亲和 System 与子图业务节点默认的
+/// Operator 类分离，但进程预算必须覆盖并发等待节点数（嵌套等待链叠加），否则可能自锁。
 ///
-/// ── 子任务空间：命名空间化 ──
-/// 每次执行以 "父任务ID|实例号|节点名" 命名子任务（段内 | 与 \ 转义，
-/// 拼接单射）——同一子图被多个组合节点、多个父图（含任务 ID 撞名与
-/// 分隔符字符）并发复用时互不冲突，无 DuplicateTask 限制（逐节点实例号
-/// 的进程级唯一性由原子计数器保证）。
-///
-/// ── 执行语义：等待型节点 ──
-/// RunFn 内同步喂入 → 提交 → 分段等待子图任务，并周期性感知父任务取消
-/// （协作式解围：宿主 cancel 父任务后，子图任务在 pollInterval 粒度内被
-/// 取消，执行槽位有界释放，不会因内层信号停滞永久挂起）。
-/// 注意：等待期间本节点占住其资源类的一个执行槽位。默认亲和为
-/// System（基础设施类）：与子图业务节点默认的 Operator 类天然分离；
-/// System 类同时承载图连接器，子图内的连接器与嵌套等待链深度均占用
-/// 同类槽位——默认进程预算（SchedulerConfig{1,1,4}）已按此预留
-/// （开箱覆盖 ≤3 层嵌套 + 并发连接器）；显式收紧 System 预算或指定
-/// 其它亲和（尤其是 Operator）时，进程级预算需覆盖全部并发等待节点
-/// 数——父子图共享同一调度器时，嵌套等待链按“同类槽位叠加”规划，
-/// 否则可能自锁。
-///
-/// ── 序列化 ──
-/// 节点 type 为 "Builtin"，与注册算子待遇一致：DCIr 往返仅保留结构
-/// （Schema 骨架），RunFn 由宿主在加载后重建。
+/// 序列化：节点 type 为 "Builtin"，DCIr 往返仅保留结构，RunFn 由宿主重建。
 class GraphOperator {
 public:
-	/// @brief 执行参数
 	struct Options {
-		uint32_t maxHops = InferGraph::kDefaultMaxHops; ///< 子图 TTL（防循环无限传播）
-		std::chrono::milliseconds pollInterval{100};    ///< 父取消感知轮询间隔（必须 > 0）
+		uint32_t maxHops = InferGraph::kDefaultMaxHops; ///< 子图 TTL
+		std::chrono::milliseconds pollInterval{100};    ///< 父取消感知轮询间隔（> 0）
 	};
 
-	/// @brief 构造（默认参数形态）：等价于 GraphOperator(graph, Options{})。
-	/// @note  不写成默认实参 `Options opts = {}`——嵌套类型的默认成员初始化器
-	///        不得在默认实参中求值（GCC/Clang 拒绝，MSVC 宽松接受），改由委托
-	///        构造在同一成员函数上下文中完成。
+	/// @brief 构造（默认参数形态）。
+	/// @note 不写默认实参 Options{}：嵌套类型的默认成员初始化器不得在默认实参中求值（GCC/Clang 拒绝）。
 	explicit GraphOperator(std::shared_ptr<InferGraph> graph)
 		: GraphOperator(std::move(graph), Options{}) {}
 
-	/// @brief 构造：接管子图共享所有权，立即冻结并推导接口 Schema（fail-fast）。
-	/// @throws GraphException(Other)         graph 为空 / 两侧绑定均空 / pollInterval <= 0
-	/// @throws GraphException(NodeNotFound)  绑定引用的节点不存在
-	/// @throws GraphException(PortNotFound)  绑定引用的端口不存在
-	/// @throws GraphException(Other)         绑定目标为连接器（接口必须指向业务节点）
+	/// @brief 接管子图共享所有权，立即冻结并推导接口 Schema（fail-fast）。
 	explicit GraphOperator(std::shared_ptr<InferGraph> graph, Options opts)
 		: _graph(std::move(graph)), _opts(opts) {
 		if (!_graph)
@@ -91,23 +55,16 @@ public:
 		_schema = _deriveSchema();
 	}
 
-	/// @brief 生成组合节点（普通 Node；可多次调用——同一子图可被多个节点共享）。
-	/// @param  nodeName  父图内节点名（唯一性由父图 addNode 校验）
-	/// @param  affinity  执行资源类归属；默认 System——等待型节点归基础设施类，
-	///                   与子图业务节点默认的 Operator 类分离（默认预算下
-	///                   开箱安全）；显式指定时按类注释的叠加规则规划预算
+	/// @brief 生成组合节点（普通 Node；可多次调用共享同一子图）。
 	std::unique_ptr<Node> makeNode(const std::string& nodeName,
 								   ResourceClass affinity = ResourceClass::System) const {
 		const uint64_t instanceId = _nextInstanceId.fetch_add(1, std::memory_order_relaxed) + 1;
 
 		auto runFn = [graph = _graph, opts = _opts, nodeName, instanceId](Node::RunContext& ctx) -> Node::Result {
-			// 子任务 ID：父任务空间 + 本节点实例命名空间——段内 | 与 \ 转义
-			// （单射拼接）：taskId/节点名含分隔符时跨任务/实例仍不碰撞（#8-14）。
 			const std::string childTid = _escapeIdSegment(ctx.taskId()) + "|"
 									 + std::to_string(instanceId) + "|" + _escapeIdSegment(nodeName);
 
-			// 子任务资源守卫（RAII，#6）：任何退出路径（含步骤⑤取数抛出）都
-			// 回收子任务——已终态立即释放；仍在飞/收尾中登记自动回收，不泄漏。
+			// RAII 守卫：任何退出路径都回收子任务（已终态立即释放，在飞登记自动回收）。
 			struct ChildTaskGuard {
 				InferGraph& graph;
 				const std::string& childTid;
@@ -115,8 +72,7 @@ public:
 				~ChildTaskGuard() { graph.detachTask(childTid); }
 			} childGuard{*graph, childTid};
 
-			// ① 输入注入：父级已投递的数据按绑定代理到子图；未投递的输入
-			//    跳过（把可选输入/默认值语义交还子图自身的就绪判定）。
+			// ① 输入注入：未投递的输入跳过（默认值语义交还子图就绪判定）。
 			for (const auto& b : graph->inputBindings()) {
 				Value v = _takeIfDelivered(ctx, b.alias);
 				if (!v)
@@ -124,11 +80,10 @@ public:
 				graph->feedInput(childTid, b.nodeName, b.portName, std::move(v));
 			}
 
-			// ② 提交：以子图全部输出绑定为声明
+			// ② 提交（以全部输出绑定为声明）
 			graph->submitBound(childTid, opts.maxHops);
 
-			// ③ 分段等待 + 父轮取消感知（协作式解围）：内层信号阻塞不再
-			//    令父池线程无限期挂起。
+			// ③ 分段等待 + 父取消感知（协作式解围）。
 			TaskResult res = graph->waitForResult(childTid, opts.pollInterval);
 			while (res.status == TaskStatus::Running) {
 				if (ctx.isCancellationRequested()) {
@@ -141,7 +96,7 @@ public:
 				res = graph->waitForResult(childTid, opts.pollInterval);
 			}
 
-			// ④ 终止判定：非成功 → 转发内层诊断（资源由守卫回收）
+			// ④ 非成功 → 转发内层诊断（资源由守卫回收）。
 			if (res.status != TaskStatus::Succeeded) {
 				std::string detail;
 				if (!res.errors.empty())
@@ -151,8 +106,7 @@ public:
 									   "'): subgraph terminated with status " + _statusName(res.status) + detail);
 			}
 
-			// ⑤ 输出收集：缺失即显式失败（fail-fast，#6）——真实根因
-			//    （声明满足但绑定端口未产出）不再被父节点"无输出"判败掩盖。
+			// ⑤ 输出收集：缺失即显式失败（真实根因不被父节点"无输出"判败掩盖）。
 			std::vector<std::string> missing;
 			for (const auto& b : graph->outputBindings()) {
 				if (!graph->hasOutput(childTid, b.nodeName, b.portName)) {
@@ -178,19 +132,17 @@ public:
 		return std::make_unique<Node>("Builtin", nodeName, _schema, std::move(runFn), affinity);
 	}
 
-	/// @brief 组合节点 Schema（端口名 = 绑定 alias；构造时推导，随对象冻结）
+	/// @brief 组合节点 Schema（构造时推导）。
 	const Node::Schema& schema() const { return _schema; }
 
-	/// @brief 子图指针（借用；所有权由共享句柄与本对象共同持有）
+	/// @brief 子图引用。
 	const InferGraph& graph() const { return *_graph; }
 
 private:
-	/// @brief 取消解围的限时收尾窗口（子图已取消后等待其终止的兜底时长）
+	/// @brief 取消解围的限时收尾窗口。
 	static constexpr std::chrono::seconds kCancelGrace{1};
 
-	/// @brief 按绑定推导节点 Schema。
-	/// @note   端口名 = 绑定 alias；其余端口属性（类型/形状/required/默认值/
-	///         锚定）如实拷贝目标端口——组合节点的就绪语义与子图入口一致。
+	/// @brief 按绑定推导节点 Schema（端口名 = alias，其余属性拷贝目标端口）。
 	Node::Schema _deriveSchema() const {
 		Node::Schema schema;
 		for (const auto& b : _graph->inputBindings()) {
@@ -221,10 +173,10 @@ private:
 		return schema;
 	}
 
-	/// @brief 绑定目标节点解析与连接器拒绝（接口必须指向业务节点）
+	/// @brief 绑定目标解析；连接器拒绝（接口必须指向业务节点）。
 	const Node* _resolveTarget(const std::string& nodeName, const std::string& alias,
 							   const char* direction) const {
-		const InferGraph& g = *_graph; // const 视图：node() 走只读重载（构建期重载冻结后抛 Frozen）
+		const InferGraph& g = *_graph; // const 视图：走只读 node() 重载（可写重载冻结后抛 Frozen）
 		const Node* n = g.node(nodeName);
 		if (!n)
 			throw GraphException(GraphException::ErrorType::NodeNotFound, "GraphOperator",
@@ -237,11 +189,7 @@ private:
 		return n;
 	}
 
-	/// @brief 尝试从父上下文取出已投递的输入（无数据返回空 Value）。
-	/// @note   RunContext::peek 对"已声明但未投递"的槽位抛
-	///         NodeException(TypeMismatch)（空槽位无 Value 载荷）——组合语义
-	///         把未投递输入交还子图自身的就绪判定，故在此按"跳过"处理；
-	///         其余异常如实上抛。
+	/// @brief 取出已投递的输入（无数据返回空 Value；peek 的 TypeMismatch 视为未投递）。
 	static Value _takeIfDelivered(Node::RunContext& ctx, const std::string& alias) {
 		try {
 			if (!ctx.peek(alias))
@@ -265,9 +213,7 @@ private:
 		return "Unknown";
 	}
 
-	/// @brief 子任务命名空间段转义：\ → \\、| → \|——保证
-	///        "段A|实例号|段B" 拼接单射（段内不出现裸分隔符，
-	///        taskId/节点名含 | 时跨任务/实例仍不碰撞）。
+	/// @brief 段转义：\ → \\、| → \|，保证 "段A|实例号|段B" 拼接单射。
 	static std::string _escapeIdSegment(const std::string& s) {
 		std::string out;
 		out.reserve(s.size());
@@ -279,11 +225,11 @@ private:
 		return out;
 	}
 
-	std::shared_ptr<InferGraph> _graph; ///< 子图（共享所有权：节点经 RunFn 捕获延长其生命周期）
-	Node::Schema _schema;               ///< 组合节点 Schema（构造时推导，此后只读）
-	Options _opts;                      ///< 执行参数（maxHops / pollInterval）
+	std::shared_ptr<InferGraph> _graph;
+	Node::Schema _schema;
+	Options _opts;
 
-	/// 进程级实例号：使每个 makeNode 产物拥有独立子任务命名空间
+	// 进程级实例号：每个 makeNode 产物拥有独立子任务命名空间。
 	static inline std::atomic<uint64_t> _nextInstanceId{0};
 };
 
