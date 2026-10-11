@@ -59,7 +59,7 @@ public:
 
 	/// @brief 提交任务到指定资源类；线程安全，首次提交惰性创建执行器。
 	/// @return true = 任务已入队；false = 已关闭或入队失败，任务未被执行。
-	bool submit(ResourceClass cls, std::function<void()> task);
+	bool submit(ResourceClass cls, std::move_only_function<void()> task);
 
 	/// @brief 关停调度器，幂等：拒绝新提交，join 在飞任务，排队任务丢弃。
 	/// @throws 在本调度器 worker 内调用抛 std::logic_error。

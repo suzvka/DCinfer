@@ -33,7 +33,7 @@ public:
 	/// @return true = 已入队；false = 池已关闭或入队失败，任务未被执行。
 	/// @note   队列无界无背压，宿主须自行做有界准入控制内存规模；
 	///         worker 不得阻塞等待由排队任务释放的准入票据。
-	bool submit(std::function<void()> task);
+	bool submit(std::move_only_function<void()> task);
 
 	/// @brief 优雅关闭，丢弃队列中未执行的任务。
 	/// @throws 在本池 worker 内调用抛 std::logic_error。
@@ -57,7 +57,7 @@ private:
 
 	std::mutex _mutex;
 	std::condition_variable _cv;
-	std::queue<std::function<void()>> _taskQueue;
+	std::queue<std::move_only_function<void()>> _taskQueue;
 
 	/// 串行化并发 shutdown：对同一 worker 并发 join 是 UB。
 	std::mutex _drainMutex;

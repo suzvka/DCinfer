@@ -51,7 +51,7 @@ ThreadPool::~ThreadPool() {
 	shutdown();
 }
 
-bool ThreadPool::submit(std::function<void()> task) {
+bool ThreadPool::submit(std::move_only_function<void()> task) {
 	{
 		std::lock_guard lk(_mutex);
 		// 已关闭：任务入队后无消费者，返回失败让调用方收尾
@@ -82,7 +82,7 @@ void ThreadPool::_drainWorkers() {
 	{
 		std::lock_guard lk(_mutex);
 		// 丢弃所有等待中的任务
-		std::queue<std::function<void()>> empty;
+		std::queue<std::move_only_function<void()>> empty;
 		_taskQueue.swap(empty);
 	}
 	_cv.notify_all();
@@ -101,7 +101,7 @@ void ThreadPool::_workerLoop() {
 		~WorkerScope() { g_workerPool = previous; }
 	} identity{this};
 	while (true) {
-		std::function<void()> task;
+		std::move_only_function<void()> task;
 		{
 			std::unique_lock lk(_mutex);
 			_cv.wait(lk, [this] { return !_taskQueue.empty() || !_running.load(std::memory_order_acquire); });

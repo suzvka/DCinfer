@@ -93,7 +93,7 @@ ThreadPool* ResourceScheduler::_poolFor(ResourceClass cls) {
 	return pool.get();
 }
 
-bool ResourceScheduler::submit(ResourceClass cls, std::function<void()> task) {
+bool ResourceScheduler::submit(ResourceClass cls, std::move_only_function<void()> task) {
 	ThreadPool* pool = _poolFor(cls);
 	if (!pool)
 		return false; // 已关停，与 ThreadPool::submit 契约一致
