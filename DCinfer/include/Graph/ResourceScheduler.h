@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <utility>
 
 namespace DC {
 
@@ -96,8 +97,9 @@ private:
 	/// @brief 取指定资源类的执行器，惰性创建；已关停返回 nullptr。
 	ThreadPool* _poolFor(ResourceClass cls);
 
-	static size_t _indexOf(ResourceClass cls) {
-		return static_cast<size_t>(cls);
+	/// @brief 枚举转底层索引（C++23 to_underlying）：直接取 int，负值由调用方显式拦截。
+	static int _indexOf(ResourceClass cls) {
+		return std::to_underlying(cls);
 	}
 
 	SchedulerConfig _config;

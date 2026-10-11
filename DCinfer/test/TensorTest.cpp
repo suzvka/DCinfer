@@ -165,6 +165,37 @@ static void runTensorTests() {
 			throw std::runtime_error("const view fork: reads returned wrong values");
 	}
 
+	// C++23 多维下标：t[a,b] 与链式 t[a][b] 等价，但一步折叠、无中间视图
+	{
+		std::vector<float> msrc = {1, 2, 3, 4, 5, 6};
+		std::vector<std::byte> mbytes(msrc.size() * sizeof(float));
+		std::memcpy(mbytes.data(), msrc.data(), mbytes.size());
+		Tensor mt = Tensor::Create<float>({2, 3}, std::move(mbytes));
+
+		mt[1, 2].set<float>(42.0f); // 等价 mt[1][2]
+		if (std::abs(mt.data<float>()[5] - 42.0f) > 1e-6f)
+			throw std::runtime_error("multi-dim subscript write mismatch");
+
+		if (std::abs(mt[0, 1].readScalar<float>() - 2.0f) > 1e-6f)
+			throw std::runtime_error("multi-dim scalar read mismatch");
+
+		const Tensor& cmt = mt;
+		if (std::abs(cmt[1, 2].readScalar<float>() - 42.0f) > 1e-6f)
+			throw std::runtime_error("multi-dim const subscript read mismatch");
+		if (std::abs(mt[1, 2].readScalar<float>() - mt[1][2].readScalar<float>()) > 1e-6f)
+			throw std::runtime_error("multi-dim vs chained mismatch");
+
+		// View 多维续接（秩 3）：t[0] 得行视图再 [1,2] 一步补两坐标，与整体 t[0,1,2] 等价
+		std::vector<float> s3 = {1, 2, 3, 4, 5, 6};
+		std::vector<std::byte> b3(s3.size() * sizeof(float));
+		std::memcpy(b3.data(), s3.data(), b3.size());
+		Tensor t3 = Tensor::Create<float>({1, 2, 3}, std::move(b3));
+		if (std::abs(t3[0][1, 2].readScalar<float>() - 6.0f) > 1e-6f)
+			throw std::runtime_error("rank-3 view-continuation mismatch");
+		if (std::abs(t3[0, 1, 2].readScalar<float>() - 6.0f) > 1e-6f)
+			throw std::runtime_error("rank-3 full multi-dim mismatch");
+	}
+
 	std::cout << "Tensor tests passed" << std::endl;
 }
 

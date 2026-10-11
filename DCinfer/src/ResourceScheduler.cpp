@@ -79,9 +79,9 @@ ThreadPool* ResourceScheduler::_poolFor(ResourceClass cls) {
 	// 快路径：已关停直接拒绝
 	if (_stopped.load(std::memory_order_acquire))
 		return nullptr;
-	// 非法枚举值按拒绝处理，禁止越界定长数组
-	const size_t index = _indexOf(cls);
-	if (index >= 3)
+	// 非法枚举值按拒绝处理，禁止越界定长数组（int 下界兼拦负值）
+	const int index = _indexOf(cls);
+	if (index < 0 || index >= 3)
 		return nullptr;
 	// 慢路径：惰性创建与关停互斥，防关停后新建池漏 join
 	std::lock_guard lk(_initMutex);

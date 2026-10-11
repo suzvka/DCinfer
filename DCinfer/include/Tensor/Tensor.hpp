@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <concepts>
 #include <cstring>
 #include <memory>
 #include <span>
@@ -42,6 +43,15 @@ public:
 
 	/// @brief 索引访问，const：返回只读 ConstView，编译期禁止修改。
 	ConstView operator[](int64_t index) const;
+
+	/// @brief 多维下标（C++23）：t[a, b, ...] 一步折叠坐标，免链式中间视图与路径拷贝。
+	template <std::integral... I>
+		requires (sizeof...(I) >= 2)
+	View operator[](I... idxs);
+
+	template <std::integral... I>
+		requires (sizeof...(I) >= 2)
+	ConstView operator[](I... idxs) const;
 
 	/// @brief 获取顶层视图，即空路径。
 	View view();
@@ -163,6 +173,15 @@ public:
 		return View(std::move(next), _top);
 	}
 
+	/// @brief 多维续接：v[a, b, ...] 一次追加多个坐标到当前路径。
+	template <std::integral... I>
+		requires (sizeof...(I) >= 2)
+	View operator[](I... idxs) const {
+		Shape next = _shape;
+		(next.push_back(static_cast<int64_t>(idxs)), ...);
+		return View(std::move(next), _top);
+	}
+
 	/// @brief 写入值，等价于 set。
 	template <typename T>
 	Tensor& operator=(const T& value) {
@@ -205,6 +224,15 @@ public:
 		return ConstView(std::move(next), _top);
 	}
 
+	/// @brief 多维续接：v[a, b, ...] 一次追加多个坐标到当前路径。
+	template <std::integral... I>
+		requires (sizeof...(I) >= 2)
+	ConstView operator[](I... idxs) const {
+		Shape next = _shape;
+		(next.push_back(static_cast<int64_t>(idxs)), ...);
+		return ConstView(std::move(next), _top);
+	}
+
 	/// @brief 读取标量值。
 	template <typename T>
 	T readScalar() const {
@@ -220,6 +248,18 @@ public:
 	Shape _shape;
 	const Tensor& _top;
 };
+
+template <std::integral... I>
+	requires (sizeof...(I) >= 2)
+Tensor::View Tensor::operator[](I... idxs) {
+	return View(Shape{static_cast<int64_t>(idxs)...}, *this);
+}
+
+template <std::integral... I>
+	requires (sizeof...(I) >= 2)
+Tensor::ConstView Tensor::operator[](I... idxs) const {
+	return ConstView(Shape{static_cast<int64_t>(idxs)...}, *this);
+}
 
 template <typename T>
 Tensor Tensor::Create(const Shape& shape, DataBlock&& data) {

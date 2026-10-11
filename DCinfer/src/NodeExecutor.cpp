@@ -79,7 +79,7 @@ Tensor NodeExecutor::takeOutputTensor(const TaskId& taskId, const std::string& n
 	if (!t) {
 		throw NodeException(NodeException::ErrorType::TypeMismatch, "NodeExecutor::takeOutputTensor",
 							"output '" + name + "' is not a DC::Tensor (innerType=" +
-								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
+								std::to_string(nt.innerType()) + ")");
 	}
 	// takeOutput 已保证独占可变，可直接转移载荷
 	return std::move(*t);

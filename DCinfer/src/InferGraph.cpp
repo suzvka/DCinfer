@@ -121,7 +121,7 @@ Tensor InferGraph::takeOutputTensor(const TaskId& taskId, const std::string& nod
 	if (!t) {
 		throw NodeException(NodeException::ErrorType::TypeMismatch, "Node::takeOutputTensor",
 							"output '" + portName + "' is not a DC::Tensor (innerType=" +
-								std::to_string(static_cast<uint32_t>(nt.innerType())) + ")");
+								std::to_string(nt.innerType()) + ")");
 	}
 	// 共享/冻结载荷深拷贝
 	if (nt.isPublished())
