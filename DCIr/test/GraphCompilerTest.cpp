@@ -987,6 +987,129 @@ void testTypeSizeNegativeRejected() {
 	END_TEST();
 }
 
+void testSignalCompileAndRoundTrip() {
+	TEST("signal — source→gate 降级绑定（fail-closed）且信号面 round-trip") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "src", "type": "dc:SignalSource", "affinity": "System", "signalName": "go",
+      "inputs": [],
+      "outputs": [{"name":"sig.out","kind":"signal","required":false}]
+    },
+    {
+      "name": "gated", "type": "Builtin", "affinity": "Operator",
+      "inputs": [{"name":"x","tensorType":"Float","typeSize":4,"shape":[],"required":true},
+                  {"name":"sig.gate","kind":"signal","required":false}],
+      "outputs": [{"name":"y","tensorType":"Float","typeSize":4,"shape":[],"required":true},
+                   {"name":"sig.done","kind":"signal","required":false}]
+    }
+  ],
+  "edges": [
+    {"srcNode":"src","srcPort":"sig.out","dstNode":"gated","dstPort":"sig.gate"}
+  ],
+  "outputBindings": []
+})";
+		InferGraph graph; GraphCompiler::compileString(graph, json);
+		auto* n = graph.node("gated");
+		CHECK(n != nullptr, "gated node should exist");
+		// 逻辑节点纯信号面，不物化为 DC::Node
+		CHECK(graph.node("src") == nullptr, "signal source is plan-only, not a DC::Node");
+		// gate 降级到源对外名 wire "go"
+		CHECK(n->signalName() == "go", "gate must bind to source signal name");
+		CHECK(n->isBlocked(), "unset signal must block (fail-closed for bound gate)");
+		graph.setSignal("go", true);
+		CHECK(!n->isBlocked(), "signal=true must unblock");
+		// 张量 schema 不含信号端子（信号面已剔离）
+		CHECK(n->schema().inputs.size() == 1 && n->schema().inputs[0].name == "x",
+			"signal terminals must be stripped from tensor schema");
+
+		// 序列化：信号端子 / 信号边 / 逻辑节点回写
+		std::string tmpFile = "test_signal_roundtrip.json";
+		GraphCompiler::serialize(graph, tmpFile);
+		{
+			std::ifstream ifs(tmpFile, std::ios::binary);
+			std::ostringstream oss; oss << ifs.rdbuf();
+			auto root = nlohmann::json::parse(oss.str());
+			bool foundGate = false, foundSrc = false, foundDone = false;
+			for (auto& nj : root["nodes"]) {
+				if (nj["name"] == "gated") {
+					for (auto& p : nj["inputs"]) if (p.value("kind", "") == "signal" && p["name"] == "sig.gate") foundGate = true;
+					for (auto& p : nj["outputs"]) if (p.value("kind", "") == "signal" && p["name"] == "sig.done") foundDone = true;
+				}
+				if (nj["name"] == "src" && nj["type"] == "dc:SignalSource" && nj.value("signalName", "") == "go") foundSrc = true;
+			}
+			CHECK(foundGate, "serialize must emit sig.gate signal input");
+			CHECK(foundDone, "serialize must emit sig.done state output");
+			CHECK(foundSrc, "serialize must emit signal source node with signalName");
+			bool foundEdge = false;
+			for (auto& ej : root["edges"])
+				if (ej["srcNode"] == "src" && ej["srcPort"] == "sig.out" && ej["dstNode"] == "gated" && ej["dstPort"] == "sig.gate") foundEdge = true;
+			CHECK(foundEdge, "serialize must emit signal edge");
+		}
+		InferGraph graph2; GraphCompiler::compileFile(graph2, tmpFile);
+		auto* n2 = graph2.node("gated");
+		CHECK(n2 != nullptr && n2->signalName() == "go", "round-trip must preserve gate binding");
+		CHECK(n2->isBlocked(), "recompiled node blocks again until signal set (store is per-graph)");
+
+		std::remove(tmpFile.c_str());
+	}
+	END_TEST();
+
+	TEST("signal — const→gate 编译期写全局 wire（true 放行 / false 阻断）") {
+		const char* jsonTrue = R"({
+  "version": "1.0",
+  "nodes": [
+    {"name":"c","type":"dc:SignalConst","affinity":"System","signalValue":true,
+     "inputs":[],"outputs":[{"name":"sig.out","kind":"signal","required":false}]},
+    {"name":"g","type":"Builtin","affinity":"Operator",
+     "inputs":[{"name":"sig.gate","kind":"signal","required":false}],
+     "outputs":[{"name":"y","tensorType":"Float","typeSize":4,"shape":[],"required":true}]}
+  ],
+  "edges": [{"srcNode":"c","srcPort":"sig.out","dstNode":"g","dstPort":"sig.gate"}],
+  "outputBindings": []
+})";
+		InferGraph g1; GraphCompiler::compileString(g1, jsonTrue);
+		auto* n1 = g1.node("g");
+		CHECK(n1 != nullptr && n1->signalName() == "c.sig.out", "gate binds to const wire");
+		CHECK(!n1->isBlocked(), "const true must unblock gate at compile time");
+
+		const char* jsonFalse = R"({
+  "version": "1.0",
+  "nodes": [
+    {"name":"c","type":"dc:SignalConst","affinity":"System","signalValue":false,
+     "inputs":[],"outputs":[{"name":"sig.out","kind":"signal","required":false}]},
+    {"name":"g","type":"Builtin","affinity":"Operator",
+     "inputs":[{"name":"sig.gate","kind":"signal","required":false}],
+     "outputs":[{"name":"y","tensorType":"Float","typeSize":4,"shape":[],"required":true}]}
+  ],
+  "edges": [{"srcNode":"c","srcPort":"sig.out","dstNode":"g","dstPort":"sig.gate"}],
+  "outputBindings": []
+})";
+		InferGraph g2; GraphCompiler::compileString(g2, jsonFalse);
+		CHECK(g2.node("g")->isBlocked(), "const false must block gate");
+	}
+	END_TEST();
+
+	TEST("signal — gate 无入边则不绑定（fail-open）") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {"name":"g","type":"Builtin","affinity":"Operator",
+     "inputs":[{"name":"sig.gate","kind":"signal","required":false}],
+     "outputs":[{"name":"y","tensorType":"Float","typeSize":4,"shape":[],"required":true}]}
+  ],
+  "edges": [],
+  "outputBindings": []
+})";
+		InferGraph graph; GraphCompiler::compileString(graph, json);
+		auto* n = graph.node("g");
+		CHECK(n != nullptr && n->signalName().empty(), "unwired gate must not bind");
+		CHECK(!n->isBlocked(), "unwired gate = fail-open (never blocked)");
+	}
+	END_TEST();
+}
+
 int main() {
 	try {
 		testCompileStringBasic();
@@ -1014,6 +1137,7 @@ int main() {
 		testDcgModelPathPassThrough();
 		testInvalidEdgeFailFast();
 		testTypeSizeNegativeRejected();
+		testSignalCompileAndRoundTrip();
 
 		if (failures == 0) {
 			std::cout << "\nAll GraphCompiler tests passed!" << std::endl;

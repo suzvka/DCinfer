@@ -113,6 +113,10 @@ bool Node::isBlocked(const TaskId& taskId) const {
 	return _signal->isBlocked(taskId);
 }
 
+std::string Node::signalName() const {
+	return _signal->signalName();
+}
+
 EngineAdapter& Node::engine() const {
 	return *_engine;
 }

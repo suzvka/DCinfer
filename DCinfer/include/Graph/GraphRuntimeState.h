@@ -3,6 +3,7 @@
 #include "CompiledGraph.h"
 #include "OutputZone.h"
 #include "SignalStore.h"
+#include "SignalPlan.h"
 #include "ErrorTracker.h"
 
 #include <atomic>
@@ -35,6 +36,9 @@ struct GraphRuntimeState {
 	OutputZone output;
 	std::shared_ptr<SignalStore> signals = std::make_shared<SignalStore>();
 	ErrorTracker errors;
+
+	/// @brief 图级信号方案（编译期从图 JSON 剔离；控制面，独立于张量数据流）。
+	SignalPlan signalPlan;
 
 	// task 执行域：per-node IO 缓冲、工作槽位与节点执行闸表。
 	std::unique_ptr<TaskExecutionDomain> exec;

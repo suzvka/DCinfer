@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DCIr 图编辑器 · Playground</title>
+    <style>
+      /* 宿主侧主题跟随：color-scheme 声明双主题，light-dark() 随生效方案取值
+         （编辑器本体经 theme prop 独立解析，见 playground/main.tsx） */
+      :root { color-scheme: light dark; }
+      html, body, #root { height: 100%; margin: 0; }
+      body { background: light-dark(#eef1f7, #0a0e17); }
+      .pg-bar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 12px;
+        background: light-dark(#ffffff, #111827);
+        color: light-dark(#1f2937, #e5e7eb);
+        border-bottom: 1px solid light-dark(#dbe2ee, #1f2937);
+        font-family: system-ui, sans-serif;
+        font-size: 13px;
+      }
+      .pg-bar .pg-status { opacity: 0.7; }
+      .pg-bar .spacer { flex: 1; }
+      .pg-bar button,
+      .pg-bar select { font: inherit; padding: 3px 10px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/playground/main.tsx"></script>
+  </body>
+</html>

@@ -191,6 +191,15 @@ public:
 	/// @brief 获取信号仓库指针。
 	std::shared_ptr<SignalStore> signalStore() { return _state->signals; }
 
+	/// @brief 构建期设置图级信号方案（编译期从图 JSON 剔离保存）；冻结后抛 Frozen。
+	void setSignalPlan(SignalPlan plan) {
+		_ensureNotFrozen("InferGraph::setSignalPlan");
+		_state->signalPlan = std::move(plan);
+	}
+
+	/// @brief 读取图级信号方案（序列化 roundtrip / 运行期求值消费）。
+	const SignalPlan& signalPlan() const { return _state->signalPlan; }
+
 private:
 	/// @brief 惰性冻结：首次运行期调用时编译为快照；快路径无锁读，首次编译由 _freezeMutex 串行化。
 	std::shared_ptr<const CompiledGraph> _ensureFrozen() const {

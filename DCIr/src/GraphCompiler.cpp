@@ -3,6 +3,7 @@
 #include "Connector.h"
 #include "EngineRegistry.h"
 #include "GraphException.h"
+#include "SignalEvaluator.h"
 #include "Ir/DcgArchive.h"
 
 #include <algorithm>
@@ -77,8 +78,23 @@ static Node::Port jsonToPort(const nlohmann::json& j) {
 	return p;
 }
 
-/// @brief 将 JSON 中的 tag 与 modelPath 应用到已创建节点，三分支共用。
+/// @brief JSON 端口是否信号端子（kind == "signal"）；缺省视为张量端口。
+static bool isSignalPortJson(const nlohmann::json& p) {
+	return p.is_object() && p.value("kind", std::string("tensor")) == "signal";
+}
+
+/// @brief 信号端子序列化（仅 name/kind/required；无张量形状）。
+static nlohmann::json signalPortToJson(const std::string& name) {
+	nlohmann::json j;
+	j["name"] = name;
+	j["kind"] = "signal";
+	j["required"] = false;
+	return j;
+}
+
+/// @brief 将 JSON 中的 tag / modelPath 应用到已创建节点，三分支共用。
 ///        modelPath 为引擎自定义不透明信息，原样透传，不拼接、不校验、不做文件系统解释。
+///        控制信号改由信号面（sig.gate + 信号边）降级，见 buildGraph；不再走节点级 signal 名。
 static void applyNodeMeta(DC::Node& node, const nlohmann::json& j) {
 	if (j.contains("modelPath")) {
 		node.setModelPath(j["modelPath"].get<std::string>());
@@ -173,7 +189,12 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 	nlohmann::json root;
 	root["version"] = "1.0";
 
-	// 节点：只序列化非连接器节点，即处理器
+	const auto& plan = graph.signalPlan();
+	std::map<std::string, const SignalNodePlan*> planByName;
+	for (const auto& n : plan.nodes)
+		planByName[n.name] = &n;
+
+	// 节点：只序列化非连接器节点（处理器）；张量端口来自 schema，信号端子来自 plan
 	nlohmann::json nodesArr = nlohmann::json::array();
 	for (auto& name : graph.nodeNames()) {
 		auto* node = graph.node(name);
@@ -190,9 +211,16 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 			j["tag"] = node->tag();
 		}
 
+		auto pit = planByName.find(node->name());
+		const SignalNodePlan* np = (pit != planByName.end()) ? pit->second : nullptr;
+
 		nlohmann::json inputs = nlohmann::json::array();
 		for (auto& port : node->schema().inputs) {
 			inputs.push_back(portToJson(port));
+		}
+		if (np) {
+			for (auto& sp : np->signalInputs)
+				inputs.push_back(signalPortToJson(sp));
 		}
 		j["inputs"] = std::move(inputs);
 
@@ -200,13 +228,49 @@ nlohmann::json GraphCompiler::graphToJson(const InferGraph& graph) {
 		for (auto& port : node->schema().outputs) {
 			outputs.push_back(portToJson(port));
 		}
+		if (np) {
+			for (auto& sp : np->signalOutputs)
+				outputs.push_back(signalPortToJson(sp));
+		}
 		j["outputs"] = std::move(outputs);
 
 		nodesArr.push_back(std::move(j));
 	}
+
+	// 逻辑节点：纯信号面，未物化为 DC::Node，从 plan 直接回写
+	for (const auto& n : plan.nodes) {
+		if (!n.isLogic) continue;
+		nlohmann::json j;
+		j["name"] = n.name;
+		j["type"] = n.type;
+		j["affinity"] = "System";
+		if (n.type == kSignalTypeSource)
+			j["signalName"] = n.signalName;
+		if (n.type == kSignalTypeConst && n.hasConstValue)
+			j["signalValue"] = n.constValue;
+		nlohmann::json inputs = nlohmann::json::array();
+		for (auto& sp : n.signalInputs)
+			inputs.push_back(signalPortToJson(sp));
+		j["inputs"] = std::move(inputs);
+		nlohmann::json outputs = nlohmann::json::array();
+		for (auto& sp : n.signalOutputs)
+			outputs.push_back(signalPortToJson(sp));
+		j["outputs"] = std::move(outputs);
+		nodesArr.push_back(std::move(j));
+	}
 	root["nodes"] = std::move(nodesArr);
 
-	root["edges"] = edgesToJson(graph);
+	// 边：张量边（穿透连接器）+ 信号边（原样回写）
+	nlohmann::json edgesArr = edgesToJson(graph);
+	for (const auto& e : plan.edges) {
+		nlohmann::json ej;
+		ej["srcNode"] = e.srcNode;
+		ej["srcPort"] = e.srcPort;
+		ej["dstNode"] = e.dstNode;
+		ej["dstPort"] = e.dstPort;
+		edgesArr.push_back(std::move(ej));
+	}
+	root["edges"] = std::move(edgesArr);
 
 	// 输出绑定：alias 为签名元数据，不参与运行时寻址
 	nlohmann::json bindingsArr = nlohmann::json::array();
@@ -323,19 +387,43 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 								 + " > limit " + std::to_string(kMaxGraphNodes) + ")");
 	}
 
+	static const nlohmann::json kEmptyArr = nlohmann::json::array();
+	SignalPlan plan;
+	auto& reg = EngineRegistry::instance();
+
+	// 第一遍：建节点。张量端口入 schema；信号端子剔离入 plan；逻辑节点不物化为 DC::Node。
 	for (auto& j : root.at("nodes")) {
 		std::string name = j.at("name").get<std::string>();
 		std::string type = j.at("type").get<std::string>();
 
 		Node::Schema schema;
-		for (auto& p : j.at("inputs")) {
-			schema.inputs.push_back(jsonToPort(p));
+		SignalNodePlan np;
+		np.name = name;
+		const bool isLogic = isSignalLogicType(type);
+		if (isLogic) {
+			np.isLogic = true;
+			np.type = type;
+			if (j.contains("signalName") && j["signalName"].is_string())
+				np.signalName = j["signalName"].get<std::string>();
+			if (j.contains("signalValue") && j["signalValue"].is_boolean()) {
+				np.hasConstValue = true;
+				np.constValue = j["signalValue"].get<bool>();
+			}
 		}
-		for (auto& p : j.at("outputs")) {
-			schema.outputs.push_back(jsonToPort(p));
+		const nlohmann::json& inArr = (j.contains("inputs") && j["inputs"].is_array()) ? j["inputs"] : kEmptyArr;
+		for (auto& p : inArr) {
+			if (isSignalPortJson(p)) np.signalInputs.push_back(p.at("name").get<std::string>());
+			else schema.inputs.push_back(jsonToPort(p));
 		}
+		const nlohmann::json& outArr = (j.contains("outputs") && j["outputs"].is_array()) ? j["outputs"] : kEmptyArr;
+		for (auto& p : outArr) {
+			if (isSignalPortJson(p)) np.signalOutputs.push_back(p.at("name").get<std::string>());
+			else schema.outputs.push_back(jsonToPort(p));
+		}
+		if (isLogic || !np.signalInputs.empty() || !np.signalOutputs.empty())
+			plan.nodes.push_back(std::move(np));
 
-		auto& reg = EngineRegistry::instance();
+		if (isLogic) continue; // 纯信号面，不入张量数据流
 
 		if (type == "Builtin") {
 			// 反序列化时 RunFn 由上层注册，此处仅创建 Schema 骨架
@@ -379,9 +467,55 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 		}
 	}
 
-	if (root.contains("edges")) {
-		rebuildEdges(graph, root["edges"]);
+	// 信号端子键集（边分类用）：node\0port
+	std::set<std::string> sigPortKeys;
+	for (const auto& n : plan.nodes) {
+		for (const auto& p : n.signalInputs) sigPortKeys.insert(n.name + '\0' + p);
+		for (const auto& p : n.signalOutputs) sigPortKeys.insert(n.name + '\0' + p);
 	}
+
+	// 第二遍：分类边。信号边入 plan；张量边交 rebuildEdges（穿透连接器）。
+	nlohmann::json tensorEdges = nlohmann::json::array();
+	if (root.contains("edges") && root["edges"].is_array()) {
+		for (auto& e : root["edges"]) {
+			if (!e.is_object()) continue;
+			std::string sn = e.value("srcNode", std::string());
+			std::string sp = e.value("srcPort", std::string());
+			std::string dn = e.value("dstNode", std::string());
+			std::string dp = e.value("dstPort", std::string());
+			const bool isSig = sigPortKeys.count(sn + '\0' + sp) || sigPortKeys.count(dn + '\0' + dp);
+			if (isSig)
+				plan.edges.push_back({sn, sp, dn, dp});
+			else
+				tensorEdges.push_back(e);
+		}
+	}
+	rebuildEdges(graph, tensorEdges);
+
+	// 第三遍：信号面降级。gate → bindSignal(wire)；const → 编译期写全局 wire。
+	// wire 名：源用对外名（宿主直达），其余 node.port。fail-open：gate 无入边则不绑定。
+	{
+		std::map<std::string, const SignalNodePlan*> byName;
+		for (const auto& n : plan.nodes) byName[n.name] = &n;
+		auto wireOf = [&](const std::string& node, const std::string& port) -> std::string {
+			auto it = byName.find(node);
+			if (it != byName.end()) return signalWireName(*it->second, port);
+			return node + "." + port;
+		};
+		auto store = graph.signalStore();
+		for (const auto& n : plan.nodes) {
+			if (n.isLogic && n.type == kSignalTypeConst && n.hasConstValue)
+				store->set(signalWireName(n, kSigOut), n.constValue);
+		}
+		for (const auto& e : plan.edges) {
+			if (e.dstPort != kSigGate) continue;
+			auto* dst = graph.node(e.dstNode);
+			if (!dst) continue; // 逻辑节点无 DC::Node，不被门控
+			dst->bindSignal(store, wireOf(e.srcNode, e.srcPort));
+		}
+	}
+
+	graph.setSignalPlan(std::move(plan));
 
 	// 输出绑定：alias 缺省回退 nodeName.portName，唯一且兼容旧版本文件
 	if (root.contains("outputBindings")) {

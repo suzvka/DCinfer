@@ -191,6 +191,9 @@ public:
 	bool isBlocked() const;
 	bool isBlocked(const TaskId& taskId) const;
 
+	/// @brief 节点绑定的控制信号名；未绑定为空串。
+	std::string signalName() const;
+
 	/// @brief 注册就绪状态委托；未注册时回退 TaskBuffer 逻辑。
 	void setReadyOverride(std::function<bool(const TaskId&)> fn) {
 		std::lock_guard lk(_mutationMutex);

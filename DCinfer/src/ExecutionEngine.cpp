@@ -5,6 +5,7 @@
 #include "OutputZone.h"
 #include "SignalProbe.h"
 #include "SignalStore.h"
+#include "SignalEvaluator.h"
 #include "ErrorTracker.h"
 #include "GraphException.h"
 #include "NodeException.h"
@@ -242,6 +243,10 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 	// 快照经发布协议 acquire 读取；本地句柄钉住存活期
 	auto snap = state->snapshot();
 	auto& graph = snap->runtimeView();
+
+	// 静态信号面求值：从信号源/常量/逻辑节点算出各 wire 的 task 级布尔值，
+	// 供节点 gate 的 isBlocked(taskId) 读取（先于拓扑守卫与调度）。
+	evaluateStaticSignals(state->signalPlan, *state->signals, taskId);
 
 	// 必须声明输出；声明随提交事务在下方临界区原子写入
 	if (declarations.empty()) {

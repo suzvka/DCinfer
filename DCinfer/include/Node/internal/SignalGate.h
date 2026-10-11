@@ -21,6 +21,9 @@ public:
 	/// @brief 是否被信号阻塞；task 级优先，全局回退，最后 false。
 	bool isBlocked(const std::string& taskId) const;
 
+	/// @brief 绑定的信号名；未绑定为空串。
+	const std::string& signalName() const { return _name; }
+
 private:
 	std::shared_ptr<SignalStore> _store;
 	std::string _name;
