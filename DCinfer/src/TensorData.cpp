@@ -1,7 +1,9 @@
 #include "TensorData.h"
 #include <cassert>
+#include <generator>
 #include <limits>
 #include <numeric>
+#include <span>
 
 namespace DC {
 
@@ -23,6 +25,25 @@ size_t checkedShapeProduct(const TensorData::Shape& shape) {
 		product *= d;
 	}
 	return checkedShapeProduct(product);
+}
+
+// 行主序枚举各维 [0, extents[i]) 的全部多重索引，末位变化最快；extents 为空时
+// 只产出一个空路径（对应单块 / 一维的 root block）。buildView 与 crop 共用的进位枚举。
+std::generator<TensorData::Shape> rowMajorPaths(std::span<const size_t> extents) {
+	TensorData::Shape path(extents.size(), 0);
+	while (true) {
+		co_yield path;
+		bool wrapped = true;
+		for (size_t i = extents.size(); i-- > 0;) {
+			if (++path[i] < extents[i]) {
+				wrapped = false;
+				break;
+			}
+			path[i] = 0;
+		}
+		if (wrapped)
+			break;
+	}
 }
 } // namespace
 
@@ -393,25 +414,15 @@ void TensorData::buildView() {
 		return;
 	}
 
-	Shape path(pathDims, 0);
+	// 行主序逐块切出稠密缓存；offsetBytes 随行主序单调递增（见 rowMajorPaths）。
 	size_t offsetBytes = 0;
-	while (true) {
+	for (const auto& path : rowMajorPaths(std::span<const size_t>(_shapeCache.data(), pathDims))) {
 		if (offsetBytes + _dataSize > _dataCache.size()) {
 			break;
 		}
 		DataBlock block(_dataCache.begin() + offsetBytes, _dataCache.begin() + offsetBytes + _dataSize);
 		_dataMain[path] = std::move(block);
 		offsetBytes += _dataSize;
-
-		std::ptrdiff_t dim = static_cast<std::ptrdiff_t>(pathDims) - 1;
-		while (dim >= 0) {
-			path[dim]++;
-			if (path[dim] < _shapeCache[dim]) {
-				break;
-			}
-			path[dim] = 0;
-			--dim;
-		}
 	}
 
 	setViewFlag();
@@ -573,22 +584,11 @@ TensorData& TensorData::crop(const Shape& targetShape) {
 	} else if (newElementCount > 0) {
 		const size_t blockRank = targetShape.size() - 1;
 		const size_t rowBytes = targetShape.back() * typeSize();
-		Shape blockPath(blockRank, 0);
-		while (true) {
+		// 行主序遍历全部块前缀，逐行 memcpy（见 rowMajorPaths）。
+		for (const auto& blockPath : rowMajorPaths(std::span<const size_t>(targetShape.data(), blockRank))) {
 			const size_t srcOffset = blockOffset(blockPath, currentShape);
 			const size_t dstOffset = blockOffset(blockPath, targetShape);
 			std::memcpy(cropped.data() + dstOffset, _dataCache.data() + srcOffset, rowBytes);
-			// 字典序递增，进位且最内维最先；最高位溢出即遍历完成
-			bool carry = true;
-			for (size_t i = blockRank; i-- > 0;) {
-				if (++blockPath[i] < targetShape[i]) {
-					carry = false;
-					break;
-				}
-				blockPath[i] = 0;
-			}
-			if (carry)
-				break;
 		}
 	}
 
