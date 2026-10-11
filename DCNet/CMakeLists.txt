@@ -7,7 +7,7 @@ include(GNUInstallDirs)
 add_library(DCNet STATIC)
 add_library(DCNet::DCNet ALIAS DCNet)
 
-target_compile_features(DCNet PUBLIC cxx_std_20)
+target_compile_features(DCNet PUBLIC cxx_std_23)
 
 # MSVC：源码 UTF-8（含中文注释），目标级启用
 if (MSVC)

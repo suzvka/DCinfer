@@ -25,7 +25,7 @@ if (NOT SMOKE_EXPECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
     message(FATAL_ERROR "SMOKE_EXPECT_VERSION must be a semantic version")
 endif()
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 版本对齐：导出文件用 SameMinorVersion 兼容策略，major.minor 不符时 find_package 失败；

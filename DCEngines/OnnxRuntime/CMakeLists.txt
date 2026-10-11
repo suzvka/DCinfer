@@ -8,7 +8,7 @@ find_package(onnxruntime CONFIG REQUIRED)
 add_library(DCEngine_OnnxRuntime STATIC)
 add_library(DCEngine::OnnxRuntime ALIAS DCEngine_OnnxRuntime)
 
-target_compile_features(DCEngine_OnnxRuntime PUBLIC cxx_std_20)
+target_compile_features(DCEngine_OnnxRuntime PUBLIC cxx_std_23)
 
 # EP 编译宏注入：DCINFER_ORT_EP → 编译期默认 ExecutionProvider（依赖注入见 toolchain）
 if (DCINFER_ORT_EP STREQUAL "CUDA")

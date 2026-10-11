@@ -7,7 +7,7 @@
 add_library(DCEngine_OpenAI STATIC)
 add_library(DCEngine::OpenAI ALIAS DCEngine_OpenAI)
 
-target_compile_features(DCEngine_OpenAI PUBLIC cxx_std_20)
+target_compile_features(DCEngine_OpenAI PUBLIC cxx_std_23)
 
 # 独立 find_package 声明：下游可直接使用 target（不依赖 DCNet 子目录作用域）
 find_package(nlohmann_json CONFIG REQUIRED)

@@ -43,7 +43,7 @@ if (DCINFER_IS_TOP_LEVEL)
         message(WARNING "Selected generator appears to be NMake Makefiles. Ensure you configure for x64 when building (e.g. cmake -A x64) or use an x64 developer prompt.")
     endif()
 
-    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_STANDARD 23)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -104,7 +104,7 @@ endif()
 # 配置摘要：显式列出启用项与依赖，防"配置成功但目标缺失"
 message(STATUS "════ DCinfer ${PROJECT_VERSION} configure summary ════")
 message(STATUS "  Top-level build : ${DCINFER_IS_TOP_LEVEL}")
-message(STATUS "  Core library    : DCinfer (C++20, zero dependencies)")
+message(STATUS "  Core library    : DCinfer (C++23, zero dependencies)")
 message(STATUS "  DCIr (JSON/.dcg): ${DCINFER_BUILD_IR}")
 message(STATUS "  DCNet           : ${DCINFER_BUILD_DCNET}")
 if (DCINFER_BUILD_ENGINES)

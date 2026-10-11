@@ -4,7 +4,7 @@
 
 *可嵌入的端云协同数据驱动推理运行时*
 
-DCinfer 是一个 C++20 推理管线编排器，目标是让 AI 应用能够在**本地、云端、PC、局域网设备**间，以**不同推理引擎**自由放置模型节点，同时把网络、调度、数据传输、引擎生命周期和执行细节隔离在运行时。
+DCinfer 是一个 C++23 推理管线编排器，目标是让 AI 应用能够在**本地、云端、PC、局域网设备**间，以**不同推理引擎**自由放置模型节点，同时把网络、调度、数据传输、引擎生命周期和执行细节隔离在运行时。
 
 ## 核心功能
 
@@ -54,16 +54,16 @@ DCinfer 采用**数据驱动执行模型**：节点在所有输入就绪后自�
 
 ### 零依赖核心
 
-DCinfer 核心库为静态库，**零外部依赖**——仅需 C++20 和标准库。DCIr 序列化模块依赖 nlohmann-json、minizip、zlib（通过 vcpkg 管理），核心库本身不引入任何外部依赖。
+DCinfer 核心库为静态库，**零外部依赖**——仅需 C++23 和标准库。DCIr 序列化模块依赖 nlohmann-json、minizip、zlib（通过 vcpkg 管理），核心库本身不引入任何外部依赖。
 
 ## 环境要求
 
 | 组件 | 要求 |
 |---|---|
 | CMake | ≥ 3.17（裸构建最低 3.17；CMakePresets version 3 需 ≥ 3.21） |
-| C++ 标准 | C++20 |
-| GCC | ≥ 11（Linux；CI 在 ubuntu-24.04 上验证） |
-| Clang | ≥ 14（CI 在 ubuntu-24.04 上验证） |
+| C++ 标准 | C++23 |
+| GCC | ≥ 13（Linux；CI 在 ubuntu-24.04 上验证） |
+| Clang | ≥ 16（CI 在 ubuntu-24.04 上验证） |
 | MSVC | VS 2026（Windows；CI 在 windows-latest 上验证） |
 | Ninja | 可选（README 示例使用 `-G Ninja`） |
 | vcpkg | 仅 DCIr / DCNet / OnnxRuntime / OpenAI 模块需要（仓库以 submodule 提供） |

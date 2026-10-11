@@ -8,7 +8,7 @@ include(GNUInstallDirs)
 add_library(DCEngine_Builtin STATIC)
 add_library(DCEngine::Builtin ALIAS DCEngine_Builtin)
 
-target_compile_features(DCEngine_Builtin PUBLIC cxx_std_20)
+target_compile_features(DCEngine_Builtin PUBLIC cxx_std_23)
 
 target_link_libraries(DCEngine_Builtin PUBLIC DCinfer::DCinfer)
 

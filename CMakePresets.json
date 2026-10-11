@@ -4,7 +4,7 @@
     {
       "name": "gcc-debug",
       "displayName": "GCC Linux Debug",
-      "description": "Linux GCC + Ninja (Debug)（需 GCC ≥ 11）",
+      "description": "Linux GCC + Ninja (Debug)（需 GCC ≥ 13）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/gcc-debug",
       "condition": {
@@ -15,14 +15,14 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_COMPILER": "g++",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
     },
     {
       "name": "gcc-release",
       "displayName": "GCC Linux Release",
-      "description": "Linux GCC + Ninja (Release)（需 GCC ≥ 11；含 DCIr，与 CI 发布验证一致）",
+      "description": "Linux GCC + Ninja (Release)（需 GCC ≥ 13；含 DCIr，与 CI 发布验证一致）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/gcc-release",
       "condition": {
@@ -33,7 +33,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "g++",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "DCINFER_BUILD_IR": "ON",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
@@ -41,26 +41,26 @@
     {
       "name": "clang-debug",
       "displayName": "Clang Debug",
-      "description": "Clang + Ninja (Debug)（跨平台，需 Clang ≥ 14）",
+      "description": "Clang + Ninja (Debug)（跨平台，需 Clang ≥ 16）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
     },
     {
       "name": "clang-release",
       "displayName": "Clang Release",
-      "description": "Clang + Ninja (Release)（跨平台，需 Clang ≥ 14；含 DCIr，与 CI 发布验证一致）",
+      "description": "Clang + Ninja (Release)（跨平台，需 Clang ≥ 16；含 DCIr，与 CI 发布验证一致）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "DCINFER_BUILD_IR": "ON",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
@@ -79,7 +79,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_COMPILER": "cl",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
     },
@@ -97,7 +97,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "cl",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "DCINFER_BUILD_IR": "ON",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake"
       }
@@ -116,7 +116,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "cl",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
         "BUILD_ENGINE_ONNXRUNTIME": "ON",
         "DCINFER_ORT_EP": "CPU"
@@ -136,7 +136,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "cl",
-        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD": "23",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/cmake/vcpkg-toolchain.cmake",
         "BUILD_ENGINE_ONNXRUNTIME": "ON",
         "DCINFER_ORT_EP": "CUDA"
