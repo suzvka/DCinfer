@@ -111,7 +111,9 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 
 	// 在飞计数递增：派发失败或抛异常时按失败语义回滚，否则计数泄漏使耗尽检测永不触发。
 	// 排水登记：_shuttingDown 检查与 _pendingRuns 递增在 _drainMutex 内原子完成。
-	// 票据先构造后登记，登记成功才 arm，随 lambda 移交，析构恰好一次递减。
+	// 票据先构造后登记，登记成功才 arm。局部引用与 lambda 副本共享同一票据，令递减恰好
+	// 一次且恒为最后动作：成功随 lambda 体执行完销毁，拒绝时局部引用兜住 submit 内的同步
+	// 销毁、延到函数末尾——总晚于 !dispatched 段对本引擎的回访，故不可降为 unique_ptr。
 	auto ticket = std::make_shared<DrainTicket>();
 	ticket->engine = this;
 	{

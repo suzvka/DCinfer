@@ -98,13 +98,15 @@ private:
 	// 每轮 submit 对应一个 TaskGate：终态、结果可读与等待协议由自身 mutex+cv 承载；
 	// execState 提交时捕获，同 ID 复用后旧轮次 lambda 无法读写新一轮执行态；
 	// inflight 归零且未终止时由最后完成的 lambda 触发 _exhaustedCheck。
+	// TaskGate 以 shared_ptr 共享：登记表、本轮各并发在飞 lambda、重投登记共同持有，
+	// 最后一个持有者放手才释放——故 releaseTask / 同 ID 重替换不影响仍在飞的本轮任务。
 	struct TaskGate {
 		std::atomic<bool> terminated{false};
 		std::atomic<uint32_t> inflight{0};
 		ExecutionEngine* engine = nullptr;
-		std::shared_ptr<GraphRuntimeState> state;
+		std::shared_ptr<GraphRuntimeState> state; // 与图对象共享，钉活在飞任务期间不被回收
 		TaskId taskId;
-		std::shared_ptr<TaskExecutionState> execState;
+		std::shared_ptr<TaskExecutionState> execState; // 共享使旧轮在飞 lambda 只触旧态，与新轮隔离
 
 		std::mutex m;
 		std::condition_variable cv;
@@ -148,8 +150,9 @@ private:
 
 	std::shared_ptr<ResourceScheduler> _scheduler;
 
-	// 析构自排水：派发在 _drainMutex 内登记并签发 DrainTicket，随任务 lambda 转移；
-	// lambda 执行完毕或被池弃置时回收计数，归零唤醒析构等待者。
+	// 析构自排水：派发在 _drainMutex 内登记并签发 DrainTicket，由调用方局部引用与任务
+	// lambda 副本共同持有；较晚放手者触发恰好一次回收计数，恒晚于本轮引擎回访，归零唤醒
+	// 析构等待者——两路径的“最后时刻”分属不同持有者，故保持 shared 而非 unique。
 	std::mutex _drainMutex;
 	std::condition_variable _drainCv;
 	bool _shuttingDown = false;
