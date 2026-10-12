@@ -58,19 +58,36 @@ public:
 
 private:
 	void run(Handler handler) {
-		for (;;) {
-			if (_stop)
-				break;
-			// 轮询而非阻塞 accept：POSIX close 不唤醒阻塞 accept
-			if (!_socket.poll(Poco::Timespan(0, 50 * 1000), Poco::Net::Socket::SELECT_READ))
-				continue;
-			Poco::Net::StreamSocket c;
-			try {
-				c = _socket.acceptConnection();
-			} catch (...) {
-				break;
+		// 监听线程整体异常隔离：线程内任何逃逸都会 std::terminate 杀死整个测试进程。
+		// stop() 关监听套接字与 poll/accept 存在竞态——POSIX 下对已关 socket 调 poll 会
+		// 抛 Poco::Exception，属正常关停信号，故在此收口并静默退出线程。
+		try {
+			for (;;) {
+				if (_stop)
+					break;
+				// 轮询而非阻塞 accept：POSIX close 不唤醒阻塞 accept
+				if (!_socket.poll(Poco::Timespan(0, 50 * 1000), Poco::Net::Socket::SELECT_READ))
+					continue;
+				Poco::Net::StreamSocket c;
+				try {
+					c = _socket.acceptConnection();
+				} catch (...) {
+					break;
+				}
+				// 单连接 socket I/O 异常不得逃逸：POSIX 下对端重置（RST，如就绪探测或
+				// 客户端 abort）令 serve 内 receiveBytes 抛 Poco::IOException——Windows 容忍
+				// 故不显；与 handler 异常同理须就地吞掉并丢弃该连接，继续监听下一个。
+				try {
+					serve(c, handler);
+				} catch (...) {
+					try {
+						c.close();
+					} catch (...) {
+					}
+				}
 			}
-			serve(c, handler);
+		} catch (const Poco::Exception&) {
+		} catch (...) {
 		}
 		try {
 			_socket.close();
