@@ -62,6 +62,11 @@
   --ig-empty-title: #f1f5ff;
   --ig-accent-text: #9fc4ff;
   --ig-save-chip-text: #8aa99f;
+
+  /* 单一来源几何：面板宽 / 把手宽 / 工具栏高（改一处，依赖项自动跟随，杜绝硬编码漂移） */
+  --ig-palette-w: 224px; /* .ig-palette 与 .ig-status-dock 宽 + 把手定位共用 */
+  --ig-handle-w: 22px; /* 折叠把手宽（left 派生用） */
+  --ig-toolbar-h: 72px; /* min-height 与 .ig-issues-panel top 共用 */
 }
 .ig-root[data-ig-theme="light"] {
   color-scheme: light;
@@ -106,6 +111,17 @@
   --ig-save-chip-text: #2b7a5e;
 }
 
+/* 盒模型复位：组件自持 border-box，不依赖宿主是否提供 *{box-sizing} 全局复位。
+ * 宿主缺省 content-box 时，工具栏 / 面板 / IO 元素会因 padding + border 外扩而偏离
+ * layout.ts 的尺寸估算（如 .ig-toolbar 由设计高 72 撑到 ~95）。统一在 .ig-root 内收口，
+ * 使嵌入式渲染与宿主是否带 preflight 无关（对齐 yunzone 观感）。 */
+.ig-root,
+.ig-root *,
+.ig-root *::before,
+.ig-root *::after {
+  box-sizing: border-box;
+}
+
 .ig-root {
   position: relative;
   display: flex;
@@ -117,7 +133,7 @@
   background: var(--bg-elev);
   color: var(--text);
   font-family: var(--font-ui);
-  font-size: 0.82rem;
+  font-size: 13.12px;
 }
 
 /* 全屏宿主模式（首页工作台）：贴边铺满，去卡片形态 */
@@ -131,15 +147,15 @@
 .ig-toolbar {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  padding: 0.42rem 0.6rem;
+  gap: 7.2px;
+  padding: 6.72px 9.6px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-solid);
   flex: none;
 }
 .ig-title {
   font-weight: 650;
-  font-size: 0.85rem;
+  font-size: 13.6px;
   letter-spacing: 0.02em;
 }
 .ig-spacer {
@@ -151,10 +167,10 @@
   appearance: none;
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 4.8px;
   font-family: var(--font-mono);
-  font-size: 0.7rem;
-  padding: 0.12rem 0.5rem;
+  font-size: 11.2px;
+  padding: 1.92px 8px;
   border-radius: 999px;
   border: 1px solid var(--line);
   color: var(--text-faint);
@@ -193,7 +209,7 @@
 .ig-issues-panel {
   position: absolute;
   left: 8px;
-  top: 42px;
+  top: var(--ig-toolbar-h);
   width: 380px;
   max-height: 240px;
   z-index: 50;
@@ -207,29 +223,29 @@
 .ig-issues-head {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.4rem 0.6rem;
+  gap: 6.4px;
+  padding: 6.4px 9.6px;
   border-bottom: 1px solid var(--line);
-  font-size: 0.72rem;
+  font-size: 11.52px;
   font-weight: 650;
   color: var(--text-dim);
   font-family: var(--font-mono);
 }
 .ig-issues-list {
   overflow-y: auto;
-  padding: 0.3rem 0;
+  padding: 4.8px 0;
   flex: 1;
   min-height: 0;
 }
 .ig-issues-group {
-  margin-bottom: 0.2rem;
+  margin-bottom: 3.2px;
 }
 .ig-issues-item {
   display: flex;
   align-items: flex-start;
-  gap: 0.4rem;
-  padding: 0.25rem 0.6rem;
-  font-size: 0.68rem;
+  gap: 6.4px;
+  padding: 4px 9.6px;
+  font-size: 10.88px;
   line-height: 1.4;
   color: var(--text-dim);
   transition: background 0.12s ease;
@@ -265,9 +281,9 @@
   background: var(--surface-hi);
   color: var(--text-dim);
   font: inherit;
-  font-size: 0.76rem;
+  font-size: 12.16px;
   font-weight: 600;
-  padding: 0.28rem 0.65rem;
+  padding: 4.48px 10.4px;
   border-radius: 8px;
   cursor: pointer;
   transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
@@ -297,10 +313,10 @@
   border: none;
   background: transparent;
   color: var(--text-faint);
-  font-size: 0.95rem;
+  font-size: 15.2px;
   line-height: 1;
   cursor: pointer;
-  padding: 0.1rem 0.3rem;
+  padding: 1.6px 4.8px;
   border-radius: 6px;
 }
 .ig-iconbtn:hover {
@@ -311,12 +327,12 @@
 .ig-input {
   width: 100%;
   box-sizing: border-box;
-  padding: 0.32rem 0.5rem;
+  padding: 5.12px 8px;
   border-radius: 7px;
   border: 1px solid var(--line-hi);
   background: var(--bg-elev);
   color: var(--text);
-  font-size: 0.78rem;
+  font-size: 12.48px;
   font-family: var(--font-ui);
 }
 .ig-input:focus {
@@ -331,27 +347,27 @@
   font-family: var(--font-mono);
 }
 .ig-input-sm {
-  padding: 0.2rem 0.4rem;
-  font-size: 0.72rem;
+  padding: 3.2px 6.4px;
+  font-size: 11.52px;
 }
 .ig-input-xs {
-  padding: 0.2rem 0.3rem;
-  font-size: 0.72rem;
+  padding: 3.2px 4.8px;
+  font-size: 11.52px;
   width: 48px;
   flex: none;
 }
 .ig-check {
   display: flex;
   align-items: center;
-  gap: 0.32rem;
-  font-size: 0.72rem;
+  gap: 5.12px;
+  font-size: 11.52px;
   color: var(--text-dim);
   cursor: pointer;
   user-select: none;
 }
 .ig-hint {
-  margin: 0.3rem 0 0;
-  font-size: 0.68rem;
+  margin: 4.8px 0 0;
+  font-size: 10.88px;
   color: var(--text-faint);
   line-height: 1.45;
 }
@@ -367,9 +383,9 @@
 }
 .ig-err {
   display: block;
-  font-size: 0.66rem;
+  font-size: 10.56px;
   color: var(--err);
-  margin-top: 0.15rem;
+  margin-top: 2.4px;
 }
 
 /* ---------- 主区布局 ---------- */
@@ -389,13 +405,13 @@
 .ig-panel-title {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 6.4px;
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: 10.88px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-faint);
-  margin: 0.4rem 0 0.5rem;
+  margin: 6.4px 0 8px;
 }
 
 /* ---------- 调色板（左：分组导轨 → 子菜单浮层 → 详情卡） ---------- */
@@ -403,11 +419,11 @@
 .ig-palette {
   position: relative;
   z-index: 20; /* 子菜单浮层盖过画布 */
-  width: 172px;
+  width: var(--ig-palette-w);
   flex: none;
   border-right: 1px solid var(--line);
   background: var(--surface-solid);
-  padding: 0.5rem 0.5rem 0.8rem;
+  padding: 8px 8px 12.8px;
   overflow: visible; /* 子菜单向右浮出，不裁切 */
 }
 
@@ -417,19 +433,19 @@
 .ig-rail {
   display: flex;
   flex-direction: column;
-  gap: 0.32rem;
+  gap: 5.12px;
   max-height: 100%;
   overflow-y: auto;
 }
 .ig-rail-item {
   font: inherit;
-  font-size: 0.78rem;
+  font-size: 12.48px;
   text-align: left;
   color: var(--text-dim);
   background: var(--bg-elev);
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 0.5rem 0.62rem;
+  padding: 8px 9.92px;
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
@@ -458,12 +474,12 @@
   border-left: none;
   border-radius: 0 var(--r-sm) var(--r-sm) 0;
   box-shadow: var(--shadow-soft);
-  padding: 0.5rem;
+  padding: 8px;
   z-index: 30;
 }
 .ig-fly-search {
   flex: none;
-  margin-bottom: 0.45rem;
+  margin-bottom: 7.2px;
 }
 .ig-fly-search .ig-input {
   width: 100%;
@@ -473,7 +489,7 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding-right: 0.1rem;
+  padding-right: 1.6px;
 }
 
 /* 详情卡（第三级浮层；锚定点击行，右侧浮出） */
@@ -489,18 +505,18 @@
   border: 1px solid var(--line-hi);
   border-radius: var(--r-sm);
   box-shadow: var(--shadow);
-  padding: 0.6rem 0.65rem;
+  padding: 9.6px 10.4px;
   z-index: 40;
 }
 .ig-detail-head {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  margin-bottom: 0.3rem;
-  padding-right: 1.25rem; /* 关闭钮（.ig-detail-close）让位 */
+  gap: 7.2px;
+  margin-bottom: 4.8px;
+  padding-right: 20px; /* 关闭钮（.ig-detail-close）让位 */
 }
 .ig-detail-title {
-  font-size: 0.8rem;
+  font-size: 12.8px;
   font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -510,43 +526,43 @@
 }
 .ig-detail-sub {
   font-family: var(--font-mono);
-  font-size: 0.65rem;
+  font-size: 10.4px;
   color: var(--text-faint);
-  margin-bottom: 0.25rem;
+  margin-bottom: 4px;
   word-break: break-all;
 }
 .ig-detail-desc {
-  margin: 0.25rem 0 0.45rem;
-  font-size: 0.68rem;
+  margin: 4px 0 7.2px;
+  font-size: 10.88px;
   color: var(--text-dim);
   line-height: 1.5;
 }
 .ig-detail-note {
-  margin: 0.35rem 0 0;
-  font-size: 0.64rem;
+  margin: 5.6px 0 0;
+  font-size: 10.24px;
   color: var(--text-faint);
   line-height: 1.5;
 }
 .ig-detail-ports {
-  margin-top: 0.4rem;
+  margin-top: 6.4px;
 }
 .ig-detail-ports-title {
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: 9.92px;
   letter-spacing: 0.05em;
   color: var(--text-faint);
   border-bottom: 1px dashed var(--line);
-  padding-bottom: 0.15rem;
-  margin-bottom: 0.25rem;
+  padding-bottom: 2.4px;
+  margin-bottom: 4px;
 }
 .ig-detail-port {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.4rem;
+  gap: 6.4px;
   font-family: var(--font-mono);
-  font-size: 0.66rem;
-  padding: 0.1rem 0;
+  font-size: 10.56px;
+  padding: 1.6px 0;
 }
 .ig-detail-port-name {
   color: var(--text);
@@ -559,21 +575,21 @@
   flex: none;
 }
 .ig-detail-port-none {
-  font-size: 0.64rem;
+  font-size: 10.24px;
   color: var(--text-faint);
 }
 
 /* 详情卡关闭钮 / 「添加到画布」主按钮 */
 .ig-detail-close {
   position: absolute;
-  top: 0.28rem;
-  right: 0.3rem;
+  top: 4.48px;
+  right: 4.8px;
   z-index: 1;
 }
 .ig-detail-add {
   display: block;
   width: 100%;
-  margin: 0.15rem 0 0.45rem;
+  margin: 2.4px 0 7.2px;
   text-align: center;
 }
 
@@ -582,8 +598,8 @@
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg-elev);
-  padding: 0.42rem 0.55rem;
-  margin-bottom: 0.42rem;
+  padding: 6.72px 8.8px;
+  margin-bottom: 6.72px;
   cursor: grab;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
@@ -601,11 +617,11 @@
 .ig-pal-head {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 6.4px;
 }
 .ig-pal-label {
   font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-size: 11.84px;
   font-weight: 600;
   flex: 1;
   overflow: hidden;
@@ -614,8 +630,8 @@
 }
 .ig-aff {
   font-family: var(--font-mono);
-  font-size: 0.6rem;
-  padding: 0.05rem 0.38rem;
+  font-size: 9.6px;
+  padding: 0.8px 6.08px;
   border-radius: 999px;
   border: 1px solid transparent;
   flex: none;
@@ -631,8 +647,8 @@
   background: rgba(34, 211, 238, 0.1);
 }
 .ig-pal-desc {
-  margin-top: 0.25rem;
-  font-size: 0.66rem;
+  margin-top: 4px;
+  font-size: 10.56px;
   color: var(--text-faint);
   line-height: 1.4;
 }
@@ -644,17 +660,17 @@
   flex: none;
   border-left: 1px solid var(--line);
   background: var(--surface-solid);
-  padding: 0.2rem 0.65rem 0.9rem;
+  padding: 3.2px 10.4px 14.4px;
   overflow-y: auto;
 }
 .ig-field {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
-  margin-bottom: 0.7rem;
+  gap: 4.8px;
+  margin-bottom: 11.2px;
 }
 .ig-field > label {
-  font-size: 0.68rem;
+  font-size: 10.88px;
   color: var(--text-dim);
   font-family: var(--font-mono);
   letter-spacing: 0.04em;
@@ -663,16 +679,16 @@
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg-elev);
-  padding: 0.32rem 0.4rem;
-  margin-bottom: 0.35rem;
+  padding: 5.12px 6.4px;
+  margin-bottom: 5.6px;
   display: flex;
   flex-direction: column;
-  gap: 0.28rem;
+  gap: 4.48px;
 }
 .ig-portrow-line {
   display: flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 4.8px;
   min-width: 0;
 }
 .ig-portrow-line .ig-editable {
@@ -681,7 +697,7 @@
 .ig-portrow-name {
   flex: 1;
   min-width: 0;
-  font-size: 0.74rem;
+  font-size: 11.84px;
   font-weight: 600;
   color: var(--text);
   overflow: hidden;
@@ -696,7 +712,7 @@
 .ig-portrow-type {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 0.62rem;
+  font-size: 9.92px;
   color: var(--text-faint);
 }
 
@@ -708,15 +724,15 @@
   z-index: 40;
   display: flex;
   flex-direction: column;
-  padding: 0.6rem 0.7rem 0.7rem;
-  gap: 0.5rem;
+  padding: 9.6px 11.2px 11.2px;
+  gap: 8px;
   background: var(--ig-json-overlay);
   backdrop-filter: blur(6px);
 }
 .ig-json-head {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 8px;
 }
 .ig-json-head .ig-panel-title {
   margin: 0;
@@ -726,28 +742,28 @@
   min-height: 0;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 0.6rem;
+  gap: 9.6px;
 }
 .ig-json-pre {
   margin: 0;
-  padding: 0.6rem 0.7rem;
+  padding: 9.6px 11.2px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--bg-elev);
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: 11.2px;
   line-height: 1.5;
   color: var(--text-dim);
 }
 .ig-json-edit {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
+  gap: 6.4px;
   min-height: 0;
 }
 .ig-json-label {
-  font-size: 0.68rem;
+  font-size: 10.88px;
   color: var(--text-dim);
   font-family: var(--font-mono);
 }
@@ -756,22 +772,22 @@
   min-height: 120px;
   resize: none;
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: 11.2px;
   line-height: 1.5;
 }
 .ig-json-actions {
   display: flex;
-  gap: 0.4rem;
+  gap: 6.4px;
 }
 .ig-json-issues {
   margin: 0;
-  padding: 0.35rem 0.6rem 0.35rem 1.4rem;
+  padding: 5.6px 9.6px 5.6px 22.4px;
   overflow-y: auto;
   max-height: 30%;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--bg-elev);
-  font-size: 0.68rem;
+  font-size: 10.88px;
   line-height: 1.5;
 }
 .ig-json-issues .ig-issue-error {
@@ -814,7 +830,7 @@
   border: 1px solid rgba(248, 113, 113, 0.5);
   background: var(--surface-solid);
   color: var(--err);
-  font-size: 0.8rem;
+  font-size: 12.8px;
   line-height: 1;
   cursor: pointer;
   box-shadow: var(--shadow-soft);
@@ -870,8 +886,8 @@
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.35rem 0.55rem;
+  gap: 6.4px;
+  padding: 5.6px 8.8px;
   border-top: 3px solid transparent;
   border-bottom: 1px solid var(--line);
   border-radius: 10px 10px 0 0;
@@ -887,7 +903,7 @@
   flex: 1;
   min-width: 0;
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: 12.48px;
   font-weight: 650;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -899,11 +915,11 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.62rem;
+  font-size: 9.92px;
   color: var(--text-dim);
   border: 1px solid var(--line);
   border-radius: 6px;
-  padding: 0.06rem 0.34rem;
+  padding: 0.96px 5.44px;
   background: var(--bg-elev);
 }
 
@@ -925,8 +941,8 @@
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 0.15rem 0.5rem;
-  padding: 2px 0.4rem;
+  gap: 2.4px 8px;
+  padding: 2px 6.4px;
 }
 .ig-sig-band-top {
   border-bottom: 1px dashed var(--line);
@@ -938,12 +954,12 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 0.22rem;
+  gap: 3.52px;
   height: 16px;
 }
 .ig-sig-name {
   font-family: var(--font-mono);
-  font-size: 0.58rem;
+  font-size: 9.28px;
   color: var(--signal);
   white-space: nowrap;
 }
@@ -951,8 +967,8 @@
 .ig-body {
   display: flex;
   justify-content: space-between;
-  gap: 0.3rem;
-  padding: 0.3rem 0 0.42rem;
+  gap: 4.8px;
+  padding: 4.8px 0 6.72px;
 }
 .ig-col {
   display: flex;
@@ -967,10 +983,10 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 0.3rem;
+  gap: 4.8px;
   height: 22px;
   max-width: 100%;
-  padding: 0 0.55rem;
+  padding: 0 8.8px;
   min-width: 0;
 }
 .ig-port-right {
@@ -978,7 +994,7 @@
 }
 .ig-port-name {
   font-family: var(--font-mono);
-  font-size: 0.68rem;
+  font-size: 10.88px;
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1004,7 +1020,7 @@
 .ig-port-tag {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 0.58rem;
+  font-size: 9.28px;
   color: var(--text-faint);
 }
 
@@ -1093,10 +1109,10 @@
   position: relative; /* handle 锚定祖先 */
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 6.4px;
   width: 132px;
   height: 44px;
-  padding: 0 0.6rem;
+  padding: 0 9.6px;
   border-radius: 10px;
   border: 1.5px solid var(--line-hi);
   background: var(--surface-solid);
@@ -1114,13 +1130,13 @@
 }
 .ig-io-kind {
   flex: none;
-  font-size: 0.72rem;
+  font-size: 11.52px;
   font-weight: 650;
   color: var(--text);
 }
 .ig-io-target {
   font-family: var(--font-mono);
-  font-size: 0.6rem;
+  font-size: 9.6px;
   color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1134,11 +1150,11 @@
 /* IO 检查器绑定状态 */
 .ig-io-bound-ok {
   font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: 12.48px;
   color: var(--accent-cyan);
 }
 .ig-io-bound-none {
-  font-size: 0.72rem;
+  font-size: 11.52px;
   color: var(--warn);
 }
 
@@ -1195,13 +1211,13 @@
   width: 18px;
   height: 18px;
   line-height: 1;
-  font-size: 0.8rem;
+  font-size: 12.8px;
 }
 
 /* 检查器端子绑定标记（只读：由画布 IO 元素声明） */
 .ig-portrow-bound {
   margin-left: auto;
-  font-size: 0.68rem;
+  font-size: 10.88px;
   color: var(--accent-cyan);
 }
 
@@ -1218,10 +1234,10 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0.35rem;
-  width: 224px;
+  gap: 5.6px;
+  width: var(--ig-palette-w);
   box-sizing: border-box;
-  padding: 0.55rem 0.7rem 0.7rem;
+  padding: 8.8px 11.2px 11.2px;
   border-right: 1px solid var(--line);
   border-top: 1px solid var(--line);
   background: linear-gradient(180deg, transparent, var(--ig-panel-bg) 24%, var(--ig-panel-bg));
@@ -1234,16 +1250,16 @@
 /* Palette 折叠 → dock 同步收窄为方形指示灯磁贴（详见文末「折叠态」段） */
 
 /* ---------- empty canvas onboarding ---------- */
-.ig-empty-canvas { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; pointer-events: none; padding: 2rem; background: radial-gradient(circle at center, rgba(47,79,140,.1), transparent 42%); }
+.ig-empty-canvas { position: absolute; inset: 0; z-index: 4; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; pointer-events: none; padding: 32px; background: radial-gradient(circle at center, rgba(47,79,140,.1), transparent 42%); }
 .ig-empty-canvas > * { pointer-events: auto; }
-.ig-empty-orb { width: 58px; height: 58px; display: grid; place-items: center; border-radius: 20px; color: #fff; font-size: 1.55rem; background: linear-gradient(135deg,rgba(85,167,255,.88),rgba(139,92,246,.88)); box-shadow: 0 18px 35px -14px rgba(93,133,255,.9); margin-bottom: 1.15rem; }
-.ig-empty-canvas h2 { font-size: 1.2rem; font-weight: 720; color: var(--ig-empty-title); margin: 0 0 .42rem; }
-.ig-empty-canvas p { max-width: 360px; margin: 0 0 1rem; color: var(--text-dim); font-size: .78rem; line-height: 1.65; }
-.ig-empty-canvas .ig-primary { padding: .55rem .9rem; border-radius: 10px; }
-.ig-empty-hints { display: flex; gap: .85rem; margin-top: 1.35rem; color: var(--text-faint); font-size: .67rem; }
-.ig-empty-hints span { display: inline-flex; align-items: center; gap: .32rem; }
-.ig-empty-hints b { width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--line-hi); border-radius: 50%; color: var(--ig-accent-text); font-size: .62rem; font-weight: 700; }
-@media (max-width: 640px) { .ig-empty-canvas { padding: 1.2rem; } .ig-empty-hints { flex-direction: column; gap: .45rem; align-items: flex-start; } }
+.ig-empty-orb { width: 58px; height: 58px; display: grid; place-items: center; border-radius: 20px; color: #fff; font-size: 24.8px; background: linear-gradient(135deg,rgba(85,167,255,.88),rgba(139,92,246,.88)); box-shadow: 0 18px 35px -14px rgba(93,133,255,.9); margin-bottom: 18.4px; }
+.ig-empty-canvas h2 { font-size: 19.2px; font-weight: 720; color: var(--ig-empty-title); margin: 0 0 6.72px; }
+.ig-empty-canvas p { max-width: 360px; margin: 0 0 16px; color: var(--text-dim); font-size: 12.48px; line-height: 1.65; }
+.ig-empty-canvas .ig-primary { padding: 8.8px 14.4px; border-radius: 10px; }
+.ig-empty-hints { display: flex; gap: 13.6px; margin-top: 21.6px; color: var(--text-faint); font-size: 10.72px; }
+.ig-empty-hints span { display: inline-flex; align-items: center; gap: 5.12px; }
+.ig-empty-hints b { width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--line-hi); border-radius: 50%; color: var(--ig-accent-text); font-size: 9.92px; font-weight: 700; }
+@media (max-width: 640px) { .ig-empty-canvas { padding: 19.2px; } .ig-empty-hints { flex-direction: column; gap: 7.2px; align-items: flex-start; } }
 
 
 .ig-root {
@@ -1255,50 +1271,49 @@
   background: var(--bg-elev);
 }
 .ig-toolbar {
-  min-height: 68px;
-  padding: 0.65rem 1rem;
-  gap: 0.55rem;
+  padding: 10.4px 16px;
+  gap: 8.8px;
   background: var(--ig-toolbar-bg);
   border-bottom-color: var(--line);
   box-shadow: var(--shadow-soft);
 }
-.ig-brand-lockup { display: flex; align-items: center; gap: .62rem; min-width: 178px; }
-.ig-brand-mark { width: 32px; height: 32px; border-radius: 11px; display: grid; place-items: center; color: #fff; font-size: 1.05rem; background: linear-gradient(135deg,#55a7ff,#8b5cf6); box-shadow: 0 8px 18px -8px rgba(91,145,255,.9); }
-.ig-brand-lockup .ig-title { display: block; font-size: .88rem; font-weight: 760; letter-spacing: .01em; }
-.ig-subtitle { display: block; color: var(--text-faint); font-size: .67rem; margin-top: .05rem; }
-.ig-toolbar-divider { width: 1px; height: 28px; background: var(--line); margin: 0 .25rem; }
-.ig-save-status { display: inline-flex; align-items: center; gap: .35rem; color: var(--text-faint); font-size: .68rem; white-space: nowrap; }
+.ig-brand-lockup { display: flex; align-items: center; gap: 9.92px; min-width: 178px; }
+.ig-brand-mark { width: 32px; height: 32px; border-radius: 11px; display: grid; place-items: center; color: #fff; font-size: 16.8px; background: linear-gradient(135deg,#55a7ff,#8b5cf6); box-shadow: 0 8px 18px -8px rgba(91,145,255,.9); }
+.ig-brand-lockup .ig-title { display: block; font-size: 14.08px; font-weight: 760; letter-spacing: .01em; }
+.ig-subtitle { display: block; color: var(--text-faint); font-size: 10.72px; margin-top: 0.8px; }
+.ig-toolbar-divider { width: 1px; height: 28px; background: var(--line); margin: 0 4px; }
+.ig-save-status { display: inline-flex; align-items: center; gap: 5.6px; color: var(--text-faint); font-size: 10.88px; white-space: nowrap; }
 .ig-save-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-green); box-shadow: 0 0 0 3px rgba(52,211,153,.12); }
-.ig-btn { border-radius: 9px; padding: .42rem .72rem; font-size: .72rem; background: var(--ig-btn-bg); }
+.ig-btn { border-radius: 9px; padding: 6.72px 11.52px; font-size: 11.52px; background: var(--ig-btn-bg); }
 .ig-btn-quiet { color: var(--text-dim); background: transparent; border-color: transparent; }
 .ig-btn-quiet:hover:not(:disabled) { background: var(--surface-hi); border-color: var(--line); }
-.ig-panel-toggle { display: inline-flex; align-items: center; gap: .34rem; color: var(--text); background: linear-gradient(135deg,rgba(79,140,255,.22),rgba(124,92,255,.18)); border-color: rgba(111,151,255,.4); }
-.ig-panel-toggle > span { color: var(--ig-accent-text); font-size: 1rem; line-height: .7; }
-.ig-icon-action { appearance: none; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-dim); font-size: 1.08rem; cursor: pointer; }
+.ig-panel-toggle { display: inline-flex; align-items: center; gap: 5.44px; color: var(--text); background: linear-gradient(135deg,rgba(79,140,255,.22),rgba(124,92,255,.18)); border-color: rgba(111,151,255,.4); }
+.ig-panel-toggle > span { color: var(--ig-accent-text); font-size: 16px; line-height: .7; }
+.ig-icon-action { appearance: none; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--text-dim); font-size: 17.28px; cursor: pointer; }
 .ig-icon-action:hover:not(:disabled) { background: var(--surface-hi); color: var(--text); border-color: var(--line); }
 .ig-icon-action:disabled { opacity: .3; cursor: default; }
-.ig-issue-chip { padding: .3rem .5rem; font-family: var(--font-ui); font-size: .66rem; }
+.ig-issue-chip { padding: 4.8px 8px; font-family: var(--font-ui); font-size: 10.56px; }
 .ig-main { background: radial-gradient(ellipse at 50% 20%, var(--ig-glow), transparent 65%); }
-.ig-palette { width: 214px; padding: .75rem .65rem; background: var(--ig-panel-bg); border-right-color: var(--line); }
-.ig-rail { gap: .4rem; }
-.ig-rail-item { border-radius: 10px; padding: .62rem .7rem; font-size: .75rem; background: var(--ig-raised-bg); }
+.ig-palette { padding: 12px 10.4px; background: var(--ig-panel-bg); border-right-color: var(--line); }
+.ig-rail { gap: 6.4px; }
+.ig-rail-item { border-radius: 10px; padding: 9.92px 11.2px; font-size: 12px; background: var(--ig-raised-bg); }
 .ig-rail-item.open { background: linear-gradient(100deg,rgba(79,140,255,.2),rgba(124,92,255,.1)); }
-.ig-flyout { width: 286px; padding: .65rem; background: var(--ig-flyout-bg); border-color: var(--line-hi); }
-.ig-pal-item { padding: .52rem .62rem; border-radius: 10px; background: var(--ig-pal-item-bg); }
-.ig-pal-label { font-family: var(--font-ui); font-size: .74rem; }
-.ig-inspector { width: 312px; padding: .62rem .8rem 1rem; background: var(--ig-panel-bg); border-left-color: var(--line); }
-.ig-panel-title { font-family: var(--font-ui); font-size: .72rem; font-weight: 700; color: var(--text-dim); letter-spacing: .02em; text-transform: none; }
-.ig-field > label { font-family: var(--font-ui); font-size: .68rem; letter-spacing: 0; text-transform: none; }
+.ig-flyout { width: 286px; padding: 10.4px; background: var(--ig-flyout-bg); border-color: var(--line-hi); }
+.ig-pal-item { padding: 8.32px 9.92px; border-radius: 10px; background: var(--ig-pal-item-bg); }
+.ig-pal-label { font-family: var(--font-ui); font-size: 11.84px; }
+.ig-inspector { width: 312px; padding: 9.92px 12.8px 16px; background: var(--ig-panel-bg); border-left-color: var(--line); }
+.ig-panel-title { font-family: var(--font-ui); font-size: 11.52px; font-weight: 700; color: var(--text-dim); letter-spacing: .02em; text-transform: none; }
+.ig-field > label { font-family: var(--font-ui); font-size: 10.88px; letter-spacing: 0; text-transform: none; }
 .ig-node { width: 244px; border-radius: 14px; background: var(--ig-node-bg); border-color: var(--line-hi); box-shadow: var(--ig-node-shadow); }
 .ig-node:hover { border-color: rgba(111,160,255,.8); box-shadow: 0 12px 26px -14px rgba(74,126,255,.5); }
 .ig-node.selected { border-color: var(--ig-focus); box-shadow: 0 0 0 2px rgba(89,145,255,.28), var(--ig-node-shadow); }
-.ig-head { height: 49px; padding: .4rem .65rem; background: var(--ig-head-bg); border-radius: 13px 13px 0 0; }
-.ig-name { font-family: var(--font-ui); font-size: .78rem; }
-.ig-type { border-radius: 999px; font-size: .58rem; padding: .12rem .4rem; }
-.ig-body { padding-top: .38rem; }
+.ig-head { height: 49px; padding: 6.4px 10.4px; background: var(--ig-head-bg); border-radius: 13px 13px 0 0; }
+.ig-name { font-family: var(--font-ui); font-size: 12.48px; }
+.ig-type { border-radius: 999px; font-size: 9.28px; padding: 1.92px 6.4px; }
+.ig-body { padding-top: 6.08px; }
 .ig-port { height: 24px; }
 .ig-io-node { border-radius: 999px; height: 48px; background: var(--ig-node-bg); box-shadow: var(--ig-node-shadow); }
-.ig-io-kind { font-size: .7rem; }
+.ig-io-kind { font-size: 11.2px; }
 .ig-root .react-flow__edge-path { stroke: var(--ig-edge); stroke-width: 1.8; }
 .ig-root .react-flow__edge.selected .react-flow__edge-path { stroke: var(--ig-edge-hi); stroke-width: 2.6; }
 .ig-root .react-flow__controls { background: var(--ig-flyout-bg); border-color: var(--line-hi); }
@@ -1306,12 +1321,12 @@
 .ig-root .react-flow__controls-button svg { fill: currentColor; }
 .ig-root .react-flow__minimap { background: var(--ig-panel-bg); border-color: var(--line-hi); }
 @media (max-width: 760px) {
-  .ig-toolbar { min-height: 60px; padding: .5rem .65rem; }
+  .ig-toolbar { min-height: 60px; padding: 8px 10.4px; }
   .ig-brand-lockup { min-width: auto; }
   .ig-save-status, .ig-toolbar-divider { display: none; }
-  .ig-toolbar .ig-btn-quiet { font-size: 0; padding: .42rem; }
-  .ig-toolbar .ig-btn-quiet span { font-size: .9rem; }
-  .ig-brand-lockup .ig-title { font-size: .78rem; }
+  .ig-toolbar .ig-btn-quiet { font-size: 0; padding: 6.72px; }
+  .ig-toolbar .ig-btn-quiet span { font-size: 14.4px; }
+  .ig-brand-lockup .ig-title { font-size: 12.48px; }
 }
 
 
@@ -1319,11 +1334,11 @@
   /* 工具条：允许换行防溢出，按钮紧凑 */
   .ig-toolbar {
     flex-wrap: wrap;
-    row-gap: 0.3rem;
-    padding: 0.38rem 0.5rem;
+    row-gap: 4.8px;
+    padding: 6.08px 8px;
   }
   .ig-toolbar .ig-btn {
-    padding: 0.26rem 0.5rem;
+    padding: 4.16px 8px;
   }
 
   /* 组件面板：覆盖式抽屉（画布保持全宽，落点视口中心语义不变） */
@@ -1332,14 +1347,10 @@
     left: 0;
     top: 0;
     bottom: 0;
-    width: min(78vw, 300px);
     border-right: 1px solid var(--line-hi);
     box-shadow: var(--shadow);
   }
-  /* dock 宽度跟随 Palette 抽屉 */
-  .ig-status-dock {
-    width: min(78vw, 300px);
-  }
+  /* dock 宽度经 --ig-palette-w 跟随 Palette 抽屉（见 760 断点变量） */
   /* 子菜单 / 详情卡：面板内全宽覆盖（介绍页替换列表；× 关闭） */
   .ig-flyout {
     left: 0;
@@ -1396,7 +1407,7 @@
   .ig-edge-del {
     width: 38px;
     height: 38px;
-    font-size: 1rem;
+    font-size: 16px;
   }
 }
 
@@ -1411,8 +1422,8 @@
 .ig-root .ig-toolbar {
   position: relative;
   z-index: 60;
-  min-height: 72px;
-  padding: .7rem 1.15rem;
+  min-height: var(--ig-toolbar-h);
+  padding: 11.2px 18.4px;
   background: var(--ig-toolbar-bg);
   box-shadow: 0 1px 0 rgba(255,255,255,.025), var(--shadow-soft);
 }
@@ -1423,9 +1434,9 @@
   background: linear-gradient(145deg, #4f8cff 12%, #765df1 85%);
   box-shadow: 0 10px 24px -10px rgba(79, 140, 255, .9), inset 0 1px 0 rgba(255,255,255,.25);
 }
-.ig-root .ig-brand-lockup .ig-title { font-size: .92rem; letter-spacing: -.01em; }
+.ig-root .ig-brand-lockup .ig-title { font-size: 14.72px; letter-spacing: -.01em; }
 .ig-root .ig-subtitle { color: var(--text-faint); }
-.ig-root .ig-save-status { padding: .3rem .55rem; border: 1px solid rgba(52,211,153,.14); border-radius: 999px; background: rgba(52,211,153,.06); color: var(--ig-save-chip-text); }
+.ig-root .ig-save-status { padding: 4.8px 8.8px; border: 1px solid rgba(52,211,153,.14); border-radius: 999px; background: rgba(52,211,153,.06); color: var(--ig-save-chip-text); }
 .ig-root .ig-toolbar-divider { background: linear-gradient(transparent, rgba(148,163,184,.3), transparent); }
 .ig-root .ig-btn { min-height: 31px; transition: transform .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease; }
 .ig-root .ig-btn:hover:not(:disabled) { transform: translateY(-1px); }
@@ -1434,10 +1445,10 @@
 .ig-root .ig-rail-handle {
   position: absolute;
   top: 50%;
-  left: 236px; /* 展开态：骑跨面板右外缘（content-box 224 + 左右 .7rem 内边距 + 1px 边框 = 247.4，把手中心对齐此） */
+  left: calc(var(--ig-palette-w) - var(--ig-handle-w) / 2); /* 派生自面板宽：始终骑跨面板右外缘，随折叠/断点自动跟随 */
   z-index: 25; /* 面板(20) 之上，flyout(30) 之下 */
   box-sizing: border-box;
-  width: 22px;
+  width: var(--ig-handle-w);
   height: 46px;
   padding: 0;
   display: grid;
@@ -1447,28 +1458,27 @@
   border-radius: 8px;
   background: var(--ig-raised-bg);
   color: var(--text-dim);
-  font-size: 1.15rem;
+  font-size: 18.4px;
   line-height: 1;
   cursor: pointer;
   transition: left .18s ease, background .15s ease, color .15s ease, border-color .15s ease;
 }
 .ig-root .ig-rail-handle:hover { color: var(--text); border-color: var(--brand); background: var(--surface-hi); }
-.ig-root.ig-palette-collapsed .ig-rail-handle { left: 66px; } /* 折叠态：面板外缘 60 + 左右 .5rem + 1px 边框 = 77，中心对齐 */
 .ig-root .ig-issue-chip { min-height: 28px; }
 .ig-root .ig-main { background: radial-gradient(900px 560px at 54% 42%, var(--ig-glow), transparent 68%), var(--ig-canvas-bg); }
 .ig-root .ig-canvas { background-image: linear-gradient(var(--ig-grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--ig-grid-line) 1px, transparent 1px); background-size: 56px 56px; }
 .ig-root .ig-palette, .ig-root .ig-inspector { backdrop-filter: blur(14px); background: var(--ig-panel-bg); }
-.ig-root .ig-palette { width: 224px; padding: .85rem .7rem; }
-.ig-root .ig-rail-item { display:flex; align-items:center; justify-content:space-between; gap: .5rem; min-height: 42px; border-color: var(--line); }
-.ig-root .ig-rail-icon { flex: none; width: 1.15em; text-align: center; font-size: 1.05rem; line-height: 1; opacity: .85; }
+.ig-root .ig-palette { padding: 13.6px 11.2px; }
+.ig-root .ig-rail-item { display:flex; align-items:center; justify-content:space-between; gap: 8px; min-height: 42px; border-color: var(--line); }
+.ig-root .ig-rail-icon { flex: none; width: 1.15em; text-align: center; font-size: 16.8px; line-height: 1; opacity: .85; }
 .ig-root .ig-rail-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ig-root .ig-rail-item.open .ig-rail-icon { opacity: 1; }
-.ig-root .ig-rail-item::after { content: "›"; color: var(--text-faint); font-size: 1.05rem; transition: transform .16s ease; }
+.ig-root .ig-rail-item::after { content: "›"; color: var(--text-faint); font-size: 16.8px; transition: transform .16s ease; }
 .ig-root .ig-rail-item.open::after { transform: rotate(90deg); color: var(--ig-accent-text); }
 .ig-root .ig-flyout { width: 300px; border-radius: 0 14px 14px 0; box-shadow: 18px 18px 42px -24px rgba(0,0,0,.35); }
-.ig-root .ig-inspector { width: 324px; padding: .8rem .95rem 1.2rem; box-shadow: -18px 0 42px -30px rgba(0,0,0,.35); }
-.ig-root .ig-panel-title { padding-bottom: .55rem; margin-bottom: .65rem; border-bottom: 1px solid var(--line); }
-.ig-root .ig-field { margin-bottom: .75rem; }
+.ig-root .ig-inspector { width: 324px; padding: 12.8px 15.2px 19.2px; box-shadow: -18px 0 42px -30px rgba(0,0,0,.35); }
+.ig-root .ig-panel-title { padding-bottom: 8.8px; margin-bottom: 10.4px; border-bottom: 1px solid var(--line); }
+.ig-root .ig-field { margin-bottom: 12px; }
 .ig-root .ig-field > label { color: var(--text-faint); }
 .ig-root .ig-input { background: var(--ig-input-bg); border-color: var(--line-hi); min-height: 32px; }
 .ig-root .ig-input:hover:not(:disabled) { border-color: var(--line-hi); }
@@ -1484,13 +1494,11 @@
 .ig-root .ig-empty-canvas { background: radial-gradient(circle at center, rgba(79,140,255,.11), transparent 43%); }
 .ig-root .ig-empty-orb { width: 64px; height: 64px; border-radius: 21px; box-shadow: 0 20px 42px -17px rgba(93,133,255,.95), inset 0 1px 0 rgba(255,255,255,.25); }
 .ig-root .ig-empty-canvas h2 { letter-spacing: -.02em; }
-.ig-root .ig-empty-hints { padding: .55rem .8rem; border: 1px solid var(--line); border-radius: 999px; background: var(--ig-raised-bg); }
+.ig-root .ig-empty-hints { padding: 8.8px 12.8px; border: 1px solid var(--line); border-radius: 999px; background: var(--ig-raised-bg); }
 @media (max-width: 760px) {
-  .ig-root .ig-toolbar { min-height: 62px; padding: .55rem .7rem; }
-  .ig-root .ig-palette { width: min(82vw, 320px); }
-  .ig-root .ig-rail-handle { left: calc(min(82vw, 320px) + 12px); } /* 对齐抽屉外缘：宽度 + 左右 .7rem 内边距 + 1px 边框 - 把手半宽 */
+  .ig-root { --ig-toolbar-h: 62px; --ig-palette-w: min(82vw, 320px); }
+  .ig-root .ig-toolbar { padding: 8.8px 11.2px; }
   .ig-root .ig-inspector { width: min(88vw, 320px); }
-  .ig-status-dock { width: min(82vw, 320px); }
 }
 
 /* ---------- 折叠态：导轨/指示灯磁贴收窄为方形（宽度 = 高度，隐藏文字） ----------
@@ -1503,10 +1511,10 @@
 .ig-root { --ig-rail-tile: 42px; } /* 折叠磁贴边长（宽 = 高），作于局部作域避免泄漏宿主 */
 .ig-root .ig-palette, .ig-root .ig-status-dock { transition: width .18s ease, padding .18s ease; }
 
-/* 面板本体：收窄到磁贴宽（60 = 42 磁贴 + 左右 .5rem 内边距） */
+/* 面板本体：收窄到磁贴宽（--ig-palette-w 派生把手 / dock 一并跟随） */
+.ig-root.ig-palette-collapsed { --ig-palette-w: 60px; }
 .ig-root.ig-palette-collapsed .ig-palette {
-  width: 60px;
-  padding: .6rem .5rem;
+  padding: 9.6px 8px;
 }
 .ig-root.ig-palette-collapsed .ig-rail { align-items: center; }
 
@@ -1522,12 +1530,11 @@
 }
 .ig-root.ig-palette-collapsed .ig-rail-item .ig-rail-label,
 .ig-root.ig-palette-collapsed .ig-rail-item::after { display: none; }
-.ig-root.ig-palette-collapsed .ig-rail-icon { width: auto; font-size: 1.2rem; opacity: 1; }
+.ig-root.ig-palette-collapsed .ig-rail-icon { width: auto; font-size: 19.2px; opacity: 1; }
 
 /* 底部状态 dock：与面板同宽对齐，chip 缩成方形指示灯磁贴（隐藏计数文字） */
 .ig-root.ig-palette-collapsed .ig-status-dock {
-  width: 60px;
-  padding: .55rem .5rem .7rem;
+  padding: 8.8px 8px 11.2px;
   align-items: center;
 }
 .ig-root.ig-palette-collapsed .ig-status-dock .ig-issue-chip {
