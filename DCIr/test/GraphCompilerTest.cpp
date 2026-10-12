@@ -1108,6 +1108,64 @@ void testSignalCompileAndRoundTrip() {
 		CHECK(!n->isBlocked(), "unwired gate = fail-open (never blocked)");
 	}
 	END_TEST();
+
+	// 端到端契约：本用例 JSON 为 Web 编辑器真实导出的 graph.json（浏览器实测抓取），
+	// 证明编辑器产物可被 GraphCompiler 编译并正确降级（信号端子剔离、gate 绑定）。
+	TEST("signal — 编辑器实际导出 JSON 可编译并正确降级（端到端契约）") {
+		const char* json = R"({
+  "version": "1.0",
+  "nodes": [
+    {
+      "name": "builtin",
+      "type": "Builtin",
+      "affinity": "Compute",
+      "inputs": [
+        { "name": "a", "tensorType": "Float", "typeSize": 4, "shape": [-1], "required": true },
+        { "name": "b", "tensorType": "Float", "typeSize": 4, "shape": [-1], "required": true },
+        { "name": "sig.gate", "kind": "signal", "required": false }
+      ],
+      "outputs": [
+        { "name": "out", "tensorType": "Float", "typeSize": 4, "shape": [-1], "required": true },
+        { "name": "sig.idle", "kind": "signal", "required": false },
+        { "name": "sig.running", "kind": "signal", "required": false },
+        { "name": "sig.blocked", "kind": "signal", "required": false },
+        { "name": "sig.error", "kind": "signal", "required": false },
+        { "name": "sig.done", "kind": "signal", "required": false }
+      ]
+    },
+    {
+      "name": "signalSource",
+      "type": "dc:SignalSource",
+      "affinity": "System",
+      "inputs": [],
+      "outputs": [
+        { "name": "sig.out", "kind": "signal", "required": false }
+      ],
+      "signalName": "go"
+    }
+  ],
+  "edges": [
+    {
+      "srcNode": "signalSource",
+      "srcPort": "sig.out",
+      "dstNode": "builtin",
+      "dstPort": "sig.gate"
+    }
+  ],
+  "inputBindings": [],
+  "outputBindings": []
+})";
+		InferGraph graph; GraphCompiler::compileString(graph, json);
+		auto* n = graph.node("builtin");
+		CHECK(n != nullptr, "editor-emitted node must compile");
+		CHECK(n->schema().inputs.size() == 2, "signal terminal stripped; only tensor a/b remain in schema");
+		CHECK(n->signalName() == "go", "gate must lower to source signalName");
+		CHECK(n->signalStore() != nullptr, "compute node must get output signal store attached");
+		CHECK(n->isBlocked(), "fail-closed until host drives 'go'");
+		graph.setSignal("go", true);
+		CHECK(!n->isBlocked(), "host setSignal('go') releases the gate");
+	}
+	END_TEST();
 }
 
 int main() {

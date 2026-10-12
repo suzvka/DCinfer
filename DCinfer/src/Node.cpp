@@ -117,6 +117,17 @@ std::string Node::signalName() const {
 	return _signal->signalName();
 }
 
+void Node::attachSignalStore(std::shared_ptr<SignalStore> store) {
+	std::lock_guard lk(_mutationMutex);
+	_ensureMutable("Node::attachSignalStore");
+	_signalStore = std::move(store);
+}
+
+std::shared_ptr<SignalStore> Node::signalStore() const {
+	std::lock_guard lk(_mutationMutex);
+	return _signalStore;
+}
+
 EngineAdapter& Node::engine() const {
 	return *_engine;
 }
@@ -213,10 +224,18 @@ const std::string& Node::RunContext::name() const {
 	return _name;
 }
 
+void Node::RunContext::emitSignal(const std::string& portName, bool value) {
+	if (!_signalStore)
+		return;
+	// 输出 wire 名 = <节点名>.<端口名>（与 GraphCompiler / SignalEvaluator 同口径）；task 级作用域
+	_signalStore->set(_name + "." + portName, _taskId, value);
+}
+
 Node::RunContext::RunContext(SlotWorkspace& workspace, EngineAdapter& engine,
 							 const Node::Schema& schema, const std::string& type, const std::string& name,
-							 TaskId taskId, std::function<bool()> cancelProbe)
+							 TaskId taskId, std::function<bool()> cancelProbe,
+							 std::shared_ptr<SignalStore> signalStore)
 	: _workspace(workspace), _engine(engine), _schema(schema), _type(type), _name(name),
-	  _taskId(std::move(taskId)), _cancelProbe(std::move(cancelProbe)) {}
+	  _taskId(std::move(taskId)), _cancelProbe(std::move(cancelProbe)), _signalStore(std::move(signalStore)) {}
 
 } // namespace DC

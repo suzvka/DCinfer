@@ -507,6 +507,12 @@ void GraphCompiler::buildGraph(InferGraph& graph, const nlohmann::json& root) {
 			if (n.isLogic && n.type == kSignalTypeConst && n.hasConstValue)
 				store->set(signalWireName(n, kSigOut), n.constValue);
 		}
+		// 输出信号发布面：计算节点绑定仓库，算法经 RunContext::emitSignal 自决时机发布
+		for (const auto& n : plan.nodes) {
+			if (n.isLogic) continue;
+			auto* node = graph.node(n.name);
+			if (node) node->attachSignalStore(store);
+		}
 		for (const auto& e : plan.edges) {
 			if (e.dstPort != kSigGate) continue;
 			auto* dst = graph.node(e.dstNode);

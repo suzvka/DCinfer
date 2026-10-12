@@ -194,6 +194,13 @@ public:
 	/// @brief 节点绑定的控制信号名；未绑定为空串。
 	std::string signalName() const;
 
+	/// @brief 绑定输出信号仓库（构建期）：算法经 RunContext::emitSignal 发布状态信号。
+	///        与门控 bindSignal 相互独立：未受门控的节点同样可发布输出信号。
+	void attachSignalStore(std::shared_ptr<SignalStore> store);
+
+	/// @brief 输出信号仓库；未绑定为空。
+	std::shared_ptr<SignalStore> signalStore() const;
+
 	/// @brief 注册就绪状态委托；未注册时回退 TaskBuffer 逻辑。
 	void setReadyOverride(std::function<bool(const TaskId&)> fn) {
 		std::lock_guard lk(_mutationMutex);
@@ -243,6 +250,7 @@ private:
 
 	NodeMeta _meta;
 	std::unique_ptr<SignalGate> _signal;
+	std::shared_ptr<SignalStore> _signalStore; ///< 输出信号仓库（构建期绑定；可空）
 	std::unique_ptr<EngineAdapter> _engine;
 	RunFn _fn;
 	CompletionFn _onComplete;
@@ -299,6 +307,10 @@ public:
 	/// @brief 当前 task 标识；RunFn 内等待或轮询以此寻址。
 	const TaskId& taskId() const { return _taskId; }
 
+	/// @brief 发布节点输出信号（控制面布尔）：写入 `<节点名>.<端口名>`，task 级作用域。
+	///        时机构成算法语义，由算法提供者在 RunFn 内自行决定；未绑定仓库时空操作。
+	void emitSignal(const std::string& portName, bool value);
+
 	/// @brief 取消感知，协作式：所属 task 是否已被请求取消或已终止；未注入谓词时恒 false。
 	bool isCancellationRequested() const {
 		return _cancelProbe ? _cancelProbe() : false;
@@ -309,7 +321,8 @@ private:
 	friend struct ExecutionPipeline;
 	RunContext(SlotWorkspace& workspace, EngineAdapter& engine,
 			   const Node::Schema& schema, const std::string& type, const std::string& name,
-			   TaskId taskId, std::function<bool()> cancelProbe);
+			   TaskId taskId, std::function<bool()> cancelProbe,
+			   std::shared_ptr<SignalStore> signalStore);
 
 	/// @brief input<T> 的非模板实现，定义在 Node.cpp；失败返回 nullptr 并填充 error。
 	const void* _inputChecked(const std::string& name, SlotDataType type, std::string* error) const;
@@ -321,6 +334,7 @@ private:
 	std::string _name;
 	TaskId _taskId;
 	std::function<bool()> _cancelProbe;
+	std::shared_ptr<SignalStore> _signalStore; ///< 输出信号仓库（可空；空则 emitSignal 无操作）
 };
 
 } // namespace DC

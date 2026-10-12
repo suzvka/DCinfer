@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.7] - 2026-10-12
+
+控制信号体系重建（破坏性）：信号从「节点上的名字字段」升级为与数据端口
+同构的**可连线端子**——节点上边信号输入、下边信号输出，信号线只传布尔
+值，编排区提供纯信号 I/O 的逻辑控件（源/常量/非/与/或）。信号面**不入
+张量数据流**：编译期自端口 schema 剔离、经 `SignalPlan` 侧表承载，运行期
+在 `submit` 前静态求值并写入 task 级 wire。节点状态（idle/running/blocked/
+error/done）的发布时机由算法提供者经 `RunContext::emitSignal` 自行决定，
+框架不自动发布。
+
+### Changed
+
+- **破坏性（0.x）节点级 `signal` 名字段退场**：`graph.json` 不再支持
+  `nodes[].signal`（GraphCompiler 不再据此绑定门控，字段被忽略）。门控改
+  由**信号边**表达——连到 `sig.gate` 的信号线即绑定来源 wire。迁移：建
+  `dc:SignalSource` 节点（`signalName` 为宿主对外的名字）并连边至节点
+  `sig.gate`。
+- **破坏性（0.x）端口 schema 引入 `kind` 判别**：`inputs[]` / `outputs[]`
+  条目可带 `"kind": "signal"`（缺省 `"tensor"`），信号端子与张量端子混编
+  于同一数组；信号端子忽略 `tensorType` / `typeSize` / `shape`，序列化仅
+  保留 `name` / `kind` / `required`。编译期信号端子自张量 schema 剔离
+  （`NodeSchema` 只含张量端口）。
+- 门控语义：`sig.gate` 无入边 = 不绑定 = **恒放行**（fail-open）；有入边按
+  wire 布尔值阻断/放行（fail-closed）。
+- `Node` 的输出信号仓库与门控绑定解耦：`attachSignalStore` 独立于
+  `bindSignal`，未受门控的节点同样可发布输出信号。
+- `GraphCompiler::applyNodeMeta` 不再接收图参数（信号分支整体移出）。
+- 注释与文档整理：全仓注释精简（净减约 4 千行）、文档修订（移除内部工单号
+  引用），不涉及公开 API 与运行时语义变化。
+- CI 收束：移除 OnnxRuntime 专用编译作业，ORT 适配器链不再纳入 CI 构建；
+  CI 覆盖保留核心、DCNet 与 OpenAI mock 链路。
+
+### Added
+
+- `SignalPlan` / `SignalNodePlan` / `SignalEdgePlan`（`SignalPlan.h`）侧表
+  承载信号面；`InferGraph::setSignalPlan` / `signalPlan()`；
+  `GraphRuntimeState::signalPlan`。
+- `SignalEvaluator`：`isSignalLogicType` / `signalWireName` /
+  `evaluateStaticSignals`——`ExecutionEngine::submit` 在拓扑守卫与调度之前
+  按依赖拓扑求值（`dc:SignalSource` 读宿主值、`dc:SignalConst` 编译期写
+  全局、`dc:SignalNot` / `dc:SignalAnd` / `dc:SignalOr` 求值后写 task 级
+  wire；memo 防环，缺省 false；逻辑节点不物化为 `DC::Node`）。
+- 信号逻辑节点类型：`dc:SignalSource` / `dc:SignalConst` / `dc:SignalNot` /
+  `dc:SignalAnd` / `dc:SignalOr`（输出 `sig.out`，输入 `sig.in0…`；源/常量
+  携带 `signalName` / `signalValue`）。
+- `Node::attachSignalStore` / `Node::signalStore()`；
+  `Node::RunContext::emitSignal(port, value)`——写 `<节点名>.<端口名>`
+  task 级 wire，未绑定仓库时空操作。
+- `graphToJson` 往返：计算节点的信号端子自 plan 回写，逻辑节点连同
+  `signalName` / `signalValue` 回写（`affinity: "System"`）。
+- Web 编辑器（`DCIr/web`）：端口 `kind` 模型与信号端子自动注入（输入
+  `sig.gate`；输出 `sig.idle` / `sig.running` / `sig.blocked` / `sig.error` /
+  `sig.done`）、专用信号调色板（源/常量/非/与/或，AND/OR 输入数可调、上限
+  8）、橙色虚线信号边、跨类连线拒绝、Inspector 逻辑节点配置。
+- 端到端契约测试：编辑器真实导出的 `graph.json` 直喂编译器的用例纳入
+  `GraphCompilerTest`，闭环编辑器 ↔ 编译降级接缝；`SignalEvaluatorTest` /
+  `SignalEmitTest` 覆盖静态求值与算法侧发布。
+
 ## [0.7.6] - 2026-10-10
 
 引擎/模型分层（破坏性）：`EngineDescriptor` 的引擎生命周期钩子拆分为显式两层——

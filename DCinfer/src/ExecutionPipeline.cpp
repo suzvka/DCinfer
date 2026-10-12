@@ -76,7 +76,7 @@ NodeResult ExecutionPipeline::execute(
 
 		try {
 			Node::RunContext ctx(workspace, engine, schema, node.type(), node.name(),
-								 taskId, isCancelRequested);
+								 taskId, isCancelRequested, node.signalStore());
 			result = fn(ctx);
 		} catch (const std::exception& e) {
 			result.status = NodeStatus::ExecutionFailed;
@@ -105,7 +105,7 @@ NodeResult ExecutionPipeline::execute(
 		if (result.ok()) {
 			try {
 				Node::RunContext ctx(workspace, engine, schema, node.type(), node.name(),
-									 taskId, isCancelRequested);
+									 taskId, isCancelRequested, node.signalStore());
 				engine.postRun(ctx);
 			} catch (...) {
 				safeTriggerOnError(engine);
