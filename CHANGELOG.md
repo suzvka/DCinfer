@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Windows TLS 路线解耦（消费方反馈）**：`POCO_ENABLE_NETSSL_WIN` 不再硬编码进
+  共享的 `x64-windows` triplet。默认 triplet 与官方一致（poco 走官方 OpenSSL
+  路线，`Poco::Crypto` 可用）；DCNet 专用路线收敛为新增的 `x64-windows-dcnet`
+  overlay triplet + `cmake/overlay-ports-dcnet/poco`（NetSSL_Win/SChannel），
+  由 wrapper toolchain 在 `DCINFER_BUILD_DCNET=ON` 且 Windows 时自动注入
+  （显式 `-DVCPKG_TARGET_TRIPLET` 优先）。引擎 overlay（abseil/onnx/
+  onnxruntime）与 poco TLS 路线分属不同目录，不启 DCNet 的消费方可直接采用
+  官方 OpenSSL 版 poco，无需 cherry-pick overlay。注意 triplet 文件内容参与
+  vcpkg ABI hash，官方 ↔ dcnet 切换 = 已装包全量重编一次（README 增补
+  「Windows TLS 路线」矩阵）。
+- poco overlay 的 `FindPCRE2.cmake` 去(pkg-config)依赖（portfile 后处理）：
+  规避 Windows 上 PATH 中的 pkg-config 返回原生反斜杠路径时，消费端
+  `find_package(Poco)` 经 `find_dependency(PCRE2)` 触发 CMake
+  `Invalid character escape` 直接中断（上游 poco/vcpkg 问题）。
+
 ## [0.7.7] - 2026-10-12
 
 控制信号体系重建（破坏性）：信号从「节点上的名字字段」升级为与数据端口

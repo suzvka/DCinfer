@@ -26,6 +26,8 @@ Testing/
 !cmake/vcpkg-toolchain.cmake
 !cmake/overlay-ports/
 !cmake/overlay-ports/**
+!cmake/overlay-ports-dcnet/
+!cmake/overlay-ports-dcnet/**
 !cmake/triplets/
 !cmake/triplets/**
 

@@ -176,6 +176,31 @@ cmake --build build/core-ir --config Release
 cmake -B build -S .
 ```
 
+#### Windows TLS 路线（poco triplet）
+
+poco 的 TLS 后端由 vcpkg triplet 决定，**triplet 文件内容参与 vcpkg ABI hash，
+两条路线不可混用**（切换 = 已装包全量重编一次）：
+
+| 场景 | triplet | poco TLS 路线 | Poco::Crypto |
+|---|---|---|---|
+| 默认（不启 DCNet） | `x64-windows`（官方） | OpenSSL 版 `Poco::NetSSL` | `poco[crypto]` 即有 |
+| DCNet（`DCINFER_BUILD_DCNET=ON`） | `x64-windows-dcnet`（overlay） | `NetSSL_Win`（SChannel） | 可另加 `poco[crypto]` |
+
+- 启用 DCNet 时 wrapper toolchain
+  （[cmake/vcpkg-toolchain.cmake](cmake/vcpkg-toolchain.cmake)）在 Windows 上
+  自动追加 `x64-windows-dcnet` 与 poco NetSSL_Win 定制 overlay
+  （`cmake/overlay-ports-dcnet/`）；显式传入 `-DVCPKG_TARGET_TRIPLET` 时以传入值为准。
+- 引擎 overlay（abseil/onnx/onnxruntime，`cmake/overlay-ports/`）与 poco TLS
+  路线**解耦**：不启 DCNet 的消费方可直接沿用本仓 toolchain + 官方
+  OpenSSL 版 poco（`find_package(Poco COMPONENTS ... Crypto)` 可用），
+  无需 cherry-pick overlay；若首次部署误用 dcnet triplet 后切换回官方
+  x64-windows，会因 ABI hash 变化触发一次全量重编，请在首次配置时选对路线。
+  注意：官方 poco port 自带的 `FindPCRE2.cmake` 仍含 pkg-config 探测（上游
+  问题，本仓 overlay 已去除），Windows 上若 PATH 中的 pkg-config 返回原生
+  反斜杠路径，消费端可禁用 pkg-config（如设置 `PKG_CONFIG_EXECUTABLE`）规避。
+- DCNet 业务代码对两条路线零条件编译（`NetSSL` / `NetSSLWin` 的
+  `HTTPSClientSession` API 一致，见 DCNet/CMakeLists.txt）。
+
 ### 引入
 
 - `add_subdirectory()`：源码级、同一构建系统集成。

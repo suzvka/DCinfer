@@ -27,6 +27,23 @@ file(REMOVE "${SOURCE_PATH}/cmake/V313/FindSQLite3.cmake")
 file(REMOVE "${SOURCE_PATH}/XML/src/expat_config.h")
 file(REMOVE "${SOURCE_PATH}/cmake/FindMySQL.cmake")
 
+# 去(pkg-config)依赖：Windows 上 PATH 中的 pkg-config 返回原生反斜杠路径时，
+# FindPCRE2.cmake 的 pkg_check_modules 会使 CMake set() 报
+# "Invalid character escape" 直接中断（消费端 find_package(Poco) 经
+# find_dependency(PCRE2) 即触发，上游 poco/vcpkg 问题）。vcpkg 环境下
+# CMAKE_PREFIX_PATH 已指向 installed 树，去掉 pkg-config 前导探测后纯
+# find_path/find_library 即可定位；残留的 ${PC_PCRE2_*} 引用展开为空变量，无害。
+file(READ "${SOURCE_PATH}/cmake/FindPCRE2.cmake" _pcre2_find_module)
+string(REGEX REPLACE "find_package\\(PkgConfig QUIET\\)\r?\n" "" _pcre2_find_module "${_pcre2_find_module}")
+string(REGEX REPLACE "pkg_check_modules\\(PC_PCRE2[^)]*\\)\r?\n" "" _pcre2_find_module "${_pcre2_find_module}")
+if (_pcre2_find_module MATCHES "pkg_check_modules")
+    message(WARNING
+        "poco overlay: failed to strip pkg_check_modules from FindPCRE2.cmake; "
+        "consumer find_package(Poco) may hit CMake 'Invalid character escape' "
+        "when a pkg-config emitting backslash paths is on PATH")
+endif()
+file(WRITE "${SOURCE_PATH}/cmake/FindPCRE2.cmake" "${_pcre2_find_module}")
+
 # define Poco linkage type
 string(COMPARE EQUAL "${VCPKG_CRT_LINKAGE}" "static" POCO_MT)
 
@@ -59,7 +76,10 @@ vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
         cpp-parser              ENABLE_CPPPARSER
 )
 
-# POCO_ENABLE_NETSSL_WIN：由 triplet 设置，用 NetSSL_Win 替换 OpenSSL NetSSL
+# POCO_ENABLE_NETSSL_WIN：由 x64-windows-dcnet triplet 设置（wrapper toolchain
+# 仅在 DCINFER_BUILD_DCNET=ON 且 Windows 时注入本 overlay），用 NetSSL_Win 替换
+# OpenSSL NetSSL；默认官方 x64-windows triplet 不设该变量，本 overlay 不被
+# toolchain 引入（消费方走官方 OpenSSL poco，含 Poco::Crypto）。
 if(POCO_ENABLE_NETSSL_WIN)
     string(REPLACE "ENABLE_NETSSL" "ENABLE_NETSSL_WIN" FEATURE_OPTIONS "${FEATURE_OPTIONS}")
     list(APPEND FEATURE_OPTIONS "-DENABLE_NETSSL:BOOL=OFF")

@@ -7,10 +7,16 @@
 set(VCPKG_MANIFEST_NO_DEFAULT_FEATURES ON)
 
 # 项目定制 port overlay（不污染 external/vcpkg submodule）：onnx/onnxruntime
-# CUDA 适配与 poco NetSSL_Win 定制见 cmake/overlay-ports/
+# CUDA 适配见 cmake/overlay-ports/；poco NetSSL_Win 定制（DCNet 专用）见
+# cmake/overlay-ports-dcnet/，仅在启用 DCNet 时追加（见下方 BUILD_DCNET 分支）——
+# 与引擎 overlay 解耦，不需要 DCNet 的消费方可直接采用官方 OpenSSL 版 poco
+# （含 Poco::Crypto），无需 cherry-pick overlay。
 set(VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_LIST_DIR}/overlay-ports")
 
-# 定制 triplet overlay：x64-windows 追加 POCO_ENABLE_NETSSL_WIN
+# 定制 triplet overlay：仅含 x64-windows-dcnet（DCNet/NetSSLWin 专用）。默认
+# x64-windows 与官方 triplet 一致（不设 POCO_ENABLE_NETSSL_WIN）；triplet 文件
+# 内容参与 vcpkg ABI hash，官方 ↔ dcnet 切换 = 已装包全量重编一次（见 README
+# 「Windows TLS 路线」矩阵）。
 set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_LIST_DIR}/triplets")
 
 # 构建并发上限（内存保护）：默认按逻辑核数并行，与 nvcc --threads 相乘会
@@ -47,6 +53,25 @@ if (BUILD_IR)
 endif()
 if (BUILD_DCNET)
     list(APPEND VCPKG_MANIFEST_FEATURES "net")
+endif()
+
+# Windows + DCNet：追加 poco NetSSL_Win 定制 overlay，并在用户未显式指定
+# triplet 时切换到 x64-windows-dcnet（toolchain 首次加载即生效；二次 configure
+# 以 cache 中的值为准）。非 Windows 的 DCNet 走官方 OpenSSL poco，无需定制。
+if (BUILD_DCNET AND CMAKE_HOST_WIN32)
+    list(APPEND VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_LIST_DIR}/overlay-ports-dcnet")
+    if (NOT DEFINED VCPKG_TARGET_TRIPLET)
+        set(VCPKG_TARGET_TRIPLET "x64-windows-dcnet" CACHE STRING
+            "Vcpkg target triplet (DCNet/NetSSLWin on Windows)")
+    elseif (VCPKG_TARGET_TRIPLET STREQUAL "x64-windows")
+        message(WARNING
+            "DCINFER_BUILD_DCNET=ON with the official x64-windows triplet gives "
+            "OpenSSL-backed poco without Poco::NetSSLWin; DCNet configure will "
+            "fail on find_package(Poco ... NetSSLWin). Use "
+            "-DVCPKG_TARGET_TRIPLET=x64-windows-dcnet instead, or clear the "
+            "build dir so the DCNet triplet default applies (see README, "
+            "Windows TLS routes table).")
+    endif()
 endif()
 
 if (BUILD_ENGINE_ONNXRUNTIME)

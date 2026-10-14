@@ -531,6 +531,10 @@ DCEngines/OpenAI/
 - vcpkg manifest 模式只安装清单声明的包：外部 `add_subdirectory` 消费方必须在
   自己的 `vcpkg.json` 声明 `nlohmann-json` 与 `poco[netssl]`（DCNet 及
   DCEngine::OpenAI 的 `find_package` 依赖），否则配置失败；
+- Windows TLS 路线由 vcpkg triplet 决定：消费方自建 poco 时，官方
+  `x64-windows` 即 OpenSSL 版 `Poco::NetSSL`；经本仓 toolchain 启用 DCNet 时
+  自动切换 `x64-windows-dcnet`（NetSSL_Win/SChannel）。两路线矩阵与 ABI 影响见
+  README「Windows TLS 路线」；
 - 不消费 DCNet 的零依赖消费方应显式
   `set(DCINFER_BUILD_DCNET OFF CACHE BOOL "" FORCE)`，避免拉入 nlohmann-json
   （`BUILD_ENGINE_OPENAI=ON` 缺 `DCNet::DCNet` 时 CMake 直接 FATAL_ERROR）；
