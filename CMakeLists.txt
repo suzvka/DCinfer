@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(DCinfer VERSION 0.7.7 LANGUAGES CXX)
+project(DCinfer VERSION 0.7.8 LANGUAGES CXX)
 
 # 自实现顶层判定（CMake < 3.21 无 PROJECT_IS_TOP_LEVEL）
 # 仅顶层执行全局设置；被 add_subdirectory() 引入时零污染宿主。

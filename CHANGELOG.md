@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.8] - 2026-10-16
 
 ### Changed
 
@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   规避 Windows 上 PATH 中的 pkg-config 返回原生反斜杠路径时，消费端
   `find_package(Poco)` 经 `find_dependency(PCRE2)` 触发 CMake
   `Invalid character escape` 直接中断（上游 poco/vcpkg 问题）。
+### Added
+
+- **Release 资产新增 `vcpkg-ports-*.txt`（实测 port 版本清单）**：发布作业用
+  `vcpkg list` 从安装数据库导出生效端口（`port:triplet version#port-version`，
+  排序后确定性输出），随 Release 发布，使「CI 实测过的依赖组合」成为明契约
+  而非 submodule 指针的内部引用。
 
 ## [0.7.7] - 2026-10-12
 

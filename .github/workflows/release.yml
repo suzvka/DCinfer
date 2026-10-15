@@ -206,6 +206,21 @@ jobs:
             echo "no differences: both clean builds produced identical install trees" > "$obs.diff"
           fi
 
+      # 对齐契约：随 Release 发布本矩阵实测的 port 版本清单（消费侧 baseline
+      # 对齐对照用）。vcpkg list 直读安装数据库，排序后保持确定性；不进 SDK
+      # 包，避免改变包内容与两份安装树的比较口径。
+      - name: Export tested vcpkg port versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          VCPKG_BIN="external/vcpkg/vcpkg"
+          [ -x "$VCPKG_BIN" ] || VCPKG_BIN="$VCPKG_BIN.exe"
+          {
+            echo "# tested vcpkg port versions (DCinfer), vcpkg commit $(git -C external/vcpkg rev-parse HEAD)"
+            "$VCPKG_BIN" list --x-install-root="build/${{ matrix.preset }}/vcpkg_installed" | awk '{print $1, $2}' | LC_ALL=C sort
+          } > "vcpkg-ports-${RUNNER_OS,,}.txt"
+          cat "vcpkg-ports-${RUNNER_OS,,}.txt"
+
       - name: Record toolchain and package with normalized metadata
         shell: bash
         run: |
@@ -259,6 +274,7 @@ jobs:
             dcinfer-*.zip
             sbom-scan.json
             reproducibility-*
+            vcpkg-ports-*.txt
 
   release:
     name: Publish release
@@ -291,3 +307,4 @@ jobs:
             dist/SHA256SUMS
             dist/sbom-scan.json
             dist/reproducibility-*
+            dist/vcpkg-ports-*.txt
