@@ -7,18 +7,9 @@
   "license": "MIT",
   "supports": "!uwp",
   "dependencies": [
-    {
-      "name": "abseil",
-      "version>=": "20250512.1"
-    },
-    {
-      "name": "boost-config",
-      "version>=": "1.82.0"
-    },
-    {
-      "name": "boost-mp11",
-      "version>=": "1.82.0"
-    },
+    "abseil",
+    "boost-config",
+    "boost-mp11",
     "cpuinfo",
     "cxxopts",
     "date",
@@ -26,29 +17,18 @@
     "eigen3",
     {
       "name": "flatbuffers",
-      "host": true,
-      "version>=": "23.5.26"
+      "host": true
     },
-    {
-      "name": "flatbuffers",
-      "version>=": "23.5.26"
-    },
+    "flatbuffers",
     "ms-gsl",
     "nlohmann-json",
-    {
-      "name": "onnx",
-      "version>=": "1.22.0"
-    },
+    "onnx",
     "optional-lite",
     {
       "name": "protobuf",
-      "version>=": "3.21.12"
+      "host": true
     },
-    {
-      "name": "protobuf",
-      "host": true,
-      "version>=": "3.21.12"
-    },
+    "protobuf",
     "re2",
     "safeint",
     "utf8-range",

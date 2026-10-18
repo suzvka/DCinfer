@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **依赖版本约束只覆盖自己直接使用的 port**：删除
+  `cmake/overlay-ports/onnxruntime/vcpkg.json` 中 abseil / boost-config /
+  boost-mp11 / flatbuffers / onnx / protobuf 的 8 条 `version>=` 下限——它们是
+  ONNX Runtime 的传递依赖，本仓既不直接链接也不替上游选版本，版本改由 vcpkg
+  baseline（abseil/onnx 另由 overlay 补丁版本决定）解析。当前 baseline 均高于
+  原下限（abseil 20250814.1、boost 1.91.0、flatbuffers 25.12.19、onnx 1.22.0、
+  protobuf 6.33.4#2），`vcpkg install --dry-run` 的解析清单逐条不变。
+
 ## [0.7.8] - 2026-10-16
 
 ### Changed
