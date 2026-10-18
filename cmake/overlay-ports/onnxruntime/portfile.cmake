@@ -133,8 +133,10 @@ vcpkg_cmake_configure(
         -Donnxruntime_ENABLE_LAZY_TENSOR=OFF
         -Donnxruntime_DISABLE_RTTI=OFF
         -Donnxruntime_DISABLE_ABSEIL=OFF
-        # 内存保护：nvcc --threads 固定为 1，并行度由 VCPKG_MAX_CONCURRENCY 统一控制
-        -Donnxruntime_NVCC_THREADS=1
+        # 并行：包级/跨目标并行由 VCPKG_MAX_CONCURRENCY 控制（vcpkg_cmake_build 转成
+        # ninja -jN）；这里控制单个 nvcc 编译单元的内部线程数，让 flash-attention 这类
+        # 巨型单 TU 也能吃多核。32GB RAM 下 --threads 2 与 -j12 是平衡点。
+        -Donnxruntime_NVCC_THREADS=2
         "-DCMAKE_CUDA_ARCHITECTURES=${DCINFER_CUDA_ARCHS}"
         --compile-no-warning-as-error
     OPTIONS_DEBUG

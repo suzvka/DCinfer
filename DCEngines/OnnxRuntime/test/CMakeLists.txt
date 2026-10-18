@@ -34,4 +34,38 @@ foreach(test_src IN LISTS TEST_SOURCES)
         add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${test_name}>)
     endif()
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
+
+    # CUDA EP：provider DLL 由 onnxruntime.dll 运行时 LoadLibrary 加载（不在导入表
+    # 内，applocal 不会复制），需手动部署到可执行文件目录；运行期再依赖 cuDNN /
+    # CUDA runtime，故把两者的 bin 目录前置进测试 PATH（配置环境存在时才注入）。
+    if (DCINFER_ORT_EP STREQUAL "CUDA")
+        add_custom_command(TARGET ${test_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_shared.dll"
+                "$<TARGET_FILE_DIR:onnxruntime::onnxruntime>/onnxruntime_providers_cuda.dll"
+                "$<TARGET_FILE_DIR:${test_name}>"
+            VERBATIM)
+
+        if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.22)
+            set(_ep_env "")
+            if (DEFINED ENV{CUDNN_ROOT_DIR})
+                string(APPEND _ep_env "PATH=path_list_prepend:$ENV{CUDNN_ROOT_DIR}/bin;")
+                file(GLOB _cudnn_bin_dirs LIST_DIRECTORIES true "$ENV{CUDNN_ROOT_DIR}/bin/*")
+                foreach(_dir IN LISTS _cudnn_bin_dirs)
+                    if (IS_DIRECTORY "${_dir}")
+                        string(APPEND _ep_env "PATH=path_list_prepend:${_dir};")
+                    endif()
+                endforeach()
+            endif()
+            if (DEFINED ENV{CUDA_PATH})
+                # CUDA 13 起 Windows DLL 位于 bin\x64，两个目录都前置。
+                string(APPEND _ep_env "PATH=path_list_prepend:$ENV{CUDA_PATH}/bin/x64;")
+                string(APPEND _ep_env "PATH=path_list_prepend:$ENV{CUDA_PATH}/bin;")
+            endif()
+            if (_ep_env)
+                set_tests_properties(${test_name} PROPERTIES
+                    ENVIRONMENT_MODIFICATION "${_ep_env}")
+            endif()
+        endif()
+    endif()
 endforeach()
