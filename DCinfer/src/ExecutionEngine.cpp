@@ -124,8 +124,11 @@ void ExecutionEngine::_submitNodeRun(const Node* node, const std::string& nodeNa
 	round->inflight.fetch_add(1, std::memory_order_acq_rel);
 	bool dispatched = false;
 	try {
+		// 捕获次序即析构次序（逆序）：ticket 首捕获、最后析构，使排水归零晚于 round 等
+		// 其余捕获的释放。否则 round→state→图拓扑→子图→调度器会在票据归零之后才释，
+		// 主线程可能在 worker 仍持有它们时就完成自身析构，令最后一份调度器引用落在 worker 上。
 		dispatched = _scheduler->submit(node->affinity(),
-									 [this, node, nodeName, round, remainingHops, ticket] {
+									 [ticket, this, node, nodeName, round, remainingHops] {
 		EngineScope active{this}; // 先于 RunDone 声明：done 析构触发耗尽检测时作用域仍有效
 		// 在飞计数收尾 RAII：归零且本轮未终止时触发耗尽检测；
 		// 票据递减晚于全部引擎回访，析构等待归零即保证无残留回访。

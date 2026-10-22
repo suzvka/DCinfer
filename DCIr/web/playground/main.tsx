@@ -1,13 +1,10 @@
 /**
- * Playground — 编辑器最小演示宿主（二次开发参考样板）
+ * Playground — 编辑器演示宿主
  *
  * 演示四个宿主职责（编辑器本体一概不管）：
- * 1. 调色板源装配：catalogSources 桥接旧快照目录 + counterSource 自定义视图程序
- *   （协议一元化：数据源 = browse 组合子的 fetch 取样，自定义 = 直接交 program）；
- *   不传 sources 时缺省由 catalogProvider prop 桥接生成（旧接入零改动）；
+ * 1. 调色板源装配：catalogSources 桥接旧快照目录 + counterSource 自定义视图程序；
  * 2. side-band 存取：EditorValue（含 layout 坐标）落 localStorage 草稿；
- * 3. 图 JSON 出入档：serializeGraph 导出 / applyImport 导入（.dcg 打包属宿主侧，
- *   对应 C++ DcgArchive；编辑器只面对 graph.json 本体）。
+ * 3. 图 JSON 出入档：serializeGraph 导出 / applyImport 导入。
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -27,8 +24,9 @@ import {
   type EditorValue,
 } from "../src/core/index";
 import InferGraphEditor, { catalogSources, ioSource, type EditorTheme, type PaletteSource } from "../src/ui/index";
+import { friendlyIssueDetail } from "../src/ui/i18n";
 
-// ── 1. 静态目录（示例条目；真实场景由注册表导出或 HTTP 提供器接入）──
+// ── 1. 静态目录（示例条目）──
 
 const DEMO_CATALOG: CatalogView = {
   groups: [],
@@ -59,11 +57,9 @@ const DEMO_CATALOG: CatalogView = {
   ],
 };
 
-// 模块级常量：provider 引用稳定（旧快照契约；此处经 catalogSources 桥接为源组，
-// 也可不传 sources 而直接传 catalogProvider prop 走编辑器内置缺省装配）
 const catalogProvider = staticCatalogProvider(DEMO_CATALOG);
 
-// ── 2. 自定义源示例：完全自持交互面（不用行/详情卡/搜索框），产出仍经 ctx.place ──
+// ── 2. 自定义源示例 ──
 
 const COUNTER_ITEM: CatalogModelItem = {
   modelKey: "demo/counter",
@@ -78,7 +74,6 @@ const counterSource: PaletteSource = {
   label: "自定义示例",
   icon: "✎",
   program: ({ ctx }) => {
-    // 程序体可用 hooks（ActiveProgram 以组件语义调用，切组重挂载）
     const [used, setUsed] = useState(0);
     return (
       <div style={{ padding: 14, display: "grid", gap: 10, alignContent: "start", color: "inherit" }}>
@@ -89,13 +84,13 @@ const counterSource: PaletteSource = {
         <button type="button" className="ig-btn ig-primary" onClick={() => { ctx.place(COUNTER_ITEM); setUsed((u) => u + 1); }}>
           放置 counter 节点（已放置 {used} 次）
         </button>
-        <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>画布当前节点数：{ctx.value.graph.nodes.length}（只读快照）</p>
+        <p style={{ margin: 0, fontSize: 12, opacity: 0.7 }}>画布当前节点数：{ctx.value.graph.nodes.length}</p>
       </div>
     );
   },
 };
 
-// ── 3. 草稿存取（side-band 与图 JSON 一并落 localStorage）──
+// ── 3. 草稿存取 ──
 
 const DRAFT_KEY = "dcir-graph-editor-playground";
 
@@ -124,14 +119,11 @@ function App() {
   const [theme, setTheme] = useState<EditorTheme>("system");
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // 源装配：内置编排组 + 目录桥接组 + 自定义示例（引用稳定：模块级常量 + 一次 memo）
   const sources = useMemo(
     () => [ioSource, ...catalogSources(catalogProvider, DEMO_CATALOG.labels), counterSource],
     [],
   );
 
-  // 宿主 chrome 跟随主题：同步 <html> 的 color-scheme（light-dark() 只认生效方案，
-  // 编辑器在 .ig-root 局部设的方案不向上传播；这段即宿主自适配的标准写法）
   useEffect(() => {
     document.documentElement.style.colorScheme = theme === "system" ? "light dark" : theme;
   }, [theme]);
@@ -140,7 +132,7 @@ function App() {
     try {
       localStorage.setItem(DRAFT_KEY, JSON.stringify(value));
     } catch {
-      // 隐私模式 / 配额不足：草稿降级为内存态，不阻塞编辑
+      // 隐私模式 / 配额不足：草稿降级为内存态
     }
   }, [value]);
 
@@ -160,7 +152,8 @@ function App() {
       const r = applyImport(value, text);
       setValue(fillLayout(r.value));
       if (r.issues.length > 0) {
-        window.alert(`导入清洗 ${r.issues.length} 项：\n${r.issues.map((i) => `[${i.level}] ${i.detail}`).join("\n")}`);
+        const msg = r.issues.map((i) => `[${i.level === "error" ? "错误" : "提示"}] ${friendlyIssueDetail(i)}`).join("\n");
+        window.alert(`导入完成，发现 ${r.issues.length} 个问题：\n${msg}`);
       }
     });
   };
@@ -168,7 +161,7 @@ function App() {
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
       <div className="pg-bar">
-        <strong>DCIr 图编辑器 · Playground</strong>
+        <strong>推理图编辑器 · Playground</strong>
         <span className="pg-status">{errorCount > 0 ? `${errorCount} 个错误（不建议导出）` : "就绪"}</span>
         <span className="spacer" />
         <label>

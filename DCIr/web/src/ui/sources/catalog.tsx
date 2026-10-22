@@ -1,12 +1,10 @@
 /**
  * 目录桥 — CatalogProvider（一次性快照契约）→ PaletteSource 语法糖族
  *
- * 兼容纪律：core 的 CatalogProvider 不动（它是一批条目的一次性快照，真实存在的
- * 业务形态），此处把它降解为「一个/多个 browse 源的取数后端」：
- * - loadShared：同一 provider 共享一次 load（WeakMap 缓存，失败清缓存可重试）；
- * - catalogSources：labels（或宿主白名单）逐个展开为标签分组 + 「查看全部」兜底；
- * - defaultSources：编排节点恒在 + 目录展开（provider 缺省 = 只剩编排）。
- * 旧 PaletteView 的「基础算子」保留标签语义在此原样继承（系统组、不入业务展开）。
+ * 标签分组语言改为用户友好：
+ * - 「基础算子」分组保留，标签文案不变（业务约定）；
+ * - 「查看全部」改为「全部模型」；
+ * - 分组图标池保持用于折叠态区分。
  */
 
 import type { CatalogModelItem, CatalogProvider, CatalogView } from "../../core/catalog";
@@ -32,7 +30,7 @@ export function loadShared(provider: CatalogProvider): Promise<CatalogView> {
   return p;
 }
 
-/** 标签过滤 fetch：load 共享快照 → 按标签切片 → 查询词本地过滤（provider 缺省 = 空列表，空分组降级） */
+/** 标签过滤 fetch：load 共享快照 → 按标签切片 → 查询词本地过滤 */
 function labelFetch(provider: CatalogProvider | null | undefined, label: string | null): SourceFetch {
   return async (query, ctrl) => {
     if (!provider) return [];
@@ -45,7 +43,7 @@ function labelFetch(provider: CatalogProvider | null | undefined, label: string 
   };
 }
 
-/** 标签分组图标池（折叠态磁贴靠此区分不同标签组；按 label 稳定取模，同一标签恒定同图） */
+/** 标签分组图标池 */
 const TAG_ICONS: readonly string[] = ["⚙", "⇄", "▤", "◈", "⬡", "▦", "◉", "⬢"];
 
 function tagIcon(label: string): string {
@@ -54,21 +52,35 @@ function tagIcon(label: string): string {
   return TAG_ICONS[h % TAG_ICONS.length];
 }
 
-/** 目录快照 → 标签分组源 + 「查看全部」作为最后防线（labels 缺省用宿主白名单；provider 缺省 = 空分组渲染） */
+/** 目录快照 → 标签分组源 + 「全部模型」兜底 */
 export function catalogSources(provider: CatalogProvider | null | undefined, labels: readonly string[]): PaletteSource[] {
   const out: PaletteSource[] = [
-    // 基础算子（系统预置标签组）：恒在、不依赖白名单
-    { id: "operators", label: "基础算子", icon: "⚙", program: browse(labelFetch(provider, "基础算子"), { searchable: false }) },
+    {
+      id: "operators",
+      label: "内置算子",
+      icon: "⚙",
+      program: browse(labelFetch(provider, "基础算子"), { searchable: false, placeholder: "搜索算子…" }),
+    },
   ];
   for (const label of labels) {
     if (RESERVED_LABELS.has(label)) continue;
-    out.push({ id: `tag:${label}`, label, icon: tagIcon(label), program: browse(labelFetch(provider, label), { searchable: false }) });
+    out.push({
+      id: `tag:${label}`,
+      label,
+      icon: tagIcon(label),
+      program: browse(labelFetch(provider, label), { searchable: false }),
+    });
   }
-  out.push({ id: "all", label: "查看全部", icon: "▦", program: browse(labelFetch(provider, null)) });
+  out.push({
+    id: "all",
+    label: "全部模型",
+    icon: "▦",
+    program: browse(labelFetch(provider, null), { placeholder: "搜索模型…" }),
+  });
   return out;
 }
 
-/** 缺省源装配：编排恒在 + 目录展开（provider 缺省 = 各组空态，与旧离线降级同口径） */
+/** 缺省源装配：流程控制恒在 + 目录展开 */
 export function defaultSources(provider: CatalogProvider | null | undefined, labels: readonly string[]): PaletteSource[] {
   return [ioSource, ...catalogSources(provider, labels)];
 }
