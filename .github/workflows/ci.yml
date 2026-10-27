@@ -29,7 +29,12 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++ pkg-config
+          sudo apt-get install -y ninja-build g++-14 pkg-config
+          # C++23：std::generator 需 libstdc++ ≥ 14（Ubuntu 24.04 自带 g++ 13 无
+          # <generator> 头）；alternatives 保持 preset/README 里的裸名 g++ 不变
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
       - name: Configure (core-only preset)
         run: cmake --preset core-only
@@ -57,6 +62,16 @@ jobs:
         with:
           submodules: false # 验证零依赖路径：核心+Builtin 无需 vcpkg submodule
           persist-credentials: false
+
+      # C++23 下限由 g++-14 提供；alternatives 让 README 命令里的裸名不变
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@7e868db0f3406270dd46e1dac26c65f621456723
@@ -113,7 +128,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++ pkg-config
+          sudo apt-get install -y ninja-build g++-14 pkg-config
+          # C++23：std::generator 需 libstdc++ ≥ 14（Ubuntu 24.04 自带 g++ 13 无
+          # <generator> 头）；alternatives 保持 preset/README 里的裸名 g++ 不变
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
       - name: Setup Ninja (Windows)
         if: runner.os == 'Windows'
@@ -193,7 +213,12 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++ pkg-config
+          sudo apt-get install -y ninja-build g++-14 pkg-config
+          # C++23：std::generator 需 libstdc++ ≥ 14（Ubuntu 24.04 自带 g++ 13 无
+          # <generator> 头）；alternatives 保持 preset/README 里的裸名 g++ 不变
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
       - name: Configure (GCC Release)
         run: |
@@ -219,7 +244,11 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build clang pkg-config
+          # C++23：clang 18 即便配 libstdc++ 14 也没有 std::generator，需 clang ≥ 19
+          # （Ubuntu 24.04 官方仓库即提供 clang-19）；g++-14 只用于提供 libstdc++-14
+          sudo apt-get install -y ninja-build clang-19 g++-14 pkg-config
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-19 100
 
       - name: Configure (Clang Release)
         run: |
@@ -247,7 +276,12 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++ pkg-config
+          sudo apt-get install -y ninja-build g++-14 pkg-config
+          # C++23：std::generator 需 libstdc++ ≥ 14（Ubuntu 24.04 自带 g++ 13 无
+          # <generator> 头）；alternatives 保持 preset/README 里的裸名 g++ 不变
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
       - name: Configure (TSan)
         run: >
@@ -288,7 +322,12 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build g++ pkg-config
+          sudo apt-get install -y ninja-build g++-14 pkg-config
+          # C++23：std::generator 需 libstdc++ ≥ 14（Ubuntu 24.04 自带 g++ 13 无
+          # <generator> 头）；alternatives 保持 preset/README 里的裸名 g++ 不变
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
 
       # 安装树一：core-ir 预设——覆盖 DCinfer 与 DCIr 两个包
       - name: Configure (core-ir preset)
@@ -369,7 +408,13 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++ pkg-config
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-14 pkg-config
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/g++-14 100
       - run: >
           cmake -S . -B build/sanitizers -G Ninja
           -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=cmake/vcpkg-toolchain.cmake
@@ -381,36 +426,38 @@ jobs:
 
   atomic-32:
     name: GCC 32-bit atomic probe and core tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-11-multilib
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14-multilib
       - run: >
           cmake -S . -B build/atomic32 -G Ninja
-          -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_CXX_FLAGS=-m32
+          -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CXX_FLAGS=-m32
           -DCMAKE_EXE_LINKER_FLAGS=-m32 -DCMAKE_BUILD_TYPE=Debug
           -DDCINFER_BUILD_ENGINES=OFF -DDCINFER_BUILD_EXAMPLES=OFF
       - run: cmake --build build/atomic32 -j 2
       - run: ctest --test-dir build/atomic32 --output-on-failure --timeout 120 --no-tests=error
 
   minimum-toolchain:
-    name: Minimum toolchain (${{ matrix.cxx }}, CMake 3.17.3)
-    runs-on: ubuntu-22.04
+    name: Minimum toolchain (${{ matrix.cxx }}, CMake 3.20.5)
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        cxx: [g++-11, clang++-14]
+        # C++23 抬高最低线：std::generator 需 GCC ≥ 14 / Clang ≥ 19
+        cxx: [g++-14, clang++-19]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-11 clang-14
-      # PyPI 上 cmake 3.17.x 最高为 3.17.3（3.17.5 不存在），保持最小 3.17 线
-      - run: python3 -m pip install --user cmake==3.17.3
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-19
+      # cxx_std_23 元特性自 CMake 3.20 引入（3.17 会报 unknown feature），
+      # 保持最小 3.20 线
+      - run: python3 -m pip install --user cmake==3.20.5
       # Preset schema v3 needs newer CMake; exercise the advertised minimum via -S/-B.
       - run: >
           $HOME/.local/bin/cmake -S . -B build/minimum -G Ninja

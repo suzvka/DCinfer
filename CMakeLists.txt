@@ -1,4 +1,5 @@
-cmake_minimum_required(VERSION 3.17)
+# cxx_std_23 元特性自 CMake 3.20 引入（3.17 会报 unknown feature）
+cmake_minimum_required(VERSION 3.20)
 
 project(DCinfer VERSION 0.7.8 LANGUAGES CXX)
 

@@ -4,7 +4,7 @@
     {
       "name": "gcc-debug",
       "displayName": "GCC Linux Debug",
-      "description": "Linux GCC + Ninja (Debug)（需 GCC ≥ 13）",
+      "description": "Linux GCC + Ninja (Debug)（需 GCC ≥ 14）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/gcc-debug",
       "condition": {
@@ -22,7 +22,7 @@
     {
       "name": "gcc-release",
       "displayName": "GCC Linux Release",
-      "description": "Linux GCC + Ninja (Release)（需 GCC ≥ 13；含 DCIr，与 CI 发布验证一致）",
+      "description": "Linux GCC + Ninja (Release)（需 GCC ≥ 14；含 DCIr，与 CI 发布验证一致）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/gcc-release",
       "condition": {
@@ -41,7 +41,7 @@
     {
       "name": "clang-debug",
       "displayName": "Clang Debug",
-      "description": "Clang + Ninja (Debug)（跨平台，需 Clang ≥ 16）",
+      "description": "Clang + Ninja (Debug)（跨平台，需 Clang ≥ 19）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-debug",
       "cacheVariables": {
@@ -54,7 +54,7 @@
     {
       "name": "clang-release",
       "displayName": "Clang Release",
-      "description": "Clang + Ninja (Release)（跨平台，需 Clang ≥ 16；含 DCIr，与 CI 发布验证一致）",
+      "description": "Clang + Ninja (Release)（跨平台，需 Clang ≥ 19；含 DCIr，与 CI 发布验证一致）",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/clang-release",
       "cacheVariables": {

@@ -60,10 +60,10 @@ DCinfer 核心库为静态库，**零外部依赖**——仅需 C++23 和标准�
 
 | 组件 | 要求 |
 |---|---|
-| CMake | ≥ 3.17（裸构建最低 3.17；CMakePresets version 3 需 ≥ 3.21） |
+| CMake | ≥ 3.20（裸构建最低 3.20，`cxx_std_23` 元特性要求；CMakePresets version 3 需 ≥ 3.21） |
 | C++ 标准 | C++23 |
-| GCC | ≥ 13（Linux；CI 在 ubuntu-24.04 上验证） |
-| Clang | ≥ 16（CI 在 ubuntu-24.04 上验证） |
+| GCC | ≥ 14（Linux；CI 在 ubuntu-24.04 上验证——13 无 `<generator>` 头） |
+| Clang | ≥ 19（CI 在 ubuntu-24.04 上验证——18 即使配 libstdc++ 14 也无 `std::generator`） |
 | MSVC | VS 2026（Windows；CI 在 windows-latest 上验证） |
 | Ninja | 可选（README 示例使用 `-G Ninja`） |
 | vcpkg | 仅 DCIr / DCNet / OnnxRuntime / OpenAI 模块需要（仓库以 submodule 提供） |
