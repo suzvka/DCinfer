@@ -103,22 +103,19 @@ TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseByt
 		throw std::invalid_argument("TensorData: typeSize must be > 0");
 	}
 
-	size_t elementCount = 1;
-	for (auto d : shape) {
-		if (d == 0) {
-			// 零维即 0 元素张量：空文本或空集合的合法表示，无分配无溢出风险；
-			// 空载荷走 metadata-only lazy 语义，带载荷走下方 mismatch 拒绝。
-			elementCount = 0;
-			break;
+	// 任意位置的零维都表示零元素，不能让零维之前的乘积误报溢出。
+	size_t elementCount = std::find(shape.begin(), shape.end(), 0) != shape.end() ? 0 : 1;
+	if (elementCount != 0) {
+		for (auto d : shape) {
+			if (elementCount > std::numeric_limits<size_t>::max() / d)
+				throw std::invalid_argument("TensorData: shape element count overflows");
+			elementCount *= d;
 		}
-		if (elementCount > std::numeric_limits<size_t>::max() / d)
-			throw std::invalid_argument("TensorData: shape element count overflows");
-		elementCount *= d;
 	}
 	if (elementCount > std::numeric_limits<size_t>::max() / typeSize)
 		throw std::invalid_argument("TensorData: required byte size overflows");
-	// 空块即 metadata-only 构造：校验形状后保持惰性与无载荷语义。
-	if (denseBytes.empty()) {
+	// 非零形状的空块保持旧 metadata-only 语义；零元素则是完整的有效空 cache。
+	if (denseBytes.empty() && elementCount != 0) {
 		setTypeSize(typeSize);
 		return;
 	}
@@ -201,13 +198,13 @@ void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes
 	// 不做解释，“不透明传递”仅适用于载荷内容，不适用于寻址元数据。
 	if (typeSize == 0)
 		throw std::invalid_argument("TensorData::loadData: typeSize must be > 0");
-	size_t elementCount = 1;
-	for (auto d : shape) {
-		if (d == 0)
-			throw std::invalid_argument("TensorData::loadData: shape dimensions must be > 0");
-		if (elementCount > std::numeric_limits<size_t>::max() / d)
-			throw std::invalid_argument("TensorData::loadData: shape element count overflows");
-		elementCount *= static_cast<size_t>(d);
+	size_t elementCount = std::find(shape.begin(), shape.end(), 0) != shape.end() ? 0 : 1;
+	if (elementCount != 0) {
+		for (auto d : shape) {
+			if (elementCount > std::numeric_limits<size_t>::max() / d)
+				throw std::invalid_argument("TensorData::loadData: shape element count overflows");
+			elementCount *= d;
+		}
 	}
 	if (elementCount > std::numeric_limits<size_t>::max() / typeSize)
 		throw std::invalid_argument("TensorData::loadData: required byte size overflows");
@@ -227,13 +224,18 @@ void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes
 	clearView();
 	setScalar(shape.empty());
 
-	if (!shape.empty() && typeSize > 0) {
+	if (!shape.empty() && elementCount != 0) {
 		_dataSize = shape.back() * typeSize;
 	}
 }
 
 void TensorData::editMode() {
 	_ensureMutable("TensorData::editMode");
+	// 稀疏块无法完整表达零元素形状（尤其最后一维为零）；保留 cache 元数据，
+	// 不将空 cache 转成无维度的 view，以免后续物化丢形状或制造标量。
+	if (hasCache() && _dataCache.empty()) {
+		return;
+	}
 	ensureView();
 	if (hasCache()) {
 		clearCache();

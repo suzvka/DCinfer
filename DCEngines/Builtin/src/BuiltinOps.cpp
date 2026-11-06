@@ -74,6 +74,7 @@ void registerBuiltinOperators(EngineRegistry& reg) {
 	reg.registerOperator("Add", addSchema(), addRunFn());
 	reg.registerOperator("Mul", mulSchema(), mulRunFn());
 	reg.registerOperator("Identity", identitySchema(), identityRunFn());
+	registerBuiltinTensorOps(reg);
 }
 
 } // namespace DC::Builtin

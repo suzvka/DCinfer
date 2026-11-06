@@ -281,9 +281,9 @@ static void runTensorDataExceptionTests() {
 		expectInvalidArgument(
 			[&] {
 				TensorData td;
-				td.loadData(std::vector<size_t>{2, 0}, sizeof(float), TensorData::DataBlock(0));
+				td.loadData(std::vector<size_t>{2, 0}, sizeof(float), TensorData::DataBlock(1));
 			},
-			"loadData zero dimension rejected");
+			"loadData zero dimension with non-empty payload rejected");
 		expectInvalidArgument(
 			[&] {
 				TensorData td;
@@ -303,11 +303,12 @@ static void runTensorDataExceptionTests() {
 							 1, TensorData::DataBlock(0));
 			},
 			"TensorData constructor shape product overflow rejected");
-		// 零维即 0 元素张量的合法语义：metadata-only 空载荷构造成功；带载荷则 mismatch。
+		// 零元素是有效空稠密张量；带载荷仍必须 mismatch。
 		{
 			TensorData td(std::vector<size_t>{0}, 1, TensorData::DataBlock(0));
-			if (td.typeSize() != 1 || !td.data().empty())
-				fail("zero-dim metadata-only TensorData must keep typeSize and empty payload");
+			if (td.typeSize() != 1 || !td.valid() || !td.hasCache()
+				|| td.getCurrentShape() != TensorData::Shape{0} || !td.data().empty())
+				fail("zero-element TensorData must keep shape, valid cache and empty payload");
 		}
 		expectInvalidArgument(
 			[&] {
@@ -389,10 +390,108 @@ static void runTensorDataExceptionTests() {
 	std::cout << "TensorData exception tests passed" << std::endl;
 }
 
+static void runTensorDataZeroElementTests() {
+	using namespace DC;
+	auto fail = [](const char* msg) { throw std::runtime_error(msg); };
+	auto checkEmptyDense = [&](const TensorData& td, const TensorData::Shape& shape) {
+		if (!td.valid() || !td.hasCache() || !td.empty() || td.isScalar()
+			|| td.getCurrentShape() != shape || td.typeSize() != sizeof(float)
+			|| td.size() != 0 || !td.data().empty() || !td.data<float>().empty())
+			fail("zero-element dense tensor lost shape, type or valid empty cache");
+	};
+	const size_t maxDim = std::numeric_limits<size_t>::max();
+	for (const auto& shape : std::vector<TensorData::Shape>{
+			 {0}, {0, 3}, {2, 0}, {2, 0, 3}, {maxDim, 2, 0}, {0, maxDim}}) {
+		TensorData constructed(shape, sizeof(float), TensorData::DataBlock{});
+		checkEmptyDense(constructed, shape);
+		// 从非空旧状态装入，确保 cache/view/scalar 都不会残留。
+		TensorData loaded;
+		loaded.write({}, 7.0f);
+		loaded.loadData(shape, sizeof(float), TensorData::DataBlock{});
+		checkEmptyDense(loaded, shape);
+		for (auto* td : {&constructed, &loaded}) {
+			td->editMode();
+			td->editMode();
+			checkEmptyDense(*td, shape);
+			td->freeze();
+			td->freeze();
+			checkEmptyDense(*td, shape);
+			if (!td->isFrozen())
+				fail("zero-element dense tensor did not freeze");
+			bool rejected = false;
+			try {
+				td->editMode();
+			} catch (const TensorException&) {
+				rejected = true;
+			}
+			if (!rejected)
+				fail("frozen zero-element editMode must reject mutation");
+		}
+		TensorData copied(constructed);
+		checkEmptyDense(copied, shape);
+		if (copied.isFrozen())
+			fail("zero-element copy construction must unfreeze");
+		TensorData assigned;
+		assigned = loaded;
+		checkEmptyDense(assigned, shape);
+		if (assigned.isFrozen())
+			fail("zero-element copy assignment must unfreeze");
+		TensorData moved(std::move(constructed));
+		checkEmptyDense(moved, shape);
+		if (!moved.isFrozen())
+			fail("zero-element move construction must retain freeze");
+		TensorData moveAssigned;
+		moveAssigned = std::move(loaded);
+		checkEmptyDense(moveAssigned, shape);
+		if (!moveAssigned.isFrozen())
+			fail("zero-element move assignment must retain freeze");
+		copied.editMode();
+		assigned.editMode();
+		checkEmptyDense(copied, shape);
+		checkEmptyDense(assigned, shape);
+
+		bool rejected = false;
+		try {
+			TensorData bad(shape, sizeof(float), TensorData::DataBlock(1));
+		} catch (const std::invalid_argument&) {
+			rejected = true;
+		}
+		if (!rejected)
+			fail("zero-element constructor must reject non-empty payload");
+		rejected = false;
+		try {
+			copied.loadData(shape, sizeof(float), TensorData::DataBlock(1));
+		} catch (const std::invalid_argument&) {
+			rejected = true;
+		}
+		if (!rejected)
+			fail("zero-element loadData must reject non-empty payload");
+		checkEmptyDense(copied, shape); // 校验失败不得清除原有状态。
+	}
+	// 非零形状空载荷的构造仍只登记类型，不物化或保存传入形状。
+	for (const auto& shape : std::vector<TensorData::Shape>{{2, 3}, {}}) {
+		TensorData metadata(shape, sizeof(float), TensorData::DataBlock{});
+		if (metadata.typeSize() != sizeof(float) || metadata.valid() || metadata.hasCache()
+			|| metadata.hasView() || !metadata.getCurrentShape().empty()
+			|| metadata.isScalar() != shape.empty() || !metadata.data().empty())
+			fail("non-zero shape empty payload constructor metadata-only compatibility changed");
+		bool rejected = false;
+		try {
+			metadata.loadData(shape, sizeof(float), TensorData::DataBlock{});
+		} catch (const std::invalid_argument&) {
+			rejected = true;
+		}
+		if (!rejected || metadata.valid() || metadata.typeSize() != sizeof(float))
+			fail("non-zero shape empty payload loadData must still reject without mutation");
+	}
+	std::cout << "TensorData zero-element tests passed" << std::endl;
+}
+
 int main() {
 	try {
 		runTensorDataDetailedTests();
 		runTensorDataExceptionTests();
+		runTensorDataZeroElementTests();
 		return 0;
 	} catch (const std::exception& e) {
 		std::cerr << "Test failed: " << e.what() << std::endl;

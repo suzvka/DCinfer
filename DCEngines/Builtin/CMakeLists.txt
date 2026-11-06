@@ -70,3 +70,8 @@ install(EXPORT DCEngineTargets
     NAMESPACE DCEngine::
     DESTINATION ${DCENGINE_INSTALL_CMAKEDIR}
 )
+
+# 集成测试（DCINFER_BUILD_TESTS）
+if (DCINFER_BUILD_TESTS)
+    add_subdirectory(test)
+endif()
