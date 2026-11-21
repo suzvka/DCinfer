@@ -379,17 +379,17 @@ static void testEagerFreezeOnConstruction() {
 }
 
 static void testParentCancelUnwindsBlockedSubgraph() {
-	TEST("cancel(parent) unwinds blocked composed node and frees the compute slot") {
-		// 专属 1/1/1 调度器：父 block 占唯一 Compute 槽位，q 排队；子图节点属 Operator 类，类间隔离
+	TEST("cancel(parent) unwinds suspended composed node and frees the compute slot") {
+		// 专属 1/1/1 调度器：父 block 占唯一 Compute 槽位，q 排队；子图节点属 Operator 类，类间隔离。
+		// 子图悬置机制：m 的必需口 b 无生产者且未喂入 → 输入永凑不齐 → 子图悬置待解围。
+		// 新输出激活语义下，信号门控声明会被豁免并提前终止，不再用于制造悬置。
 		auto sched = std::make_shared<ResourceScheduler>(SchedulerConfig{1, 1, 1});
 		auto sub = std::make_shared<InferGraph>(sched);
 		sub->addNode(std::make_unique<Node>("test", "n", identitySchema(), identityRunFn()));
-		auto m = std::make_unique<Node>("test", "m", identitySchema(), identityRunFn());
-		m->bindSignal(sub->signalStore(), "gate");
-		sub->addNode(std::move(m));
-		sub->connect("n", "y", "m", "x");
+		sub->addNode(std::make_unique<Node>("test", "m", addSchema(), addRunFn()));
+		sub->connect("n", "y", "m", "a"); // m.b 无连接、未喂入
 		sub->bindInput("x", "n", "x");
-		sub->bindOutput("y", "m", "y");
+		sub->bindOutput("y", "m", "s");
 
 		GraphOperator op(sub);
 		auto blockNode = op.makeNode("sub", ResourceClass::Compute);
@@ -408,7 +408,7 @@ static void testParentCancelUnwindsBlockedSubgraph() {
 		parent.submit("p2", "q", "y", 1);
 
 		CHECK(parent.waitForResult("p1", 400ms).status == TaskStatus::Running,
-			  "composed task blocked by inner signal must stay Running");
+			  "composed task awaiting suspended subgraph must stay Running");
 		CHECK(parent.waitForResult("p2", 200ms).status == TaskStatus::Running,
 			  "queued compute task must not run while the slot is held");
 

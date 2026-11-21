@@ -286,6 +286,38 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 							 "node (cycle/break in graph construction)");
 	}
 
+	// 激活探针：按声明目标的 kill cone（必需无默认边反向可达的上游节点集）判定活跃。
+	// 拓扑冻结 ⇒ cone 静态可算；运行期仅对 cone 内节点现读 isBlocked(taskId)，任一被阻塞
+	// 即该声明此刻不活跃，满足判定跳过（全不活跃 = 空满足 = Succeeded，不揣测宿主意图）。
+	// 信号翻转无需订阅：判定每次现读，自然双向生效。无门控上游的图不登记探针，
+	// 行为与开销与升级前一致。探针在 OutputZone 锁内只读信号仓库（叶子），锁序单向无环。
+	auto cones = std::make_shared<std::unordered_map<std::string, std::vector<const Node*>>>();
+	bool anyGated = false;
+	for (const auto& d : declarations) {
+		if (cones->contains(d.nodeName))
+			continue;
+		auto cone = killCone(graph, d.nodeName);
+		for (const Node* n : cone) {
+			if (n && !n->signalName().empty()) {
+				anyGated = true;
+				break;
+			}
+		}
+		(*cones)[d.nodeName] = std::move(cone);
+	}
+	OutputZone::ActivityProbe activityProbe;
+	if (anyGated) {
+		activityProbe = [cones, snap, taskId](const std::string& nodeName) -> bool {
+			auto it = cones->find(nodeName);
+			if (it == cones->end())
+				return true;
+			for (const Node* n : it->second)
+				if (n && n->isBlocked(taskId))
+					return false;
+			return true;
+		};
+	}
+
 	// 构建本轮轮次，含终态与等待协议；执行态自此捕获，后续调度与清理
 	// 全部经本对象寻址，不再按可复用 taskId 查表。
 	auto round = std::make_shared<TaskGate>();
@@ -310,6 +342,8 @@ void ExecutionEngine::submit(const TaskId& taskId, uint32_t maxHops,
 		state->errors.clearTask(taskId); // 上一轮诊断不残留
 		state->output.clearTask(taskId); // 清掉上一轮声明、累加与结果
 		state->output.declare(taskId, std::move(declarations));
+		if (activityProbe)
+			state->output.setActivityProbe(taskId, std::move(activityProbe));
 		_rounds[taskId] = round; // 替换旧轮；旧轮由在飞 lambda 保活
 	}
 	// 节点执行态无需在此清理：所有终态必经 _terminate。

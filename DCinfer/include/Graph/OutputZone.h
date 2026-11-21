@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -40,6 +41,15 @@ struct OutputBinding {
 class OutputZone {
 public:
 	using TaskId = std::string;
+
+	/// @brief 节点激活探针：返回该节点此刻是否活跃（未被信号致死）。
+	///        由执行引擎按声明目标的 kill cone 注入；满足判定跳过不活跃声明，
+	///        全部不活跃 = 空满足 = Succeeded（不揣测宿主意图）。
+	/// @note  探针在 _mutex 内调用：只允许读信号仓库（叶子组件），禁止回访 OutputZone。
+	using ActivityProbe = std::function<bool(const std::string& nodeName)>;
+
+	/// @brief 登记/清除 task 级激活探针；空探针等价清除。未登记视为恒活跃。
+	void setActivityProbe(const TaskId& taskId, ActivityProbe probe);
 
 	void declare(const TaskId& taskId, std::vector<OutputDeclaration> declarations);
 	void declare(const TaskId& taskId, const std::string& nodeName,
@@ -83,6 +93,14 @@ private:
 		return nodeName + ":" + portName;
 	}
 
+	/// @brief 声明此刻是否活跃；调用方须持 _mutex。探针未登记视为恒活跃。
+	bool _activeLocked(const TaskId& taskId, const OutputDeclaration& decl) const {
+		auto it = _probes.find(taskId);
+		if (it == _probes.end() || !it->second)
+			return true;
+		return it->second(decl.nodeName);
+	}
+
 	struct Artifact {
 		Value data;
 		OutputAudit audit;
@@ -93,7 +111,16 @@ private:
 	std::unordered_map<TaskId, std::vector<OutputDeclaration>> _declarations;
 	std::unordered_map<TaskId, std::unordered_map<std::string, size_t>> _accumulated;
 	std::unordered_map<TaskId, std::unordered_map<std::string, Artifact>> _artifacts;
+	std::unordered_map<TaskId, ActivityProbe> _probes;
 };
+
+inline void OutputZone::setActivityProbe(const TaskId& taskId, ActivityProbe probe) {
+	std::lock_guard lk(_mutex);
+	if (probe)
+		_probes[taskId] = std::move(probe);
+	else
+		_probes.erase(taskId);
+}
 
 inline void OutputZone::declare(const TaskId& taskId, std::vector<OutputDeclaration> declarations) {
 	// count=0 无诊断价值，正确语义是不声明；入口拒绝且零副作用
@@ -137,6 +164,8 @@ inline bool OutputZone::accumulateAndCheck(const std::string& nodeName, const st
 	++_accumulated[taskId][key];
 
 	for (const auto& decl : declIt->second) {
+		if (!_activeLocked(taskId, decl))
+			continue; // 不活跃声明不参与满足判定
 		std::string dkey = _makeKey(decl.nodeName, decl.portName);
 		size_t current = _accumulated[taskId][dkey];
 		if (current < decl.count)
@@ -153,6 +182,8 @@ inline bool OutputZone::checkAllSatisfied(const TaskId& taskId) const {
 
 	auto accIt = _accumulated.find(taskId);
 	for (const auto& decl : declIt->second) {
+		if (!_activeLocked(taskId, decl))
+			continue; // 不活跃声明不参与满足判定
 		std::string key = _makeKey(decl.nodeName, decl.portName);
 		size_t current = 0;
 		if (accIt != _accumulated.end()) {
@@ -176,6 +207,8 @@ inline std::vector<UnsatisfiedDeclaration> OutputZone::unsatisfiedDeclarations(c
 
 	auto accIt = _accumulated.find(taskId);
 	for (const auto& decl : declIt->second) {
+		if (!_activeLocked(taskId, decl))
+			continue; // 不活跃声明不报未满足
 		std::string key = _makeKey(decl.nodeName, decl.portName);
 		size_t current = 0;
 		if (accIt != _accumulated.end()) {
@@ -230,6 +263,7 @@ inline void OutputZone::clearTask(const TaskId& taskId) {
 	_declarations.erase(taskId);
 	_accumulated.erase(taskId);
 	_artifacts.erase(taskId);
+	_probes.erase(taskId);
 }
 
 } // namespace DC

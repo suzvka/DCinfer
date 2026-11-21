@@ -180,18 +180,17 @@ static void test_ioSemanticsConsistentAcrossFreeze() {
 
 static void test_runtimeLifecycleOnFrozenGraph() {
 	InferGraph graph;
-	auto& b = graph.addNode(makeId("b"));
+	graph.addNode(makeId("b"));
 	graph.addNode(makeId("a"));
 	graph.connect("a", "y", "b", "x");
-	b.bindSignal(graph.signalStore(), "gate");
 
 	graph.feedInput("t1", "a", "x", floatTensor(1.0f));
-	graph.submit("t1", "b", "y");
-	graph.setSignal("gate", false);
+	// count=2 而 b 仅产出一次：悬置待宿主解围（非门控，不触发激活豁免）。
+	graph.submit("t1", "b", "y", 2);
 
 	CHECK(graph.waitForResult("t1", std::chrono::milliseconds(80)).status == TaskStatus::Running,
-		  "blocked task should not complete");
-	CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task running while blocked");
+		  "suspended task should not complete");
+	CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task running while suspended");
 	CHECK(graph.cancel("t1"), "cancel on frozen graph should work");
 	CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "wait should wake after cancel");
 	CHECK(graph.taskStatus("t1") == TaskStatus::Cancelled, "status should be Cancelled");

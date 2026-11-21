@@ -845,20 +845,19 @@ void testDuplicateActiveSubmitRejected() {
 }
 
 void testCancelRunningTask() {
-	TEST("lifecycle: cancel terminates a blocked task with Cancelled status") {
+	TEST("lifecycle: cancel terminates a suspended task with Cancelled status") {
 		InferGraph graph;
-		auto& b = graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		graph.connect("id_a", "y", "id_b", "x");
 
-		b.bindSignal(graph.signalStore(), "gate");
-		graph.setSignal("gate", false);
-
 		graph.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
-		graph.submit("t1", "id_b", "y");
+		// 声明 count=2 但 id_b 仅产出一次：声明未满足且无 Error，任务悬置待宿主解围。
+		// 新输出激活语义下，信号门控的声明会被豁免并提前终止，不再用于制造悬置。
+		graph.submit("t1", "id_b", "y", 2);
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task should be running while blocked");
+		CHECK(graph.taskStatus("t1") == TaskStatus::Running, "task should be running while suspended");
 
 		CHECK(graph.cancel("t1"), "cancel should succeed on active task");
 		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "wait should wake up after cancel");
@@ -868,9 +867,8 @@ void testCancelRunningTask() {
 		auto result = graph.waitForResult("t1");
 		CHECK(result.status == TaskStatus::Cancelled, "waitForResult should report Cancelled");
 
-		graph.setSignal("gate", true);
 		graph.feedInput("t1", "id_a", "x", makeFloatTensor(9.0f));
-		graph.submit("t1", "id_b", "y");
+		graph.submit("t1", "id_b", "y", 1);
 		CHECK(graph.waitForResult("t1").status != TaskStatus::Running, "re-submitted task after cancel should complete");
 		auto r = graph.takeOutputTensor("t1", "id_b", "y");
 		CHECK(std::abs(r.item<float>() - 9.0f) < 1e-6f, "re-run result should be 9.0");
@@ -1102,15 +1100,13 @@ void testTakeOutputDestructive() {
 void testWaitSemantics() {
 	TEST("lifecycle: wait semantics (0=infinite, waiter-only timeout, unknown-id fast-fail)") {
 		InferGraph graph;
-		auto& b = graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
+		graph.addNode(std::make_unique<Node>("Builtin", "id_b", identitySchema(), identityRunFn()));
 		graph.addNode(std::make_unique<Node>("Builtin", "id_a", identitySchema(), identityRunFn()));
 		graph.connect("id_a", "y", "id_b", "x");
 
-		b.bindSignal(graph.signalStore(), "gate");
-		graph.setSignal("gate", false);
-
 		graph.feedInput("t1", "id_a", "x", makeFloatTensor(1.0f));
-		graph.submit("t1", "id_b", "y");
+		// count=2 而 id_b 仅产出一次：悬置待宿主解围（非门控，不触发激活豁免）。
+		graph.submit("t1", "id_b", "y", 2);
 
 		CHECK(graph.waitForResult("t1", std::chrono::milliseconds(80)).status == TaskStatus::Running, "explicit timeout leaves task running");
 		auto running = graph.waitForResult("t1", std::chrono::milliseconds(80));

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **输出激活语义：声明按目标节点 kill cone 的当前信号状态参与满足判定（契约变更）**：
+  推理图的实际输出不再只看显式声明，还看声明目标是否被信号致死。死区语义
+  `dead(n) = gated(n) OR ∃ 必需无默认值生产者 p: dead(p)`（节点就绪是必需输入口
+  的 AND，任一必需生产者被关则输入永凑不齐）；可选/默认值口不传播死区。拓扑冻结
+  ⇒ 致死锥（kill cone）静态可算：`submit` 期对每个声明目标沿“必需且无默认值”输入边
+  反向 BFS 预计算锥，运行期满足判定仅对锥内节点现读 `isBlocked(taskId)`，任一阻塞即
+  该声明此刻不活跃、判定跳过；**全部不活跃 = 空满足 = Succeeded**（不揣测宿主意图）。
+  判定每次现读 ⇒ 信号翻转双向动态生效，无需订阅/epoch/缓存；无门控上游的图不登记
+  探针，行为与开销不变。新增 `killCone`（SignalProbe）与 `OutputZone::ActivityProbe` /
+  `setActivityProbe`（探针在输出区锁内只读信号仓库，叶子组件，锁序单向）。
+  **契约变更**：信号门控的声明输出不再无限悬置——被豁免后任务提前终止（Succeeded），
+  旧“纯信号停滞 → 悬置 → 宿主 cancel 解围”仅适用于**非豁免**的未满足声明（如 count
+  未达成、必需口从未喂入）。连带：门控子图经 `GraphOperator` 组合时自动完成（空满足
+  Succeeded），若绑定输出缺失则组合节点走既有“子图成功但缺输出 → 显式失败”逻辑；
+  “父取消解围子图”改由非豁免悬置（必需口无生产者）验证。新增
+  `OutputActivationTest`（9 用例）；`InferGraphTest`/`FreezeBoundaryTest`/`GraphOperatorTest`
+  四处生命周期测试的悬置机制由信号门控改为非豁免悬置以保留 cancel/wait/freeze 本意。
+
 - **依赖版本约束只覆盖自己直接使用的 port**：删除
   `cmake/overlay-ports/onnxruntime/vcpkg.json` 中 abseil / boost-config /
   boost-mp11 / flatbuffers / onnx / protobuf 的 8 条 `version>=` 下限——它们是

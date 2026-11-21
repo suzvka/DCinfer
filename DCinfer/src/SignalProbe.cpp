@@ -49,4 +49,40 @@ bool canSatisfyTopologically(const GraphRuntimeView& view,
 	return false;
 }
 
+std::vector<const Node*> killCone(const GraphRuntimeView& view, const std::string& targetNode) {
+	// 反向邻接：仅“必需且无默认值”输入口传递死区。
+	// 可选口与带默认值口不参与就绪 AND（见 TaskBuffer::_isReadyLocked），其生产者被关不致下游于死地。
+	std::unordered_map<std::string, std::vector<std::string>> producers;
+	producers.reserve(view.nodeCount());
+	for (const auto& edge : view.edges) {
+		const Node* dst = view.node(edge.dstNode);
+		if (!dst)
+			continue;
+		const NodePort* port = dst->schema().findInput(edge.dstPort);
+		if (!port || !port->required || port->defaultValue.has_value())
+			continue;
+		producers[edge.dstNode].push_back(edge.srcNode);
+	}
+
+	// 从目标反向 BFS，visited 兜底环；锥含目标自身。
+	std::vector<const Node*> cone;
+	std::unordered_set<std::string> visited;
+	std::queue<std::string> frontier;
+	frontier.push(targetNode);
+	visited.insert(targetNode);
+	while (!frontier.empty()) {
+		std::string cur = std::move(frontier.front());
+		frontier.pop();
+		if (const Node* n = view.node(cur))
+			cone.push_back(n);
+		auto it = producers.find(cur);
+		if (it == producers.end())
+			continue;
+		for (const auto& p : it->second)
+			if (visited.insert(p).second)
+				frontier.push(p);
+	}
+	return cone;
+}
+
 } // namespace DC
