@@ -52,6 +52,7 @@ DCinfer 采用**数据驱动执行模型**：节点在所有输入就绪后自�
 - `EngineRegistry` 提供统一接口，在运行时注册和发现后端引擎——同一张推理图可以逐步适配不同执行后端。
 - 我们提供通用注册接口，用户可通过 `EngineDescriptor` 注册自有引擎（ONNX Runtime、TensorRT 或其他自定义后端）
 - 节点通过引擎名称引用后端，换引擎无需修改管线结构。
+- ONNX Runtime CUDA EP 默认启用 `OnnxOptions::deviceDirect`：同一引擎核心的节点用共享 CUDA stream 与 IoBinding 传递外部 backing；host 访问时才导出。设置为 `false` 可保留原有 host 路径，CPU EP 不受影响。
 
 ### 零依赖核心
 

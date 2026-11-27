@@ -12,7 +12,9 @@ target_compile_features(DCEngine_OnnxRuntime PUBLIC cxx_std_20)
 
 # EP 编译宏注入：DCINFER_ORT_EP → 编译期默认 ExecutionProvider（依赖注入见 toolchain）
 if (DCINFER_ORT_EP STREQUAL "CUDA")
+    find_package(CUDAToolkit REQUIRED)
     target_compile_definitions(DCEngine_OnnxRuntime PUBLIC DCINFER_ORT_ENABLE_CUDA=1)
+    target_link_libraries(DCEngine_OnnxRuntime PRIVATE CUDA::cudart)
 elseif (DCINFER_ORT_EP STREQUAL "TENSORRT")
     target_compile_definitions(DCEngine_OnnxRuntime PUBLIC DCINFER_ORT_ENABLE_TENSORRT=1)
 elseif (DCINFER_ORT_EP STREQUAL "OPENVINO")

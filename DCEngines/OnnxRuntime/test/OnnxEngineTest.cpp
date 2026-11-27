@@ -172,14 +172,25 @@ int fail(const std::string& msg) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
 	try {
+		DC::Onnx::OnnxOptions onnxOptions;
+		for (int i = 1; i < argc; ++i) {
+			const std::string arg(argv[i]);
+			if (arg.empty())
+				continue;
+			if (arg == "--no-device-direct")
+				onnxOptions.deviceDirect = false;
+			else
+				return fail("unknown test argument: " + arg);
+		}
+
 		auto modelPath = generateAddModel("dcinfer_test_add.onnx", 1, {1, 4});
 		if (modelPath.empty())
 			return fail("model generation failed");
 		std::cout << "Test model: " << modelPath << std::endl;
 
-		DC::Onnx::registerOnnxEngine();
+		DC::Onnx::registerOnnxEngine(DC::EngineRegistry::instance(), onnxOptions);
 		auto& reg = DC::EngineRegistry::instance();
 		if (!reg.hasEngine("OnnxRuntime"))
 			return fail("OnnxRuntime engine not registered");
@@ -229,6 +240,10 @@ int main() {
 			return fail("no output captured at onnx_add.Z");
 
 		auto result = harness.getOutputTensor("task1", "onnx_add", "Z");
+#ifdef DCINFER_ORT_ENABLE_CUDA
+		if (result.hasExternalBacking() != onnxOptions.deviceDirect)
+			return fail("output backing does not match deviceDirect option");
+#endif
 		auto data = result.data<float>();
 		if (data.size() != 4)
 			return fail("expected 4 output elements, got " + std::to_string(data.size()));
@@ -245,6 +260,44 @@ int main() {
 			return fail("unexpected output shape");
 
 		std::cout << "[PASS] OnnxEngineTest: X + Y = Z verified via ONNX Runtime" << std::endl;
+
+#if defined(DCINFER_ORT_ENABLE_CUDA)
+		if (onnxOptions.deviceDirect) {
+			// 两个节点共享同一 OrtCore：第一个 CUDA backing 应由第二个节点直接消费，
+			// 末端 host 读取触发一次 export 并验证完整链路数值。
+			{
+				auto first = reg.createNode("OnnxRuntime", "onnx_chain_first", modelPath);
+				auto second = reg.createNode("OnnxRuntime", "onnx_chain_second", modelPath);
+				if (!first || !second)
+					return fail("CUDA chain createNode returned null");
+
+				DC::TestHarness chain;
+				chain.addNode(std::move(first));
+				chain.addNode(std::move(second));
+				chain.connect("onnx_chain_first", "Z", "onnx_chain_second", "X");
+				chain.bindOutput("Z", "onnx_chain_second", "Z");
+				const float x[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+				const float y[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+				const float z[4] = {10.0f, 10.0f, 10.0f, 10.0f};
+				chain.feedInput("task_chain", "onnx_chain_first", "X", makeFloatTensor(x));
+				chain.feedInput("task_chain", "onnx_chain_first", "Y", makeFloatTensor(y));
+				chain.feedInput("task_chain", "onnx_chain_second", "Y", makeFloatTensor(z));
+				chain.submit("task_chain", "onnx_chain_second", "Z");
+				if (!chain.awaitCompletion("task_chain") || chain.hasErrors())
+					return fail("CUDA direct-transfer chain failed");
+				auto result = chain.getOutputTensor("task_chain", "onnx_chain_second", "Z");
+				if (!result.hasExternalBacking())
+					return fail("CUDA chain output should retain external backing");
+				const auto values = result.data<float>();
+				const float expected[4] = {12.0f, 13.0f, 14.0f, 15.0f};
+				for (size_t i = 0; i < 4; ++i) {
+					if (values[i] != expected[i])
+						return fail("CUDA chain output mismatch at index " + std::to_string(i));
+				}
+			}
+			std::cout << "[PASS] CUDA shared-core direct-transfer chain" << std::endl;
+		}
+#endif
 
 		// TensorConverter 契约直测
 		{

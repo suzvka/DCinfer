@@ -11,7 +11,30 @@
 #include <string>
 #include <vector>
 
+#ifdef DCINFER_ORT_ENABLE_CUDA
+#include <cuda_runtime_api.h>
+#endif
+
 namespace DC::Onnx {
+
+struct OrtCore {
+	std::shared_ptr<Ort::Env> env;
+#ifdef DCINFER_ORT_ENABLE_CUDA
+	cudaStream_t stream = nullptr;
+	int deviceId = 0;
+
+	~OrtCore() {
+		if (!stream)
+			return;
+		auto status = cudaSetDevice(deviceId);
+		if (status == cudaSuccess)
+			status = cudaStreamDestroy(stream);
+		if (status != cudaSuccess)
+			std::cerr << "[OnnxRuntime] failed to release CUDA stream: "
+					  << cudaGetErrorString(status) << std::endl;
+	}
+#endif
+};
 
 // Windows 下 Ort::Session 仅接受 wchar_t*；其他平台 ORTCHAR_T 即 char
 static std::basic_string<ORTCHAR_T> toNativePath(const std::string& path) {
@@ -94,6 +117,17 @@ static bool tensorTypeToOnnxType(Tensor::TensorType type, size_t typeSize,
 	}
 }
 
+#ifdef DCINFER_ORT_ENABLE_CUDA
+static void checkCuda(cudaError_t status, const char* operation) {
+	if (status != cudaSuccess)
+		throw std::runtime_error(std::string("CUDA ") + operation + ": " + cudaGetErrorString(status));
+}
+
+static Ort::MemoryInfo cudaMemoryInfo(int deviceId) {
+	return Ort::MemoryInfo("Cuda", OrtDeviceAllocator, deviceId, OrtMemTypeDefault);
+}
+#endif
+
 static std::vector<Node::Port> getPortsFromSession(const Ort::Session& session, bool isInput) {
 	std::vector<Node::Port> ports;
 
@@ -172,19 +206,60 @@ static Tensor onnxToDC(const void* native) {
 	return Tensor(onnxTypeToTensorType(elementType), typeSize, shape, std::move(block));
 }
 
-static Node::RunFn onnxRunFn() {
-	return [](Node::RunContext& ctx) -> Node::Result {
+#ifdef DCINFER_ORT_ENABLE_CUDA
+static Tensor onnxToExternal(Ort::Value&& native, const EngineCoreHandle& coreHandle, OrtCore* core) {
+	auto value = std::make_shared<Ort::Value>(std::move(native));
+	auto info = value->GetTensorTypeAndShapeInfo();
+	auto elementType = info.GetElementType();
+	auto typeSize = onnxTypeSize(elementType);
+	if (typeSize == 0)
+		throw std::runtime_error("OnnxRuntime: unsupported non-tensor output type for external backing");
+	auto byteSize = info.GetElementCount() * typeSize;
+	auto onnxShape = info.GetShape();
+	Tensor::Shape shape(onnxShape.begin(), onnxShape.end());
+
+	ExternalBacking backing;
+	backing.producerEngine = "OnnxRuntime";
+	backing.coreToken = std::shared_ptr<const void>(coreHandle, core);
+	backing.handle = value;
+	backing.exportToHost = [value, core, byteSize]() {
+		std::vector<std::byte> host(byteSize);
+		if (byteSize == 0)
+			return host;
+		checkCuda(cudaSetDevice(core->deviceId), "cudaSetDevice");
+		checkCuda(cudaMemcpyAsync(
+			host.data(),
+			value->GetTensorMutableData<void>(),
+			byteSize,
+			cudaMemcpyDeviceToHost,
+			core->stream),
+			"cudaMemcpyAsync");
+		checkCuda(cudaStreamSynchronize(core->stream), "cudaStreamSynchronize");
+		return host;
+	};
+	return Tensor::fromExternal(onnxTypeToTensorType(elementType), typeSize, shape, std::move(backing));
+}
+#endif
+
+static Node::RunFn onnxRunFn(bool deviceDirect) {
+	return [deviceDirect](Node::RunContext& ctx) -> Node::Result {
 		auto* engine = ctx.engine();
 		if (!engine)
 			return ctx.failure(Node::Status::ExecutionFailed, "OnnxRuntime: no engine instance");
 		auto& session = *static_cast<Ort::Session*>(engine);
+
+		const auto* instance = ctx.engineInstance();
+		EngineCoreHandle coreHandle = instance ? instance->core() : EngineCoreHandle{};
+		if (!coreHandle)
+			return ctx.failure(Node::Status::ExecutionFailed, "OnnxRuntime: no engine core");
+		auto* core = static_cast<OrtCore*>(coreHandle->get());
 
 		const auto* converter = ctx.converter();
 		if (!converter || !converter->toNative || !converter->toDC)
 			return ctx.failure(Node::Status::ExecutionFailed,
 							   "OnnxRuntime: TensorConverter not configured on engine");
 
-		// 收集输入：DC::Tensor 转 Ort::Value，经 converter 零拷贝视图
+		// 收集输入：同核心 external backing 可包装为 CUDA 指针视图，否则走 host converter。
 		const auto& schema = ctx.schema();
 		std::vector<const char*> inputNames;
 		std::vector<Ort::Value> inputValues;
@@ -197,7 +272,43 @@ static Node::RunFn onnxRunFn() {
 				return ctx.failure(Node::Status::InvalidInput,
 								   "OnnxRuntime: input '" + port.name + "' is not a DC::Tensor");
 
-			auto native = converter->toNative(*tensor);
+			Value native;
+			try {
+#ifdef DCINFER_ORT_ENABLE_CUDA
+				const auto* backing = tensor->externalBacking();
+				if (deviceDirect && backing && backing->coreToken.get() == core) {
+					checkCuda(cudaSetDevice(core->deviceId), "cudaSetDevice");
+					auto* source = static_cast<Ort::Value*>(backing->handle.get());
+					auto info = source->GetTensorTypeAndShapeInfo();
+					ONNXTensorElementDataType onnxType{};
+					if (!tensorTypeToOnnxType(tensor->type(), tensor->typeSize(), onnxType))
+						return ctx.failure(Node::Status::InvalidInput,
+										   "OnnxRuntime: external input type is not supported");
+					auto shape = tensor->shape();
+					if (info.GetElementType() != onnxType || info.GetShape() != shape)
+						return ctx.failure(Node::Status::InvalidInput,
+										   "OnnxRuntime: external input handle metadata mismatch");
+					auto memInfo = cudaMemoryInfo(core->deviceId);
+					auto* direct = new Ort::Value(Ort::Value::CreateTensor(
+						memInfo,
+						source->GetTensorMutableData<void>(),
+						info.GetElementCount() * tensor->typeSize(),
+						shape.data(),
+						shape.size(),
+						onnxType));
+					native = Value(direct, [](Ort::Value* v) { delete v; });
+				} else
+#endif
+				{
+					native = converter->toNative(*tensor);
+				}
+			} catch (const Ort::Exception& e) {
+				return ctx.failure(Node::Status::ExecutionFailed,
+								   std::string("OnnxRuntime input conversion failed: ") + e.what());
+			} catch (const std::exception& e) {
+				return ctx.failure(Node::Status::ExecutionFailed,
+								   std::string("OnnxRuntime input conversion failed: ") + e.what());
+			}
 			auto* ortVal = native.as<Ort::Value>();
 			if (!ortVal)
 				return ctx.failure(Node::Status::InvalidInput,
@@ -217,15 +328,33 @@ static Node::RunFn onnxRunFn() {
 
 		std::vector<Ort::Value> outputs;
 		try {
-			outputs = session.Run(
-				Ort::RunOptions{nullptr},
-				inputNames.data(),
-				inputValues.data(),
-				inputValues.size(),
-				outputNames.data(),
-				outputNames.size()
-			);
+#ifdef DCINFER_ORT_ENABLE_CUDA
+			if (deviceDirect) {
+				checkCuda(cudaSetDevice(core->deviceId), "cudaSetDevice");
+				Ort::IoBinding binding(session);
+				for (size_t i = 0; i < inputNames.size(); ++i)
+					binding.BindInput(inputNames[i], inputValues[i]);
+				auto memInfo = cudaMemoryInfo(core->deviceId);
+				for (const auto* name : outputNames)
+					binding.BindOutput(name, memInfo);
+				session.Run(Ort::RunOptions{nullptr}, binding);
+				outputs = binding.GetOutputValues();
+			} else
+#endif
+			{
+				outputs = session.Run(
+					Ort::RunOptions{nullptr},
+					inputNames.data(),
+					inputValues.data(),
+					inputValues.size(),
+					outputNames.data(),
+					outputNames.size()
+				);
+			}
 		} catch (const Ort::Exception& e) {
+			return ctx.failure(Node::Status::ExecutionFailed,
+							   std::string("OnnxRuntime inference failed: ") + e.what());
+		} catch (const std::exception& e) {
 			return ctx.failure(Node::Status::ExecutionFailed,
 							   std::string("OnnxRuntime inference failed: ") + e.what());
 		}
@@ -237,8 +366,24 @@ static Node::RunFn onnxRunFn() {
 								   + " outputs, got " + std::to_string(outputs.size()));
 		}
 
-		// 收集输出：Ort::Value 转 DC::Tensor，经 converter 深拷贝
+		// 收集输出：CUDA 直传模式持有 Ort::Value 以保活 arena 内存；其余走 host 深拷贝。
 		for (size_t i = 0; i < schema.outputs.size(); ++i) {
+#ifdef DCINFER_ORT_ENABLE_CUDA
+			if (deviceDirect) {
+				Tensor t;
+				try {
+					t = onnxToExternal(std::move(outputs[i]), coreHandle, core);
+				} catch (const Ort::Exception& e) {
+					return ctx.failure(Node::Status::ExecutionFailed,
+									   std::string("OnnxRuntime output conversion failed: ") + e.what());
+				} catch (const std::exception& e) {
+					return ctx.failure(Node::Status::ExecutionFailed,
+									   std::string("OnnxRuntime output conversion failed: ") + e.what());
+				}
+				ctx.output(schema.outputs[i].name, Value(std::make_unique<Tensor>(std::move(t))));
+				continue;
+			}
+#endif
 			Tensor t = converter->toDC(&outputs[i]);
 			ctx.output(schema.outputs[i].name, Value(std::make_unique<Tensor>(std::move(t))));
 		}
@@ -253,15 +398,29 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 
 	desc.converter = {onnxToNative, onnxToDC};
 
-	// createEngineCore：共享 Ort::Env，缓存键为 engineType，每类型恰好一次
-	desc.createEngineCore = []() -> EngineCore {
-		return EngineCore(std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "DCinfer"));
+	// createEngineCore：共享 Ort::Env；CUDA 直传模式下每个引擎核心拥有一条共享流。
+	desc.createEngineCore = [opts]() -> EngineCore {
+		auto core = std::make_shared<OrtCore>();
+		core->env = std::make_shared<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "DCinfer");
+#ifdef DCINFER_ORT_ENABLE_CUDA
+		if (opts.deviceDirect) {
+			checkCuda(cudaSetDevice(core->deviceId), "cudaSetDevice");
+			checkCuda(cudaStreamCreateWithFlags(&core->stream, cudaStreamNonBlocking),
+					  "cudaStreamCreateWithFlags");
+		}
+#endif
+		return EngineCore(std::move(core));
 	};
 
 	// loadModel：加载 Session，缓存键为 engineType:modelPath，每组合一次；Env 来自
 	// 引擎核心，Session 不得超出 Env 生命周期，实例共享持有核心句柄由框架保证
 	desc.loadModel = [opts](const EngineCore& core, const std::string& modelPath) -> EngineInstance {
-		auto& env = *static_cast<Ort::Env*>(const_cast<void*>(core.get()));
+		auto& ortCore = *static_cast<OrtCore*>(const_cast<void*>(core.get()));
+		auto& env = *ortCore.env;
+#ifdef DCINFER_ORT_ENABLE_CUDA
+		if (opts.deviceDirect)
+			checkCuda(cudaSetDevice(ortCore.deviceId), "cudaSetDevice");
+#endif
 
 		Ort::SessionOptions sessionOpts;
 		sessionOpts.SetIntraOpNumThreads(opts.intraOpThreads); // 与 DCinfer 图级并行模型一致
@@ -269,6 +428,10 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 		// 编译期默认 EP 由构建选项 DCINFER_ORT_EP 决定：先于 sessionCustomizer 追加以保证优先
 #ifdef DCINFER_ORT_ENABLE_CUDA
 		OrtCUDAProviderOptions cudaOpts{};
+		if (opts.deviceDirect) {
+			cudaOpts.has_user_compute_stream = 1;
+			cudaOpts.user_compute_stream = ortCore.stream;
+		}
 		sessionOpts.AppendExecutionProvider_CUDA(cudaOpts);
 #endif
 #ifdef DCINFER_ORT_ENABLE_TENSORRT
@@ -311,9 +474,9 @@ void registerOnnxEngine(EngineRegistry& reg, const OnnxOptions& opts) {
 
 	// factory：用框架推导的 Schema 构造节点并绑定引擎实例；engineInstance 为
 	// 框架缓存的共享句柄，引擎存活期覆盖节点存活期
-	desc.factory = [](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
+	desc.factory = [opts](const NodeFactoryParams& p) -> std::unique_ptr<Node> {
 		auto node = std::make_unique<Node>(
-			"OnnxRuntime", p.nodeName, p.schema, onnxRunFn(),
+			"OnnxRuntime", p.nodeName, p.schema, onnxRunFn(opts.deviceDirect),
 			ResourceClass::Compute);
 
 		if (p.engineInstance)

@@ -35,9 +35,24 @@ foreach(test_src IN LISTS TEST_SOURCES)
     endif()
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 120)
 
+    if (DCINFER_ORT_EP STREQUAL "CUDA" AND test_name STREQUAL "OnnxEngineTest")
+        if (WIN32 AND CMAKE_CONFIGURATION_TYPES)
+            add_test(NAME ${test_name}_NoDeviceDirect
+                     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/RunOrtTest.bat
+                             ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Release
+                             $<TARGET_FILE_DIR:${test_name}>
+                             $<TARGET_FILE:${test_name}>
+                             --no-device-direct)
+        else()
+            add_test(NAME ${test_name}_NoDeviceDirect
+                     COMMAND $<TARGET_FILE:${test_name}> --no-device-direct)
+        endif()
+        set_tests_properties(${test_name}_NoDeviceDirect PROPERTIES TIMEOUT 120)
+    endif()
+
     # CUDA EP：provider DLL 由 onnxruntime.dll 运行时 LoadLibrary 加载（不在导入表
     # 内，applocal 不会复制），需手动部署到可执行文件目录；运行期再依赖 cuDNN /
-    # CUDA runtime，故把两者的 bin 目录前置进测试 PATH（配置环境存在时才注入）。
+    # CUDA runtime，故把 vcpkg、cuDNN、CUDA 的 bin 目录前置进测试 PATH。
     if (DCINFER_ORT_EP STREQUAL "CUDA")
         add_custom_command(TARGET ${test_name} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -47,7 +62,7 @@ foreach(test_src IN LISTS TEST_SOURCES)
             VERBATIM)
 
         if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.22)
-            set(_ep_env "")
+            set(_ep_env "PATH=path_list_prepend:${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin;")
             if (DEFINED ENV{CUDNN_ROOT_DIR})
                 string(APPEND _ep_env "PATH=path_list_prepend:$ENV{CUDNN_ROOT_DIR}/bin;")
                 file(GLOB _cudnn_bin_dirs LIST_DIRECTORIES true "$ENV{CUDNN_ROOT_DIR}/bin/*")
@@ -65,6 +80,10 @@ foreach(test_src IN LISTS TEST_SOURCES)
             if (_ep_env)
                 set_tests_properties(${test_name} PROPERTIES
                     ENVIRONMENT_MODIFICATION "${_ep_env}")
+                if (test_name STREQUAL "OnnxEngineTest")
+                    set_tests_properties(${test_name}_NoDeviceDirect PROPERTIES
+                        ENVIRONMENT_MODIFICATION "${_ep_env}")
+                endif()
             endif()
         endif()
     endif()

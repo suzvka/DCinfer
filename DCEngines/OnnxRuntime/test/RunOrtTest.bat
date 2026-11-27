@@ -7,13 +7,14 @@ rem broken DLL at the end of every build, overwriting manual fixes.
 rem So right before the test runs, copy the Release ORT DLLs (C ABI
 rem compatible) over the output directory, then launch the test.
 rem
-rem Usage: RunOrtTest.bat <release_bin_dir> <test_bin_dir> <test_exe_path>
+rem Usage: RunOrtTest.bat <release_bin_dir> <test_bin_dir> <test_exe_path> [test_arg]
 
 setlocal
 
 set RELEASE_DIR=%~1
 set BIN_DIR=%~2
 set TEST_EXE=%~3
+set TEST_ARG=%~4
 
 if not exist "%RELEASE_DIR%\onnxruntime.dll" (
     echo [RunOrtTest] ERROR: Release ORT DLL not found in %RELEASE_DIR%
@@ -31,5 +32,5 @@ if /i not "%BIN_DIR%"=="%RELEASE_DIR%" (
     )
 )
 
-"%TEST_EXE%"
+"%TEST_EXE%" %TEST_ARG%
 exit /b %ERRORLEVEL%

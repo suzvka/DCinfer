@@ -20,7 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   移动转移。直传协商由消费侧单边判定（`coreToken` 与本引擎 core 比对），
   `EngineDescriptor` 不新增钩子，跨引擎/跨机边自然落 host 兜底。新增
   `ExternalBackingTest`（18 用例，mock 引擎：直传/兜底/broadcast COW/混合链/
-  freeze 不导出/并发导出等）。ORT CUDA 设备直传适配为下一阶段（Phase B）。
+  freeze 不导出/并发导出等）。
+
+- **ONNX Runtime CUDA 设备直传**：CUDA EP 默认通过共享 `OrtCore` stream 和 IoBinding
+  绑定设备输出；`Ort::Value` 由外部 backing 持有以防 ORT arena 复用，host 读时同步并
+  D2H 导出；同 core 的下游节点包装设备指针直传，跨 core/普通 host Tensor 仍走兼容路径。
+  `OnnxOptions::deviceDirect=false` 可关闭；CPU EP 行为不变。CUDA 集成测试覆盖同 core
+  双节点链、外部输出与 opt-out 旧路径。
 
 ### Changed
 
