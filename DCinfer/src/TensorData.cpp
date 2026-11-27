@@ -94,6 +94,11 @@ void TensorData::freeze() {
 	_frozen = true;
 }
 
+void TensorData::freezeOpaque() {
+	std::lock_guard lk(_lazyMutex);
+	_frozen = true;
+}
+
 TensorData::TensorData(const Shape& shape, size_t typeSize, DataBlock&& denseBytes)
 	: _dataSize(0), _dataMain({}), _dataCatalog({}), _dataCache({}), _shapeCache({}), _validFlags(0), _isScalar(false),
 	  _typeSize(0) {
@@ -160,6 +165,10 @@ void TensorData::setTypeSize(size_t typeSize) {
 
 void TensorData::clear() {
 	_ensureMutable("TensorData::clear");
+	clearUnchecked();
+}
+
+void TensorData::clearUnchecked() {
 	_dataMain.clear();
 	_dataCatalog.clear();
 	_dataSize = 0;
@@ -193,6 +202,14 @@ TensorData::Shape TensorData::getCurrentShape() const {
 
 void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes) {
 	_ensureMutable("TensorData::loadData");
+	loadDataImpl(shape, typeSize, std::move(bytes));
+}
+
+void TensorData::loadDataOpaque(const Shape& shape, size_t typeSize, DataBlock&& bytes) {
+	loadDataImpl(shape, typeSize, std::move(bytes));
+}
+
+void TensorData::loadDataImpl(const Shape& shape, size_t typeSize, DataBlock&& bytes) {
 	// 入口校验：shape 积 × typeSize 必须等于缓冲字节数，否则下游按 shape
 	// 寻址将越界；校验先于 clear，失败时对象状态不变。载荷原样进入 cache
 	// 不做解释，“不透明传递”仅适用于载荷内容，不适用于寻址元数据。
@@ -216,8 +233,8 @@ void TensorData::loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes
 									+ std::to_string(expectedBytes) + ")");
 	}
 
-	clear();
-	setTypeSize(typeSize);
+	clearUnchecked();
+	_typeSize = typeSize;
 	_dataCache = std::move(bytes);
 	_shapeCache = shape;
 	setCacheFlag();

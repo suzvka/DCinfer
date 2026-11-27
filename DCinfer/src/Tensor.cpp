@@ -21,6 +21,15 @@ Tensor::Tensor(const TensorType& type, size_t typeSize, const Shape& shape, Data
 	_data = TensorData(indexShape(shape, false), _meta.typeSize, std::move(data));
 }
 
+Tensor Tensor::fromExternal(const TensorType& type, size_t typeSize, const Shape& shape, ExternalBacking backing) {
+	if (!backing.handle) {
+		throw std::invalid_argument("Tensor::fromExternal: backing.handle must not be null");
+	}
+	Tensor tensor(type, typeSize, shape, {});
+	tensor._backing = std::make_shared<const ExternalBacking>(std::move(backing));
+	return tensor;
+}
+
 Tensor& Tensor::setName(const std::string& name) {
 	_meta.name = name;
 	return *this;
@@ -37,14 +46,19 @@ Tensor::ConstView Tensor::operator[](int64_t index) const {
 }
 
 Tensor::Tensor(const Tensor& other) {
+	// 锁源导出锁：共享冻结张量可能正在隐式导出
+	std::lock_guard lk(other._extMutex);
 	_meta = other._meta;
 	_data = other._data;
+	_backing = other._backing;
 }
 
 Tensor& Tensor::operator=(const Tensor& other) {
 	if (this != &other) {
+		std::lock_guard lk(other._extMutex);
 		_meta = other._meta;
 		_data = other._data;
+		_backing = other._backing;
 	}
 	return *this;
 }
@@ -69,16 +83,22 @@ size_t Tensor::typeSize() const {
 }
 
 std::span<const std::byte> Tensor::bytes() const {
+	ensureHostData();
 	// 返回可靠字节视图：需要时构建稠密 cache
 	return _data.data();
 }
 
 Tensor::Shape Tensor::shape() const {
+	// 外部张量未物化时按 meta 回答，不触载荷
+	if (_backing && !_data.valid()) {
+		return _meta.shape;
+	}
 	TensorData::Shape currentShape = _data.getCurrentShape();
 	return Tensor::Shape(currentShape.begin(), currentShape.end());
 }
 
 Tensor& Tensor::loadData(DataBlock&& data, const Shape& shape) {
+	detachBacking(false);
 	_data.loadData(indexShape(shape, false), _meta.typeSize, std::move(data));
 	return *this;
 }
@@ -124,7 +144,34 @@ std::optional<Tensor::ErrorType> Tensor::checkSingleElementView(const Shape& pat
 void Tensor::moveFrom(Tensor&& other) noexcept {
 	_meta = std::move(other._meta);
 	_data = std::move(other._data);
+	_backing = std::move(other._backing);
 }
+
+void Tensor::ensureHostData() const {
+	if (!_backing || _data.hasCache()) {
+		return;
+	}
+	std::lock_guard lk(_extMutex);
+	if (_data.hasCache()) {
+		return;
+	}
+	if (!_backing->exportToHost) {
+		abort(ErrorType::Other, "external backing provides no host export");
+	}
+	DataBlock bytes = _backing->exportToHost();
+	const_cast<TensorData&>(_data).loadDataOpaque(indexShape(_meta.shape, false), _meta.typeSize, std::move(bytes));
+}
+
+void Tensor::detachBacking(bool materialize) {
+	if (!_backing || _data.isFrozen()) {
+		return;
+	}
+	if (materialize) {
+		ensureHostData();
+	}
+	_backing.reset();
+}
+
 
 std::vector<size_t> Tensor::indexShape(const Shape& shape, bool isRead) const {
 	auto dataShape = _data.getCurrentShape();

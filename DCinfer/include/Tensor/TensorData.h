@@ -45,6 +45,9 @@ public:
 	/// @brief 冻结：预物化稠密缓存并置冻结位；冻结后写路径抛 TensorException(Frozen)，只读不再触发惰性物化。
 	void freeze();
 
+	/// @brief 不透明冻结：仅置冻结位，不物化 host 缓存；供外部 backing 张量使用，host 读仍按需导出。
+	void freezeOpaque();
+
 	/// @brief 是否已冻结。
 	bool isFrozen() const {
 		return _frozen;
@@ -123,6 +126,9 @@ public:
 	// 直接装入稠密数据，外部已是稠密张量时避免逐块登记开销。
 	void loadData(const Shape& shape, size_t typeSize, DataBlock&& bytes);
 
+	// 装入稠密数据但绕过冻结门：仅供外部 backing 导出物化进已冻结张量，载荷校验与 loadData 一致。
+	void loadDataOpaque(const Shape& shape, size_t typeSize, DataBlock&& bytes);
+
 	// 进入可编辑模式：稠密直通数据物化为稀疏块映射。
 	void editMode();
 
@@ -136,6 +142,10 @@ public:
 private:
 	/// @brief 冻结门校验；仅覆盖载荷写路径，对象级赋值不在其列。
 	void _ensureMutable(const char* api) const;
+
+	// clear/loadData 的无冻结门实现体，供 loadDataOpaque 复用。
+	void clearUnchecked();
+	void loadDataImpl(const Shape& shape, size_t typeSize, DataBlock&& bytes);
 
 	// 按稠密形状更新 _shapeCache、_dataSize 与 _size。
 	void syncDenseCacheMeta(const Shape& denseShape);

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tensor 不透明外部 backing（引擎中立设备直传契约，Phase A）**：新增
+  `Tensor/ExternalBacking.h`——`ExternalBacking{producerEngine, coreToken, handle,
+  syncToken, exportToHost}`，核心只当黑盒存储/路由，不解释句柄内容；
+  `Tensor::fromExternal` 工厂 + `hasExternalBacking()`/`externalBacking()` 访问器。
+  host 读访问（`bytes`/`data<T>`/`item`/View 读/`getData`）隐式 export 并缓存
+  （双检锁，仅导出一次），backing 保留供引擎路由；部分写（`write`/`expand`/`crop`）
+  先物化再 detach（COW），全量替换写（`fill`/`loadData`/标量赋值）跳过导出；
+  外部张量 `freeze()` 仅标记不物化（`TensorData::freezeOpaque`）；拷贝共享 backing、
+  移动转移。直传协商由消费侧单边判定（`coreToken` 与本引擎 core 比对），
+  `EngineDescriptor` 不新增钩子，跨引擎/跨机边自然落 host 兜底。新增
+  `ExternalBackingTest`（18 用例，mock 引擎：直传/兜底/broadcast COW/混合链/
+  freeze 不导出/并发导出等）。ORT CUDA 设备直传适配为下一阶段（Phase B）。
+
 ### Changed
 
 - **输出激活语义：声明按目标节点 kill cone 的当前信号状态参与满足判定（契约变更）**：

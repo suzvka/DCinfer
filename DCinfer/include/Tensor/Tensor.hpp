@@ -7,8 +7,10 @@
 #include <type_traits>
 #include <vector>
 
+#include <mutex>
 #include <optional>
 #include "TensorMods.h"
+#include "ExternalBacking.h"
 
 namespace DC {
 
@@ -33,6 +35,20 @@ public:
 	/// @brief 工厂方法：从 C++ 类型 T 推导逻辑类型与元素大小。
 	template <typename T>
 	static Tensor Create(const Shape& shape = {}, DataBlock&& data = {});
+
+	/// @brief 工厂：包装引擎侧外部存储为张量。shape 须具体（非负），backing.handle 不得为空。
+	/// 载荷留在引擎侧，host 读隐式导出并缓存，写路径先物化再脱离 backing（COW）。
+	static Tensor fromExternal(const TensorType& type, size_t typeSize, const Shape& shape, ExternalBacking backing);
+
+	/// @brief 是否携带不透明外部 backing（载荷未必已物化到 host）。
+	bool hasExternalBacking() const {
+		return _backing != nullptr;
+	}
+
+	/// @brief 访问外部 backing 契约；无 backing 返回 nullptr。
+	const ExternalBacking* externalBacking() const {
+		return _backing.get();
+	}
 
 	/// @brief 设置张量名称，供日志与错误定位。
 	Tensor& setName(const std::string& name);
@@ -99,11 +115,11 @@ public:
 	}
 
 	bool empty() const {
-		return _data.empty();
+		return !_backing && _data.empty();
 	}
 
 	bool valid() const {
-		return _data.valid();
+		return _backing != nullptr || _data.valid();
 	}
 
 	bool hasCache() const {
@@ -111,8 +127,13 @@ public:
 	}
 
 	/// @brief 冻结：预物化稠密缓存并置冻结位；冻结后写路径抛 TensorException(Frozen)，只读不再触发惰性物化。
+	/// 外部 backing 张量仅置冻结位不物化，host 读仍按需隐式导出。
 	void freeze() {
-		_data.freeze();
+		if (_backing) {
+			_data.freezeOpaque();
+		} else {
+			_data.freeze();
+		}
 	}
 
 	/// @brief 是否已冻结。
@@ -123,6 +144,11 @@ public:
 private:
 	TensorMeta _meta;
 	TensorData _data;
+
+	// 不透明外部 backing：载荷在引擎侧存储；host 读隐式导出缓存，写先物化再脱离（COW）。
+	std::shared_ptr<const ExternalBacking> _backing;
+	// 隐式导出串行化锁，双检物化；广播共享后并发读安全。
+	mutable std::mutex _extMutex;
 
 	std::optional<ErrorType> checkTypeMatch(size_t size) const;
 
@@ -145,6 +171,12 @@ private:
 	T readScalar(const Shape& path) const;
 
 	void moveFrom(Tensor&& other) noexcept;
+
+	// 隐式导出：外部载荷物化进 host 缓存（双检锁）；backing 保留供路由。
+	void ensureHostData() const;
+
+	// 写侧 COW：脱离 backing；materialize=true 先导出，整体替换写可跳过导出。冻结张量不动，保留 Frozen 异常。
+	void detachBacking(bool materialize = true);
 
 	TensorData::Shape indexShape(const Shape& shape, bool isRead) const;
 
@@ -231,6 +263,7 @@ Tensor Tensor::Create(const Shape& shape, DataBlock&& data) {
 
 template <typename T>
 T Tensor::item() const {
+	ensureHostData();
 	return _data.readElement<T>({});
 }
 
@@ -239,6 +272,8 @@ Tensor& Tensor::operator=(const T& value) {
 	if (auto err = checkTypeMatch(sizeof(T))) {
 		abort(*err, "type mismatch in scalar assignment");
 	}
+
+	detachBacking(false);
 
 	// 优先复用稠密缓存写入路径；无缓存则直接装入标量字节。
 	DataBlock bytes(_meta.typeSize);
@@ -261,6 +296,8 @@ Tensor& Tensor::fill(const T& data) {
 	if (auto err = checkTypeMatch(sizeof(T))) {
 		abort(*err, "type mismatch in fill assignment");
 	}
+
+	detachBacking(false);
 
 	Shape shape;
 	if (_data.hasView()) {
@@ -299,12 +336,14 @@ Tensor& Tensor::fill(const T& data) {
 
 template <typename T>
 inline std::span<const T> Tensor::data() const {
+	ensureHostData();
 	return _data.data<T>();
 }
 
 template <typename T>
 void Tensor::write(const Shape& path, const std::vector<T>& data) {
 	try {
+		detachBacking();
 		_data.editMode();
 		_data.write(indexShape(path, false), data);
 	} catch (const TensorException& e) {
@@ -317,6 +356,7 @@ void Tensor::write(const Shape& path, const std::vector<T>& data) {
 template <typename T>
 void Tensor::write(const Shape& path, const T& data) {
 	try {
+		detachBacking();
 		_data.editMode();
 		_data.write(indexShape(path, false), data);
 	} catch (const TensorException& e) {
@@ -328,11 +368,13 @@ void Tensor::write(const Shape& path, const T& data) {
 
 template <typename T>
 std::span<const T> Tensor::read(const Shape& path) const {
+	ensureHostData();
 	return _data.read<T>(indexShape(path, true));
 }
 
 template <typename T>
 T Tensor::readScalar(const Shape& path) const {
+	ensureHostData();
 	auto dataShape = _data.getCurrentShape();
 	if (auto err = checkTypeMatch(sizeof(T)))
 		abort(*err, "type mismatch in scalar read");
@@ -358,7 +400,9 @@ T Tensor::readScalar(const Shape& path) const {
 template <typename T>
 std::vector<T> Tensor::getData() {
 	static_assert(std::is_trivially_copyable_v<T>, "Tensor::getData requires trivially copyable type");
+	ensureHostData();
 	auto data = _data.getData();
+	_backing.reset(); // 消费式取出：host 载荷取走后放弃外部存储声明
 	const size_t bytes = data.size();
 	// 元素数 = ceil(总字节 / sizeof(T))；全部字节进入结果，末元素零填充。
 	std::vector<T> result((bytes + sizeof(T) - 1) / sizeof(T));
@@ -369,11 +413,13 @@ std::vector<T> Tensor::getData() {
 
 template <typename T>
 Tensor& Tensor::expand(const Tensor::Shape& targetShape, const T& fillData) {
+	detachBacking();
 	_data.expand(indexShape(targetShape, false), fillData);
 	return *this;
 }
 
 inline Tensor& Tensor::crop(const Shape& targetShape) {
+	detachBacking();
 	_data.crop(indexShape(targetShape, false));
 	return *this;
 }
